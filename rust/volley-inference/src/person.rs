@@ -315,49 +315,64 @@ impl PersonEngine {
             }
         }
         let mut results: Vec<PersonObservation> = Vec::new();
-        for (det_score, crop) in distinct {
+        for group in distinct.chunks(8) {
             if results.len() == MAX_PERSONS {
                 break;
             }
-            // A very small or border-truncated proposal is not a runtime
-            // failure; RTMPose needs at least an 8x20 original-pixel crop.
-            if (crop[2] - crop[0]) * (W as f64) < 8.0 || (crop[3] - crop[1]) * (H as f64) < 20.0 {
-                continue;
-            }
-            let keypoints = self.pose.infer(rgb, crop)?;
-            let small_far_player = crop[3] - crop[1] <= 0.17;
-            let Some((bbox, pose_score)) = skeleton_box(&keypoints).or_else(|| {
-                small_far_player
-                    .then(|| skeleton_box_with_threshold(&keypoints, 0.28, 9))
-                    .flatten()
-            }) else {
-                continue;
-            };
-            // Very-low detector confidence is valid only with strong evidence
-            // from a coherent pose; never admit a weak silhouette alone.
-            if det_score < 0.24 && pose_score < 0.49 {
-                continue;
-            }
-            let head = (keypoints[0].score >= 0.32)
-                .then_some([keypoints[0].x as f64, keypoints[0].y as f64]);
-            let observation = PersonObservation {
-                bbox,
-                score: (0.35 * det_score + 0.65 * pose_score).clamp(0.0, 1.0),
-                head,
-                keypoints: keypoints
-                    .map(|point| [point.x as f64, point.y as f64, point.score as f64]),
-            };
-            if let Some(previous) = results
-                .iter_mut()
-                .find(|other| same_person_box(other.bbox, bbox))
-            {
-                // Keep the more fully observed skeleton, not the first
-                // detector crop that happened to see the person.
-                if observation.score > previous.score {
-                    *previous = observation;
+            let valid: Vec<_> = group
+                .iter()
+                .copied()
+                .filter(|(_, crop)| {
+                    (crop[2] - crop[0]) * (W as f64) >= 8.0
+                        && (crop[3] - crop[1]) * (H as f64) >= 20.0
+                })
+                .collect();
+            let crops: Vec<_> = valid.iter().map(|(_, crop)| *crop).collect();
+            let poses = self.pose.infer_batch(rgb, &crops)?;
+            for ((det_score, crop), keypoints) in valid.into_iter().zip(poses) {
+                if results.len() == MAX_PERSONS {
+                    break;
                 }
-            } else {
-                results.push(observation);
+                // A very small or border-truncated proposal is not a runtime
+                // failure; RTMPose needs at least an 8x20 original-pixel crop.
+                if (crop[2] - crop[0]) * (W as f64) < 8.0 || (crop[3] - crop[1]) * (H as f64) < 20.0
+                {
+                    continue;
+                }
+                let small_far_player = crop[3] - crop[1] <= 0.17;
+                let Some((bbox, pose_score)) = skeleton_box(&keypoints).or_else(|| {
+                    small_far_player
+                        .then(|| skeleton_box_with_threshold(&keypoints, 0.28, 9))
+                        .flatten()
+                }) else {
+                    continue;
+                };
+                // Very-low detector confidence is valid only with strong evidence
+                // from a coherent pose; never admit a weak silhouette alone.
+                if det_score < 0.24 && pose_score < 0.49 {
+                    continue;
+                }
+                let head = (keypoints[0].score >= 0.32)
+                    .then_some([keypoints[0].x as f64, keypoints[0].y as f64]);
+                let observation = PersonObservation {
+                    bbox,
+                    score: (0.35 * det_score + 0.65 * pose_score).clamp(0.0, 1.0),
+                    head,
+                    keypoints: keypoints
+                        .map(|point| [point.x as f64, point.y as f64, point.score as f64]),
+                };
+                if let Some(previous) = results
+                    .iter_mut()
+                    .find(|other| same_person_box(other.bbox, bbox))
+                {
+                    // Keep the more fully observed skeleton, not the first
+                    // detector crop that happened to see the person.
+                    if observation.score > previous.score {
+                        *previous = observation;
+                    }
+                } else {
+                    results.push(observation);
+                }
             }
         }
         Ok(results)

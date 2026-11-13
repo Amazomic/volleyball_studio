@@ -741,7 +741,7 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
         && rallies["project_id"] == request.project_id
         && rallies["video"] == request.video
 }
-const GPU_MODEL_STACK: &str = "vballnet_rtmdet_rtmpose_tiled_coco17_v3";
+const GPU_MODEL_STACK: &str = "vballnet_rtmdet_rtmpose_tiled_coco17_batch8_v4";
 
 fn compatible_version(saved: &Value, request: &StartRequest, identity: &Value) -> bool {
     saved["schema"] == SCHEMA
@@ -2018,7 +2018,7 @@ mod branching_tests {
             &json!({
                 "schema":"volley-native-cpu-touch-proposals/1","state":"motion_gated_touch_proposals","touch_id":touch,
                 "project_id":request.project_id,"video":request.video,
-                "source_replay_id":replay,"method":"vballnet_gravity_player_geometry_v6","sha256":sha
+                "source_replay_id":replay,"method":"vballnet_gravity_player_geometry_pose_contact_v7","sha256":sha
             }),
         );
         emit(
@@ -2072,6 +2072,9 @@ mod branching_tests {
             "unchanged settings must reuse both versions"
         );
         assert!(compatible_version(&saved, &request, &identity));
+        let mut legacy = saved.clone();
+        legacy["gpu_model_stack"] = json!("vballnet_rtmdet_rtmpose_tiled_coco17_v3");
+        assert!(!compatible_version(&legacy, &request, &identity));
         assert!(gpu_lineage_valid(&project_dir, &request, &identity, &saved));
         assert!(cpu_lineage_valid(&project_dir, &request, &saved));
         request.post.touches.algorithm = TouchAlgorithm::PoseMotion;

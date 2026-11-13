@@ -123,6 +123,55 @@ impl PoseEngine {
         }
         decode_simcc(sx, sy, bbox)
     }
+
+    pub fn infer_batch(
+        &mut self,
+        rgb: &[u8],
+        boxes: &[[f64; 4]],
+    ) -> Result<Vec<[Keypoint; KPT_COUNT]>, String> {
+        if boxes.is_empty() {
+            return Ok(Vec::new());
+        }
+        if boxes.len() > 8 {
+            return Err("RTMPose batch is limited to eight players".into());
+        }
+        let mut crops = Vec::with_capacity(boxes.len() * 3 * 256 * 192);
+        for &bbox in boxes {
+            crops.extend(crop_and_normalize(rgb, bbox)?);
+        }
+        let tensor = Tensor::from_array((vec![boxes.len() as i64, 3, 256, 192], crops))
+            .map_err(|e| e.to_string())?;
+        let result = self
+            .session
+            .run(ort::inputs!["input" => tensor])
+            .map_err(|e| format!("RTMPose batch inference: {e}"))?;
+        let (dx, sx) = result
+            .get("simcc_x")
+            .ok_or("RTMPose X output missing")?
+            .try_extract_tensor::<f32>()
+            .map_err(|e| e.to_string())?;
+        let (dy, sy) = result
+            .get("simcc_y")
+            .ok_or("RTMPose Y output missing")?
+            .try_extract_tensor::<f32>()
+            .map_err(|e| e.to_string())?;
+        if dx.as_ref() != [boxes.len() as i64, 17, 384]
+            || dy.as_ref() != [boxes.len() as i64, 17, 512]
+        {
+            return Err(format!("Unexpected RTMPose batch shapes: {dx:?}, {dy:?}"));
+        }
+        boxes
+            .iter()
+            .enumerate()
+            .map(|(i, &bbox)| {
+                decode_simcc(
+                    &sx[i * 17 * 384..(i + 1) * 17 * 384],
+                    &sy[i * 17 * 512..(i + 1) * 17 * 512],
+                    bbox,
+                )
+            })
+            .collect()
+    }
 }
 
 fn crop_geometry(bbox: [f64; 4]) -> Result<(f64, f64, f64, f64), String> {
@@ -225,6 +274,49 @@ fn decode_simcc(x: &[f32], y: &[f32], bbox: [f64; 4]) -> Result<[Keypoint; KPT_C
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "Requires PERSON_PREVIEW_RGB and CUDA runtime"]
+    fn pose_batch_matches_individual_inference_with_tolerance() {
+        let rgb = std::fs::read(std::env::var("PERSON_PREVIEW_RGB").unwrap()).unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let device = if std::env::var_os("POSE_EVAL_CPU").is_some() {
+            crate::Device::Cpu
+        } else {
+            crate::Device::Cuda
+        };
+        let mut engine = super::PoseEngine::load(root, device, 8, 0).unwrap();
+        let boxes = [
+            [0.2, 0.4, 0.35, 0.9],
+            [0.5, 0.4, 0.65, 0.9],
+            [0.2, 0.4, 0.35, 0.9],
+            [0.5, 0.4, 0.65, 0.9],
+            [0.2, 0.4, 0.35, 0.9],
+            [0.5, 0.4, 0.65, 0.9],
+            [0.2, 0.4, 0.35, 0.9],
+            [0.5, 0.4, 0.65, 0.9],
+        ];
+        let expected: Vec<_> = boxes
+            .iter()
+            .map(|&bbox| engine.infer(&rgb, bbox).unwrap())
+            .collect();
+        let actual = engine.infer_batch(&rgb, &boxes).unwrap();
+        assert!(engine
+            .infer_batch(&rgb, &[[0.2, 0.4, 0.35, 0.9]; 9])
+            .is_err());
+        assert!(engine.infer_batch(&rgb, &[]).unwrap().is_empty());
+        assert_eq!(actual.len(), expected.len());
+        for (a, b) in actual.iter().flatten().zip(expected.iter().flatten()) {
+            assert!(
+                (a.x - b.x).abs() < 0.005
+                    && (a.y - b.y).abs() < 0.005
+                    && (a.score - b.score).abs() < 0.005
+            );
+        }
+    }
     use super::*;
     #[test]
     fn pose_crop_guards_invalid_box_and_rgb_size() {
