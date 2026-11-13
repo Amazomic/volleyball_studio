@@ -315,15 +315,12 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
                 return Err("cancelled".into());
             }
             let records = if let Some(engine) = person_engine.as_mut() {
-                let rgb_frame_bytes = w * h * 3;
                 let mut detections = Vec::new();
-                for offset in 0..9 {
-                    let first = offset * rgb_frame_bytes;
-                    let rgb = window
-                        .data
-                        .get(first..first + rgb_frame_bytes)
-                        .ok_or("Incomplete RGB window for player pose inference")?;
-                    for (index, pose) in engine.detect(rgb)?.into_iter().enumerate() {
+                engine.detect_frames(&window.data, |offset, poses| {
+                    if context.cancelled.load(Ordering::Acquire) {
+                        return Err("cancelled".into());
+                    }
+                    for (index, pose) in poses.into_iter().enumerate() {
                         detections.push(RawDetection {
                             frame_index: window.first_frame + offset as u64,
                             class_name: "player",
@@ -334,7 +331,8 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
                             head_point_norm: pose.head.map(|p| p.map(|v| v as f32)),
                         });
                     }
-                }
+                    Ok(())
+                })?;
                 detections
             } else {
                 let input = normalized_model_window(&window.data, w, h, channels)?;

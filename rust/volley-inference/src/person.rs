@@ -217,13 +217,43 @@ impl PersonEngine {
     }
 
     pub fn detect(&mut self, rgb: &[u8]) -> Result<Vec<PersonObservation>, String> {
-        if rgb.len() != W * H * 3 {
-            return Err("RTMDet expects one 640x360 RGB24 frame".into());
+        self.detect_prepared(rgb, prepare_views(rgb)?)
+    }
+
+    pub fn detect_frames(
+        &mut self,
+        frames: &[u8],
+        mut consume: impl FnMut(usize, Vec<PersonObservation>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let frame_bytes = W * H * 3;
+        if frames.is_empty() || !frames.len().is_multiple_of(frame_bytes) {
+            return Err("RTMDet expects complete RGB24 frames".into());
         }
+        std::thread::scope(|scope| {
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            scope.spawn(move || {
+                for frame in frames.chunks_exact(frame_bytes) {
+                    if sender.send(prepare_views(frame)).is_err() {
+                        break;
+                    }
+                }
+            });
+            for (index, frame) in frames.chunks_exact(frame_bytes).enumerate() {
+                let prepared = receiver.recv().map_err(|_| "RTMDet preparation failed")??;
+                consume(index, self.detect_prepared(frame, prepared)?)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn detect_prepared(
+        &mut self,
+        rgb: &[u8],
+        inputs: [Vec<f32>; 4],
+    ) -> Result<Vec<PersonObservation>, String> {
         let mut proposals = Vec::new();
-        for view in VIEWS {
+        for (view, input) in VIEWS.into_iter().zip(inputs) {
             let ratio = SIDE as f64 / view.width as f64;
-            let input = preprocess_view(rgb, view)?;
             let tensor = Tensor::from_array((vec![1_i64, 3, SIDE as i64, SIDE as i64], input))
                 .map_err(|e| format!("RTMDet tensor: {e}"))?;
             let outputs = self
@@ -334,6 +364,15 @@ impl PersonEngine {
     }
 }
 
+fn prepare_views(rgb: &[u8]) -> Result<[Vec<f32>; 4], String> {
+    Ok([
+        preprocess_view(rgb, VIEWS[0])?,
+        preprocess_view(rgb, VIEWS[1])?,
+        preprocess_view(rgb, VIEWS[2])?,
+        preprocess_view(rgb, VIEWS[3])?,
+    ])
+}
+
 #[cfg(test)]
 fn preprocess(rgb: &[u8]) -> Result<Vec<f32>, String> {
     preprocess_view(rgb, VIEWS[0])
@@ -371,6 +410,35 @@ fn preprocess_view(rgb: &[u8], view: DetectorView) -> Result<Vec<f32>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn prepared_views_match_individual_preprocessing() {
+        let rgb: Vec<u8> = (0..W * H * 3).map(|i| (i % 251) as u8).collect();
+        let prepared = prepare_views(&rgb).unwrap();
+        for (view, actual) in VIEWS.into_iter().zip(prepared) {
+            assert_eq!(actual, preprocess_view(&rgb, view).unwrap());
+        }
+        assert!(prepare_views(&rgb[..100]).is_err());
+    }
+    #[test]
+    #[ignore = "Run with PERSON_PREVIEW_RGB and CUDA runtime on host"]
+    fn pipelined_frames_match_sequential_gpu_results() {
+        let rgb = std::fs::read(std::env::var("PERSON_PREVIEW_RGB").unwrap()).unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let mut engine = PersonEngine::load(root, Device::Cuda, 8, 0).unwrap();
+        let expected = format!("{:?}", engine.detect(&rgb).unwrap());
+        let mut observed = Vec::new();
+        engine
+            .detect_frames(&rgb.repeat(3), |_, poses| {
+                observed.push(format!("{poses:?}"));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(observed, vec![expected; 3]);
+    }
     fn sample(x: f32, y: f32, score: f32) -> Keypoint {
         Keypoint { x, y, score }
     }
