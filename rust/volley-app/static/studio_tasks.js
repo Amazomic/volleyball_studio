@@ -165,14 +165,7 @@
       await Promise.allSettled([readGpu(),readQuick()]);
     }finally{polling=false;}
   }
-  const restartButton=$("studio-restart"),profileButton=$("studio-restart-profile"),restartMessage=$("studio-restart-status");
-  let nextProfile=null;
-  api("/internal/rewrite-status").then(result=>{
-    if(!profileButton||!["debug","release"].includes(result.build_profile))return;
-    nextProfile=result.build_profile==="debug"?"release":"debug";
-    profileButton.textContent=`Перезапустить в ${nextProfile}`;
-    profileButton.disabled=false;
-  }).catch(()=>{});
+  const restartButton=$("studio-restart"),restartMessage=$("studio-restart-status");
   let restarting=false,restartWatcher=null;
   const restartNotice=(message,isError=false)=>{
     if(!restartMessage)return;
@@ -199,20 +192,17 @@
         clearInterval(restartWatcher);
         restarting=false;
         restartButton.disabled=false;
-        if(profileButton)profileButton.disabled=!nextProfile;
         restartNotice("Не удалось подтвердить перезапуск. Проверьте состояние сервера.",true);
       }
     },1500);
   };
-  const restart=async profile=>{
+  const restart=async()=>{
     if(restarting)return;
     restarting=true;
     restartButton.disabled=true;
-    if(profileButton)profileButton.disabled=true;
     restartNotice("Проверяем задачи и запускаем безопасный перезапуск…");
     try{
-      const url=profile?`/api/studio/restart?profile=${encodeURIComponent(profile)}`:"/api/studio/restart";
-      const response=await window.VolleyballStudioActivity.fetch(url,{
+      const response=await window.VolleyballStudioActivity.fetch("/api/studio/restart",{
         method:"POST",cache:"no-store",credentials:"same-origin",
         headers:{"Content-Type":"application/json"},body:"{}"
       });
@@ -226,12 +216,10 @@
     }catch(error){
       restarting=false;
       restartButton.disabled=false;
-      if(profileButton)profileButton.disabled=!nextProfile;
       restartNotice(error.message||String(error),true);
     }
   };
-  restartButton?.addEventListener("click",()=>restart(null));
-  profileButton?.addEventListener("click",()=>{if(nextProfile)restart(nextProfile);});
+  restartButton?.addEventListener("click",restart);
   window.VolleyballTasks={set,clear,refresh};
   const wake=()=>{schedule();refresh();};
   $("studio-project")?.addEventListener("change",()=>{if(!trackedGpuProject&&!trackedAnalysisProject)wake();});

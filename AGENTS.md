@@ -48,3 +48,4 @@ and must be reported explicitly if skipped. No paid hosted CI is assumed.
 The Windows launcher is `start-volley-ui.cmd` → `scripts/start-volley-rust-dev.ps1`
 → Rust binary. It never kills an unrelated process on port 8875. Isolated Rust
 writes stay outside the repository; saved legacy data remains read-only.
+After changes that require a Studio rebuild, rebuild and safely restart Studio automatically as the final step. Check for active jobs first and do not interrupt them; if a restart is unsafe, report the reason and the exact action needed.

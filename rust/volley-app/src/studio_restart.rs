@@ -2,12 +2,7 @@
 //! The external repository-scoped launcher repeats ownership and idle checks
 //! before sending SIGTERM. No caller-supplied path or command is executed.
 use crate::{runtime, storage, AppState};
-use axum::{
-    extract::{Query, State},
-    http::HeaderMap,
-    Json,
-};
-use serde::Deserialize;
+use axum::{extract::State, http::HeaderMap, Json};
 use serde_json::{json, Value};
 use std::{
     env,
@@ -28,21 +23,7 @@ pub(crate) fn current_profile() -> &'static str {
     }
 }
 
-fn restart_profile(profile: Option<&str>) -> Result<&'static str, &'static str> {
-    match profile {
-        None => Ok(current_profile()),
-        Some("debug") => Ok("debug"),
-        Some("release") => Ok("release"),
-        _ => Err("Недопустимый режим запуска"),
-    }
-}
-
-#[derive(Deserialize)]
-pub(crate) struct RestartQuery {
-    profile: Option<String>,
-}
-
-fn launch_args(state: &AppState, profile: &str) -> Vec<String> {
+fn launch_args(state: &AppState) -> Vec<String> {
     let root = &state.repository_root;
     let bind = env::var("VOLLEY_RUST_BIND").unwrap_or_else(|_| "127.0.0.1:8875".into());
     let data = if state.writes_enabled {
@@ -69,17 +50,14 @@ fn launch_args(state: &AppState, profile: &str) -> Vec<String> {
         mode.into(),
         ort,
         openvino,
-        profile.into(),
     ]
 }
 
 pub(crate) async fn restart(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(query): Query<RestartQuery>,
 ) -> storage::ApiResult<Value> {
     storage::validate_origin(&headers)?;
-    let profile = restart_profile(query.profile.as_deref()).map_err(storage::bad_request)?;
     let active = runtime::active_job_types(&state).await;
     if !active.is_empty() {
         return Err(storage::conflict(format!(
@@ -100,7 +78,7 @@ pub(crate) async fn restart(
     // setsid -f forks a detached session: it survives the old Rust process and
     // the foreground PowerShell/WSL wrapper. The launcher itself refuses to
     // stop any unknown process or any native worker that becomes active.
-    let args = launch_args(&state, profile);
+    let args = launch_args(&state);
     let result = Command::new("setsid")
         .arg("-f")
         .arg("bash")
@@ -133,17 +111,6 @@ pub(crate) async fn restart(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn restart_profile_rejects_unknown_values_and_defaults_to_current_build() {
-        assert_eq!(
-            super::restart_profile(None).unwrap(),
-            super::current_profile()
-        );
-        assert_eq!(super::restart_profile(Some("release")).unwrap(), "release");
-        assert_eq!(super::restart_profile(Some("debug")).unwrap(), "debug");
-        assert!(super::restart_profile(Some("other")).is_err());
-    }
-
     #[test]
     fn launch_never_accepts_user_defined_command_or_remote_target() {
         let source = include_str!("studio_restart.rs");

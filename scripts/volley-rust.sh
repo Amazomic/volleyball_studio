@@ -21,9 +21,7 @@ repo="$(cd "$repo" && pwd -P)"
 cd "$repo/rust"
 if [[ -f "$HOME/.cargo/env" ]];then source "$HOME/.cargo/env";fi
 url="http://$bind/internal/rewrite-status"
-profile="${8:-debug}"
-case "$profile" in debug|release) ;; *) echo "Invalid build profile" >&2;exit 2;; esac
-binary="$repo/rust/target/$profile/volley-app"
+binary="$repo/rust/target/release/volley-app"
 safe_path(){
   [[ "$1" == /* && "$1" != *"/../"* && "$1" != *"/.." ]]
 }
@@ -230,7 +228,7 @@ case "$action" in
   stop) stop_owned;;
   start|restart)
     if [[ "$action" == restart ]];then
-      if [[ "$profile" == release ]];then cargo build --release --locked --offline -p volley-app;else cargo build --locked --offline -p volley-app;fi
+      cargo build --release --locked --offline -p volley-app
     fi
     if [[ "$action" == restart ]];then stop_owned;fi
     if response="$(listener)";then
@@ -255,7 +253,7 @@ case "$action" in
       export LD_LIBRARY_PATH="$(dirname "$openvino_lib")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     fi
     if [[ "$action" == start ]];then
-      if [[ "$profile" == release ]];then cargo build --release --locked --offline -p volley-app;else cargo build --locked --offline -p volley-app;fi
+      cargo build --release --locked --offline -p volley-app
     fi
     echo "Starting ONE Volleyball Studio on http://$bind/studio (foreground, Ctrl+C stops)"
     exec "$binary"
