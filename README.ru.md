@@ -72,4 +72,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-volley-rust-de
 
 **Активная разработка / экспериментальная версия.** Наличие функции в интерфейсе не означает подтверждённой точности на реальных матчах. Полная приёмка, сопоставление с исторической Python-реализацией и измерения качества ещё не завершены. Исходные видеозаписи и исторические результаты не должны автоматически изменяться при анализе.
 
-**Документация:** [Архитектура](docs/RUST_ARCHITECTURE.md) · [Карта разработки](docs/RUST_ROADMAP.md) · [Журнал миграции](docs/RUST_MIGRATION.md) · [Развёртывание](docs/RUST_DEPLOYMENT.md) · [Руководство разработчика](rust/README.md) · [Чеклист улучшений для агентов](docs/AGENT_IMPROVEMENT_CHECKLIST.md).
+**Документация:** [Архитектура](docs/RUST_ARCHITECTURE.md) · [Карта разработки](docs/RUST_ROADMAP.md) · [Журнал миграции](docs/RUST_MIGRATION.md) · [Развёртывание](docs/RUST_DEPLOYMENT.md) · [Руководство разработчика](rust/README.md) · [Чеклист улучшений для агентов](docs/AGENT_IMPROVEMENT_CHECKLIST.md) · [Параллельная работа агентов](docs/AGENT_PARALLEL_WORKFLOW.md).

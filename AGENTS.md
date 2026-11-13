@@ -32,6 +32,17 @@ UI invariants: `docs/UI_LAYOUT_POLICY.md`.
 For analysis quality, performance and personalized montage improvements, follow
 `docs/AGENT_IMPROVEMENT_CHECKLIST.md`; verify existing behavior before implementing a checklist item.
 
+## Parallel work
+
+Follow `docs/AGENT_PARALLEL_WORKFLOW.md` for concurrent agents. Each writer must
+have a separate worktree/branch, explicit write paths, a fixed base SHA, and
+isolated runtime data and build outputs. Never run concurrent writers in the
+same checkout. A single coordinator assigns files/contracts/resources; a single
+integrator owns shared entry points and integrates reviewed commits sequentially.
+Workers record each tested increment in their unique task handoff; the integrator
+appends accepted records to `docs/RUST_MIGRATION.md` and alone applies the combined
+result to the working Studio after checking active jobs.
+
 ## Procedure
 
 Before implementation, inspect `git log`, the ownership map, existing Rust
