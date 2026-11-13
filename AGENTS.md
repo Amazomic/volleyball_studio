@@ -29,6 +29,9 @@ Stage map: `docs/RUST_ROADMAP.json` and generated `docs/RUST_ROADMAP.md`.
 Append-only handoff: `docs/RUST_MIGRATION.md`.
 UI invariants: `docs/UI_LAYOUT_POLICY.md`.
 
+For analysis quality, performance and personalized montage improvements, follow
+`docs/AGENT_IMPROVEMENT_CHECKLIST.md`; verify existing behavior before implementing a checklist item.
+
 ## Procedure
 
 Before implementation, inspect `git log`, the ownership map, existing Rust
