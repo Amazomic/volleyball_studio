@@ -379,7 +379,7 @@ impl PersonEngine {
     }
 }
 
-fn prepare_views(rgb: &[u8]) -> Result<[Vec<f32>; 4], String> {
+pub fn prepare_views(rgb: &[u8]) -> Result<[Vec<f32>; 4], String> {
     Ok([
         preprocess_view(rgb, VIEWS[0])?,
         preprocess_view(rgb, VIEWS[1])?,
