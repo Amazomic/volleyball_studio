@@ -189,6 +189,7 @@ pub(crate) struct RewriteStatus {
     pub(crate) active_jobs: Vec<&'static str>,
     supported_api_endpoints: &'static [&'static str],
     pid: u32,
+    build_profile: &'static str,
 }
 
 /// Status report is intentionally read-only. The launch script checks
@@ -323,6 +324,7 @@ pub(crate) async fn rewrite_status(
             "POST /api/montage/native/audio (multipart, isolated root)",
         ],
         pid: std::process::id(),
+        build_profile: crate::studio_restart::current_profile(),
     })
 }
 

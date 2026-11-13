@@ -1366,3 +1366,7 @@ rust/volley-app/src/native_preview_pose.rs теперь читает точны�
 - Changed short VBallNet gap rendering to bounded two-sided ballistic interpolation (synthetic mask, excludes offscreen/teleport/reversal, not authoritative Touch evidence).
 - Hard capped rally Touch inactivity at 120 frames, ignoring repeated same-player events. Added synthetic regression and refreshed WASM/UI tests.
 - Existing RAVEL-era data retained as read-only provenance; new analyses get distinct `gpu_model_stack` and `person_pose` fusion lineage and do not reuse previous GPU branches.
+# 2026-11-13 — Перезапуск с выбором профиля
+
+Studio показывает кнопку перехода между debug и release. Сервер проверяет профиль и активные задачи, а launcher собирает выбранную версию до безопасной остановки. Проверены целевой Rust-тест, синтаксис JavaScript и shell, отклонение неизвестного профиля и запуск debug; переход в release через интерфейс не проверен.
+
