@@ -140,6 +140,7 @@ struct ActiveSegment {
     touches: u64,
     first_touch: Option<u64>,
     last_touch: Option<u64>,
+    last_touch_samples: Option<u64>,
     last_touch_track_id: Option<u64>,
     max_touch: f64,
     ids: BTreeSet<u64>,
@@ -233,6 +234,7 @@ impl RallySegmenter {
         active.touches += 1;
         active.first_touch.get_or_insert(frame);
         active.last_touch = Some(frame);
+        active.last_touch_samples = Some(active.samples);
         active.last_touch_track_id = Some(id);
         active.max_touch = active.max_touch.max(touch.probability);
         active.ids.insert(id);
@@ -245,6 +247,9 @@ impl RallySegmenter {
             let start = active.idle_start.unwrap_or(active.last_ball);
             active.samples = active.samples.saturating_sub(active.idle);
             start.saturating_sub(1)
+        } else if reason == "touchless_timeout" {
+            active.samples = active.last_touch_samples.unwrap_or(0);
+            active.last_touch.unwrap_or(active.last_ball)
         } else {
             active.last_ball
         };
@@ -347,9 +352,9 @@ impl RallySegmenter {
         if let Some(active) = &self.active {
             if frame.saturating_sub(active.last_ball) > self.config.max_ball_gap_frames {
                 emitted = self.finish_active("ball_missing");
-            } else if active.last_touch.is_some_and(|last| {
-                frame.saturating_sub(last) > self.config.max_without_touch_frames.min(120)
-            }) {
+            } else if frame.saturating_sub(active.last_touch.unwrap_or(active.start))
+                > self.config.max_without_touch_frames.min(120)
+            {
                 emitted = self.finish_active("touchless_timeout");
             }
         }
@@ -379,6 +384,7 @@ impl RallySegmenter {
                     touches: 0,
                     first_touch: None,
                     last_touch: None,
+                    last_touch_samples: None,
                     last_touch_track_id: None,
                     max_touch: 0.0,
                     ids: BTreeSet::new(),
@@ -699,6 +705,50 @@ mod tests {
         assert_eq!(results[0].motion_supported_touch_proposals, 2);
         assert_eq!(results[0].end_reason, "touchless_timeout");
         assert!(results[0].detected_end_frame <= 170);
+    }
+
+    #[test]
+    fn ball_only_prefix_longer_than_four_seconds_cannot_join_a_rally() {
+        let (rallies, totals) = run(
+            320,
+            |i| b(100.0 + (i % 75) as f64 * 2.0),
+            &[200, 260],
+            RallySettings::default(),
+        );
+        assert_eq!(rallies.len(), 1);
+        assert_eq!(rallies[0].first_touch_frame, 200);
+        assert!(rallies[0].detected_start_frame >= 80);
+        assert!(rallies[0].first_touch_frame - rallies[0].detected_start_frame <= 120);
+        assert!(totals.ended_on_touch_gap >= 1);
+    }
+
+    #[test]
+    fn touchless_timeout_ends_at_last_touch_not_four_seconds_of_ball_only_motion() {
+        let (rallies, totals) = run(
+            260,
+            |i| b(100.0 + (i % 75) as f64 * 2.0),
+            &[20, 75],
+            RallySettings::default(),
+        );
+        assert_eq!(rallies.len(), 1);
+        assert_eq!(rallies[0].detected_end_frame, 75);
+        assert_eq!(rallies[0].ball_observations, 76);
+        assert_eq!(rallies[0].end_reason, "touchless_timeout");
+        assert!(totals.ended_on_touch_gap >= 1);
+    }
+
+    #[test]
+    fn exactly_four_seconds_between_touches_does_not_split_rally() {
+        let (rallies, totals) = run(
+            150,
+            |i| b(100.0 + (i % 75) as f64 * 2.0),
+            &[5, 125],
+            RallySettings::default(),
+        );
+        assert_eq!(rallies.len(), 1);
+        assert_eq!(rallies[0].motion_supported_touch_proposals, 2);
+        assert_eq!(rallies[0].detected_start_frame, 0);
+        assert_eq!(totals.ended_on_touch_gap, 0);
     }
 
     #[test]
