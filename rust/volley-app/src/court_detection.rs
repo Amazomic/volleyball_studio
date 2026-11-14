@@ -8,7 +8,7 @@ use axum::{extract::State, http::HeaderMap, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{process::Stdio, sync::Arc, time::Duration};
-use volley_core::court_detection::{combine_frames, detect_frame};
+use volley_core::court_detection::{combine_frames, combine_frames_advisory, detect_frame};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,9 +30,9 @@ pub(crate) async fn detect(
     }
     // Existing source-ownership validation is shared with video edits.
     let source = crate::video_edits::calibration_source(&state, &req.project_id, &req.video)?;
-    const W: usize = 320;
-    const H: usize = 180;
-    const N: usize = 5;
+    const W: usize = 640;
+    const H: usize = 360;
+    const N: usize = 7;
     let mut command = tokio::process::Command::new("ffmpeg");
     command
         .args([
@@ -43,18 +43,18 @@ pub(crate) async fn detect(
             "-threads",
             "2",
         ])
-        .args(["-ss", &format!("{:.3}", req.start_sec)])
+        .args(["-ss", &format!("{:.3}", (req.start_sec - 3.0).max(0.0))])
         .arg("-i")
         .arg(source)
         .args([
             "-t",
-            "10",
+            "8",
             "-vf",
-            "fps=0.5,scale=320:180:flags=bilinear,format=rgb24",
+            "fps=1,scale=640:360:flags=bicubic,format=rgb24",
         ])
         .args([
             "-frames:v",
-            "5",
+            "7",
             "-f",
             "rawvideo",
             "-pix_fmt",
@@ -84,17 +84,17 @@ pub(crate) async fn detect(
         .chunks_exact(frame_bytes)
         .filter_map(|pixels| detect_frame(pixels, W, H))
         .collect();
-    let result = if detected.len() >= 3 && detected.len() * 2 >= total {
-        combine_frames(&detected)
-    } else {
-        None
-    };
+    // Strong agreement is preferred. Two independent matching frames are
+    // still useful as a reviewed suggestion when lines are briefly occluded.
+    let strong = combine_frames(&detected);
+    let weak_consensus = strong.is_none();
+    let result = strong.or_else(|| combine_frames_advisory(&detected));
     Ok(Json(match result {
         Some(c) => json!({"detected":true,"court":c.court,"net":c.net,
             "confidence":c.confidence,"sampled_frames":total,
-            "supporting_frames":detected.len()}),
+            "supporting_frames":detected.len(),"weak_consensus":weak_consensus}),
         None => json!({"detected":false,"court":[],"net":null,
             "sampled_frames":total,"supporting_frames":detected.len(),
-            "message":"No reliable court consensus; mark the four corners manually"}),
+            "message":"Не удалось уверенно выделить границы площадки на этих кадрах. Выберите более четкий момент видео или отметьте углы вручную"}),
     }))
 }
