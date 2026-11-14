@@ -207,7 +207,7 @@
       if(token!==generation||epoch!==editEpoch)return;
       if(!result.detected){message(result.message||"Не удалось уверенно распознать разметку. Отметьте углы вручную.",true);return;}
       corners=result.court;net=result.net||null;setMarking(true);markModified();draw();
-      message((result.weak_consensus?"Предварительная разметка (мало совпавших кадров). ":"Найдена разметка. ")+"Подтверждений: "+result.supporting_frames+"/"+result.sampled_frames+". Проверьте углы и сетку, при необходимости перетащите точки, затем сохраните.");
+      message((result.inferred?"Часть границ достроена по размерам площадки и перспективе — проверьте положение каждой точки. ":result.temporal_composite?"Разметка восстановлена из нескольких кадров — проверьте её. ":result.weak_consensus?"Предварительная разметка (мало совпавших кадров). ":"Найдена разметка. ")+"Подтверждений: "+result.supporting_frames+"/"+result.sampled_frames+". Проверьте углы и сетку, при необходимости перетащите точки, затем сохраните.");
     }catch(error){if(token===generation)message(error.message,true);}
     finally{button.disabled=!valid();}
   });  modeButton.addEventListener("click",()=>setMarking(!marking));
