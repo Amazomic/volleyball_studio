@@ -780,6 +780,24 @@
             ctx.fillStyle="#d9eaff";ctx.fillText(Math.round(player.score*100)+"%",px+2,py+2);
           }
         }
+        const poseBoxes=raw.poses?.length?raw.poses:(raw.poses_interpolated||[]);
+        if(Array.isArray(poseBoxes)&&poseBoxes.length){
+          ctx.save();ctx.setLineDash([5,4]);ctx.strokeStyle="#98a9d3";ctx.lineWidth=1.5;
+          for(const person of poseBoxes){
+            if(!Array.isArray(person.box)||person.box.length!==4)continue;
+            const [x1,y1,x2,y2]=person.box;
+            const covered=(raw.players||[]).some(det=>{
+              if(!Array.isArray(det.box)||det.box.length!==4)return false;
+              const b=det.box;
+              const intersection=Math.max(0,Math.min(x2,b[2])-Math.max(x1,b[0]))*
+                Math.max(0,Math.min(y2,b[3])-Math.max(y1,b[1]));
+              const size=(x2-x1)*(y2-y1)+(b[2]-b[0])*(b[3]-b[1])-intersection;
+              return size>0&&intersection/size>0.4;
+            });
+            if(!covered)ctx.strokeRect(x+x1*width,y+y1*height,(x2-x1)*width,(y2-y1)*height);
+          }
+          ctx.restore();
+        }
       }
       if(overlay.rawPoseVisible.checked){
         const edges=[[5,7],[7,9],[6,8],[8,10],[5,6],[5,11],[6,12],
@@ -863,7 +881,10 @@
         const [x1,y1,x2,y2]=player.box;
         const px=x+x1*width,py=y+y1*height;
         const rw=(x2-x1)*width,rh=(y2-y1)*height;
+        ctx.save();
+        if(player.interpolated===true){ctx.setLineDash([5,4]);ctx.globalAlpha=0.78;}
         ctx.strokeRect(px,py,rw,rh);
+        ctx.restore();
         const labelsKey=playerLabelKey(project,run,video,record.replay_sha256);
         const owner=overlayLabels.loaded&&overlayLabels.key===labelsKey?
           overlayLabels.names.get(String(player.id)):null;

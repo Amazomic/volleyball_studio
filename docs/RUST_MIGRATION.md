@@ -1659,3 +1659,14 @@ Studio показывает кнопку перехода между debug и re
 - Code: rust/volley-app/src/native_preview_overlay.rs, rust/volley-app/static/studio.js, scripts/ci/test_studio_raw_detector.mjs.
 - Verified: 13 Rust raw/processed preview tests, cargo check --workspace --offline, Node syntax, raw detector UI regression and player identity sync. Global cargo fmt and web translation gate still fail on unrelated pre-existing files; intentionally not changed.
 - Handoff: docs/agent-runs/2026-11-15-raw-preview-detector.md.- Deployment: offline release build passed, safely restarted idle Studio PID 42137 to PID 43439, and verified HTTP 200 for /studio and /studio/app.js with the new raw model selector.
+
+
+### 2026-11-15 · Интерполированные рамки и скелеты участвуют в CPU-анализе касаний
+
+- Подключены короткие двусторонние интерполяции RTMPose (по сохранённому stride) к cpu_touches::pose_frames. Интерполированные суставы сопоставляются только с существующим однозначно подходящим Track ID и передаются в проверку контакта с мячом и типизацию; GPU-измерения остаются неизменными.
+- Происхождение PosePlayer::interpolated исключает использование синтетических промежуточных точек как независимых наблюдений до/после удара. Неоднозначные/пересекающиеся игроки не интерполируются.
+- В предпросмотре CPU-рамки, заполненные непрерывностью трека, рисуются пунктиром; в сырых данных отсутствующие детекторные рамки могут дополняться пунктирными рамками из RTMPose. Настоящие детекции остаются отдельными.
+- Изменения: rust/volley-app/src/{native_preview_pose.rs,cpu_touches.rs,cpu_retrack.rs,native_preview_overlay.rs}, rust/volley-core/src/{touch_pipeline.rs,touch_pipeline/pose_motion.rs}, rust/volley-app/static/studio.js, scripts/ci/test_studio_raw_detector.mjs.
+- Матчевые метрики касаний/типов на независимой разметке: NOT MEASURED. Нужна повторная CPU-постобработка уже сохранённого GPU-анализа, чтобы получить новые предложения касаний. Исходные файлы не изменяются.
+- Handoff: docs/agent-runs/2026-11-15-pose-gap-analytics.md.
+- Проверки: cargo check --workspace --offline и cargo build --release --locked --offline -p volley-app прошли; Rust workspace: 533 tests passed, 9 ignored, 1 unrelated failing fixture excluded (studio_pipeline::branching_tests::gpu_settings_and_source_are_branch_keys_while_cpu_settings_are_subbranches; isolated rerun also fails). Node syntax, raw detector UI regression, identity sync and git diff --check прошли. Ручная GPU/матчевая проверка не проводилась.

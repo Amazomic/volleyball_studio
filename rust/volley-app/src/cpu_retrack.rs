@@ -315,6 +315,7 @@ fn fill_confirmed_track_gaps(
                             rows.push(json!({
                                 "track_id":track_id,
                                 "detection":estimate,
+                                "measurement_source":"interpolated_track_bbox",
                                 "is_verified_athlete":false
                             }));
                             if entry["interpolated_track_ids"].is_null() {
@@ -1391,8 +1392,8 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .all(|p| p["measurement_source"].is_null()),
-            "render-only interpolation cannot claim a measured RTMPose observation"
+                .all(|p| p["measurement_source"] == "interpolated_track_bbox"),
+            "interpolated Track boxes must never claim a measured RTMPose observation"
         );
         let ids_at_three = at_three["tracked_players"]
             .as_array()

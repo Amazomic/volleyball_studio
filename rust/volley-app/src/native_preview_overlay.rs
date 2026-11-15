@@ -399,7 +399,7 @@ fn overlay_players(frame: &Value) -> Vec<Value> {
             {
                 return None;
             }
-            Some(json!({"id":id,"box":bb}))
+            Some(json!({"id":id,"box":bb,"interpolated":inferred.contains(&id)}))
         })
         .collect()
 }
@@ -1318,10 +1318,12 @@ mod tests {
         let players = overlay_players(&frame);
         assert_eq!(players.len(), 2);
         assert_eq!(players[0]["id"], 1, "measured player retains its ID");
+        assert_eq!(players[0]["interpolated"], false);
         assert_eq!(
             players[1]["id"], 3,
             "independent visual interpolation remains visible"
         );
+        assert_eq!(players[1]["interpolated"], true);
         assert!(
             !players.iter().any(|player| player["id"] == 2),
             "ghost player may not put a second identity over a measured body"

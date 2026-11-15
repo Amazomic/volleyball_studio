@@ -405,6 +405,7 @@ mod tests {
                 players: vec![PosePlayer {
                     track_id: 1,
                     keypoints,
+                    interpolated: false,
                 }],
             });
         }
@@ -425,6 +426,7 @@ mod tests {
                 players: vec![PosePlayer {
                     track_id: 2,
                     keypoints: poses[0].players[0].keypoints,
+                    interpolated: false,
                 }],
             },
         );

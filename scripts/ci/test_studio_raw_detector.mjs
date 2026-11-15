@@ -40,5 +40,9 @@ s.analysis="missing";
 context.updateRawDetectorLabel();
 assert.equal(checkbox.disabled,true,"no selected GPU fusion disables the toggle");
 assert.match(source,/if\(overlay\.rawPeopleVisible\.checked\)/);
+assert.match(source,/const poseBoxes=raw\.poses\?\.length\?raw\.poses:\(raw\.poses_interpolated\|\|\[\]\)/,
+  "unobserved detector frames reuse measured or bridged RTMPose crop boxes");
+assert.match(source,/if\(player\.interpolated===true\)\{ctx\.setLineDash/,
+  "CPU preview distinguishes interpolated track boxes");
 assert.match(source,/rawDetectors\.set\(rawDetectorKey\(project,run,video\),value\.person_detector\)/);
 console.log("Raw preview checkbox follows RF-DETR / RTMDet saved GPU fusion: OK");

@@ -13,6 +13,7 @@ use crate::{
 pub struct PosePlayer {
     pub track_id: u64,
     pub keypoints: [[f64; 3]; 17],
+    pub interpolated: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -155,13 +156,17 @@ fn pose_contact_with_ball(
     let before = poses.iter().rev().find(|p| {
         p.frame_index < current.frame_index
             && current.frame_index - p.frame_index <= 9
-            && p.players.iter().any(|v| v.track_id == track_id)
+            && p.players
+                .iter()
+                .any(|v| v.track_id == track_id && !v.interpolated)
             && sample_ball(p, true).is_some()
     })?;
     let after = poses.iter().find(|p| {
         p.frame_index > current.frame_index
             && p.frame_index - current.frame_index <= 9
-            && p.players.iter().any(|v| v.track_id == track_id)
+            && p.players
+                .iter()
+                .any(|v| v.track_id == track_id && !v.interpolated)
             && sample_ball(p, false).is_some()
     })?;
     let prior = before.players.iter().find(|v| v.track_id == track_id)?;
@@ -309,7 +314,8 @@ pub fn pose_contact_from_nearby_sample(
             continue;
         };
         let rank = contact.normalized_distance
-            + 0.002 * sample.frame_index.abs_diff(current.frame_index) as f64;
+            + 0.002 * sample.frame_index.abs_diff(current.frame_index) as f64
+            + if pose.interpolated { 0.03 } else { 0.0 };
         if best.as_ref().is_none_or(|old| rank < old.0) {
             best = Some((
                 rank,
@@ -1075,6 +1081,7 @@ mod tests {
                     players: vec![PosePlayer {
                         track_id: 42,
                         keypoints,
+                        interpolated: false,
                     }],
                 }
             })
@@ -1173,6 +1180,47 @@ mod tests {
             event.is_some(),
             "independent pose/ball sampling must not erase contact"
         );
+        let mut with_estimated = poses.clone();
+        let mut midpoint = poses[0].players[0].clone();
+        midpoint.interpolated = true;
+        for joint in 0..17 {
+            for coord in 0..2 {
+                midpoint.keypoints[joint][coord] = (poses[0].players[0].keypoints[joint][coord]
+                    + poses[2].players[0].keypoints[joint][coord])
+                    * 0.5;
+            }
+            midpoint.keypoints[joint][2] = poses[0].players[0].keypoints[joint][2]
+                .min(poses[2].players[0].keypoints[joint][2]);
+        }
+        with_estimated[1] = PoseFrame {
+            frame_index: 32,
+            players: vec![midpoint],
+        };
+        assert!(pose_contact_at_frame(
+            &frames,
+            &with_estimated,
+            &frames[32],
+            42,
+            640,
+            360,
+            TouchSettings::default()
+        )
+        .is_some());
+        for pose in &mut with_estimated {
+            for player in &mut pose.players {
+                player.interpolated = true;
+            }
+        }
+        assert!(pose_contact_at_frame(
+            &frames,
+            &with_estimated,
+            &frames[32],
+            42,
+            640,
+            360,
+            TouchSettings::default()
+        )
+        .is_none());
     }
 
     #[test]

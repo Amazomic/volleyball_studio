@@ -52,7 +52,7 @@ fn pose_frames(root: &Path, fusion: &str, frames: &[TouchFrame]) -> Result<Vec<P
         "frame":frame.frame_index,
         "players":frame.players.iter().map(|player| json!({"id":player.track_id,"box":player.bbox_xyxy_norm})).collect::<Vec<_>>()
     })).collect();
-    if !native_preview_pose::enrich_exact(
+    if !native_preview_pose::enrich_continuous(
         root,
         fusion,
         first.frame_index,
@@ -72,6 +72,7 @@ fn pose_frames(root: &Path, fusion: &str, frames: &[TouchFrame]) -> Result<Vec<P
                     Some(PosePlayer {
                         track_id: player["id"].as_u64()?,
                         keypoints: serde_json::from_value(player.get("pose")?.clone()).ok()?,
+                        interpolated: player["pose_interpolated"] == true,
                     })
                 })
                 .collect();
@@ -1219,8 +1220,16 @@ mod tests {
                 .iter()
                 .map(|frame| frame.frame_index)
                 .collect::<Vec<_>>(),
-            vec![24, 30, 36]
+            (24..=36).collect::<Vec<_>>()
         );
+        for sample in &samples {
+            assert_eq!(sample.players[0].track_id, 8);
+            assert_eq!(
+                sample.players[0].interpolated,
+                ![24, 30, 36].contains(&sample.frame_index),
+            );
+        }
+        assert_eq!(samples[7].players[0].keypoints[9], points[9]);
         let mut events = vec![PhysicalTouchCandidate {
             frame_index: 31,
             provisional_track_id: Some(8),

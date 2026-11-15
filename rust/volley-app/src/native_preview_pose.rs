@@ -262,7 +262,12 @@ fn keypoints(value: &Value) -> Option<&Vec<Value>> {
     Some(a)
 }
 
-fn attach_frame(row: &Value, frame: &mut Value, reject_ambiguous: bool) -> bool {
+fn attach_frame(
+    row: &Value,
+    frame: &mut Value,
+    reject_ambiguous: bool,
+    interpolated: bool,
+) -> bool {
     let Some(poses) = row["players"].as_array() else {
         return false;
     };
@@ -273,6 +278,9 @@ fn attach_frame(row: &Value, frame: &mut Value, reject_ambiguous: bool) -> bool 
     let mut matched = false;
     let boxes: Vec<_> = tracked.iter().map(|p| valid_box(&p["box"])).collect();
     for (track_index, player) in tracked.iter_mut().enumerate() {
+        if player.get("pose").is_some() && (interpolated || reject_ambiguous) {
+            continue;
+        }
         let Some(bb) = valid_box(&player["box"]) else {
             continue;
         };
@@ -316,6 +324,7 @@ fn attach_frame(row: &Value, frame: &mut Value, reject_ambiguous: bool) -> bool 
             }
             if let Some(points) = keypoints(&poses[i]["keypoints"]) {
                 player["pose"] = json!(points);
+                player["pose_interpolated"] = json!(interpolated);
                 used[i] = true;
                 matched = true;
             }
@@ -324,10 +333,9 @@ fn attach_frame(row: &Value, frame: &mut Value, reject_ambiguous: bool) -> bool 
     matched
 }
 
-/// Build an *overlay-only* intermediate pose. Unlike raw.poses, this
-/// data is never saved as a model observation or used by CPU analytics.
-/// Pose detections have no Track IDs: match by mutual, unambiguous box overlap,
-/// or omit the ambiguous person rather than attaching limbs to a stranger.
+/// Reconstruct intermediate joints from unambiguous neighboring GPU samples.
+/// The returned coordinates keep their synthetic provenance and are never
+/// treated as a measured RTMPose observation or an athlete identity.
 fn interpolate_raw_players(before: &[Value], after: &[Value], t: f64) -> Vec<Value> {
     if !(0.0..1.0).contains(&t) || before.len() > 128 || after.len() > 128 {
         return Vec::new();
@@ -397,9 +405,9 @@ fn interpolate_raw_players(before: &[Value], after: &[Value], t: f64) -> Vec<Val
     result
 }
 
-/// Exact detections stay in raw.poses; interpolation for visual continuity
-/// is kept separately in raw.poses_interpolated. CPU inference/analysis does
-/// not read the synthetic poses, and each gap needs two saved RTMPose samples.
+/// Exact detections stay in raw.poses; interpolation is kept separately in
+/// raw.poses_interpolated. CPU touch analysis can explicitly consume the same
+/// bounded estimates while preserving their non-measured provenance.
 pub fn raw_window(
     project_root: &Path,
     fusion_id: &str,
@@ -601,8 +609,69 @@ fn enrich_with_tolerance(
                 continue;
             };
             let delta = frame.abs_diff(sample_frame);
-            if delta <= tolerance && delta < closest[i] && attach_frame(&item, target, exact) {
+            if delta <= tolerance && delta < closest[i] && attach_frame(&item, target, exact, false)
+            {
                 closest[i] = delta;
+            }
+        }
+    }
+    Ok(true)
+}
+
+pub(crate) fn enrich_continuous(
+    project_root: &Path,
+    fusion_id: &str,
+    start: u64,
+    end: u64,
+    frames: &mut [Value],
+) -> Result<bool, String> {
+    if !enrich_exact(project_root, fusion_id, start, end, frames)? {
+        return Ok(false);
+    }
+    if start > end || frames.len() != (end - start) as usize {
+        return Err("Invalid continuous RTMPose frame range".into());
+    }
+    if frames.is_empty() {
+        return Ok(true);
+    }
+    let Some((path, sha, stride)) = pose_run(project_root, fusion_id)? else {
+        return Ok(false);
+    };
+    let index = index_for(&path, &sha, stride)?;
+    let lo = index.partition_point(|(at, _)| *at < start.saturating_sub(stride as u64));
+    let hi = index.partition_point(|(at, _)| *at < end.saturating_add(stride as u64));
+    let mut reader = BufReader::new(File::open(path).map_err(|e| e.to_string())?);
+    let mut samples = Vec::new();
+    for &(at, offset) in &index[lo..hi] {
+        reader
+            .seek(SeekFrom::Start(offset))
+            .map_err(|e| e.to_string())?;
+        let line = bounded_line(&mut reader)?.ok_or("RTMPose index points past evidence")?;
+        let row: Value = serde_json::from_slice(&line).map_err(|e| e.to_string())?;
+        if row["frame"].as_u64() != Some(at) {
+            return Err("RTMPose index frame mismatch".into());
+        }
+        let players = row["players"].as_array().ok_or("Missing RTMPose players")?;
+        if players.len() > 128 {
+            return Err("RTMPose player count exceeds bounds".into());
+        }
+        samples.push((at, players.clone()));
+    }
+    for pair in samples.windows(2) {
+        let (left_at, left_players) = &pair[0];
+        let (right_at, right_players) = &pair[1];
+        if right_at - left_at != stride as u64 {
+            continue;
+        }
+        for at in (left_at + 1).max(start)..(*right_at).min(end) {
+            let t = (at - left_at) as f64 / (right_at - left_at) as f64;
+            let interpolated = interpolate_raw_players(left_players, right_players, t);
+            if interpolated.is_empty() {
+                continue;
+            }
+            let target = &mut frames[(at - start) as usize];
+            if target["frame"].as_u64() == Some(at) {
+                attach_frame(&json!({"players":interpolated}), target, true, true);
             }
         }
     }
@@ -725,6 +794,28 @@ mod tests {
         assert!(processed
             .iter()
             .all(|frame| frame["pose_points"][0]["track_id"].is_null()));
+        let mut tracked = (0..5)
+            .map(|frame| {
+                json!({"frame":frame,
+                "players":[{"id":7,"box":[0.2,0.2,0.5,0.9]}]})
+            })
+            .collect::<Vec<_>>();
+        assert!(enrich_continuous(&root, &fusion, 0, 5, &mut tracked).unwrap());
+        assert_eq!(tracked[0]["players"][0]["pose_interpolated"], false);
+        assert_eq!(tracked[1]["players"][0]["pose_interpolated"], true);
+        assert_eq!(tracked[1]["players"][0]["pose"][0][0], 0.33);
+        assert_eq!(tracked[2]["players"][0]["pose"][0][0], 0.36);
+        assert_eq!(tracked[3]["players"][0]["pose_interpolated"], false);
+        assert!(tracked[4]["players"][0].get("pose").is_none());
+        let mut shifted_tracked = (1..4)
+            .map(|frame| {
+                json!({"frame":frame,
+                "players":[{"id":7,"box":[0.2,0.2,0.5,0.9]}]})
+            })
+            .collect::<Vec<_>>();
+        assert!(enrich_continuous(&root, &fusion, 1, 4, &mut shifted_tracked).unwrap());
+        assert_eq!(shifted_tracked[0]["players"][0]["pose_interpolated"], true);
+        assert_eq!(shifted_tracked[2]["players"][0]["pose_interpolated"], false);
         manifest["sha256"] = json!("0".repeat(64));
         fs::write(
             pose_dir.join("manifest.json"),
@@ -763,7 +854,7 @@ mod tests {
             "keypoints":(0..17).map(|_|json!([0.2,0.4,0.9])).collect::<Vec<_>>()}]});
         let mut frame = json!({"players":[{"id":7,"box":[0.1,0.1,0.3,0.8]},
             {"id":8,"box":[0.1,0.1,0.3,0.8]}]});
-        assert!(!attach_frame(&row, &mut frame, true));
+        assert!(!attach_frame(&row, &mut frame, true, false));
         assert!(frame["players"][0].get("pose").is_none());
         assert!(frame["players"][1].get("pose").is_none());
     }
@@ -772,7 +863,8 @@ mod tests {
         let row = json!({"players":[{"box":[0.1,0.1,0.3,0.8],
             "keypoints":(0..17).map(|_|json!([0.2,0.4,0.9])).collect::<Vec<_>>()}]});
         let mut frame = json!({"players":[{"id":7,"box":[0.1,0.1,0.3,0.8]}]});
-        attach_frame(&row, &mut frame, false);
+        attach_frame(&row, &mut frame, false, false);
         assert_eq!(frame["players"][0]["pose"].as_array().unwrap().len(), 17);
+        assert_eq!(frame["players"][0]["pose_interpolated"], false);
     }
 }
