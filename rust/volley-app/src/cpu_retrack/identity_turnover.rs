@@ -157,7 +157,10 @@ pub(super) fn split(path: &Path, expected_sha: &str, frames: u64) -> Result<(Str
                     }
                 }
             }
-            if let Some(inferred) = frame["interpolated_track_ids"].as_array_mut() {
+            if let Some(inferred) = frame
+                .get_mut("interpolated_track_ids")
+                .and_then(Value::as_array_mut)
+            {
                 for id in inferred {
                     let previous = id.as_u64().ok_or("Invalid turnover inferred ID")?;
                     if let Some(versions) = replacements.get(&previous) {
@@ -250,7 +253,7 @@ mod tests {
                 "frame_index":frame,
                 "tracked_players":ids.iter().map(|id|json!({"track_id":id,"detection":{"score":0.9}})).collect::<Vec<_>>(),
                 "raw_player_candidates":[{"source":"raw"}],
-                "interpolated_track_ids":[],
+
             });
             let mut bytes = serde_json::to_vec(&row).unwrap();
             bytes.push(b'\n');
@@ -279,6 +282,7 @@ mod tests {
             .unwrap()
             .iter()
             .any(|p| p["track_id"] == 8));
+        assert!(parsed[250].get("interpolated_track_ids").is_none());
         assert_eq!(
             parsed[250]["raw_player_candidates"],
             json!([{"source":"raw"}])
