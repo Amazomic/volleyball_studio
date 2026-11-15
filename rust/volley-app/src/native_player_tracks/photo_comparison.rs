@@ -16,7 +16,7 @@ pub(super) struct Snapshot {
     pub(super) identity_revision: String,
     pub(super) albums: Vec<(String, String)>,
     photos: Vec<PhotoInput>,
-    vectors: BTreeMap<u64, Vec<f32>>,
+    vectors: BTreeMap<u64, Vec<Vec<f32>>>,
     pub(super) model: String,
 }
 
@@ -46,11 +46,10 @@ pub(super) fn snapshot(state: &AppState, req: &ReidReviewRequest) -> Result<Snap
         .iter()
         .filter_map(Value::as_u64)
         .collect::<BTreeSet<_>>();
-    let rebuild = req.action == "auto_assign";
     let eligible = ctx
         .tracks
         .keys()
-        .filter(|id| (rebuild || !assigned.contains_key(&id.to_string())) && (rebuild || !excluded.contains(id)))
+        .filter(|id| !assigned.contains_key(&id.to_string()) && !excluded.contains(id))
         .collect::<Vec<_>>();
     if eligible.len() > 1024 {
         return Err(storage::bad_request(
@@ -223,8 +222,7 @@ pub(super) async fn compare(
         .ctx
         .tracks
         .keys()
-        .filter(|id| (req.action == "auto_assign" || !assigned.contains_key(&id.to_string()))
-            && (req.action == "auto_assign" || !excluded.contains(id)))
+        .filter(|id| !assigned.contains_key(&id.to_string()) && !excluded.contains(id))
         .copied()
         .collect::<Vec<_>>();
     if ids.is_empty() {
@@ -244,10 +242,13 @@ pub(super) async fn compare(
                 expected_source_sha256: req.expected_source_sha256.clone(),
                 track_ids: chunk.to_vec(),
                 transient: true,
+                sample_count: req.algorithm.sample_count(),
             }),
         )
         .await?;
-        if result["model_fingerprint"] != snap.model {
+        if result["model_fingerprint"] != snap.model
+            || result["sample_count_requested"] != json!(req.algorithm.sample_count())
+        {
             return Err(storage::conflict("ReID model changed during comparison"));
         }
         for row in result["features"]
@@ -257,9 +258,12 @@ pub(super) async fn compare(
             let id = row["track_id"]
                 .as_u64()
                 .ok_or_else(|| storage::internal("Track feature ID missing"))?;
-            let vector: Vec<f32> = serde_json::from_value(row["vector"].clone())
-                .map_err(|_| storage::internal("Invalid track feature"))?;
-            if !chunk.contains(&id) || snap.vectors.insert(id, vector).is_some() {
+            let vectors: Vec<Vec<f32>> = serde_json::from_value(row["sample_vectors"].clone())
+                .map_err(|_| storage::internal("Invalid track sample features"))?;
+            if vectors.len() > req.algorithm.sample_count()
+                || !chunk.contains(&id)
+                || snap.vectors.insert(id, vectors).is_some()
+            {
                 return Err(storage::internal("Unexpected track feature"));
             }
         }
@@ -323,19 +327,22 @@ pub(super) async fn compare(
             vector,
         })
         .collect::<Vec<_>>();
-    // CPU postprocessing is a complete rebuild: old manual/automatic links
-    // must never suppress photo candidates from the new identity pass.
-    let mut match_identity = snap.identity.clone();
-    if req.action == "auto_assign" {
-        match_identity["assignments"] = json!({});
-        match_identity["excluded_ids"] = json!([]);
-    }
-    let matches = photo_match_candidates(&snap.ctx, &match_identity, &snap.vectors, &refs)
-        .map_err(storage::bad_request)?;
+    // Manual links and exclusions are authoritative; automatic suggestions
+    // must not overwrite them on repeated postprocessing of the same replay.
+    let matches = photo_match_candidates(
+        &snap.ctx,
+        &snap.identity,
+        &snap.vectors,
+        &refs,
+        req.algorithm.sample_count(),
+    )
+    .map_err(storage::bad_request)?;
     Ok(
         json!({"schema":"volley-native-player-photo-comparison/1", "project_id":snap.ctx.project_id,
         "replay_id":snap.ctx.replay_id,"source_replay_sha256":snap.ctx.source_sha,
-        "player_matches":matches,"photo_count":refs.len(),"identity_revision":snap.identity_revision,"album_revisions":snap.albums,"model_fingerprint":snap.model,"auto_assign_enabled":false,"confirmed":false}),
+        "player_matches":matches,"photo_count":refs.len(),"identity_revision":snap.identity_revision,"album_revisions":snap.albums,"model_fingerprint":snap.model,
+        "samples_per_track":req.algorithm.sample_count(),
+        "auto_assign_enabled":false,"confirmed":false}),
     )
 }
 
