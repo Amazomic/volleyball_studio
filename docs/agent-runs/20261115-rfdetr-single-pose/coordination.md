@@ -1,11 +1,11 @@
 # RF-DETR single-pose GPU run coordination
 - Run ID: 20261115-rfdetr-single-pose
 - Coordinator and integrator: current Studio maintainer session (single writer)
-- Revision: 2
+- Revision: 3
 - Base SHA: eda3a1a4c2b950a1b2f1b7c9637939721f491cdc
 - Branch: codex/20261115-rfdetr/single-pose
 - Worktree: C:\Users\amazomic\Desktop\github\fast-volleyball-tracking-inference\.studio-runtime\worktrees\rfdetr-single-pose
-- Task: single-pose, status review, grant epoch 1, no parallel writers
+- Task: single-pose, status accepted, grant epoch 1, no parallel writers
 - Exclusive write paths: rust/volley-inference/src/person.rs, rust/volley-app/src/inference_full.rs, rust/volley-app/src/studio_pipeline.rs, docs/agent-runs/20261115-rfdetr-single-pose/coordination.md, docs/agent-runs/20261115-rfdetr-single-pose/tasks/single-pose.md, docs/RUST_MIGRATION.md
 - Contract: RF-DETR raw evidence remains detector boxes only; pose evidence is generated exclusively by pose_inference::process after box interpolation; RTMDet remains pose-confirmed.
 - Cache: bump RF-DETR GPU stack and person-pipeline versions to prevent reusing different evidence.
@@ -16,3 +16,6 @@
 
 - Verified: cargo check volley-app, 4 RF-DETR tests, 5 studio_pipeline tests, 1 preview detector test, 2 Node history/selector tests, rustfmt changed files, git diff --check.
 - Baseline known failure: scripts/ci/test_studio_raw_gpu_preview.mjs fails in both unchanged root and isolated worktree on assertion Current fusion loads normally.
+
+- Accepted code commit: 27d3ee6; tests ran against that tree (same three Rust files).
+- Ready for sequential integration into rust; keep the user's four uncommitted files intact.
