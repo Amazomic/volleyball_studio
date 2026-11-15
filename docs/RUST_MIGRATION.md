@@ -1687,3 +1687,10 @@ Studio показывает кнопку перехода между debug и re
 - После обновления Studio повторная CPU-постобработка `34921f44214e482ba8532ae8ee0de7d9` заново использовала проверенный GPU fusion `ca53e980463a40c0922f28bca58fb03a`; новый CPU replay `01a13818f6ce488d90c586730e0b5fe5` содержит 14 Track ID, `identity_turnover_splits=1`.
 - Автоматическая ReID привязка завершена: ID 4 → Ирек (88,4%, кадр 339 / 00:11.3); ID 5 → Раиля (74,5%, первый розыгрыш); новый ID 19 → Ирек (89,0%, второй розыгрыш). Назначено 11 ID против 9 в предыдущей CPU-версии, остался 1 непривязанный ID 13 (потребует отдельной проверки смешанного трека). Старые CPU-версии оставлены неизменными.
 - Сборка Studio запущена на том же изолированном хранилище через штатный безопасный `Stop` / `Detach`, PID 90733, порт 8875; постобработка и ReID успешны. Коммиты разработки: `52f510d`, `a3c61ca`; точные серверные ID указаны выше.
+
+### 2026-11-15 · GPU fusion analysis picker deduplication
+
+- Fixed `rust/volley-web/src/domain.rs`: fused GPU person+pose job was erroneously rendered as a standalone unmerged analysis because the selection engine checked obsolete `ravel_job_id` instead of `person_job_id` from the canonical `studio_analysis` manifest projection.
+- Raw VBallNet and person jobs remain stored separately as immutable evidence, but the analysis picker now displays only their fused source; an actually orphaned raw job remains selectable.
+- Added regression test with two fused jobs and one orphan. `cargo test -p volley-web --offline --locked`: 9 passed; crate format check and release WASM build passed. WASM Node UI-wide translation budget check remains failing on unrelated existing untranslated static phrases.
+- Handoff: `docs/agent-runs/2026-11-15-gpu-chain-fusion-visibility.md`.
