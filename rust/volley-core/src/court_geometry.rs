@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 
 pub const COURT_LENGTH_M: f64 = 18.0;
 pub const COURT_WIDTH_M: f64 = 9.0;
-pub const ON_COURT_LENGTH_MARGIN_M: f64 = 3.5;
+pub const ON_COURT_LENGTH_MARGIN_M: f64 = 6.0; // Servers may start well behind an end line.
 pub const ON_COURT_WIDTH_MARGIN_M: f64 = 1.5;
-pub const SERVE_ZONE_MARGIN_M: f64 = 1.2;
+pub const SERVE_ZONE_MARGIN_M: f64 = 0.35; // Only line-local tolerance inside the end line.
 pub const BLOCK_NEAR_NET_M: f64 = 1.6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -221,10 +221,12 @@ mod tests {
         assert_eq!(center.side, CourtSide::Far);
         assert!(center.near_net);
         assert!(!center.in_serve_zone);
-        let server = h.evidence_for_feet([0.125, 0.5]).unwrap();
+        let server = h.evidence_for_feet([0.09, 0.5]).unwrap();
         assert_eq!(server.side, CourtSide::Near);
         assert!(server.in_serve_zone);
         assert!(!server.near_net);
+        assert!(!h.evidence_for_feet([0.125, 0.5]).unwrap().in_serve_zone);
+        assert!(h.evidence_for_feet([-0.08, 0.5]).unwrap().in_serve_zone); // 4m behind end line
         assert!(h.evidence_for_feet([0.98, 0.5]).is_some()); // 1.8 m outside end line
         assert!(h.evidence_for_feet([1.3, 0.5]).is_none());
     }
