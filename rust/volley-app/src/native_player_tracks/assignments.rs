@@ -692,25 +692,23 @@ pub(super) fn save_automatic_photo_links(
         &req.replay_id,
         req.rally_run_id.as_deref(),
     )?;
-    // Rebuild identity membership once per CPU result, using the photo
-    // comparison only. The old assignment sidecar must not bias this pass.
-    let mut reset = doc.clone();
-    reset["assignments"] = json!({});
-    reset["automatic_assignments"] = json!({});
-    reset["excluded_ids"] = json!([]);
-    reset["automatic_suppressed_ids"] = json!([]);
+    // Preserve manual assignments, exclusions and user suppression across
+    // repeated CPU postprocessing. Only automatic links are recomputed.
+    doc["automatic_assignments"] = json!({});
     let matches = &comparison["player_matches"];
-    let chosen = choose_automatic_photo_links(&scoped, &reset, matches)
-        .map_err(storage::bad_request)?;
-    doc = reset;
-    doc["automatic_assignments"] = json!(chosen.iter()
-        .map(|(id, player)| (id.to_string(), player.clone()))
-        .collect::<BTreeMap<_, _>>());
     doc["automatic_identity_evidence"] = json!({
-        "threshold":0.30, "matches":matches,
+        "threshold":f64::from(req.threshold_percent) / 100.0,
+        "algorithm":req.algorithm,
+        "samples_per_track":req.algorithm.sample_count(),
+        "matches":matches,
         "album_revisions":comparison["album_revisions"],
         "model_fingerprint":comparison["model_fingerprint"]
     });
+    let chosen = choose_automatic_photo_links(&scoped, &doc, matches)
+        .map_err(storage::bad_request)?;
+    doc["automatic_assignments"] = json!(chosen.iter()
+        .map(|(id, player)| (id.to_string(), player.clone()))
+        .collect::<BTreeMap<_, _>>());
     let unassigned: Vec<_> = scoped
         .tracks
         .keys()
@@ -736,6 +734,44 @@ pub(super) fn save_automatic_photo_links(
         json!({"automatic_count":chosen.len(),"automatic_assignments":chosen,"unassigned_track_ids":unassigned,"identity_revision":revision(saved.as_deref()),"confirmed":false}),
     )
 }
+/// Disable automatic assignments without removing manually confirmed
+/// ownership, exclusions or the saved photo reference album.
+pub(super) fn disable_automatic_photo_links(
+    state: &AppState,
+    req: &ReidReviewRequest,
+) -> Result<Value, ApiError> {
+    if !state.writes_enabled {
+        return Err(storage::conflict("Identity links require writable storage"));
+    }
+    let _guard = project_guard::write_guard(state, &req.project_id)?;
+    let ctx = source(state, &req.project_id, &req.video, &req.replay_id)?;
+    if ctx.source_sha != req.expected_source_sha256 {
+        return Err(storage::conflict("Source replay changed"));
+    }
+    let raw = existing(&ctx.sidecar).map_err(storage::bad_request)?;
+    let mut doc = validated(raw.as_deref(), &ctx).map_err(storage::bad_request)?;
+    doc["automatic_assignments"] = json!({});
+    doc["automatic_identity_evidence"] = json!({
+        "disabled":true, "algorithm":req.algorithm,
+        "threshold": f64::from(req.threshold_percent) / 100.0
+    });
+    let unassigned = ctx.tracks.keys()
+        .filter(|id| !doc["assignments"].as_object()
+            .is_some_and(|manual| manual.contains_key(&id.to_string())))
+        .copied().collect::<Vec<_>>();
+    let folder = ctx.sidecar.parent()
+        .ok_or_else(|| storage::internal("Link directory missing"))?;
+    versioned_store::write_json_checked(folder, &ctx.sidecar, &doc, MAX_LINKS)
+        .map_err(storage::bad_request)?;
+    let saved = existing(&ctx.sidecar).map_err(storage::bad_request)?;
+    Ok(json!({
+        "automatic_count":0,"automatic_assignments":{},
+        "unassigned_track_ids":unassigned,
+        "identity_revision":revision(saved.as_deref()),
+        "disabled":true,"confirmed":false
+    }))
+}
+
 pub async fn read(
     State(state): State<Arc<AppState>>,
     Query(req): Query<TrackQuery>,
