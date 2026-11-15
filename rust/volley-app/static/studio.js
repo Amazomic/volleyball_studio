@@ -493,7 +493,8 @@
   // bounded interpolation may enter the processed overlay canvas.
   const processedBallOverlayIsValid=value=>
     ["vballnet_only_short_gap_interpolation_v1",
-      "vballnet_physical_teleport_repair_player_kink_v3"].includes(value.ball_policy)&&
+      "vballnet_physical_teleport_repair_player_kink_v3",
+      "vballnet_leading_ball_rally_v1"].includes(value.ball_policy)&&
     Array.isArray(value.frames)&&value.frames.every((row,index)=>{
       if(row.frame!==value.start_frame+index)return false;
       if(row.ball===null)

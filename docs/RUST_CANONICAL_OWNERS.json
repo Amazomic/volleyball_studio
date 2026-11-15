@@ -134,6 +134,9 @@
                         "status":  "partial",
                         "adapters":  [
                                          "rust/volley-app/src/cpu_touches.rs",
+                                         "rust/volley-core/src/touch_pipeline/ball_continuity.rs",
+                                         "rust/volley-core/src/touch_pipeline/ball_continuity/leading_ball.rs",
+                                         "rust/volley-app/src/cpu_retrack/ball_track.rs",
                                          "rust/volley-app/src/touch_preview.rs",
                                          "rust/volley-app/src/native_player_tracks.rs",
                                          "rust/volley-app/src/native_player_tracks/trajectory.rs"

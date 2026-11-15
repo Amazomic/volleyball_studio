@@ -230,90 +230,21 @@ fn write_proposal(
     Ok(())
 }
 
-// Read only ball centers in a separate bounded streaming pass. This lets
-// rallies use the *same* VBallNet teleport rejection as Touch and preview,
-// without making synthetic positions into evidence or retaining long videos
-// in memory. A boolean mask costs one byte per frame, even for long matches.
-#[derive(Deserialize)]
-struct BallOnlyFrame {
-    frame_index: u64,
-    selected_ball: Option<BallOnlySelected>,
-}
-#[derive(Deserialize)]
-struct BallOnlySelected {
-    source_model: String,
-    detection: BallOnlyDetection,
-}
-#[derive(Deserialize)]
-struct BallOnlyDetection {
-    score: f64,
-    bbox_xyxy_norm: [f64; 4],
-}
-
+#[cfg(test)]
 fn reject_teleport_frames(
     source: &Path,
-    expected_sha: &str,
+    sha: &str,
     frames: u64,
     width: u32,
     height: u32,
     min_score: f64,
 ) -> Result<Vec<bool>, String> {
-    const CHUNK: usize = 240;
-    const HALO: usize = 16;
-    let total = usize::try_from(frames).map_err(|_| "Rally frame count too large")?;
-    let mut rejected = vec![false; total];
-    let mut reader = BoundedReader::open(source)?;
-    let mut buffer = std::collections::VecDeque::<Option<[f64; 2]>>::new();
-    let mut buffer_start = 0;
-    let mut next_read = 0;
-    let mut core_start = 0;
-    while core_start < total {
-        let core_end = (core_start + CHUNK).min(total);
-        let region_start = core_start.saturating_sub(HALO);
-        let region_end = (core_end + HALO).min(total);
-        while next_read < region_end {
-            let bytes = reader.line()?.ok_or("Truncated ball source pre-scan")?;
-            let row: BallOnlyFrame = serde_json::from_slice(&bytes)
-                .map_err(|_| "Malformed ball source pre-scan frame")?;
-            if row.frame_index != next_read as u64 {
-                return Err("Ball source pre-scan frames out of order".into());
-            }
-            let sample = row.selected_ball.and_then(|entry| {
-                let b = entry.detection.bbox_xyxy_norm;
-                (entry.source_model == "vballnet"
-                    && entry.detection.score.is_finite()
-                    && entry.detection.score >= min_score
-                    && b.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v))
-                    && b[2] > b[0]
-                    && b[3] > b[1])
-                    .then_some([(b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5])
-            });
-            buffer.push_back(sample);
-            next_read += 1;
-        }
-        let points = buffer
-            .iter()
-            .skip(region_start - buffer_start)
-            .take(region_end - region_start)
-            .copied()
-            .collect::<Vec<_>>();
-        let flags = volley_core::touch_pipeline::flag_ball_teleports(&points, width, height);
-        for index in core_start..core_end {
-            rejected[index] = flags[index - region_start];
-        }
-        core_start = core_end;
-        let keep_from = core_start.saturating_sub(HALO);
-        while buffer_start < keep_from {
-            buffer.pop_front();
-            buffer_start += 1;
-        }
-    }
-    if reader.line()?.is_some() || reader.finish() != expected_sha {
-        return Err("Ball source pre-scan SHA-256 mismatch".into());
-    }
-    Ok(rejected)
+    Ok(
+        crate::cpu_retrack::ball_track::read(source, sha, frames, width, height, min_score, &[0])?
+            .rejected
+            .clone(),
+    )
 }
-
 // The rebuild contract deliberately enumerates the full verified source
 // identity (files, SHAs, run ids, geometry). Grouping into parameter structs
 // belongs to the stage E decomposition, not to a lint-driven rewrite of
@@ -333,19 +264,23 @@ fn rebuild_from_snapshots(
     replay_id: &str,
     touch_id: &str,
     court: Option<&volley_core::court_geometry::CourtTransform>,
+    ball_scope: Option<(&[u64], f64)>,
 ) -> Result<(String, RallyTotals, OutputCounters), String> {
     settings.validate()?;
     if frames == 0 || frames > 48 * 3600 * 30 || expected_touches > frames {
         return Err("Native rally source frame/contact count exceeds limits".into());
     }
-    let false_ball_frames = reject_teleport_frames(
+    let (rally_starts, tracking_score) = ball_scope.unwrap_or((&[], settings.min_ball_score));
+    let ball_mask = crate::cpu_retrack::ball_track::read(
         frames_file,
         replay_sha,
         frames,
         width,
         height,
-        settings.min_ball_score,
+        tracking_score,
+        rally_starts,
     )?;
+    let accepted_ball_frames = &ball_mask.accepted;
     let mut inputs = BoundedReader::open(frames_file)?;
     let mut touches = BoundedReader::open(touches_file)?;
     let output_file = OpenOptions::new()
@@ -392,7 +327,7 @@ fn rebuild_from_snapshots(
                 } else {
                     let [left, top, right, bottom] = ball.detection.bbox_xyxy_norm;
                     if ball.detection.score >= settings.min_ball_score
-                        && !false_ball_frames[frame_index as usize]
+                        && accepted_ball_frames[frame_index as usize]
                     {
                         history.push_ball(CourtBallSample {
                             frame: frame_index,
@@ -418,7 +353,7 @@ fn rebuild_from_snapshots(
         // Distinguish immutable raw ball evidence from confidence-qualified
         // ball observations used by touch/court/rally reconstruction.
         let reliable_ball = ball.filter(|b| {
-            b.score >= settings.min_ball_score && !false_ball_frames[frame_index as usize]
+            b.score >= settings.min_ball_score && accepted_ball_frames[frame_index as usize]
         });
         let near_player = reliable_ball.is_some_and(|b| {
             frame.tracked_players.iter().any(|tracked| {
@@ -594,6 +529,47 @@ fn rebuild_from_snapshots(
     ))
 }
 
+pub(crate) fn refine_leading_ball(
+    state: &AppState,
+    request: &crate::cpu_touches::TouchRequest,
+    settings: RallySettings,
+    discovery_id: &str,
+) -> Result<Value, ApiError> {
+    let run =
+        crate::native_rally_preview::inspect_project(state, &request.project_id, discovery_id)?;
+    if run.replay_id != request.replay_id || run.video != request.video {
+        return Err(storage::bad_request(
+            "Leading-ball boundaries belong to another replay",
+        ));
+    }
+    let windows =
+        crate::native_rally_preview::verified_track_windows(&run).map_err(storage::bad_request)?;
+    let mut starts = vec![0];
+    starts.extend(
+        windows
+            .intervals
+            .iter()
+            .map(|(start, _)| *start)
+            .filter(|start| *start > 0),
+    );
+    let touches = crate::cpu_touches::process_with_ball_scope(state, request, &starts)?;
+    let touch_id = touches["touch_id"]
+        .as_str()
+        .ok_or_else(|| storage::bad_request("Missing refined Touch ID"))?;
+    let rallies = process(
+        state,
+        &RallyRequest {
+            project_id: request.project_id.clone(),
+            video: request.video.clone(),
+            replay_id: request.replay_id.clone(),
+            touch_id: touch_id.to_owned(),
+            settings: Some(settings),
+        },
+    )?;
+    Ok(json!({"touches":touches,"rallies":rallies,
+        "ball_tracking_boundary_source":{"rally_run_id":discovery_id,"sha256":run.rally_sha}}))
+}
+
 pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value, ApiError> {
     if !state.writes_enabled {
         return Err(storage::conflict(
@@ -717,6 +693,11 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
         .map_err(|e| storage::internal(format!("Create isolated rally snapshot: {e}")))?;
     let result = (|| -> Result<Value, String> {
         let part = folder.join("rally_candidates.jsonl.partial");
+        let ball_scope = crate::cpu_retrack::ball_track::saved_scope(&contacts)?;
+        let (rally_starts, tracking_score) = ball_scope
+            .as_ref()
+            .map(|(starts, score)| (starts.as_slice(), *score))
+            .unwrap_or((&[], settings.min_ball_score));
         let (output_sha, stats, output) = rebuild_from_snapshots(
             &tracked_file,
             &touch_file,
@@ -731,6 +712,7 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
             &request.replay_id,
             &request.touch_id,
             court.as_ref().map(|snapshot| &snapshot.transform),
+            Some((rally_starts, tracking_score)),
         )?;
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared video changed during native rally processing".into());
@@ -751,6 +733,9 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
             "width":dimensions.width,"height":dimensions.height,"fps":30,
             "frames":frames,
             "settings":settings,
+            "ball_tracking_policy":contacts["ball_tracking_policy"],
+            "leading_ball_rally_starts":rally_starts,
+            "leading_ball_min_score":contacts["leading_ball_min_score"],
             "court_revision":contacts["court_revision"],
             "court_context_enabled":contacts["court_context_enabled"],
             "court_contact_context_version":"python_serve_toss_possession_v2",
@@ -822,6 +807,65 @@ pub async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ball_threshold_observations(
+        tracking_score: f64,
+        rally_score: f64,
+        weak_initial: bool,
+    ) -> u64 {
+        let root = std::env::temp_dir().join(format!("ball-threshold-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("tracked.jsonl");
+        let touches = root.join("touches.jsonl");
+        let mut bytes = Vec::new();
+        for frame in 0..50 {
+            let x = if (5..20).contains(&frame) {
+                0.85 + (frame - 5) as f64 * 0.002
+            } else {
+                0.3 + frame as f64 * 0.002
+            };
+            bytes.extend(serde_json::to_vec(&json!({"frame_index":frame,
+                "track_ids_provisional":true,"confirmed_athlete_identities":false,"touches_confirmed":false,
+                "selected_ball":{"source_model":"vballnet","detection":{
+                    "frame_index":frame,"class_name":"ball","score":if weak_initial && frame < 5 || !weak_initial && (5..20).contains(&frame) {0.4} else {0.9},
+                    "bbox_xyxy_norm":[x,0.4,x+0.005,0.405]}}})).unwrap());
+            bytes.push(b'\n');
+        }
+        fs::write(&source, &bytes).unwrap();
+        fs::write(&touches, []).unwrap();
+        let (_, totals, _) = rebuild_from_snapshots(
+            &source,
+            &touches,
+            &format!("{:x}", Sha256::digest(&bytes)),
+            &format!("{:x}", Sha256::digest([])),
+            50,
+            0,
+            1280,
+            720,
+            RallySettings {
+                min_ball_score: rally_score,
+                ..Default::default()
+            },
+            &root.join("rallies.jsonl"),
+            &"a".repeat(32),
+            &"b".repeat(32),
+            None,
+            Some((&[0], tracking_score)),
+        )
+        .unwrap();
+        fs::remove_dir_all(root).unwrap();
+        totals.ball_observations
+    }
+
+    #[test]
+    fn stricter_rally_confidence_does_not_choose_a_different_leading_ball() {
+        assert_eq!(ball_threshold_observations(0.35, 0.67, true), 30);
+    }
+
+    #[test]
+    fn lower_rally_confidence_cannot_restore_unaccepted_ball_candidates() {
+        assert_eq!(ball_threshold_observations(0.67, 0.35, false), 35);
+    }
 
     #[test]
     fn confidence_does_not_override_short_false_ball_island() {
@@ -927,6 +971,7 @@ mod tests {
             "0123456789abcdef0123456789abcdef",
             "abcdef0123456789abcdef0123456789",
             Some(&court),
+            None,
         )
         .unwrap();
         eprintln!("{}", fs::read_to_string(output).unwrap());
@@ -979,6 +1024,7 @@ mod tests {
                 &rallies,
                 "0123456789abcdef0123456789abcdef",
                 "abcdef0123456789abcdef0123456789",
+                None,
                 None,
             )?;
             let actual = format!(
@@ -1073,6 +1119,7 @@ mod tests {
                 &rallies,
                 "0123456789abcdef0123456789abcdef",
                 "abcdef0123456789abcdef0123456789",
+                None,
                 None,
             )?;
             if ingested.ingested_touch_candidates != contacts {
@@ -1184,6 +1231,7 @@ mod tests {
             "0123456789abcdef0123456789abcdef",
             "abcdef0123456789abcdef0123456789",
             None,
+            None,
         );
         let response = result.map(|(sha, stats, counts)| {
             let bytes = fs::read(&output).unwrap();
@@ -1267,6 +1315,7 @@ mod tests {
             "0123456789abcdef0123456789abcdef",
             "abcdef0123456789abcdef0123456789",
             Some(&court),
+            None,
         )
         .unwrap();
         let data = fs::read_to_string(&output).unwrap();

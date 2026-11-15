@@ -6,8 +6,10 @@ mod geometry;
 mod player_gap;
 mod pose_motion;
 pub use ball_continuity::{
-    exclude_ball_teleports, flag_ball_teleports, repair_vballnet_trajectory,
-    repair_vballnet_trajectory_with_players,
+    exclude_ball_teleports, flag_ball_teleports, flag_local_ball_artifacts,
+    repair_accepted_vballnet_trajectory, repair_vballnet_trajectory,
+    repair_vballnet_trajectory_with_players, LeadingBallObservation, LeadingBallSettings,
+    LeadingBallTracker,
 };
 pub use player_gap::reconstruct as reconstruct_track_gaps;
 pub use pose_motion::{

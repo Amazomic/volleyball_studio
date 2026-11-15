@@ -2,6 +2,8 @@
 //! The immutable fusion/replay remains unchanged. A false stationary landmark
 //! between two compatible ball observations must not erase nearby contacts.
 use super::{center, valid_bbox, TouchFrame};
+mod leading_ball;
+pub use leading_ball::{LeadingBallObservation, LeadingBallSettings, LeadingBallTracker};
 
 fn location(frame: &TouchFrame, width: f64, height: f64) -> Option<[f64; 2]> {
     let ball = frame
@@ -102,7 +104,7 @@ fn flag_stationary_landmarks(samples: &[Option<[f64; 2]>], width: f64, height: f
 /// A wrong VBallNet location can have *higher* confidence than the real
 /// ball. Compare motion on both sides instead of deleting every low-score
 /// sample. Reject both persistent stationary landmarks and brief out-and-back islands.
-fn suppress_false_ball_islands(
+fn suppress_local_ball_artifacts(
     samples: &mut [Option<[f64; 2]>],
     width: u32,
     height: u32,
@@ -209,6 +211,42 @@ fn suppress_false_ball_islands(
     rejected
 }
 
+pub fn flag_local_ball_artifacts(
+    samples: &[Option<[f64; 2]>],
+    width: u32,
+    height: u32,
+) -> Vec<bool> {
+    let mut working = samples.to_vec();
+    suppress_local_ball_artifacts(&mut working, width, height)
+}
+
+fn suppress_false_ball_islands(
+    samples: &mut [Option<[f64; 2]>],
+    width: u32,
+    height: u32,
+) -> Vec<bool> {
+    let mut rejected = suppress_local_ball_artifacts(samples, width, height);
+    if width < 64 || height < 64 {
+        return rejected;
+    }
+    let mut tracker = LeadingBallTracker::new(width, height);
+    let observed = samples.to_vec();
+    for index in 0..samples.len() {
+        let decision = tracker.observe(index as u64, observed[index].as_slice());
+        if samples[index].is_some() && decision.selected.is_none() {
+            samples[index] = None;
+            rejected[index] = true;
+        }
+        if let Some(anchors) = decision.acquired_frames {
+            for anchor in anchors {
+                samples[anchor as usize] = observed[anchor as usize];
+                rejected[anchor as usize] = false;
+            }
+        }
+    }
+    rejected
+}
+
 /// Identify unreliable observed positions without inventing a ball location.
 /// Streaming CPU stages can apply this boolean mask to their own source data.
 pub fn flag_ball_teleports(samples: &[Option<[f64; 2]>], width: u32, height: u32) -> Vec<bool> {
@@ -259,6 +297,56 @@ pub fn repair_vballnet_trajectory_with_players(
     (points, synthetic)
 }
 
+pub fn repair_accepted_vballnet_trajectory(
+    samples: &[Option<[f64; 2]>],
+    players: &[Vec<[f64; 4]>],
+    track_ids: &[u32],
+    width: u32,
+    height: u32,
+) -> (Vec<Option<[f64; 2]>>, Vec<bool>) {
+    let mut points = samples.to_vec();
+    let mut synthetic = vec![false; samples.len()];
+    if samples.len() != players.len() || samples.len() != track_ids.len() {
+        return (points, synthetic);
+    }
+    let mut begin = 0;
+    while begin < samples.len() {
+        let mut end = begin + 1;
+        while end < samples.len() && track_ids[end] == track_ids[begin] {
+            end += 1;
+        }
+        if track_ids[begin] > 0 {
+            crate::ball_interpolation::interpolate_player_rebound_gaps(
+                &mut points[begin..end],
+                &mut synthetic[begin..end],
+                &players[begin..end],
+                width,
+                height,
+            );
+            let ballistic =
+                crate::ball_interpolation::interpolate_short_gaps(&mut points[begin..end]);
+            for (flag, fitted) in synthetic[begin..end].iter_mut().zip(ballistic) {
+                *flag |= fitted;
+            }
+            let mut tracker = LeadingBallTracker::new(width, height);
+            for index in begin..end {
+                if synthetic[index] {
+                    if points[index].is_none_or(|point| !tracker.allows(index as u64, point)) {
+                        points[index] = None;
+                        synthetic[index] = false;
+                    }
+                } else {
+                    if let Some(point) = samples[index] {
+                        tracker.accept_anchor(index as u64, point);
+                    }
+                }
+            }
+        }
+        begin = end;
+    }
+    (points, synthetic)
+}
+
 /// Remove spurious ball locations from a temporary *observed-only* working
 /// copy. Synthetic reconstruction must NEVER become player contact evidence.
 #[must_use]
@@ -282,6 +370,73 @@ pub fn exclude_ball_teleports(frames: &[TouchFrame], width: u32, height: u32) ->
 mod tests {
     use super::*;
     use crate::touch_pipeline::TouchBall;
+
+    #[test]
+    fn leading_ball_rejects_moving_remote_candidates_without_waiting_for_return() {
+        let samples = (0..50)
+            .map(|i| {
+                Some(if i < 10 {
+                    [0.28 + i as f64 * 0.002, 0.3]
+                } else {
+                    [0.85 + (i - 10) as f64 * 0.002, 0.65]
+                })
+            })
+            .collect::<Vec<_>>();
+        let rejected = flag_ball_teleports(&samples, 1280, 720);
+        assert!(rejected[10..].iter().all(|flag| *flag));
+        assert!(rejected[..10].iter().all(|flag| !flag));
+    }
+
+    #[test]
+    fn leading_ball_rejects_recorded_13_second_right_edge_detour() {
+        let mut samples = (380..=410)
+            .map(|i| {
+                let t = (i - 387) as f64;
+                Some([(432.5 + 8.0 * t) / 1280.0, (5.3 + 0.65 * t * t) / 720.0])
+            })
+            .collect::<Vec<_>>();
+        let false_points = [
+            [1182.5, 412.5],
+            [1192.5, 417.5],
+            [1192.5, 415.0],
+            [1192.5, 415.0],
+            [1190.0, 412.5],
+            [1190.0, 415.0],
+            [1190.0, 417.5],
+            [1190.0, 417.5],
+            [1190.0, 422.5],
+            [1192.5, 422.5],
+            [1190.0, 422.5],
+            [1190.0, 422.5],
+        ];
+        for (offset, point) in false_points.into_iter().enumerate() {
+            samples[8 + offset] = Some([point[0] / 1280.0, point[1] / 720.0]);
+        }
+        let rejected = flag_ball_teleports(&samples, 1280, 720);
+        assert!(rejected[8..20].iter().all(|flag| *flag));
+        assert!(!rejected[7] && !rejected[20]);
+    }
+
+    #[test]
+    fn interpolation_never_crosses_a_new_rally_even_with_matching_motion() {
+        let samples = vec![
+            Some([0.20, 0.4]),
+            Some([0.21, 0.4]),
+            Some([0.22, 0.4]),
+            None,
+            Some([0.24, 0.4]),
+            Some([0.25, 0.4]),
+            Some([0.26, 0.4]),
+        ];
+        let (points, inferred) = repair_accepted_vballnet_trajectory(
+            &samples,
+            &vec![Vec::new(); 7],
+            &[1, 1, 1, 2, 2, 2, 2],
+            1280,
+            720,
+        );
+        assert!(points[3].is_none() && !inferred[3]);
+    }
 
     fn sample(i: u64, x: f64) -> TouchFrame {
         TouchFrame {
@@ -409,7 +564,9 @@ mod tests {
     fn recovers_volley_23_4s_false_ball_island_with_high_attack() {
         // Real observations around frames 696..707; the GPU briefly chose
         // a stationary right-edge false ball at 697..700 and 703..706.
-        let mut observations = vec![None; 17];
+        let mut observations = vec![None; 19];
+        observations[0] = Some([0.481, 0.352]);
+        observations[1] = Some([0.479, 0.362]);
         let samples = [
             (0, [0.477, 0.372]),
             (1, [0.475, 0.382]),
@@ -427,7 +584,7 @@ mod tests {
             (13, [0.385, 0.337]),
         ];
         for (i, xy) in samples {
-            observations[i] = Some(xy);
+            observations[i + 2] = Some(xy);
         }
         let mut players = vec![vec![]; observations.len()];
         for row in &mut players {
@@ -435,27 +592,27 @@ mod tests {
         }
         let (repaired, synthetic) =
             repair_vballnet_trajectory_with_players(&observations, &players, 1280, 720);
-        for i in 2..=5 {
+        for i in 4..=7 {
             assert!(
                 repaired[i].is_some_and(|p| p[0] < 0.55),
                 "false ball island at frame {} must be reconstructed: {:?}",
-                695 + i,
+                693 + i,
                 repaired[i]
             );
             assert!(synthetic[i]);
         }
-        for i in 8..=11 {
+        for i in 10..=13 {
             assert!(
                 repaired[i].is_some_and(|p| p[0] < 0.55),
                 "second false island at frame {} must be reconstructed: {:?}",
-                695 + i,
+                693 + i,
                 repaired[i]
             );
             assert!(synthetic[i]);
         }
-        assert_eq!(observations[2], Some([0.932, 0.587]));
-        assert_eq!(repaired[1], observations[1]);
-        assert_eq!(repaired[6], observations[6]);
+        assert_eq!(observations[4], Some([0.932, 0.587]));
+        assert_eq!(repaired[3], observations[3]);
+        assert_eq!(repaired[8], observations[8]);
     }
 
     #[test]

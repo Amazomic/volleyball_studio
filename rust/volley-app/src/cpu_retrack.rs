@@ -30,6 +30,7 @@ const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_ROW_BYTES: usize = 512 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
+pub(crate) mod ball_track;
 mod gap_interpolation;
 mod identity_handoff;
 mod identity_turnover;

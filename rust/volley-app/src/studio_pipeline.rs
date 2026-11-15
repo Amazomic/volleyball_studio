@@ -874,6 +874,10 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
         && rallies["state"] == "provisional_rally_segments"
         && rallies["court_contact_context_version"] == "python_serve_toss_possession_v2"
         && rallies["ground_boundary_version"] == "trajectory_court_player_v2"
+        && touches["ball_tracking_policy"] == crate::cpu_retrack::ball_track::POLICY
+        && rallies["ball_tracking_policy"] == crate::cpu_retrack::ball_track::POLICY
+        && touches["leading_ball_rally_starts"] == rallies["leading_ball_rally_starts"]
+        && touches["leading_ball_min_score"] == rallies["leading_ball_min_score"]
         && rallies["rally_run_id"] == rally
         && rallies["source_replay_id"] == replay
         && rallies["source_touch_id"] == touch
@@ -1590,7 +1594,7 @@ async fn pipeline(
             settings: Some(request.post.touches),
             pose_classification: request.post.pose_classification,
         },
-        cpu_touches::process,
+        cpu_touches::process_discovery,
     )
     .await?;
     let touch_id = require_id(&touches, "touch_id")?;
@@ -1628,7 +1632,49 @@ async fn pipeline(
         cpu_rallies::process,
     )
     .await?;
-    let rally_id = require_id(&rallies, "rally_run_id")?;
+    let discovery_id = require_id(&rallies, "rally_run_id")?;
+    if cancel.load(Ordering::Acquire) {
+        return Err("cancelled".into());
+    }
+    progress(
+        path,
+        status,
+        "Постобработка · сопровождение ведущего мяча",
+        97.0,
+    )?;
+    status["ball_tracking_boundary_source"] =
+        json!({"rally_run_id":discovery_id,"sha256":rallies["sha256"]});
+    log_native(
+        path,
+        "Ведущий мяч",
+        "cpu_touches::process_with_ball_scope",
+        json!({"boundary_discovery_rally_run_id":discovery_id,"policy":crate::cpu_retrack::ball_track::POLICY}),
+    )?;
+    let refined = cpu(
+        app.clone(),
+        (
+            cpu_touches::TouchRequest {
+                project_id: request.project_id.clone(),
+                video: request.video.clone(),
+                replay_id: replay_id.clone(),
+                settings: Some(request.post.touches),
+                pose_classification: request.post.pose_classification,
+            },
+            request.post.rallies,
+            discovery_id,
+        ),
+        |app, (touch_request, rally_settings, discovery_id)| {
+            cpu_rallies::refine_leading_ball(app, touch_request, *rally_settings, discovery_id)
+        },
+    )
+    .await?;
+    let touches = &refined["touches"];
+    let rallies = &refined["rallies"];
+    if touches["court_revision"] != status["court_revision"] {
+        return Err("Court calibration changed during leading-ball refinement".into());
+    }
+    status["cpu_runs"]["touches"] = json!(require_id(touches, "touch_id")?);
+    let rally_id = require_id(rallies, "rally_run_id")?;
     status["cpu_runs"]["rallies"] = json!(rally_id);
     status["postprocessing_id"] = json!(rally_id);
     save(path, status)?;

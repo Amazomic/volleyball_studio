@@ -230,6 +230,7 @@ pub struct RunQuery {
 }
 fn valid_manifest(value: &Value, project_id: &str, run_id: &str, project_videos: &[&str]) -> bool {
     value["schema"] == "volley-native-cpu-rally-proposals/1"
+        && value["ball_tracking_policy"] != "vballnet_local_artifacts_v1"
         && value["state"] == "provisional_rally_segments"
         && value["project_id"] == project_id
         && value["rally_run_id"] == run_id

@@ -465,6 +465,7 @@ fn raw_frame(
     json!({"balls":balls,"players":players,"touches":touches})
 }
 
+#[cfg(test)]
 fn repaired_ball_observations(
     samples: &[Option<(&str, [f64; 2])>],
     width: u32,
@@ -505,12 +506,32 @@ fn extract_frames(
     height: u32,
     min_ball_score: f64,
     raw_thresholds: Option<(u8, u8, u8, u8)>,
+    ball_scope: Option<(&[u64], f64)>,
 ) -> Result<Vec<Value>, String> {
     let index = index_for(path, sha, total)?;
+    let starts = scope
+        .intervals
+        .iter()
+        .map(|(start, _)| *start)
+        .filter(|start| *start > 0)
+        .fold(vec![0], |mut starts, start| {
+            starts.push(start);
+            starts
+        });
+    let (rally_starts, tracking_score) = ball_scope.unwrap_or((&starts, min_ball_score));
+    let ball_mask = crate::cpu_retrack::ball_track::read(
+        path,
+        sha,
+        total,
+        width,
+        height,
+        tracking_score,
+        rally_starts,
+    )?;
     // Teleport islands can last ten frames; ballistic fit needs one extra
     // real observation on each side. Preserve this halo for every page.
-    let read_start = start.saturating_sub(16);
-    let read_end = end.saturating_add(16).min(total);
+    let read_start = start.saturating_sub(30);
+    let read_end = end.saturating_add(30).min(total);
     let anchor = read_start / STRIDE * STRIDE;
     let offset = index.offsets[(read_start / STRIDE) as usize];
     let mut file = File::open(path).map_err(|e| format!("Open indexed replay: {e}"))?;
@@ -534,7 +555,9 @@ fn extract_frames(
         }
         let ball = frame["selected_ball"]["detection"]["score"]
             .as_f64()
-            .filter(|score| score.is_finite() && *score >= min_ball_score)
+            .filter(|score| {
+                score.is_finite() && *score >= min_ball_score && ball_mask.accepted[i as usize]
+            })
             .and_then(|_| box_norm(&frame["selected_ball"]["detection"]["bbox_xyxy_norm"]))
             .map(|bb| json!([(bb[0] + bb[2]) * 0.5, (bb[1] + bb[3]) * 0.5]));
         let in_rally = scope.contains(i);
@@ -547,7 +570,11 @@ fn extract_frames(
             .map(|(ball, ravel, player, touch)| raw_frame(&frame, ball, ravel, player, touch));
         output.push(json!({
             "frame":i,"ball":ball,"ball_source":frame["selected_ball"]["source_model"],
-            "raw":raw,"in_rally":in_rally,"players":players
+            "raw":raw,"in_rally":in_rally,"players":players,
+            "ball_candidates_count":ball_mask.candidate_counts[i as usize],
+            "ball_candidate_accepted":ball_mask.accepted[i as usize],
+            "ball_candidate_rejected":ball_mask.rejected[i as usize],
+            "leading_ball_track_id":ball_mask.track_ids[i as usize],
         }));
     }
     let samples = output
@@ -569,7 +596,22 @@ fn extract_frames(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let (gated, synthetic) = repaired_ball_observations(&samples, width, height, &player_boxes);
+    let accepted = samples
+        .iter()
+        .map(|sample| {
+            sample
+                .filter(|(source, _)| *source == "vballnet")
+                .map(|(_, point)| point)
+        })
+        .collect::<Vec<_>>();
+    let track_ids = &ball_mask.track_ids[read_start as usize..read_end as usize];
+    let (gated, synthetic) = volley_core::touch_pipeline::repair_accepted_vballnet_trajectory(
+        &accepted,
+        &player_boxes,
+        track_ids,
+        width,
+        height,
+    );
     for ((row, ball), inferred) in output.iter_mut().zip(gated).zip(synthetic) {
         // Reject outliers even if their model confidence is high; distinguish
         // every inferred position from an actual VBallNet detection.
@@ -681,6 +723,16 @@ pub async fn get(
     let (frames, poses_available) = tokio::task::spawn_blocking(move || {
         let windows = native_rally_preview::verified_track_windows(&preview_run)
             .map_err(|e| format!("Unverified rally scope: {e}"))?;
+        let rally_dir = preview_run
+            .rally_file
+            .parent()
+            .ok_or("Missing rally directory")?;
+        let saved: Value = serde_json::from_slice(
+            &fs::read(safe_file(rally_dir, "manifest.json", MAX_MANIFEST_BYTES)?)
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|_| "Invalid rally ball policy manifest")?;
+        let ball_scope = crate::cpu_retrack::ball_track::saved_scope(&saved)?;
         let mut frames = extract_frames(
             &replay_path,
             &replay_sha,
@@ -692,6 +744,9 @@ pub async fn get(
             preview_run.height,
             preview_run.min_ball_score,
             raw_thresholds,
+            ball_scope
+                .as_ref()
+                .map(|(starts, score)| (starts.as_slice(), *score)),
         )?;
         let poses_available = if let Some(fusion) = fusion_for_pose {
             native_preview_pose::processed_window(
@@ -712,7 +767,8 @@ pub async fn get(
     .map_err(storage::bad_request)?;
     Ok(Json(json!({
         "schema":"volley-native-preview-overlay/1",
-        "ball_policy":"vballnet_physical_teleport_repair_player_kink_v3",
+        "ball_policy":"vballnet_leading_ball_rally_v1",
+        "expected_balls":1,
         "fps":30,
         "project_id":run.project_id,"video":run.video,
         "rally_run_id":run.run_id,"replay_sha256":run.replay_sha,
@@ -1222,6 +1278,8 @@ mod tests {
     fn processed_overlay_uses_only_vball_observations() {
         let samples = vec![
             Some(("ravel", [0.1, 0.1])),
+            Some(("vballnet", [0.0, 0.2])),
+            Some(("vballnet", [0.1, 0.2])),
             Some(("vballnet", [0.2, 0.2])),
             Some(("ravel", [0.3, 0.2])),
             Some(("ravel", [0.9, 0.9])),
@@ -1229,17 +1287,59 @@ mod tests {
             Some(("ravel", [0.6, 0.2])),
         ];
         let result = gated_ball_observations(&samples);
-        assert_eq!(
-            result,
-            vec![
-                None,
-                Some([0.2, 0.2]),
-                Some([0.3, 0.2]),
-                Some([0.4, 0.2]),
-                Some([0.5, 0.2]),
-                None
-            ]
-        );
+        let expected = vec![
+            None,
+            Some([0.0, 0.2]),
+            Some([0.1, 0.2]),
+            Some([0.2, 0.2]),
+            Some([0.3, 0.2]),
+            Some([0.4, 0.2]),
+            Some([0.5, 0.2]),
+            None,
+        ];
+        for (actual, expected) in result.iter().zip(expected) {
+            match (actual, expected) {
+                (Some(actual), Some(expected)) => assert!(
+                    (actual[0] - expected[0]).abs() < 1e-12
+                        && (actual[1] - expected[1]).abs() < 1e-12
+                ),
+                (None, None) => (),
+                _ => panic!("RAVEL cannot become an observed processed ball"),
+            }
+        }
+    }
+
+    #[test]
+    fn seeking_inside_remote_ball_streak_keeps_original_leading_ball() {
+        let root = std::env::temp_dir().join(format!("leading-ball-page-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("tracked_frames.jsonl");
+        let mut bytes = Vec::new();
+        for frame in 0..500_u64 {
+            let x = if (370..450).contains(&frame) {
+                0.85 + (frame - 370) as f64 * 0.001
+            } else {
+                0.30 + frame as f64 * 0.0005
+            };
+            let row = json!({"frame_index":frame,"track_ids_provisional":true,
+                "confirmed_athlete_identities":false,"touches_confirmed":false,
+                "selected_ball":{"source_model":"vballnet","detection":{
+                    "score":0.8,"bbox_xyxy_norm":[x,0.4,x+0.01,0.41]}},"tracked_players":[]});
+            bytes.extend(serde_json::to_vec(&row).unwrap());
+            bytes.push(b'\n');
+        }
+        fs::write(&path, &bytes).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let scope = native_rally_preview::RallyWindows {
+            intervals: vec![(0, 499)],
+        };
+        let rows = extract_frames(
+            &path, &sha, 500, 400, 405, &scope, 1280, 720, 0.35, None, None,
+        )
+        .unwrap();
+        assert!(rows.iter().all(|row| row["ball"].is_null()));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn processed_overlay_interpolates_vballnet_without_reusing_ravel_ball() {
@@ -1247,18 +1347,20 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let path = root.join("tracked_frames.jsonl");
         let mut data = Vec::new();
-        for frame in 0..6u64 {
-            let source = if (1..=2).contains(&frame) {
+        for frame in 0..8u64 {
+            let source = if (3..=4).contains(&frame) {
                 "ravel"
             } else {
                 "vballnet"
             };
             let bbox = match frame {
-                0 => [0.1, 0.2, 0.2, 0.3],
-                3 => [0.4, 0.2, 0.5, 0.3],
+                0 => [0.0, 0.2, 0.1, 0.3],
+                1 => [0.1, 0.2, 0.2, 0.3],
+                2 => [0.2, 0.2, 0.3, 0.3],
+                5 => [0.5, 0.2, 0.6, 0.3],
                 _ => [0.9, 0.8, 1.0, 0.9],
             };
-            let ball = (frame <= 3).then(|| {
+            let ball = (frame <= 5).then(|| {
                 json!({
                     "source_model": source,
                     "detection": {"score":0.95,"bbox_xyxy_norm":bbox}
@@ -1277,32 +1379,33 @@ mod tests {
         fs::write(&path, &data).unwrap();
         let sha = format!("{:x}", Sha256::digest(&data));
         let scope = native_rally_preview::RallyWindows {
-            intervals: vec![(0, 5)],
+            intervals: vec![(0, 7)],
         };
         // A request beginning inside the hole needs the VballNet anchors
         // outside the requested subwindow. The +/-8-frame read halo supplies them.
         let frames = extract_frames(
             &path,
             &sha,
-            6,
-            1,
+            8,
             3,
+            5,
             &scope,
             640,
             360,
             0.35,
             Some((50, 50, 50, 50)),
+            None,
         )
         .unwrap();
         assert_eq!(frames.len(), 2);
         for row in &frames {
             assert_eq!(row["ball_interpolated"], true);
             assert_eq!(row["ball_origin"], "vballnet_interpolated");
-            assert!(row["ball"][0].as_f64().unwrap() < 0.45);
+            assert!(row["ball"][0].as_f64().unwrap() < 0.55);
             assert_eq!(row["raw"]["balls"][0]["source"], "ravel");
         }
-        assert!((frames[0]["ball"][0].as_f64().unwrap() - 0.25).abs() < 1e-12);
-        assert!((frames[1]["ball"][0].as_f64().unwrap() - 0.35).abs() < 1e-12);
+        assert!((frames[0]["ball"][0].as_f64().unwrap() - 0.35).abs() < 1e-12);
+        assert!((frames[1]["ball"][0].as_f64().unwrap() - 0.45).abs() < 1e-12);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1357,7 +1460,8 @@ mod tests {
         let active = native_rally_preview::RallyWindows {
             intervals: vec![(2, 4)],
         };
-        let overlay = extract_frames(&input, &sha, 6, 0, 6, &active, 640, 360, 0.35, None).unwrap();
+        let overlay =
+            extract_frames(&input, &sha, 6, 0, 6, &active, 640, 360, 0.35, None, None).unwrap();
         assert_eq!(overlay.len(), 6);
         for (frame, item) in overlay.iter().enumerate() {
             let in_rally = (2..=4).contains(&frame);
@@ -1370,6 +1474,7 @@ mod tests {
         assert_eq!(overlay[2]["players"][0]["id"], 7);
         fs::remove_dir_all(root).unwrap();
     }
+
 
     #[test]
     fn player_labels_include_only_manually_reviewed_owners() {

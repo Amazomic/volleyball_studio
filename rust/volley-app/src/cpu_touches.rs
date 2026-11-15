@@ -620,6 +620,7 @@ pub(crate) fn detect_stream(
         None,
         None,
         &[],
+        None,
     )
 }
 
@@ -636,6 +637,7 @@ fn detect_stream_with_pose(
     pose_source: Option<(&Path, &str)>,
     court: Option<&CourtTransform>,
     training: &[training_samples::Example],
+    ball_mask: Option<&crate::cpu_retrack::ball_track::BallTrackMask>,
 ) -> Result<(String, u64, u64), String> {
     settings.validate()?;
     if count == 0 || count > 48 * 3600 * 30 {
@@ -693,7 +695,17 @@ fn detect_stream_with_pose(
             gate_ball_confidence(&mut block, settings.min_ball_score);
             // A short false localization must not hide several neighboring impacts.
             // Only the bounded working copy is cleaned; the hashed CPU replay remains immutable.
-            let clean = exclude_ball_teleports(&block, width, height);
+            let clean = if let Some(mask) = ball_mask {
+                let mut clean = block.clone();
+                for frame in &mut clean {
+                    if !mask.accepted[frame.frame_index as usize] {
+                        frame.selected_ball = None;
+                    }
+                }
+                clean
+            } else {
+                exclude_ball_teleports(&block, width, height)
+            };
             // Reconstruct bounded positions of existing tracked skeletons only.
             // The immutable replay and original GPU player detections remain unchanged.
             let continuous = if interpolate_players {
@@ -855,6 +867,18 @@ fn detect_stream_with_pose(
 }
 
 pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, ApiError> {
+    process_with_ball_scope(state, req, &[0])
+}
+
+pub(crate) fn process_discovery(state: &AppState, req: &TouchRequest) -> Result<Value, ApiError> {
+    process_with_ball_scope(state, req, &[])
+}
+
+pub(crate) fn process_with_ball_scope(
+    state: &AppState,
+    req: &TouchRequest,
+    rally_starts: &[u64],
+) -> Result<Value, ApiError> {
     if !state.writes_enabled {
         return Err(storage::conflict(
             "Touch recalculation requires an isolated working directory",
@@ -977,6 +1001,15 @@ pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, Api
         } else {
             None
         };
+        let ball_mask = crate::cpu_retrack::ball_track::read(
+            &source,
+            &sha,
+            frames,
+            dimensions.width,
+            dimensions.height,
+            settings.min_ball_score,
+            rally_starts,
+        )?;
         let (digest, events, raw) = detect_stream_with_pose(
             &source,
             &part,
@@ -989,6 +1022,7 @@ pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, Api
             pose_requested.then_some((project_dir.as_path(), fusion_id.as_str())),
             court_calibration.as_ref().map(|value| &value.transform),
             &training_examples,
+            Some(&ball_mask),
         )?;
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared source changed during CPU Touch replay".into());
@@ -1012,6 +1046,9 @@ pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, Api
             "width":dimensions.width,"height":dimensions.height,"fps":30,
             "frames":frames,
             "settings":settings,
+            "ball_tracking_policy":if rally_starts.is_empty() { "vballnet_local_artifacts_v1" } else { crate::cpu_retrack::ball_track::POLICY },
+            "leading_ball_rally_starts":rally_starts,
+            "leading_ball_min_score":settings.min_ball_score,
             "interpolate_players":manifest["interpolate_players"].as_bool().unwrap_or(true),
             "court_revision":court_calibration.as_ref().map(|c| &c.revision),
             "court_context_enabled":court_calibration.is_some(),
@@ -1450,6 +1487,7 @@ mod tests {
             Some((&root, &fusion)),
             None,
             &[],
+            None,
         )
         .unwrap();
         assert_eq!(count, 1);
@@ -1649,6 +1687,7 @@ mod local_tuning_diagnostic {
             Some((&root, fusion)),
             None,
             &[],
+            None,
         )
         .unwrap();
         let events: Vec<Value> = fs::read_to_string(output)

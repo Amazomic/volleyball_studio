@@ -23,6 +23,8 @@ assert.equal(context.validate(good),true);
 const repaired=JSON.parse(JSON.stringify(good));
 repaired.ball_policy="vballnet_physical_teleport_repair_player_kink_v3";
 assert.equal(context.validate(repaired),true);
+repaired.ball_policy="vballnet_leading_ball_rally_v1";
+assert.equal(context.validate(repaired),true);
 const invalid=edit=>{
   const clone=JSON.parse(JSON.stringify(good));
   edit(clone);
