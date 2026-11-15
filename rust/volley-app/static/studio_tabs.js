@@ -197,6 +197,10 @@
   // Mirrors volley-core's validated native defaults (no JS-only processing).
   const postProfile=()=>({
     pose_classification:$("studio-post-pose-classify").value==="1",
+    identity:{
+      algorithm:$("studio-post-identity-algorithm").value,
+      threshold_percent:inputValue("studio-post-identity-threshold")
+    },
     tracking:{
       min_player_score:inputValue("studio-post-player-score"),
       nms_iou:inputValue("studio-post-nms"),
