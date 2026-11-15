@@ -83,11 +83,15 @@ fn ball_held_near_player(frame: &TouchFrame, track_id: u64) -> bool {
 /// Python find_rally_start requires >=0.5 s of handling and then a flight.
 /// For CPU Touch this is a conservative local witness (not a verified serve).
 fn observed_serve_preparation(frames: &[TouchFrame], frame_index: u64, track_id: u64) -> bool {
-    const PREPARATION_FRAMES: usize = 15;
-    const SERVE_TOSS_FRAMES: u64 = 75;
-    const RELEASE_FLIGHT_FRAMES: usize = 9;
+    // Source detections can blink during the toss. Count observed evidence
+    // instead of demanding a continuous 0.5s ball track.
+    const PREPARATION_FRAMES: usize = 8;
+    const SERVE_TOSS_FRAMES: u64 = 90;
+    const RELEASE_FLIGHT_FRAMES: usize = 3;
+    const MAX_MISSING_FRAMES: usize = 4;
     let mut flight = 0usize;
     let mut preparation = 0usize;
+    let mut missing = 0usize;
     for frame in frames.iter().rev() {
         if frame.frame_index >= frame_index {
             continue;
@@ -95,12 +99,15 @@ fn observed_serve_preparation(frames: &[TouchFrame], frame_index: u64, track_id:
         if frame_index - frame.frame_index > SERVE_TOSS_FRAMES {
             break;
         }
-        // An undetected ball is not evidence of a released toss.
         if frame.selected_ball.is_none() {
-            flight = 0;
-            preparation = 0;
+            missing += 1;
+            if missing > MAX_MISSING_FRAMES {
+                flight = 0;
+                preparation = 0;
+            }
             continue;
         }
+        missing = 0;
         if flight < RELEASE_FLIGHT_FRAMES {
             if ball_held_near_player(frame, track_id) {
                 flight = 0;
@@ -119,6 +126,21 @@ fn observed_serve_preparation(frames: &[TouchFrame], frame_index: u64, track_id:
         }
     }
     false
+}
+
+/// A jump-serve impact may occur inside the court projection, after takeoff
+/// behind the end line. Preserve observed server origin, not ball-ground projection.
+fn serve_origin_seen(
+    frames: &[TouchFrame],
+    frame_index: u64,
+    track_id: u64,
+    court: &CourtTransform,
+) -> bool {
+    frames.iter().rev().filter(|frame| {
+        frame.frame_index <= frame_index && frame_index - frame.frame_index <= 45
+    }).filter_map(|frame| frame.players.iter().find(|player| player.track_id == track_id))
+      .filter_map(|player| court.player_evidence(player.bbox_xyxy_norm))
+      .any(|evidence| evidence.in_serve_zone)
 }
 
 /// Annotate only same-frame valid Track IDs. Pose evidence is already applied,
@@ -162,7 +184,8 @@ pub(crate) fn annotate(
         }
         // Original Python: serving zone alone is not enough to call a serve.
         // There must be preparation, source-frame reach, and acceleration.
-        if evidence.in_serve_zone
+        if (evidence.in_serve_zone
+            || serve_origin_seen(frames, event.frame_index, track_id, court))
             && event.speed_after_px_frame / event.speed_before_px_frame.max(0.1) >= 1.2
             && observed_serve_preparation(frames, event.frame_index, track_id)
         {
@@ -294,4 +317,35 @@ mod tests {
             ActionKind::Attack
         );
     }
+    #[test]
+    fn serve_survives_short_ball_detection_holes() {
+        let mut frames = (0..65).map(|i| frame(i, 0.09, true)).collect::<Vec<_>>();
+        for frame in frames.iter_mut().filter(|f| (27..=45).contains(&f.frame_index)) {
+            frame.selected_ball.as_mut().unwrap().bbox_xyxy_norm = [0.65, 0.1, 0.67, 0.12];
+        }
+        for index in [4, 9, 15, 20, 29, 35, 41] {
+            frames[index].selected_ball = None;
+        }
+        let mut events = vec![event(52)];
+        annotate(&mut events, &frames, &court());
+        assert_eq!(events[0].action_prediction.as_ref().unwrap().kind, ActionKind::Serve);
+    }
+
+    #[test]
+    fn jump_serve_uses_observed_takeoff_behind_end_line() {
+        let mut frames = (0..70).map(|i| frame(i, 0.09, true)).collect::<Vec<_>>();
+        for sample in &mut frames {
+            if (28..=49).contains(&sample.frame_index) {
+                sample.selected_ball.as_mut().unwrap().bbox_xyxy_norm = [0.65, 0.1, 0.67, 0.12];
+            }
+            if sample.frame_index >= 50 {
+                sample.players[0].bbox_xyxy_norm = [0.13, 0.35, 0.19, 0.75];
+            }
+        }
+        let mut events = vec![event(55)];
+        annotate(&mut events, &frames, &court());
+        assert!(!events[0].court.unwrap().in_serve_zone);
+        assert_eq!(events[0].action_prediction.as_ref().unwrap().kind, ActionKind::Serve);
+    }
+
 }
