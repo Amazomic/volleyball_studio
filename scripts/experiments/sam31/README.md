@@ -101,3 +101,9 @@ Compare all outputs:
       --output /tmp/volley-sam31/all_models.json
 
 Interpretation: raw RF-DETR id is only a per-frame proposal index, not an athlete ID. The final file's Rust tracker IDs are counted. RF-DETR keeps detector boxes even when RTMPose skeleton is incomplete; the current baseline drops low-quality skeleton boxes. This is a combined detector/pose-gating comparison, not strictly one-variable. Accurate ID-switch rate/recall needs manual annotations.
+
+One-command runner after installation (launch in WSL, never runs inside Studio):
+
+    bash "$repo/scripts/experiments/sam31/run_all_rfdetr.sh"
+
+The runner reuses the existing 180-frame RTMDet baseline when present and writes the aggregate report to /tmp/volley-sam31/rfdetr_comparison.json.

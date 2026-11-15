@@ -185,14 +185,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "model": format!("{upstream_model}+RTMPose+ProvisionalTracker"),
         "frames": count, "video_sha256": checksum, "video": video,
         "source_proposals_jsonl": proposals_path,
-        "sam_proposals": proposals,
+        "detector_proposals": proposals,
         "pose_without_confident_skeleton": missing_skeleton,
         "pose_errors": pose_errors,
         "pose_stage_seconds": pose_seconds,
-        "sam_stage_seconds": upstream_seconds,
+        "detector_stage_seconds": upstream_seconds,
         "inference_seconds": total_seconds,
         "fps": total_seconds.map(|t| count as f64 / t),
-        "note": "Full pipeline FPS only available with actual SAM time metadata",
+        "note": "Full pipeline FPS requires actual detector inference time metadata",
     });
     std::fs::write(
         Path::new(&output).with_extension("stats.json"),
