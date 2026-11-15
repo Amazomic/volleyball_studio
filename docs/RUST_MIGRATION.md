@@ -1739,3 +1739,13 @@ Studio показывает кнопку перехода между debug и re
 - Файлы: rust/volley-inference/src/person.rs, rust/volley-app/src/inference_full.rs, rust/volley-app/src/studio_pipeline.rs, docs/agent-runs/20261115-rfdetr-single-pose/.
 - Проверено: cargo check -p volley-app --offline; 4 теста RF-DETR; 5 тестов studio_pipeline; тест распознавания исходной модели в предпросмотре; UI-тесты истории и выбора анализа; rustfmt и git diff --check.
 - Ограничения: реальный GPU-бенчмарк и оценка качества по матчу не запускались (NOT MEASURED). UI-тест test_studio_raw_gpu_preview.mjs падает и в исходной ветке до этого изменения, независимо от GPU-рефакторинга.
+
+
+### 2026-11-15 - Выбор режима расчёта поз первичного GPU-анализа
+
+- В Основной анализ добавлен режим RTMPose: по фото (отдельным кадрам) с шагом 1–30 кадров (по умолчанию 3), либо по видео (каждый кадр, шаг 1). Оба режима используют одну и ту же модель RTMPose-M-Body7, а не отдельную видеомодель.
+- Режим передаётся из сохранённых настроек интерфейса в Rust GPU-профиль, журнал запуска, фактическую частоту декодирования и immutable pose manifest. Повторное использование GPU-кэша проверяет и шаг, и режим; старые манифесты без режима считаются photo для обратной совместимости.
+- Шаг 30 разрешён также в верификаторе источника поз предпросмотра и CPU replay; интерполяция рамок и поз работает независимо.
+- Файлы: rust/volley-app/src/pose_inference.rs, studio_pipeline.rs, native_preview_pose.rs, rust/volley-app/static/studio.html, studio_tabs.js, scripts/ci/test_studio_pose_modes.mjs и test_studio_interpolation_flags.mjs.
+- Проверки: rustfmt, cargo check/test (offline), Node тесты режима/настроек, git diff --check; реальный GPU-бенчмарк и сравнение качества на игровом видео не запускались.
+- Декодер 9-кадровых окон расширен для редких фото-проб с шагом до 30 кадров: лишние кадры реально пропускаются, индексы и синхронизация не сдвигаются.
