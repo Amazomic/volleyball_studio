@@ -980,7 +980,8 @@
   updateProfile();
   window.addEventListener("volley:chain-change",event=>{
     const detail=event.detail||{};
-    if(detail.project_id!==projectId()||!detail.video||state.tab!=="analysis")return;
+    if(detail.project_id!==projectId()||state.tab!=="analysis")return;
+    // Clearing the last GPU analysis must immediately disable CPU postprocessing.
     if([...ui.video.options].some(option=>option.value===detail.video)&&
         ui.video.value!==detail.video){
       ui.video.value=detail.video;

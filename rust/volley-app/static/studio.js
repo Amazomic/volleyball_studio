@@ -1531,9 +1531,12 @@
     ui.job.textContent="";ui.cancel.classList.add("hidden");
     ui.download.classList.add("hidden");renderSelection();
   };
-  const options=(select,rows,value,label,placeholder)=>{
+  const options=(select,rows,value,label,placeholder,allowEmpty=true)=>{
     wipe(select);
-    const blank=make("option","",placeholder);blank.value="";select.append(blank);
+    // A project with saved primary analyses must never offer a blank selection.
+    if(allowEmpty||!rows.length){
+      const blank=make("option","",placeholder);blank.value="";select.append(blank);
+    }
     for(const item of rows){
       const entry=make("option","",label(item));entry.value=String(item[value]);
       select.append(entry);
@@ -1595,16 +1598,28 @@
   const chainSignature=chain=>JSON.stringify([
     chain.choices,[...chain.byAnalysis].map(([key,rows])=>[key,rows])
   ]);
+  const newestPrimaryAnalysis=choices=>{
+    // Only real GPU sources take precedence over legacy orphan CPU snapshots.
+    // Stage listings are sorted separately per video, not across the project.
+    const primary=choices.filter(row=>row.kind!=="unlinked");
+    const candidates=primary.length?primary:choices;
+    return [...candidates].sort((a,b)=>
+      (Number(b.created_at)||0)-(Number(a.created_at)||0)||
+      String(b.id||"").localeCompare(String(a.id||"")))[0]?.value||"";
+  };
   const renderChain=async(chain,preferredAnalysis="",preferredRun="",retainCurrent=false)=>{
     const unchanged=retainCurrent&&s.analysis===preferredAnalysis&&s.run===preferredRun&&
       chain.choices.some(row=>row.value===s.analysis)&&
       (!s.run||(chain.byAnalysis.get(s.analysis)||[]).some(row=>row.rally_run_id===s.run));
     s.chain=chain;
     options(ui.analysis,chain.choices,"value",item=>item.label,
-      chain.choices.length?"Выберите первичный анализ":"Нет GPU-анализов");
+      chain.choices.length?"Выберите первичный анализ":"Нет GPU-анализов",
+      !chain.choices.length);
     ui.analysis.disabled=!chain.choices.length;
+    // Restore a valid explicit choice; otherwise select the most recently
+    // created GPU analysis, including after the selected version is deleted.
     ui.analysis.value=chain.choices.some(row=>row.value===preferredAnalysis)?
-      preferredAnalysis:chain.choices.length===1?chain.choices[0].value:"";
+      preferredAnalysis:newestPrimaryAnalysis(chain.choices);
     refreshPicker(ui.analysis);
     if(unchanged){
       // Only labels and available versions changed. Do not discard the active
