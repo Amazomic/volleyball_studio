@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn serve_requires_preparation_not_merely_baseline_location() {
-        let mut frames = (0..60).map(|i| frame(i, 0.125, true)).collect::<Vec<_>>();
+        let mut frames = (0..60).map(|i| frame(i, 0.09, true)).collect::<Vec<_>>();
         for frame in frames
             .iter_mut()
             .filter(|f| (26..=44).contains(&f.frame_index))
@@ -309,7 +309,7 @@ mod tests {
             events[0].action_prediction.as_ref().unwrap().kind,
             ActionKind::Serve
         );
-        let frames = (0..60).map(|i| frame(i, 0.125, false)).collect::<Vec<_>>();
+        let frames = (0..60).map(|i| frame(i, 0.09, false)).collect::<Vec<_>>();
         let mut events = vec![event(50)];
         annotate(&mut events, &frames, &court());
         assert_eq!(
