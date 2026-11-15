@@ -286,6 +286,7 @@ fn ilnur_late_id_13_can_join_id_12_after_measured_track_handoff() {
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
     let mut ctx = context(&root, sha, tracks);
     ctx.roster.insert("abcdef012345".into(), "Ильнур".into());
+    ctx.roster.insert("123456abcdef".into(), "Тимур".into());
     let mut template = ctx.tracks[&7].clone();
     template.observed_pairs.clear();
     let mut early = template.clone();
@@ -315,10 +316,15 @@ fn ilnur_late_id_13_can_join_id_12_after_measured_track_handoff() {
         },
     );
     ctx.tracks.clear();
+    let mut timur = template.clone();
+    timur.first = 1044;
+    timur.last = 1728;
+    timur.visible_spans = vec![(1044, 1044), (1056, 1056), (1390, 1390)];
+    ctx.tracks.insert(11, timur);
     ctx.tracks.insert(12, first_ilnur);
     ctx.tracks.insert(13, second_ilnur);
     ctx.tracks.insert(14, early);
-    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [12, 13, 14]).unwrap();
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [11, 12, 13, 14]).unwrap();
     let original = json!({"12":"abcdef012345"});
     let confirm_late = BTreeMap::from([(13, "abcdef012345".into())]);
     assert_eq!(
@@ -338,11 +344,15 @@ fn ilnur_late_id_13_can_join_id_12_after_measured_track_handoff() {
     let mut doc = base_document(&ctx);
     doc["automatic_assignments"] = original;
     let matches = json!({
-        "12":[{"player_id":"abcdef012345","cosine_similarity":0.855}],
-        "13":[{"player_id":"abcdef012345","cosine_similarity":0.783}],
+        "11":[{"player_id":"123456abcdef","cosine_similarity":0.874}],
+        "12":[{"player_id":"abcdef012345","cosine_similarity":0.918}],
+        "13":[{"player_id":"abcdef012345","cosine_similarity":0.682},
+              {"player_id":"123456abcdef","cosine_similarity":0.664}],
         "14":[{"player_id":"abcdef012345","cosine_similarity":0.520}]
     });
     let auto = choose_automatic_photo_links(&ctx, &doc, &matches).unwrap();
+    assert_eq!(auto.get(&11).map(String::as_str), Some("123456abcdef"));
+    assert_eq!(auto.get(&12).map(String::as_str), Some("abcdef012345"));
     assert_eq!(auto.get(&13).map(String::as_str), Some("abcdef012345"));
     assert!(!auto.contains_key(&14));
     fs::remove_dir_all(root).unwrap();

@@ -172,17 +172,26 @@ pub(super) fn choose_automatic_photo_links(
         let Some((score, _, owner)) = ranked.first() else {
             continue;
         };
-        if ranked.get(1).is_some_and(|second| *score - second.0 < 0.04) {
+        // A near-equal photo match is ambiguous only when that other athlete
+        // could actually be the current body. If the alternative has already
+        // been identified in an independently observed, co-visible track,
+        // it is not a valid contender for this same video frame.
+        let occupied_in_frame = |possible_owner: &str| {
+            assigned.iter().any(|(other_id, other_owner)| {
+                other_owner.as_str() == Some(possible_owner)
+                    && other_id.parse::<u64>().ok().is_some_and(overlaps)
+            }) || chosen
+                .iter()
+                .any(|(other_id, other_owner)| other_owner == possible_owner && overlaps(*other_id))
+        };
+        if ranked
+            .iter()
+            .skip(1)
+            .any(|second| *score - second.0 < 0.04 && !occupied_in_frame(&second.2))
+        {
             continue;
         }
-        let locked = assigned.iter().any(|(other_id, other_owner)| {
-            other_owner.as_str() == Some(owner.as_str())
-                && other_id.parse::<u64>().ok().is_some_and(overlaps)
-        });
-        let occupied = chosen
-            .iter()
-            .any(|(other_id, other_owner)| other_owner == owner && overlaps(*other_id));
-        if !locked && !occupied {
+        if !occupied_in_frame(owner) {
             chosen.insert(id, (*owner).clone());
         }
     }
