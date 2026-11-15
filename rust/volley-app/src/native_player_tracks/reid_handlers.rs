@@ -1,4 +1,46 @@
 use super::*;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IdentityAlgorithm {
+    #[default]
+    ThreeSampleMean,
+    SingleBest,
+    Disabled,
+}
+
+impl IdentityAlgorithm {
+    pub(crate) const fn sample_count(self) -> usize {
+        match self {
+            Self::ThreeSampleMean => 3,
+            Self::SingleBest => 1,
+            Self::Disabled => 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct IdentityProfile {
+    pub(crate) algorithm: IdentityAlgorithm,
+    pub(crate) threshold_percent: u8,
+}
+
+impl Default for IdentityProfile {
+    fn default() -> Self {
+        Self { algorithm: IdentityAlgorithm::ThreeSampleMean, threshold_percent: 35 }
+    }
+}
+
+impl IdentityProfile {
+    pub(crate) fn validate(self) -> Result<(), String> {
+        if !(1..=99).contains(&self.threshold_percent) {
+            return Err("Player identity similarity threshold must be 1..99%".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeReidQuery {
@@ -11,6 +53,9 @@ pub struct NativeReidQuery {
 }
 pub(super) fn default_reid_threshold() -> u8 {
     30
+}
+pub(super) fn default_auto_identity_threshold() -> u8 {
+    35
 }
 
 pub(super) fn native_reid_report(
@@ -183,8 +228,10 @@ pub struct ReidReviewRequest {
     pub(crate) track_ids: Vec<u64>,
     #[serde(default)]
     pub(crate) expected_revision: Option<String>,
-    #[serde(default = "default_reid_threshold")]
+    #[serde(default = "default_auto_identity_threshold")]
     pub(crate) threshold_percent: u8,
+    #[serde(default)]
+    pub(crate) algorithm: IdentityAlgorithm,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,8 +392,9 @@ pub(super) struct PhotoReference {
 pub(super) fn photo_match_candidates(
     ctx: &Inputs,
     identity: &Value,
-    vectors: &BTreeMap<u64, Vec<f32>>,
+    vectors: &BTreeMap<u64, Vec<Vec<f32>>>,
     references: &[PhotoReference],
+    required_samples: usize,
 ) -> Result<Value, String> {
     let assignments = identity["assignments"]
         .as_object()
@@ -358,17 +406,24 @@ pub(super) fn photo_match_candidates(
         .filter_map(Value::as_u64)
         .collect::<BTreeSet<_>>();
     let mut matches = serde_json::Map::new();
-    for (&id, vector) in vectors {
-        if assignments.contains_key(&id.to_string()) || excluded.contains(&id) {
+    for (&id, samples) in vectors {
+        if assignments.contains_key(&id.to_string())
+            || excluded.contains(&id)
+            || samples.len() != required_samples
+            || samples.is_empty()
+        {
             continue;
         }
         let Some(track) = ctx.tracks.get(&id) else {
             continue;
         };
-        let mut ranked = BTreeMap::<String, (f64, u64)>::new();
+        // Each observed frame is independently compared with every verified
+        // photo. Pick the strongest reference per athlete *per frame*, then
+        // average across the three temporal regions, never across athletes.
+        let mut ranked = BTreeMap::<String, (Vec<f64>, u64)>::new();
         for reference in references {
             if !ctx.roster.contains_key(&reference.player_id)
-                || reference.vector.len() != vector.len()
+                || samples.iter().any(|vector| reference.vector.len() != vector.len())
             {
                 continue;
             }
@@ -382,27 +437,43 @@ pub(super) fn photo_match_candidates(
                     }
                 }
             }
-            let score = vector
-                .iter()
-                .zip(&reference.vector)
-                .map(|(a, b)| f64::from(*a) * f64::from(*b))
-                .sum::<f64>();
-            if !score.is_finite() || score <= 0.0 {
-                continue;
-            }
-            let entry = ranked
-                .entry(reference.player_id.clone())
-                .or_insert((score, reference.track_id));
-            if score > entry.0 {
-                *entry = (score, reference.track_id);
+            for (sample_index, vector) in samples.iter().enumerate() {
+                let score = vector
+                    .iter()
+                    .zip(&reference.vector)
+                    .map(|(a, b)| f64::from(*a) * f64::from(*b))
+                    .sum::<f64>();
+                if !score.is_finite() || score <= 0.0 {
+                    continue;
+                }
+                let entry = ranked.entry(reference.player_id.clone())
+                    .or_insert_with(|| (vec![0.0; samples.len()], reference.track_id));
+                if score > entry.0[sample_index] {
+                    entry.0[sample_index] = score.min(1.0);
+                    entry.1 = reference.track_id;
+                }
             }
         }
-        let mut rows = ranked.into_iter().collect::<Vec<_>>();
-        rows.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0).then_with(|| a.0.cmp(&b.0)));
+        let mut rows = ranked
+            .into_iter()
+            .map(|(player, (scores, reference_track_id))| {
+                let score = scores.iter().sum::<f64>() / scores.len() as f64;
+                (player, score, scores, reference_track_id)
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         if !rows.is_empty() {
-            matches.insert(id.to_string(), json!(rows.into_iter().take(ctx.roster.len()).map(|(player,(score,track_id))|
-                json!({"player_id":player,"name":ctx.roster[&player],"cosine_similarity":score.min(1.0),
-                    "reference_track_id":track_id,"reference_kind":"saved_photo"})).collect::<Vec<_>>()));
+            matches.insert(id.to_string(), json!(rows.into_iter().take(ctx.roster.len())
+                .map(|(player, score, scores, reference_track_id)| json!({
+                    "player_id":player,
+                    "name":ctx.roster[&player],
+                    "cosine_similarity":score,
+                    "sample_similarities":scores,
+                    "samples_used":required_samples,
+                    "reference_track_id":reference_track_id,
+                    "reference_kind":"saved_photo"
+                }))
+                .collect::<Vec<_>>()));
         }
     }
     Ok(Value::Object(matches))
@@ -647,6 +718,11 @@ pub async fn reid_review(
 ) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
     if req.action == "auto_assign" {
+        IdentityProfile { algorithm: req.algorithm, threshold_percent: req.threshold_percent }
+            .validate().map_err(storage::bad_request)?;
+        if req.algorithm == IdentityAlgorithm::Disabled {
+            return Err(storage::bad_request("Automatic assignment is disabled in this profile"));
+        }
         let comparison =
             super::photo_comparison::compare(state.clone(), headers, req.clone()).await?;
         let result = tokio::task::spawn_blocking(move || {
