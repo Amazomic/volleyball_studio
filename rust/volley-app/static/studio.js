@@ -692,6 +692,8 @@
       ctx.strokeStyle="#35e0ef";ctx.lineWidth=2.5;ctx.stroke();
     }
   };
+  // Processed skeletons have the same rally scope as server-filtered player boxes.
+  const poseVisibleInRally=frame=>frame?.in_rally===true&&Array.isArray(frame.pose_points);
   const drawOverlay=()=>{
     const box=overlayContext(),source=overlay.source;
     if(box)drawCourtPreview(box);
@@ -845,7 +847,8 @@
       ctx.shadowColor="#1cb9ff";ctx.shadowBlur=5;ctx.stroke();ctx.shadowBlur=0;
     }
     const current=frames.find(row=>row.frame===frame);
-    if(overlay.flags.pose && Array.isArray(current?.pose_points)){
+    // Match the CPU player's verified rally scope; do not draw skeletons between plays.
+    if(overlay.flags.pose && poseVisibleInRally(current)){
       const edges=[[5,7],[7,9],[6,8],[8,10],[5,6],[5,11],[6,12],
         [11,12],[11,13],[13,15],[12,14],[14,16]];
       ctx.strokeStyle="#6af6ae";ctx.fillStyle="#f9d977";

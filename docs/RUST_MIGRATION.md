@@ -1764,3 +1764,11 @@ Studio показывает кнопку перехода между debug и re
 - Интерполяция Track ID игроков сохранена в CPU-постобработке, а промежуточные точки позы — в обработке и предпросмотре. CPU-интерполяция игроков больше не считается параметром совместимости GPU-кэша.
 - В UI убраны выбор частоты/режима RTMPose и интерполяция рамок в первичном GPU-анализе. Настройка CPU-интерполяции вынесена в постобработку. Проектные исходники/анализы не модифицировались.
 - Проверено: `cargo check -p volley-app --offline --locked`, 2 теста `pose_inference`, 8 тестов `studio_pipeline`, 2 Node-теста формы анализа, `node --check`. Старый `branching_tests::gpu_settings_and_source_are_branch_keys_while_cpu_settings_are_subbranches` остаётся красным из-за ранее известной устаревшей CPU-фикстуры; модельная оценка на реальном видео с полным анализом здесь не проводилась.
+
+### 2026-11-16 — Отображение скелетов только во время розыгрышей
+
+- CPU-предпросмотр помечает каждый кадр `in_rally` по тому же проверенному интервалу, который уже ограничивает отображение рамок игроков.
+- Скелеты RTMPose, включая визуальную интерполяцию, рисуются только при `in_rally=true`; за пределами розыгрышей они не отображаются. При этом данные поз остаются неизменными и доступны алгоритмам и разметке, а режим сырых GPU-данных не затронут.
+- Файлы: `rust/volley-app/src/native_preview_overlay.rs`, `rust/volley-app/static/studio.js`, `scripts/ci/test_studio_pose_rally_visibility.mjs`.
+- Проверки: `cargo check --offline --locked -p volley-app`, тест `native_preview_overlay::tests::overlays_hide_players_outside_plays_and_keep_inside_player_ids`, `node --check`, новый JS-регрессионный тест.
+- Дополнительный тест `scripts/ci/test_studio_raw_gpu_preview.mjs` по-прежнему падает на ранее известном сценарии (`Current fusion loads normally`, 0 !== 1); он не менялся в этой задаче.

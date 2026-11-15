@@ -537,13 +537,17 @@ fn extract_frames(
             .filter(|score| score.is_finite() && *score >= min_ball_score)
             .and_then(|_| box_norm(&frame["selected_ball"]["detection"]["bbox_xyxy_norm"]))
             .map(|bb| json!([(bb[0] + bb[2]) * 0.5, (bb[1] + bb[3]) * 0.5]));
-        let players = overlay_players(&frame);
+        let in_rally = scope.contains(i);
+        let players = if in_rally {
+            overlay_players(&frame)
+        } else {
+            Vec::new()
+        };
         let raw = raw_thresholds
             .map(|(ball, ravel, player, touch)| raw_frame(&frame, ball, ravel, player, touch));
         output.push(json!({
             "frame":i,"ball":ball,"ball_source":frame["selected_ball"]["source_model"],
-            "raw":raw,
-            "players":if scope.contains(i){players}else{Vec::new()}
+            "raw":raw,"in_rally":in_rally,"players":players
         }));
     }
     let samples = output
@@ -1356,9 +1360,11 @@ mod tests {
         let overlay = extract_frames(&input, &sha, 6, 0, 6, &active, 640, 360, 0.35, None).unwrap();
         assert_eq!(overlay.len(), 6);
         for (frame, item) in overlay.iter().enumerate() {
+            let in_rally = (2..=4).contains(&frame);
+            assert_eq!(item["in_rally"], in_rally);
             assert_eq!(
                 item["players"].as_array().unwrap().len(),
-                if (2..=4).contains(&frame) { 1 } else { 0 }
+                if in_rally { 1 } else { 0 }
             );
         }
         assert_eq!(overlay[2]["players"][0]["id"], 7);
