@@ -294,7 +294,7 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
         None
     };
     let mut person_engine = if context.config.model == ModelKind::Players {
-        Some(PersonEngine::load(
+        Some(PersonEngine::load_for_gpu_evidence(
             &context.repo,
             context.config.device,
             context.config.cpu_threads,
@@ -395,7 +395,7 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
                 volley_inference::person::DetectorVariant::RtmDetNano =>
                     "rtmdet_nano_tiled_rtmpose_m_coco17_3hz_v5",
                 volley_inference::person::DetectorVariant::RfDetrMedium =>
-                    "rfdetr_medium_18250b5a_rtmpose_m_detector_boxes_3hz_v1",
+                    "rfdetr_medium_18250b5a_detector_boxes_pose_deferred_3hz_v2",
             })
         } else { None },
         "person_sampling_period_frames":if context.config.model == ModelKind::Players { 10 } else { 1 },
