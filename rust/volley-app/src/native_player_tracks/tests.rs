@@ -1,6 +1,42 @@
 use super::*;
 use sha2::{Digest, Sha256};
 #[test]
+fn rally_turnover_keeps_irek_in_both_rallies_without_stealing_railya() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    ctx.roster.insert("abcdef012345".into(), "Ирек".into());
+    ctx.roster.insert("123456abcdef".into(), "Раиля".into());
+    let template = ctx.tracks[&7].clone();
+    let segment = |first, last| {
+        let mut track = template.clone();
+        track.first = first;
+        track.last = last;
+        track.observed = last - first + 1;
+        track.visible_spans = vec![(first, last)];
+        track.observed_pairs.clear();
+        track
+    };
+    ctx.tracks.clear();
+    ctx.tracks.insert(4, segment(0, 850));
+    ctx.tracks.insert(5, segment(0, 855));
+    ctx.tracks.insert(19, segment(856, 1730));
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [4, 5, 19]).unwrap();
+    let proposals = json!({
+        "4":[{"player_id":"abcdef012345","cosine_similarity":0.833}],
+        "5":[{"player_id":"123456abcdef","cosine_similarity":0.800},
+             {"player_id":"abcdef012345","cosine_similarity":0.532}],
+        "19":[{"player_id":"abcdef012345","cosine_similarity":0.853}]
+    });
+    let selected = choose_automatic_photo_links(&ctx, &base_document(&ctx), &proposals).unwrap();
+    assert_eq!(selected.len(), 3);
+    assert_eq!(selected.get(&4).map(String::as_str), Some("abcdef012345"));
+    assert_eq!(selected.get(&5).map(String::as_str), Some("123456abcdef"));
+    assert_eq!(selected.get(&19).map(String::as_str), Some("abcdef012345"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn photo_refresh_preserves_confirmed_links_and_manual_exclusions() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
