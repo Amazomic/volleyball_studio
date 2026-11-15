@@ -31,6 +31,7 @@ const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_ROW_BYTES: usize = 512 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
 mod gap_interpolation;
+mod identity_handoff;
 mod identity_turnover;
 mod pose_source;
 mod track_merge;
@@ -142,6 +143,7 @@ struct ReplayTotals {
     short_track_detections: u64,
     duplicate_track_ids_merged: u64,
     identity_turnover_splits: u64,
+    identity_handoff_splits: u64,
     pose_detections: u64,
 }
 
@@ -551,8 +553,9 @@ fn replay_frames_verified(
     // independent. Never use the later visual interpolation for identity.
     let (canonical_sha, merged) = track_merge::merge(output, &observed_sha, count)?;
     totals.duplicate_track_ids_merged = merged;
-    let (turnover_sha, splits) = identity_turnover::split(output, &canonical_sha, count)?;
+    let (turnover_sha, splits, handoffs) = identity_turnover::split(output, &canonical_sha, count)?;
     totals.identity_turnover_splits = splits;
+    totals.identity_handoff_splits = handoffs;
     let (continuous_sha, _inferred_positions) = if interpolate_players {
         fill_confirmed_track_gaps(output, &turnover_sha, count)?
     } else {
@@ -720,8 +723,9 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             "discarded_short_track_ids":totals.unconfirmed_tracks,
             "tentative_track_count":totals.tentative_tracks,
             "duplicate_track_ids_merged":totals.duplicate_track_ids_merged,
-            "identity_turnover_version":"measured_roster_turnover_v1",
+            "identity_turnover_version":"measured_roster_turnover_handoff_v2",
             "identity_turnover_splits":totals.identity_turnover_splits,
+            "identity_handoff_splits":totals.identity_handoff_splits,
             "ambiguous_detections":totals.ambiguous,
             "frames_with_ball_proposals":totals.frames_with_ball,
             "provisional_track_count":track_count,

@@ -69,9 +69,37 @@ fn boundaries(spans: &BTreeMap<u64, Span>, frames: u64) -> Vec<u64> {
     selected.into_iter().map(|(cut, _)| cut).collect()
 }
 
-pub(super) fn split(path: &Path, expected_sha: &str, frames: u64) -> Result<(String, u64), String> {
+fn remap_id(
+    id: u64,
+    at: u64,
+    later: &BTreeMap<u64, Vec<(u64, u64)>>,
+    earlier: &BTreeMap<u64, (u64, u64)>,
+) -> u64 {
+    if let Some(&(cut, replacement)) = earlier.get(&id) {
+        if at < cut {
+            return replacement;
+        }
+    }
+    later
+        .get(&id)
+        .and_then(|versions| {
+            versions
+                .iter()
+                .rev()
+                .find(|(cut, _)| at >= *cut)
+                .map(|(_, replacement)| *replacement)
+        })
+        .unwrap_or(id)
+}
+
+pub(super) fn split(
+    path: &Path,
+    expected_sha: &str,
+    frames: u64,
+) -> Result<(String, u64, u64), String> {
     let mut input = BoundedReader::open(path)?;
     let mut spans = BTreeMap::<u64, Span>::new();
+    let mut handoffs = super::identity_handoff::Detector::default();
     for expected_frame in 0..frames {
         let bytes = input.line()?.ok_or("Turnover split source is truncated")?;
         let frame: Value =
@@ -82,6 +110,7 @@ pub(super) fn split(path: &Path, expected_sha: &str, frames: u64) -> Result<(Str
         let rows = frame["tracked_players"]
             .as_array()
             .ok_or("Turnover source tracks missing")?;
+        handoffs.observe(expected_frame, rows);
         for row in rows {
             let id = row["track_id"]
                 .as_u64()
@@ -100,8 +129,14 @@ pub(super) fn split(path: &Path, expected_sha: &str, frames: u64) -> Result<(Str
         return Err("Turnover source SHA-256 mismatch".into());
     }
     let cuts = boundaries(&spans, frames);
-    if cuts.is_empty() {
-        return Ok((expected_sha.to_owned(), 0));
+    let measured_handoffs = handoffs.valid_cuts(
+        &spans
+            .iter()
+            .map(|(&id, s)| (id, (s.first, s.last, s.observations)))
+            .collect(),
+    );
+    if cuts.is_empty() && measured_handoffs.is_empty() {
+        return Ok((expected_sha.to_owned(), 0, 0));
     }
     let mut next = spans.keys().next_back().copied().unwrap_or(0);
     let mut replacements = BTreeMap::<u64, Vec<(u64, u64)>>::new();
@@ -119,9 +154,21 @@ pub(super) fn split(path: &Path, expected_sha: &str, frames: u64) -> Result<(Str
             replacements.entry(id).or_default().push((cut, next));
         }
     }
-    let splits = replacements.values().map(Vec::len).sum::<usize>() as u64;
+    // Preserve the late ID for the new body, so a user seeing ID 13 at 46s
+    // can assign that same ID. The earlier unrelated person receives a new ID.
+    // Tracks already segmented at a global roster turnover retain that policy.
+    let mut earlier = BTreeMap::<u64, (u64, u64)>::new();
+    for candidate in measured_handoffs {
+        if replacements.contains_key(&candidate.track) || earlier.contains_key(&candidate.track) {
+            continue;
+        }
+        next = next.checked_add(1).ok_or("Track ID space exhausted")?;
+        earlier.insert(candidate.track, (candidate.at, next));
+    }
+    let handoff_splits = earlier.len() as u64;
+    let splits = replacements.values().map(Vec::len).sum::<usize>() as u64 + handoff_splits;
     if splits == 0 {
-        return Ok((expected_sha.to_owned(), 0));
+        return Ok((expected_sha.to_owned(), 0, 0));
     }
     let temp = path.with_extension("turnover.partial");
     let file = OpenOptions::new()
@@ -149,12 +196,9 @@ pub(super) fn split(path: &Path, expected_sha: &str, frames: u64) -> Result<(Str
                 let id = row["track_id"]
                     .as_u64()
                     .ok_or("Turnover Track ID missing")?;
-                if let Some(versions) = replacements.get(&id) {
-                    if let Some((_, replacement)) =
-                        versions.iter().rev().find(|(cut, _)| frame_index >= *cut)
-                    {
-                        row["track_id"] = json!(replacement);
-                    }
+                let new_id = remap_id(id, frame_index, &replacements, &earlier);
+                if new_id != id {
+                    row["track_id"] = json!(new_id);
                 }
             }
             if let Some(inferred) = frame
@@ -163,12 +207,9 @@ pub(super) fn split(path: &Path, expected_sha: &str, frames: u64) -> Result<(Str
             {
                 for id in inferred {
                     let previous = id.as_u64().ok_or("Invalid turnover inferred ID")?;
-                    if let Some(versions) = replacements.get(&previous) {
-                        if let Some((_, replacement)) =
-                            versions.iter().rev().find(|(cut, _)| frame_index >= *cut)
-                        {
-                            *id = json!(replacement);
-                        }
+                    let new_id = remap_id(previous, frame_index, &replacements, &earlier);
+                    if new_id != previous {
+                        *id = json!(new_id);
                     }
                 }
             }
@@ -192,7 +233,7 @@ pub(super) fn split(path: &Path, expected_sha: &str, frames: u64) -> Result<(Str
         return Err(error);
     }
     fs::rename(&temp, path).map_err(|e| format!("Publish turnover split: {e}"))?;
-    Ok((format!("{:x}", hash.finalize()), splits))
+    Ok((format!("{:x}", hash.finalize()), splits, handoff_splits))
 }
 
 #[cfg(test)]
@@ -235,6 +276,85 @@ mod tests {
     }
 
     #[test]
+    fn handoff_relabels_only_earlier_person_and_retains_later_id() {
+        let root = std::env::temp_dir().join(format!("volley-handoff-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("tracked_frames.jsonl");
+        let mut file = BufWriter::new(File::create(&path).unwrap());
+        let mut sha = Sha256::new();
+        for frame in 0..1650_u64 {
+            let mut players = Vec::new();
+            let before = (860..=1040).contains(&frame) && ((frame - 860) % 3 == 0 || frame == 930);
+            if before || frame == 1041 {
+                players.push(json!({"track_id":12,"detection":{
+                    "bbox_xyxy_norm":[0.4435,0.4749,0.4876,0.6601]}}));
+            }
+            if before {
+                let box_before = if frame >= 1038 {
+                    json!([0.4296, 0.4249, 0.4622, 0.5683])
+                } else {
+                    json!([0.395, 0.4249, 0.429, 0.5683])
+                };
+                players.push(json!({"track_id":13,"detection":{
+                    "bbox_xyxy_norm":box_before}}));
+            }
+            if frame >= 1044 && frame <= 1599 && (frame - 1044) % 3 == 0 {
+                players.push(json!({"track_id":13,"detection":{
+                    "bbox_xyxy_norm":[0.4429,0.4528,0.4793,0.6537]}}));
+            }
+            let mut row = serde_json::to_vec(&json!({
+                "frame_index":frame,"tracked_players":players,
+                "raw_player_candidates":[{"source":"original"}]
+            }))
+            .unwrap();
+            row.push(b'\n');
+            file.write_all(&row).unwrap();
+            sha.update(row);
+        }
+        file.flush().unwrap();
+        drop(file);
+        let original = format!("{:x}", sha.finalize());
+        let (digest, splits, handoffs) = split(&path, &original, 1650).unwrap();
+        assert_eq!((splits, handoffs), (1, 1));
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(format!("{:x}", Sha256::digest(&bytes)), digest);
+        let rows = String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert!(rows[930]["tracked_players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["track_id"] == 14));
+        assert!(rows[930]["tracked_players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["track_id"] == 12));
+        assert!(rows[1044]["tracked_players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["track_id"] == 13));
+        assert!(rows[1389]["tracked_players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["track_id"] == 13));
+        assert_eq!(
+            rows[930]["raw_player_candidates"],
+            json!([{"source":"original"}])
+        );
+        assert_eq!(
+            rows[1044]["raw_player_candidates"],
+            json!([{"source":"original"}])
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn split_preserves_raw_evidence_and_separates_track_ids() {
         let root = std::env::temp_dir().join(format!("volley-turnover-{}", Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
@@ -263,8 +383,9 @@ mod tests {
         out.flush().unwrap();
         drop(out);
         let original = format!("{:x}", sha.finalize());
-        let (digest, count) = split(&path, &original, 500).unwrap();
+        let (digest, count, handoffs) = split(&path, &original, 500).unwrap();
         assert_eq!(count, 1);
+        assert_eq!(handoffs, 0);
         assert_ne!(digest, original);
         let rows = fs::read_to_string(&path).unwrap();
         let parsed: Vec<Value> = rows

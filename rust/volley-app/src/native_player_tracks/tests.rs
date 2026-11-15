@@ -281,6 +281,74 @@ fn six_player_two_rally_replay_links_every_measured_track_without_overlap() {
 }
 
 #[test]
+fn ilnur_late_id_13_can_join_id_12_after_measured_track_handoff() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    ctx.roster.insert("abcdef012345".into(), "Ильнур".into());
+    let mut template = ctx.tracks[&7].clone();
+    template.observed_pairs.clear();
+    let mut early = template.clone();
+    early.first = 860;
+    early.last = 1040;
+    early.visible_spans = vec![(930, 930), (1040, 1040)];
+    let mut first_ilnur = template.clone();
+    first_ilnur.first = 860;
+    first_ilnur.last = 1053;
+    first_ilnur.visible_spans = vec![
+        (930, 930),
+        (1041, 1041),
+        (1047, 1047),
+        (1050, 1050),
+        (1053, 1053),
+    ];
+    let mut second_ilnur = template.clone();
+    second_ilnur.first = 1044;
+    second_ilnur.last = 1728;
+    second_ilnur.visible_spans = vec![(1044, 1044), (1056, 1056), (1390, 1390)];
+    early.observed_pairs.insert(
+        (12, 14),
+        PairGeometry {
+            same_position: 0,
+            distinct_position: 3,
+            first_distinct_frame: Some(930),
+        },
+    );
+    ctx.tracks.clear();
+    ctx.tracks.insert(12, first_ilnur);
+    ctx.tracks.insert(13, second_ilnur);
+    ctx.tracks.insert(14, early);
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [12, 13, 14]).unwrap();
+    let original = json!({"12":"abcdef012345"});
+    let confirm_late = BTreeMap::from([(13, "abcdef012345".into())]);
+    assert_eq!(
+        new_manual_owner_conflict(&ctx, &confirm_late, &original, &[13]),
+        None,
+        "30-second ID 12 cannot block ID 13's separate 46-second observations"
+    );
+
+    assert!(!tracks_co_visible(&ctx.tracks[&12], &ctx.tracks[&13]));
+
+    let confirm_early = BTreeMap::from([(14, "abcdef012345".into())]);
+    assert_eq!(
+        new_manual_owner_conflict(&ctx, &confirm_early, &original, &[14]),
+        Some((14, 12, 930)),
+        "the different person actually visible at 31s must still be rejected"
+    );
+    let mut doc = base_document(&ctx);
+    doc["automatic_assignments"] = original;
+    let matches = json!({
+        "12":[{"player_id":"abcdef012345","cosine_similarity":0.855}],
+        "13":[{"player_id":"abcdef012345","cosine_similarity":0.783}],
+        "14":[{"player_id":"abcdef012345","cosine_similarity":0.520}]
+    });
+    let auto = choose_automatic_photo_links(&ctx, &doc, &matches).unwrap();
+    assert_eq!(auto.get(&13).map(String::as_str), Some("abcdef012345"));
+    assert!(!auto.contains_key(&14));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn manual_link_never_steals_an_automatically_linked_athlete_in_the_same_frame() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
