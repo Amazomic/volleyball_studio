@@ -7,8 +7,9 @@
   if(!root||!list)return;
   const tasks=new Map(),rows=new Map();
   let pollTimer=null;
+  const preparationProjects=new Set();
   const labels={analysis:"Полный анализ",gpu:"Анализ GPU",cpu:"Постобработка CPU",quick:"Быстрый рилс"};
-  let trackedGpuProject="",trackedAnalysisProject="",polling=false;
+  let trackedGpuProject="",trackedAnalysisProject="",polling=false,refreshPending=false;
   const clamp=p=>Math.max(0,Math.min(100,p));
   const create=(tag,css,text)=>{
     const el=document.createElement(tag);
@@ -145,6 +146,30 @@
       stage:String(data.stage||"Обработка"),
       progress:Number.isFinite(data.progress_percent)?data.progress_percent:null});
   }
+  async function readPreparation(){
+    const current=$("studio-project")?.value||"";
+    const projects=new Set(preparationProjects);
+    if(current)projects.add(current);
+    await Promise.allSettled([...projects].map(async project=>{
+      const data=await api(query("/api/project-preparation",{project_id:project}));
+      if(data.project_id!==project||!Array.isArray(data.videos))return;
+      const prefix="preparation:"+project+":";
+      const active=new Set();
+      for(const video of data.videos){
+        if(typeof video.video!=="string"||!["queued","preparing"].includes(video.state))continue;
+        const key=prefix+video.video;
+        active.add(key);
+        set(key,{label:"Подготовка видео",
+          stage:video.video+" · "+(video.state==="queued"?"В очереди":"Подготовка видео"),
+          progress:Number.isFinite(video.progress)?video.progress:null});
+      }
+      for(const key of tasks.keys()){
+        if(key.startsWith(prefix)&&!active.has(key))clear(key);
+      }
+      if(active.size)preparationProjects.add(project);
+      else preparationProjects.delete(project);
+    }));
+  }
   async function readQuick(){
     const data=await api("/api/quick-reel/native/status");
     if(data.status!=="queued"&&data.status!=="running"){clear("quick");return;}
@@ -156,14 +181,18 @@
       progress:Number.isFinite(data.progress)?data.progress:null});
   }
   async function refresh(){
-    if(polling||document.hidden)return;
+    if(document.hidden)return;
+    if(polling){refreshPending=true;return;}
     if(!window.VolleyballStudioActivity?.fetch)return;
     polling=true;
     try{
       // A failing status request never hides a still-running task.
       await readPipeline().catch(()=>{});
-      await Promise.allSettled([readGpu(),readQuick()]);
-    }finally{polling=false;}
+      await Promise.allSettled([readGpu(),readQuick(),readPreparation()]);
+    }finally{
+      polling=false;
+      if(refreshPending){refreshPending=false;void refresh();}
+    }
   }
   const restartButton=$("studio-restart"),restartMessage=$("studio-restart-status");
   let restarting=false,restartWatcher=null;
@@ -221,8 +250,12 @@
   };
   restartButton?.addEventListener("click",restart);
   window.VolleyballTasks={set,clear,refresh};
-  const wake=()=>{schedule();refresh();};
-  $("studio-project")?.addEventListener("change",()=>{if(!trackedGpuProject&&!trackedAnalysisProject)wake();});
+  const wake=()=>{
+    const current=$("studio-project")?.value||"";
+    if(current)preparationProjects.add(current);
+    schedule();refresh();
+  };
+  $("studio-project")?.addEventListener("change",wake);
   window.addEventListener("volley:project-ready",wake);
   document.addEventListener("visibilitychange",()=>{if(!document.hidden)wake();});
   schedule();

@@ -40,19 +40,28 @@ const container=new Node(),list=new Node(),project=new Node();
 project.value="project-a";
 const nodes=new Map([["studio-sidebar-tasks",container],
   ["studio-sidebar-task-list",list],["studio-project",project]]);
-for(const el of nodes.values())el.addEventListener=()=>{};
+const listeners=new Map();
+for(const el of nodes.values())el.addEventListener=(name,fn)=>listeners.set(name,fn);
 let gpu={schema:"volley-native-active-gpu/1",project_id:"project-a",active:false};
 let reel={status:"idle"};
 let failQuick=false;
+let preparation={project_id:"project-a",videos:[]};
+let failPreparation=false;
+let quickGate=null;
 const hits=[];
 const doc={hidden:false,getElementById:id=>nodes.get(id),createElement:()=>new Node(),
   addEventListener(){}};
-const win={addEventListener(){},VolleyballStudioActivity:{
+const win={addEventListener:(name,fn)=>listeners.set(name,fn),VolleyballStudioActivity:{
   async fetch(url){
     hits.push(url);
     if(url.startsWith("/api/quick-reel/")){
+      if(quickGate)await quickGate;
       if(failQuick)throw Error("network");
       return {ok:true,json:async()=>reel};
+    }
+    if(url.startsWith("/api/project-preparation")){
+      if(failPreparation)throw Error("network");
+      return {ok:true,json:async()=>preparation};
     }
     return {ok:true,json:async()=>gpu};
   }
@@ -74,7 +83,7 @@ reel={status:"running",stage:"Монтаж",progress:88,stage_index:4};
 await win.VolleyballTasks.refresh();
 assert.equal(list.children.length,2);
 assert.ok(!container.classList.contains("hidden"));
-assert.equal(list.children[0].children[0].children[0].textContent,"Анализ GPU · RAVEL");
+assert.equal(list.children[0].children[0].children[0].textContent,"Анализ GPU · "+(win.VolleyballPersonDetector?.label||"RTMDet + RTMPose"));
 assert.equal(list.children[0].children[0].children[1].textContent,"36%");
 assert.equal(list.children[1].children[0].children[1].textContent,"88%");
 
@@ -96,4 +105,41 @@ reel={status:"complete",progress:100};
 await win.VolleyballTasks.refresh();
 assert.ok(container.classList.contains("hidden"),"after completion card should disappear");
 assert.equal(list.children.length,0);
+preparation={project_id:"project-a",videos:[
+  {video:"match.mp4",state:"preparing",progress:37.4},
+  {video:"next.mp4",state:"queued",progress:0},
+  {video:"ready.mp4",state:"ready",progress:100}
+]};
+await win.VolleyballTasks.refresh();
+assert.equal(list.children.length,2,"preparation is restored from server status on refresh");
+assert.equal(list.children[0].children[0].children[0].textContent,"Подготовка видео");
+assert.equal(list.children[0].children[0].children[1].textContent,"37%");
+assert.equal(list.children[0].children[1].textContent,"match.mp4 · Подготовка видео");
+assert.equal(list.children[1].children[1].textContent,"next.mp4 · В очереди");
+project.value="";
+preparation.videos[0].progress=62;
+await win.VolleyballTasks.refresh();
+assert.equal(list.children[0].children[0].children[1].textContent,"62%","switching projects retains active preparation");
+failPreparation=true;
+await win.VolleyballTasks.refresh();
+assert.equal(list.children.length,2,"network errors retain preparation");
+failPreparation=false;
+preparation.videos[0].state="ready";
+preparation.videos[1].state="cancelled";
+await win.VolleyballTasks.refresh();
+assert.ok(container.classList.contains("hidden"),"completed and cancelled preparation disappears");
+let releaseQuick;
+quickGate=new Promise(resolve=>{releaseQuick=resolve;});
+const polling=win.VolleyballTasks.refresh();
+await new Promise(resolve=>setImmediate(resolve));
+project.value="new-project";
+listeners.get("volley:project-ready")();
+project.value="other-project";
+listeners.get("change")();
+releaseQuick();
+quickGate=null;
+await polling;
+await new Promise(resolve=>setImmediate(resolve));
+assert.ok(hits.some(url=>url.startsWith("/api/project-preparation?")&&url.includes("project_id=new-project")),
+  "project created during a poll must be observed even after immediate project switch");
 console.log("PASS: anchored sidebar task card, GPU+Quick server status, CPU indeterminate bar, reload polling, network failures and idle cleanup");
