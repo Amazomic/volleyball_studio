@@ -31,6 +31,10 @@ pub(super) fn tracks_co_visible(a: &Aggregate, b: &Aggregate) -> bool {
         .flatten()
         .filter_map(Value::as_u64)
         .collect();
+    let threshold = doc["automatic_identity_evidence"]["threshold"]
+        .as_f64()
+        .filter(|value| (0.0..=1.0).contains(value))
+        .unwrap_or(0.30); // Compatibility for old persisted assignment data.
     // Evaluate strongest evidence first. An athlete can have many tracklets,
     // but not two co-visible tracklets with distinct positions.
     let mut candidates = Vec::<(f64, u64, String)>::new();
@@ -49,13 +53,12 @@ pub(super) fn tracks_co_visible(a: &Aggregate, b: &Aggregate) -> bool {
                 .filter(|owner| ctx.roster.contains_key(*owner)) else { continue };
             let Some(score) = row["cosine_similarity"]
                 .as_f64()
-                .filter(|score| score.is_finite() && *score > 0.30 && *score <= 1.0)
+                .filter(|score| score.is_finite() && *score >= threshold && *score <= 1.0)
                 else { continue };
             candidates.push((score, track_id, owner.to_owned()));
         }
     }
-    // Try the best player first, then other photo matches above 30% only
-    // when the strongest candidate conflicts with a co-visible track.
+    // Never fall back to a weaker athlete after a co-visibility conflict.
     let mut tracks = candidates.iter().map(|v| v.1).collect::<BTreeSet<_>>()
         .into_iter().collect::<Vec<_>>();
     let highest = |id| candidates.iter().filter(|v| v.1 == id)
@@ -80,17 +83,16 @@ pub(super) fn tracks_co_visible(a: &Aggregate, b: &Aggregate) -> bool {
             .is_some_and(|other| tracks_co_visible(candidate, other));
         let mut ranked = candidates.iter().filter(|v| v.1 == id).collect::<Vec<_>>();
         ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
-        for (_, _, owner) in ranked {
+        if let Some((_, _, owner)) = ranked.first() {
             let locked = assigned.iter().any(|(other_id, other_owner)| {
                 other_owner.as_str() == Some(owner.as_str())
                     && other_id.parse::<u64>().ok().is_some_and(overlaps)
             });
             let occupied = chosen.iter().any(|(other_id, other_owner)| {
-                other_owner == owner && overlaps(*other_id)
+                other_owner == *owner && overlaps(*other_id)
             });
             if !locked && !occupied {
-                chosen.insert(id, owner.clone());
-                break;
+                chosen.insert(id, (*owner).clone());
             }
         }
     }
@@ -279,14 +281,17 @@ pub(super) fn filtered_page(
             }
         }
     }
-    // Distinguish lack of photo similarity from a real co-visibility
-    // conflict. A >30% photo match is not the same as a valid assignment.
+    // Distinguish missing photo evidence from a co-visibility conflict.
+    let threshold = doc["automatic_identity_evidence"]["threshold"]
+        .as_f64()
+        .filter(|value| (0.0..=1.0).contains(value))
+        .unwrap_or(0.30);
     let unresolved_match_ids: BTreeSet<u64> = ctx.tracks.iter().filter(|(id, candidate)| {
         if owners.contains_key(id) { return false; }
         let Some(rows) = doc["automatic_identity_evidence"]["matches"][id.to_string()].as_array()
         else { return false };
         let eligible = rows.iter().filter(|row| {
-            row["cosine_similarity"].as_f64().is_some_and(|score| score > 0.30)
+            row["cosine_similarity"].as_f64().is_some_and(|score| score >= threshold)
                 && row["player_id"].as_str().is_some_and(|name| ctx.roster.contains_key(name))
         }).collect::<Vec<_>>();
         !eligible.is_empty() && eligible.iter().all(|row| {
