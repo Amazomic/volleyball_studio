@@ -55,19 +55,16 @@ impl CourtHistory {
             return None;
         }
         let mut events = Vec::new();
-        let mut last_track_id = None;
         for contact in self
             .contacts
             .iter()
             .filter(|c| (start..=end).contains(&c.frame))
         {
-            let Some(track_id) = contact.track_id else {
-                continue;
-            };
-            if last_track_id == Some(track_id) {
+            if contact.track_id.is_none() {
                 continue;
             }
-            last_track_id = Some(track_id);
+            // The same player can toss and then strike a serve. CPU Touch
+            // already deduplicates adjacent motion peaks; never erase a later hit.
             if events.len() == MAX_CONTEXT_CONTACTS {
                 // Never publish a misleading partial analysis.
                 return None;
