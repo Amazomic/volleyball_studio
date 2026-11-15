@@ -79,9 +79,9 @@ fn overlapping_people_try_next_photo_match_above_threshold() {
         ]
     });
     let assigned = choose_automatic_photo_links(&ctx, &base_document(&ctx), &matches).unwrap();
-    assert_eq!(assigned.len(), 2);
+    assert_eq!(assigned.len(), 1);
     assert_eq!(assigned[&7], "abcdef012345");
-    assert_eq!(assigned[&8], "123456abcdef");
+    assert!(!assigned.contains_key(&8), "Conflicting first choice stays unconfirmed");
     fs::remove_dir_all(root).unwrap();
 }#[test]
 fn automatic_photo_link_picks_the_highest_similarity_for_one_track() {
@@ -1337,5 +1337,61 @@ fn native_manual_assignments_are_replay_scoped_and_roster_checked() {
     let mut excluded = doc.clone();
     excluded["excluded_ids"] = json!([7]);
     assert!(validated(Some(&serde_json::to_vec(&excluded).unwrap()), &ctx).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn three_sample_similarity_uses_mean_of_best_reference_per_frame() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    ctx.roster.insert("123456abcdef".into(), "Player B".into());
+    let samples = BTreeMap::from([(7, vec![
+        vec![1.0, 0.0], vec![0.8, 0.6], vec![0.6, 0.8],
+    ])]);
+    let reference = |id: &str, vector: Vec<f32>| PhotoReference {
+        player_id: id.into(),
+        project_id: ctx.project_id.clone(),
+        video: ctx.video.clone(),
+        replay_id: ctx.replay_id.clone(),
+        track_id: 7,
+        vector,
+    };
+    let refs = vec![
+        reference("abcdef012345", vec![1.0, 0.0]),
+        reference("123456abcdef", vec![0.0, 1.0]),
+    ];
+    let matches = photo_match_candidates(
+        &ctx, &base_document(&ctx), &samples, &refs, 3,
+    ).unwrap();
+    let ranked = matches["7"].as_array().unwrap();
+    assert_eq!(ranked[0]["player_id"], "abcdef012345");
+    let score = ranked[0]["cosine_similarity"].as_f64().unwrap();
+    assert!((score - 0.8).abs() < 0.00001);
+    assert_eq!(ranked[0]["samples_used"], 3);
+    assert_eq!(ranked[0]["sample_similarities"], json!([1.0, 0.8, 0.6]));
+    let mut doc = base_document(&ctx);
+    doc["automatic_identity_evidence"] = json!({"threshold":0.81});
+    assert!(choose_automatic_photo_links(&ctx, &doc, &matches).unwrap().is_empty());
+    doc["automatic_identity_evidence"]["threshold"] = json!(0.35);
+    assert_eq!(choose_automatic_photo_links(&ctx, &doc, &matches).unwrap()[&7],
+        "abcdef012345");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn three_sample_similarity_requires_three_distinct_crops() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let ctx = context(&root, sha, tracks);
+    let samples = BTreeMap::from([(7, vec![vec![1.0_f32, 0.0], vec![0.8, 0.6]])]);
+    let reference = PhotoReference {
+        player_id:"abcdef012345".into(),project_id:ctx.project_id.clone(),
+        video:ctx.video.clone(),replay_id:ctx.replay_id.clone(),
+        track_id:7,vector:vec![1.0,0.0],
+    };
+    assert_eq!(photo_match_candidates(
+        &ctx,&base_document(&ctx),&samples,&[reference],3
+    ).unwrap(),json!({}));
     fs::remove_dir_all(root).unwrap();
 }
