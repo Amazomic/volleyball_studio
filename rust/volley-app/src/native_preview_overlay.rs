@@ -838,10 +838,61 @@ fn extract_gpu_frames(
     Ok(output)
 }
 
+/// Resolve the player detector from the original immutable GPU evidence,
+/// never from the environment of the currently running Studio.
+fn gpu_person_detector(project_root: &Path, fusion: &Value) -> &'static str {
+    let Some(source) = fusion["sources"]["person_pose"].as_object() else {
+        return "unknown";
+    };
+    let Some(job_id) = source.get("job_id").and_then(Value::as_str) else {
+        return "unknown";
+    };
+    let Some(sha) = source.get("sha256").and_then(Value::as_str) else {
+        return "unknown";
+    };
+    if !volley_core::contracts::job_id(job_id) || !volley_core::contracts::sha256(sha) {
+        return "unknown";
+    }
+    let runs = project_root.join("native_gpu_runs");
+    let Ok(()) = safe_folder(&runs) else {
+        return "unknown";
+    };
+    let folder = runs.join(job_id);
+    let Ok(()) = safe_folder(&folder) else {
+        return "unknown";
+    };
+    let Ok(file) = safe_file(&folder, "manifest.json", MAX_MANIFEST_BYTES) else {
+        return "unknown";
+    };
+    let Ok(bytes) = fs::read(file) else {
+        return "unknown";
+    };
+    let Ok(model) = serde_json::from_slice::<Value>(&bytes) else {
+        return "unknown";
+    };
+    if model["schema"] != "volley-native-gpu-model-detections/1"
+        || model["status"] != "model_raw_detections_complete"
+        || model["model"] != "players"
+        || model["job_id"] != job_id
+        || model["project_id"] != fusion["project_id"]
+        || model["video"] != fusion["video"]
+        || model["sha256"] != sha
+        || model["source_identity"] != fusion["source_identity"]
+    {
+        return "unknown";
+    }
+    match model["person_pipeline"].as_str() {
+        Some(pipeline) if pipeline.starts_with("rfdetr_medium_") => "rfdetr-medium",
+        Some(pipeline) if pipeline.starts_with("rtmdet_nano_") => "rtmdet-nano",
+        // GPU runs predating the RF-DETR integration always used RTMDet-Nano.
+        None => "rtmdet-nano",
+        _ => "unknown",
+    }
+}
 fn inspect_gpu_source(
     state: &AppState,
     query: &GpuOverlayQuery,
-) -> Result<(PathBuf, String, u64, u32, u32, PathBuf), storage::ApiError> {
+) -> Result<(PathBuf, String, u64, u32, u32, PathBuf, &'static str), storage::ApiError> {
     storage::project_id(&query.project_id)?;
     storage::video_name(&query.video)?;
     if !volley_core::contracts::job_id(&query.fusion_id) {
@@ -903,7 +954,16 @@ fn inspect_gpu_source(
         .to_owned();
     let path =
         safe_file(&folder, "frames.jsonl", MAX_REPLAY_BYTES).map_err(storage::bad_request)?;
-    Ok((path, sha, total, dimensions.width, dimensions.height, root))
+    let person_detector = gpu_person_detector(&root, &manifest);
+    Ok((
+        path,
+        sha,
+        total,
+        dimensions.width,
+        dimensions.height,
+        root,
+        person_detector,
+    ))
 }
 
 pub async fn gpu(
@@ -913,7 +973,7 @@ pub async fn gpu(
     if query.count == 0 || query.count > MAX_WINDOW {
         return Err(storage::bad_request("Invalid GPU overlay window"));
     }
-    let (path, sha, total, width, height, root) = tokio::task::spawn_blocking({
+    let (path, sha, total, width, height, root, person_detector) = tokio::task::spawn_blocking({
         let state = state.clone();
         let query = GpuOverlayQuery {
             project_id: query.project_id.clone(),
@@ -945,7 +1005,7 @@ pub async fn gpu(
     Ok(Json(json!({"schema":"volley-native-gpu-overlay/1",
         "project_id":query.project_id,"video":query.video,"fusion_id":query.fusion_id,
         "source_fusion_sha256":response_sha,"fps":30,
-        "width":width,"height":height,"total_frames":total,
+        "width":width,"height":height,"total_frames":total,"person_detector":person_detector,
         "start_frame":start,"end_frame":end,"frames":frames,
         "poses_available":pose_run_id.is_some(),"pose_run_id":pose_run_id,
         "touches_verified":false,"athlete_identities_verified":false})))
@@ -955,6 +1015,42 @@ pub async fn gpu(
 mod tests {
     use super::*;
 
+    #[test]
+    fn gpu_person_detector_uses_saved_gpu_model_not_current_environment() {
+        let root = std::env::temp_dir().join(format!("volley-gpu-model-{}", uuid::Uuid::new_v4()));
+        let job_id = "0123456789abcdef0123456789abcdef";
+        let folder = root.join("native_gpu_runs").join(job_id);
+        fs::create_dir_all(&folder).unwrap();
+        let sha = "a".repeat(64);
+        let source = json!({"schema":"volley-native-gpu-model-detections/1",
+            "status":"model_raw_detections_complete","model":"players",
+            "job_id":job_id,"project_id":"0123456789ab","video":"game.mp4",
+            "sha256":sha,"source_identity":{"bytes":123,"mtime_ns":456},
+            "person_pipeline":"rfdetr_medium_18250b5a_rtmpose_m_detector_boxes_3hz_v1"});
+        let fusion = json!({"project_id":"0123456789ab","video":"game.mp4",
+            "sources":{"person_pose":{"job_id":job_id,"sha256":sha}},
+            "source_identity":{"bytes":123,"mtime_ns":456}});
+        let save = |value: &Value| {
+            fs::write(
+                folder.join("manifest.json"),
+                serde_json::to_vec(value).unwrap(),
+            )
+            .unwrap()
+        };
+        save(&source);
+        assert_eq!(gpu_person_detector(&root, &fusion), "rfdetr-medium");
+        let mut legacy = source.clone();
+        legacy["person_pipeline"] = json!("rtmdet_nano_tiled_rtmpose_m_coco17_3hz_v5");
+        save(&legacy);
+        assert_eq!(gpu_person_detector(&root, &fusion), "rtmdet-nano");
+        legacy.as_object_mut().unwrap().remove("person_pipeline");
+        save(&legacy);
+        assert_eq!(gpu_person_detector(&root, &fusion), "rtmdet-nano");
+        let mut changed = fusion.clone();
+        changed["sources"]["person_pose"]["sha256"] = json!("b".repeat(64));
+        assert_eq!(gpu_person_detector(&root, &changed), "unknown");
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn raw_gpu_window_is_independent_of_cpu_and_rejects_changed_sha() {
         let root = std::env::temp_dir().join(format!("volley-raw-gpu-{}", uuid::Uuid::new_v4()));

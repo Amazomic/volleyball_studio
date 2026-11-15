@@ -349,7 +349,7 @@
     rawPose:$("studio-raw-pose"),rawPoseVisible:$("studio-raw-pose-visible"),
     raw:false,
     actionFlags:{attack:true,block:true,serve:true,overhead_pass:true,dig:true,low_touch:true},
-    source:null,cache:new Map(),rawFrames:new Map(),presentedTime:null,
+    source:null,cache:new Map(),rawFrames:new Map(),rawDetectors:new Map(),presentedTime:null,
     fetching:new Set(),controllers:new Map(),failed:new Map(),loop:0,
     flags:{rallies:true,touches:true,trajectory:true,players:true,pose:true,court:true}
   };
@@ -450,6 +450,32 @@
   };
   const rawFusion=()=>s.chain?.choices.find(row=>row.value===s.analysis&&row.kind==="fusion")||null;
   const overlaySourceId=()=>overlay.raw?rawFusion()?.id||"":s.run;
+  // Identify the detector by the saved GPU fusion, not current runtime settings.
+  const rawDetectorKey=(project,run,video)=>[project,run,video].join(":");
+  const updateRawDetectorLabel=()=>{
+    const input=overlay.rawPeopleVisible;
+    const label=input?.closest("label");
+    if(!label)return;
+    let name=label.querySelector(".raw-source-detector-label");
+    if(!name){
+      name=label.querySelector("#studio-raw-person-model");
+      if(name)name.removeAttribute("id"); // Independent of the global model setting.
+      else{
+        for(const child of [...label.childNodes])
+          if(child.nodeType===3)child.remove();
+        name=document.createElement("span");
+        label.append(" ",name);
+      }
+      name.classList.add("raw-source-detector-label");
+    }
+    const fusion=rawFusion();
+    const variant=fusion?overlay.rawDetectors.get(
+      rawDetectorKey(s.project,fusion.id,s.video)):null;
+    name.textContent=variant==="rfdetr-medium"?"RF-DETR Medium":
+      variant==="rtmdet-nano"?"RTMDet-Nano":
+      "\u0414\u0435\u0442\u0435\u043a\u0442\u043e\u0440 \u0438\u0433\u0440\u043e\u043a\u043e\u0432";
+    input.disabled=!fusion;
+  };
   const overlayWindowStart=frame=>Math.max(0,Math.floor(frame/90)*90-60);
   const overlayWindowKey=(project,run,video,start)=>
     [project,overlay.raw?"gpu":"cpu",run,video,start,...(!overlay.raw&&overlay.flags.pose?["pose"]:[])].join(":");
@@ -515,6 +541,7 @@
          !Number.isSafeInteger(value.height)||value.height<=0||
          value.project_id!==project||
          (isRaw?value.fusion_id!==run:value.rally_run_id!==run)||
+         (isRaw&&!["rfdetr-medium","rtmdet-nano","unknown"].includes(value.person_detector))||
          (isRaw?!/^[a-f0-9]{64}$/.test(value.source_fusion_sha256):false)||
          value.video!==video||value.start_frame!==start||
          !Number.isSafeInteger(value.end_frame)||value.end_frame<=start||
@@ -526,7 +553,11 @@
         throw Error("Processed ball source is not VballNet-only");
       if(s.project!==project||s.video!==video||overlay.raw!==isRaw||
          overlaySourceId()!==run)return;
-      if(isRaw)overlay.rawFrames.set([project,run,video].join(":"),value.total_frames);
+      if(isRaw){
+        overlay.rawFrames.set([project,run,video].join(":"),value.total_frames);
+        overlay.rawDetectors.set(rawDetectorKey(project,run,video),value.person_detector);
+        updateRawDetectorLabel();
+      }
       overlay.cache.set(key,value);
       while(overlay.cache.size>16)overlay.cache.delete(overlay.cache.keys().next().value);
       overlayMessage((isRaw?overlay.rawPoseVisible.checked:overlay.flags.pose)&&
@@ -1004,6 +1035,7 @@
       overlay.canvas.closest(".video-wrap")?.classList.remove("training-select");
       training.mode.setAttribute("aria-selected","false");
       overlay.raw=raw;
+      updateRawDetectorLabel();
       overlay.mode.setAttribute("aria-selected",String(!raw));
       overlay.rawMode.setAttribute("aria-selected",String(raw));
       overlay.rawControls.classList.toggle("hidden",!raw);
@@ -1512,6 +1544,7 @@
     // Overlay playback follows the selected CPU snapshot, not a rally card.
     // reset() clears the canvas source; restore it for full-video preview too.
     setOverlaySource(overlay.raw||s.run?{}:null);
+    updateRawDetectorLabel();
     if(s.run&&s.video)
       prefetchOverlayAtFrame(Math.max(0,Math.floor((ui.video.currentTime||0)*fps())));
     if(s.analysis)sourceSelection.save(s.project,s.analysis,s.run);
