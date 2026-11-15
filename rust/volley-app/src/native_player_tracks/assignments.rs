@@ -89,7 +89,7 @@ pub(super) fn tracks_co_visible(a: &Aggregate, b: &Aggregate) -> bool {
                     && other_id.parse::<u64>().ok().is_some_and(overlaps)
             });
             let occupied = chosen.iter().any(|(other_id, other_owner)| {
-                other_owner == *owner && overlaps(*other_id)
+                other_owner.as_str() == owner.as_str() && overlaps(*other_id)
             });
             if !locked && !occupied {
                 chosen.insert(id, (*owner).clone());
