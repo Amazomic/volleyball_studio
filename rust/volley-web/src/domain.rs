@@ -132,7 +132,7 @@ fn chain(input: &Value) -> Value {
                 row["id"].as_str().unwrap_or_default(),
                 add(&mut choices, &mut by, video, "fusion", row),
             );
-            for key in ["ravel_job_id", "vball_job_id"] {
+            for key in ["person_job_id", "vball_job_id"] {
                 if id(&row[key]) {
                     fused_gpu.insert(row[key].as_str().unwrap_or_default());
                 }
@@ -199,6 +199,30 @@ mod tests {
             choice["display_name"],
             chain(&input)["choices"][0]["display_name"]
         );
+    }
+
+    #[test]
+    fn fused_person_and_ball_jobs_do_not_appear_as_separate_analyses() {
+        let ball = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let person = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let fusion = "cccccccccccccccccccccccccccccccc";
+        let orphan = "dddddddddddddddddddddddddddddddd";
+        // Match the metadata returned by studio_analysis::stage_summary.
+        let input = json!({"videos":["match.mp4"],"overviews":{"match.mp4":{"stages":[
+            {"key":"fusion","items":[{"id":fusion,"person_job_id":person,"vball_job_id":ball}]},
+            {"key":"gpu","items":[{"id":ball},{"id":person},{"id":orphan}]}
+        ]}},"runs":[]});
+        let result = chain(&input);
+        let choices = result["choices"].as_array().unwrap();
+        assert_eq!(
+            choices.len(),
+            2,
+            "fused model jobs must not be separate GPU analyses"
+        );
+        assert_eq!(choices[0]["id"], fusion);
+        assert_eq!(choices[0]["kind"], "fusion");
+        assert_eq!(choices[1]["id"], orphan);
+        assert_eq!(choices[1]["kind"], "gpu");
     }
 }
 fn montage(input: &Value) -> Value {
