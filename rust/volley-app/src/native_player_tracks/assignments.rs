@@ -294,7 +294,7 @@ pub(super) fn filtered_page(
             row["cosine_similarity"].as_f64().is_some_and(|score| score >= threshold)
                 && row["player_id"].as_str().is_some_and(|name| ctx.roster.contains_key(name))
         }).collect::<Vec<_>>();
-        !eligible.is_empty() && eligible.iter().all(|row| {
+        eligible.first().is_some_and(|row| {
             let player = row["player_id"].as_str().unwrap_or_default();
             owners.iter().any(|(other_id, owner)| {
                 owner == player && ctx.tracks.get(other_id)
