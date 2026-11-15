@@ -53,7 +53,7 @@ pub fn interpret_motion(input: MotionInput) -> Result<EventEvidence, String> {
     let delta = after - before;
     let strong_accel = delta >= 3.0 && (before < 2.0 || after >= before * 1.5);
     let strong_decel = delta <= -3.0 && (after < 2.0 || before >= after * 1.5);
-    let direction = input.direction_change_deg >= 35.0;
+    let direction = input.direction_change_deg >= 5.0;
     let pattern = if input.direction_change_deg >= 110.0 {
         "direction_reversal"
     } else if direction && (strong_accel || strong_decel) {
@@ -223,6 +223,7 @@ mod tests {
             "direction_and_speed_change"
         );
         assert_eq!(event(4.0, 2.0, 9.0).motion_pattern, "measured_acceleration");
+        assert_eq!(event(6.0, 9.0, 8.0).motion_pattern, "direction_change");
         assert_eq!(
             event(2.0, 11.0, 2.0).motion_pattern,
             "measured_deceleration"

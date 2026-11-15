@@ -68,6 +68,7 @@ pub enum PredictionMethod {
     ContactGeometryV1,
     PoseKeypointsV1,
     CourtGeometryV1,
+    LearnedPoseV1,
 }
 
 impl ActionPrediction {
@@ -84,6 +85,7 @@ impl ActionPrediction {
                 PredictionMethod::ContactGeometryV1
                     | PredictionMethod::PoseKeypointsV1
                     | PredictionMethod::CourtGeometryV1
+                    | PredictionMethod::LearnedPoseV1
             )
     }
 }

@@ -15,6 +15,8 @@ pub enum VideoLayout {
     #[default]
     Original,
     Vertical,
+    /// Portrait crop, following a source-verified moving ball trajectory.
+    VerticalFollow,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -385,6 +387,9 @@ pub fn compose_args_for_layout(
     hardware: bool,
     layout: VideoLayout,
 ) -> Result<Vec<String>, String> {
+    if layout == VideoLayout::VerticalFollow {
+        return Err("Для отслеживания мяча требуется проверенная траектория кадрирования".into());
+    }
     let (max_width, max_height, target_fps) = output_profile_for_layout(formats, layout)?;
     if clips.is_empty() || clips.len() != formats.len() {
         return Err("Некорректные исходные фрагменты монтажа".into());
@@ -455,6 +460,105 @@ pub fn compose_args_for_layout(
     Ok(args)
 }
 
+
+/// One time-stamped, normalized (0..1) point from a SHA-verified VBallNet replay.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CameraPoint {
+    pub time_sec: f64,
+    pub x: f64,
+    pub y: f64,
+}
+fn follow_expression(points: &[CameraPoint], x_axis: bool) -> Result<String, String> {
+    if points.is_empty() || points.len() > 100 {
+        return Err("Для камеры требуется 1..100 подтверждённых точек".into());
+    }
+    let mut previous = -1.0;
+    for point in points {
+        if !point.time_sec.is_finite() || point.time_sec <= previous
+            || point.time_sec < 0.0
+            || !point.x.is_finite() || !(0.0..=1.0).contains(&point.x)
+            || !point.y.is_finite() || !(0.0..=1.0).contains(&point.y)
+        {
+            return Err("Недопустимая точка траектории камеры".into());
+        }
+        previous = point.time_sec;
+    }
+    let ordinate = |point: &CameraPoint| if x_axis { point.x } else { point.y };
+    let mut expr = format!("{:.6}", ordinate(points.last().unwrap()));
+    for pair in points.windows(2).rev() {
+        let a = &pair[0];
+        let b = &pair[1];
+        let delta = b.time_sec - a.time_sec;
+        let interpolate = format!(
+            "({:.6}+({:.6})*(t-{:.6})/{:.6})",
+            ordinate(a), ordinate(b) - ordinate(a), a.time_sec, delta
+        );
+        expr = format!("if(lt(t,{:.4}),{interpolate},{expr})", b.time_sec);
+    }
+    let first = points.first().unwrap();
+    let result = format!(
+        "if(lt(t,{:.4}),{:.6},{expr})",
+        first.time_sec, ordinate(first)
+    );
+    Ok(result.replace(',', "\\,"))
+}
+
+/// FFmpeg portrait crop using verified, temporally smooth camera coordinates.
+/// Cropping is deliberately separate from source-preserving extraction.
+pub fn compose_follow_args(
+    clips: &[PathBuf],
+    formats: &[(u32, u32, String, f64)],
+    tracks: &[Vec<CameraPoint>],
+    zoom: f64,
+    output: &Path,
+    hardware: bool,
+) -> Result<Vec<String>, String> {
+    if clips.is_empty() || clips.len() != formats.len() || clips.len() != tracks.len()
+        || !zoom.is_finite() || !(1.0..=2.5).contains(&zoom) {
+        return Err("Некорректные клипы, траектории или увеличение камеры".into());
+    }
+    let (width, height, fps) = output_profile_for_layout(formats, VideoLayout::VerticalFollow)?;
+    let mut args = vec![
+        "-nostdin".into(), "-hide_banner".into(), "-loglevel".into(),
+        "error".into(), "-y".into()
+    ];
+    for path in clips {
+        args.extend(["-i".into(), path.to_string_lossy().into_owned()]);
+    }
+    let mut filters = Vec::new();
+    let mut refs = String::new();
+    for (index, points) in tracks.iter().enumerate() {
+        let (w,h,_,_) = formats[index];
+        let segment_zoom = if points.len() == 1 {1.0} else {zoom};
+        let crop_h = (((h as f64).min(w as f64 * 16.0 / 9.0) / segment_zoom) as u32 / 2 * 2).max(2);
+        let crop_w = (((crop_h as f64 * 9.0 / 16.0) as u32) / 2 * 2).max(2);
+        if crop_w > w || crop_h > h {
+            return Err("Кадрирование выходит за размеры исходного кадра".into());
+        }
+        let center_x = follow_expression(points, true)?;
+        let center_y = follow_expression(points, false)?;
+        let x = format!("max(0\\,min(iw-ow\\,iw*({center_x})-ow/2))");
+        let y = format!("max(0\\,min(ih-oh\\,ih*({center_y})-oh/2))");
+        filters.push(format!(
+            "[{index}:v:0]setpts=PTS-STARTPTS,fps={fps:.8},\
+             crop={crop_w}:{crop_h}:{x}:{y}:exact=1,\
+             scale={width}:{height}:flags=lanczos,setsar=1,format=yuv420p[v{index}]"
+        ));
+        refs.push_str(&format!("[v{index}]"));
+    }
+    let mapped = if clips.len()==1 {
+        "[v0]".to_owned()
+    } else {
+        filters.push(format!("{refs}concat=n={}:v=1:a=0[combined]",clips.len()));
+        "[combined]".to_owned()
+    };
+    args.extend(["-filter_complex".into(),filters.join(";"),"-map".into(),mapped]);
+    args.extend(encode_flags(hardware));
+    args.extend([
+        "-movflags".into(),"+faststart".into(),output.to_string_lossy().into_owned()
+    ]);
+    Ok(args)
+}
 /// Add a looped soundtrack while keeping the encoded video bit-for-bit.
 /// Since clip extraction discards source audio, soundtrack is the only audio.
 pub fn soundtrack_args(

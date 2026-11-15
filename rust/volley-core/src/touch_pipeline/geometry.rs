@@ -133,6 +133,9 @@ struct ReachEvidence {
     ball_y: f64,
     ball_radius: f64,
     max_reach_ratio: f64,
+    /// Only a measured strong direction reversal can expand overhead reach
+    /// beyond the detector's truncated body box.
+    strong_reversal: bool,
 }
 
 /// Returns the most plausible SAME-FRAME player; no invented or interpolated Track IDs.
@@ -148,6 +151,7 @@ fn touching_player(
         ball_y,
         ball_radius,
         max_reach_ratio,
+        strong_reversal,
     } = reach_evidence;
     let mut best: Option<(u64, f64, f64)> = None;
     for player in &frames[index].players {
@@ -164,7 +168,10 @@ fn touching_player(
         };
         let standing = standing.max(bbox_height);
         let reach_x = ((x2 - x1) * 0.70).max(standing * 0.50) + ball_radius;
-        let reach_top = y2 - standing * 1.45 - ball_radius;
+        // Far-court detector boxes often truncate raised arms. Allow extra
+        // overhead reach only when independent ball motion shows a sharp
+        // reversal; mere proximity or acceleration cannot expand the zone.
+        let reach_top = y2 - standing * if strong_reversal { 1.70 } else { 1.45 } - ball_radius;
         let reach_bottom = y2 + standing * 0.15 + ball_radius;
         let reach_mid = (reach_top + reach_bottom) * 0.5;
         let reach_y = (reach_bottom - reach_top) * 0.5;
@@ -216,7 +223,11 @@ fn settled_ball_after(frames: &[TouchFrame], index: usize, width: f64, height: f
     let mut samples = 0;
     let mut far = 0;
     for row in frames.iter().skip(index + 1).take(MAX_SETTLED_SPAN_FRAMES) {
-        let Some(ball) = row.selected_ball.as_ref().filter(|b| b.source_model == "vballnet") else {
+        let Some(ball) = row
+            .selected_ball
+            .as_ref()
+            .filter(|b| b.source_model == "vballnet")
+        else {
             continue;
         };
         let point = center(ball.bbox_xyxy_norm);
@@ -267,11 +278,11 @@ pub(super) fn detect(
         {
             continue;
         }
-        // More stringent than the RAVEL-supported path to limit false contacts.
-        if speed < 2.0
-            || motion.residual < 8.0_f64.max(0.45 * speed)
-            || (motion.angle < 35.0 && (motion.speed_after - motion.speed_before).abs() < 6.0)
-        {
+        // A large speed change without a turn can be tracking noise or a
+        // freely flying ball passing a player. Geometry alone cannot certify
+        // an impact without an observed change in flight direction; the
+        // independent RTMPose/body-contact path may confirm real interceptions.
+        if speed < 2.0 || motion.residual < 8.0_f64.max(0.45 * speed) || motion.angle < 5.0 {
             continue;
         }
         let box_ = ball.bbox_xyxy_norm;
@@ -288,6 +299,7 @@ pub(super) fn detect(
                 ball_y: y,
                 ball_radius: radius,
                 max_reach_ratio,
+                strong_reversal: motion.angle >= 120.0,
             },
         ) else {
             continue;
@@ -335,9 +347,13 @@ pub(super) fn detect_observed_vertical_rebounds(
     let mut proposals = Vec::new();
     for index in 3..frames.len() - 4 {
         let (Some(a), Some(b), Some(c), Some(d)) = (
-            observed(index - 2), observed(index),
-            observed(index + 1), observed(index + 3),
-        ) else { continue };
+            observed(index - 2),
+            observed(index),
+            observed(index + 1),
+            observed(index + 3),
+        ) else {
+            continue;
+        };
         let incoming = [(b[0] - a[0]) * 0.5, (b[1] - a[1]) * 0.5];
         let outgoing = [(d[0] - c[0]) * 0.5, (d[1] - c[1]) * 0.5];
         let speed_in = incoming[0].hypot(incoming[1]);
@@ -345,14 +361,20 @@ pub(super) fn detect_observed_vertical_rebounds(
         // A comparatively slow inbound ball can still be sharply attacked.
         // Require a decisive outgoing vertical flight; weak floor bounces
         // remain ineligible.
-        if incoming[1] < 8.0 || outgoing[1] > -13.0
-            || speed_in > 60.0 || speed_out > 60.0
-            || speed_in < 8.0 || speed_out < 13.0
+        if incoming[1] < 8.0
+            || outgoing[1] > -13.0
+            || speed_in > 60.0
+            || speed_out > 60.0
+            || speed_in < 8.0
+            || speed_out < 13.0
         {
             continue;
         }
         let angle = ((incoming[0] * outgoing[0] + incoming[1] * outgoing[1])
-            / (speed_in * speed_out)).clamp(-1.0, 1.0).acos().to_degrees();
+            / (speed_in * speed_out))
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
         if angle < 115.0 || settled_ball_after(frames, index, width, height) {
             continue;
         }
@@ -364,12 +386,15 @@ pub(super) fn detect_observed_vertical_rebounds(
             if player.score < 0.40 {
                 continue;
             }
-            let [x1,y1,x2,y2] = pixel_bbox(player.bbox_xyxy_norm, width, height);
+            let [x1, y1, x2, y2] = pixel_bbox(player.bbox_xyxy_norm, width, height);
             let ph = y2 - y1;
             let pw = x2 - x1;
-            if ph < 35.0 || pw < 12.0
-                || b[0] < x1 - 0.18 * pw || b[0] > x2 + 0.18 * pw
-                || b[1] < y1 - 0.16 * ph || b[1] > y1 + 0.46 * ph
+            if ph < 35.0
+                || pw < 12.0
+                || b[0] < x1 - 0.18 * pw
+                || b[0] > x2 + 0.18 * pw
+                || b[1] < y1 - 0.16 * ph
+                || b[1] > y1 + 0.46 * ph
             {
                 continue;
             }
@@ -380,8 +405,7 @@ pub(super) fn detect_observed_vertical_rebounds(
             if count < 3 {
                 continue;
             }
-            let cost = (b[0] - (x1 + x2) * 0.5).abs() / pw
-                + (b[1] - y1).abs() / ph;
+            let cost = (b[0] - (x1 + x2) * 0.5).abs() / pw + (b[1] - y1).abs() / ph;
             if best.is_none_or(|old| cost < old.0) {
                 best = Some((cost, player.track_id, player.score));
             }
@@ -559,6 +583,7 @@ pub(super) fn detect_gap_rebounds(
                 ball_y: predicted[1],
                 ball_radius: radius,
                 max_reach_ratio,
+                strong_reversal: angle >= 120.0,
             },
         ) else {
             continue;
@@ -604,19 +629,176 @@ mod gap_tests {
     };
 
     #[test]
+    fn observed_far_court_reversal_at_31_4s_is_a_touch_candidate() {
+        // VBallNet centers from the immutable CPU replay (30 FPS, 1280x720),
+        // frames 928..955. The ball reverses 40+ pixels above the small far
+        // athlete's detector bbox, inside plausible extended overhead reach.
+        // This is a geometry hypothesis, not a verified joint contact.
+        let centers: [[f64; 2]; 28] = [
+            [547.5, 187.5],
+            [550.0, 192.5],
+            [550.0, 200.0],
+            [552.5, 205.0],
+            [555.0, 210.0],
+            [555.0, 217.5],
+            [557.5, 225.0],
+            [560.0, 230.0],
+            [562.5, 237.5],
+            [562.5, 250.0],
+            [565.0, 257.5],
+            [570.0, 267.5],
+            [570.0, 272.5],
+            [570.0, 272.5],
+            [570.0, 267.5],
+            [572.5, 260.0],
+            [577.5, 247.5],
+            [575.0, 237.5],
+            [580.0, 227.5],
+            [582.5, 217.5],
+            [582.5, 207.5],
+            [585.0, 197.5],
+            [585.0, 190.0],
+            [590.0, 177.5],
+            [590.0, 172.5],
+            [595.0, 160.0],
+            [595.0, 157.5],
+            [597.5, 150.0],
+        ];
+        let frames: Vec<TouchFrame> = centers
+            .iter()
+            .enumerate()
+            .map(|(i, &[x, y])| TouchFrame {
+                frame_index: 928 + i as u64,
+                players: vec![TouchPlayer {
+                    track_id: 12,
+                    score: 0.34,
+                    touch_probability: None,
+                    bbox_xyxy_norm: [0.428, 0.436, 0.458, 0.526],
+                }],
+                selected_ball: Some(TouchBall {
+                    source_model: "vballnet".into(),
+                    score: 0.60,
+                    bbox_xyxy_norm: [
+                        (x - 5.0) / 1280.0,
+                        (y - 5.0) / 720.0,
+                        (x + 5.0) / 1280.0,
+                        (y + 5.0) / 720.0,
+                    ],
+                }),
+            })
+            .collect();
+        let hits = evaluate_block(&frames, 1280, 720, 936, 947, TouchSettings::default())
+            .expect("replay-derived frames valid");
+        assert!(
+            hits.iter().any(|hit| (939..=944).contains(&hit.frame_index)
+                && hit.provisional_track_id == Some(12)),
+            "real observed turn must create a player-linked proposal: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn straight_deceleration_near_player_is_not_a_touch_at_4_9s() {
+        // Reproduces the physics shape of an observed false event: the ball
+        // slows sharply but keeps flying in the same direction beside a player.
+        // This must not create an unconfirmed geometry-only Touch.
+        let frames: Vec<TouchFrame> = (0..26u64)
+            .map(|i| {
+                let y = if i <= 12 {
+                    0.86 - i as f64 * 0.037
+                } else {
+                    0.416 - (i - 12) as f64 * 0.009
+                };
+                TouchFrame {
+                    frame_index: 132 + i,
+                    players: vec![TouchPlayer {
+                        track_id: 1,
+                        score: 0.95,
+                        touch_probability: None,
+                        bbox_xyxy_norm: [0.37, 0.35, 0.47, 0.70],
+                    }],
+                    selected_ball: Some(TouchBall {
+                        source_model: "vballnet".into(),
+                        score: 0.90,
+                        bbox_xyxy_norm: [0.403, y - 0.013, 0.421, y + 0.013],
+                    }),
+                }
+            })
+            .collect();
+        let balls: Vec<BallObservation> = frames
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let bbox = row.selected_ball.as_ref().unwrap().bbox_xyxy_norm;
+                BallObservation {
+                    frame: i as i64,
+                    x: (bbox[0] + bbox[2]) * 640.0,
+                    y: (bbox[1] + bbox[3]) * 360.0,
+                }
+            })
+            .collect();
+        let observed = ball_motion_change(&balls, 12, 0, TOUCH_MOTION_CONFIG)
+            .expect("observed flights on both sides of a velocity break");
+        assert!(
+            observed.angle < 5.0,
+            "expected near-straight flight: {observed:?}"
+        );
+        assert!(
+            (observed.speed_after - observed.speed_before).abs() > 6.0,
+            "the existing speed-change exception should be exercised: {observed:?}"
+        );
+        let contacts = evaluate_block(&frames, 1280, 720, 132, 158, TouchSettings::default())
+            .expect("valid selected VBallNet frames");
+        assert!(
+            contacts.is_empty(),
+            "deceleration without deflection is not a Touch: {contacts:?}"
+        );
+
+        // A modest but real 5-35° turn must now be eligible when the other
+        // physics and player-reach evidence is strong.
+        let mut turning = frames.clone();
+        for (i, frame) in turning.iter_mut().enumerate().skip(13) {
+            let dx = (i - 12) as f64 * 0.00085;
+            let bbox = &mut frame.selected_ball.as_mut().unwrap().bbox_xyxy_norm;
+            bbox[0] += dx;
+            bbox[2] += dx;
+        }
+        let contacts = evaluate_block(&turning, 1280, 720, 132, 158, TouchSettings::default())
+            .expect("valid turned VBallNet frames");
+        assert!(
+            contacts
+                .iter()
+                .any(|event| (5.0..35.0).contains(&event.direction_change_deg)),
+            "a supported small turn should pass the new 5° threshold: {contacts:?}"
+        );
+    }
+
+    #[test]
     fn stationary_out_of_play_ball_cannot_be_player_touch_at_25_3s() {
         // Saved new3 VBallNet observations around frame 759. The ball stops
         // near x=0.305, y=0.556; Track 15 is geometrically nearby.
         let positions = [
-            [0.275, 0.472], [0.279, 0.483], [0.281, 0.490],
-            [0.287, 0.503], [0.291, 0.517], [0.293, 0.528],
-            [0.297, 0.538], [0.299, 0.549], [0.305, 0.556],
-            [0.305, 0.559], [0.305, 0.559], [0.305, 0.559],
-            [0.305, 0.556], [0.305, 0.556], [0.303, 0.556],
-            [0.303, 0.549], [0.303, 0.545],
+            [0.275, 0.472],
+            [0.279, 0.483],
+            [0.281, 0.490],
+            [0.287, 0.503],
+            [0.291, 0.517],
+            [0.293, 0.528],
+            [0.297, 0.538],
+            [0.299, 0.549],
+            [0.305, 0.556],
+            [0.305, 0.559],
+            [0.305, 0.559],
+            [0.305, 0.559],
+            [0.305, 0.556],
+            [0.305, 0.556],
+            [0.303, 0.556],
+            [0.303, 0.549],
+            [0.303, 0.545],
         ];
-        let frames: Vec<TouchFrame> = positions.iter().enumerate().map(|(i, &xy)| {
-            TouchFrame {
+        let frames: Vec<TouchFrame> = positions
+            .iter()
+            .enumerate()
+            .map(|(i, &xy)| TouchFrame {
                 frame_index: 751 + i as u64,
                 players: vec![TouchPlayer {
                     track_id: 15,
@@ -627,99 +809,172 @@ mod gap_tests {
                 selected_ball: Some(TouchBall {
                     source_model: "vballnet".to_string(),
                     score: 0.62,
-                    bbox_xyxy_norm: [xy[0]-0.005, xy[1]-0.006, xy[0]+0.005, xy[1]+0.006],
+                    bbox_xyxy_norm: [xy[0] - 0.005, xy[1] - 0.006, xy[0] + 0.005, xy[1] + 0.006],
                 }),
-            }
-        }).collect();
+            })
+            .collect();
         assert!(settled_ball_after(&frames, 7, 1280.0, 720.0));
         assert!(settled_ball_after(&frames, 8, 1280.0, 720.0));
-        assert!(settled_ball_after(&frames, 10, 1280.0, 720.0),
-                "following frames of the same settled phase must not become contacts");
-        let observations = frames.iter().map(|row| {
-            let b = row.selected_ball.as_ref().unwrap().bbox_xyxy_norm;
-            BallObservation {
-                frame: (row.frame_index - 751) as i64,
-                x: (b[0]+b[2])*640.0,
-                y: (b[1]+b[3])*360.0,
-            }
-        }).collect::<Vec<_>>();
+        assert!(
+            settled_ball_after(&frames, 10, 1280.0, 720.0),
+            "following frames of the same settled phase must not become contacts"
+        );
+        let observations = frames
+            .iter()
+            .map(|row| {
+                let b = row.selected_ball.as_ref().unwrap().bbox_xyxy_norm;
+                BallObservation {
+                    frame: (row.frame_index - 751) as i64,
+                    x: (b[0] + b[2]) * 640.0,
+                    y: (b[1] + b[3]) * 360.0,
+                }
+            })
+            .collect::<Vec<_>>();
         let hits = detect(&frames, &observations, 1280.0, 720.0, 0.75);
-        assert!(!hits.iter().any(|event| (7..=11).contains(&event.frame)),
-                "ball stopping near a player is not contact: {hits:?}");
+        assert!(
+            !hits.iter().any(|event| (7..=11).contains(&event.frame)),
+            "ball stopping near a player is not contact: {hits:?}"
+        );
     }
 
     #[test]
     fn volleyball_40_1s_slow_inbound_fast_vertical_reversal_is_touch() {
         let pts = [
-            [0.645,0.299],[0.646,0.309],[0.648,0.319],
-            [0.648,0.333],[0.646,0.347],[0.646,0.361],
-            [0.646,0.375],[0.646,0.385],[0.645,0.389],
-            [0.646,0.410],[0.645,0.417],[0.643,0.413],
-            [0.637,0.344],[0.637,0.340],[0.631,0.288],
-            [0.623,0.253],[0.619,0.236],
+            [0.645, 0.299],
+            [0.646, 0.309],
+            [0.648, 0.319],
+            [0.648, 0.333],
+            [0.646, 0.347],
+            [0.646, 0.361],
+            [0.646, 0.375],
+            [0.646, 0.385],
+            [0.645, 0.389],
+            [0.646, 0.410],
+            [0.645, 0.417],
+            [0.643, 0.413],
+            [0.637, 0.344],
+            [0.637, 0.340],
+            [0.631, 0.288],
+            [0.623, 0.253],
+            [0.619, 0.236],
         ];
-        let frames = pts.iter().enumerate().map(|(i,&p)| TouchFrame{
-            frame_index:1194+i as u64,
-            players:vec![TouchPlayer{
-                track_id:17,score:0.50,touch_probability:None,
-                bbox_xyxy_norm:[0.629,0.419,0.664,0.539],
-            }],
-            selected_ball:Some(TouchBall{
-                source_model:"vballnet".into(),score:0.65,
-                bbox_xyxy_norm:[p[0]-0.005,p[1]-0.006,p[0]+0.005,p[1]+0.006],
-            }),
-        }).collect::<Vec<_>>();
-        let proposed=detect_observed_vertical_rebounds(&frames,1280.0,720.0);
-        assert!(proposed.iter().any(|item| (9..=12).contains(&item.frame)
-            && item.track_id==17), "40.1s rebound must be kept: {proposed:?}");
+        let frames = pts
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| TouchFrame {
+                frame_index: 1194 + i as u64,
+                players: vec![TouchPlayer {
+                    track_id: 17,
+                    score: 0.50,
+                    touch_probability: None,
+                    bbox_xyxy_norm: [0.629, 0.419, 0.664, 0.539],
+                }],
+                selected_ball: Some(TouchBall {
+                    source_model: "vballnet".into(),
+                    score: 0.65,
+                    bbox_xyxy_norm: [p[0] - 0.005, p[1] - 0.006, p[0] + 0.005, p[1] + 0.006],
+                }),
+            })
+            .collect::<Vec<_>>();
+        let proposed = detect_observed_vertical_rebounds(&frames, 1280.0, 720.0);
+        assert!(
+            proposed
+                .iter()
+                .any(|item| (9..=12).contains(&item.frame) && item.track_id == 17),
+            "40.1s rebound must be kept: {proposed:?}"
+        );
     }
 
     #[test]
     fn rebound_at_36s_is_not_lost_and_27s_ground_settling_is_not_rebound() {
         let points = [
-            [0.445,0.354], [0.447,0.372], [0.447,0.385],
-            [0.453,0.403], [0.455,0.427], [0.459,0.451],
-            [0.459,0.476], [0.463,0.507], [0.465,0.535],
-            [0.467,0.566], [0.469,0.597], [0.475,0.635],
-            [0.477,0.681], [0.475,0.677], [0.473,0.653],
-            [0.465,0.569], [0.461,0.569], [0.461,0.528],
-            [0.453,0.500], [0.447,0.462], [0.443,0.434],
+            [0.445, 0.354],
+            [0.447, 0.372],
+            [0.447, 0.385],
+            [0.453, 0.403],
+            [0.455, 0.427],
+            [0.459, 0.451],
+            [0.459, 0.476],
+            [0.463, 0.507],
+            [0.465, 0.535],
+            [0.467, 0.566],
+            [0.469, 0.597],
+            [0.475, 0.635],
+            [0.477, 0.681],
+            [0.475, 0.677],
+            [0.473, 0.653],
+            [0.465, 0.569],
+            [0.461, 0.569],
+            [0.461, 0.528],
+            [0.453, 0.500],
+            [0.447, 0.462],
+            [0.443, 0.434],
         ];
-        let frames: Vec<TouchFrame> = points.iter().enumerate().map(|(i, &p)| TouchFrame {
-            frame_index: 1068 + i as u64,
-            players: (i >= 11).then_some(TouchPlayer {
-                track_id: 15, score: 0.65, touch_probability: None,
-                bbox_xyxy_norm: [0.409, 0.679, 0.492, 0.891],
-            }).into_iter().collect(),
-            selected_ball: Some(TouchBall {
-                source_model: "vballnet".into(), score: 0.62,
-                bbox_xyxy_norm: [p[0]-0.005,p[1]-0.006,p[0]+0.005,p[1]+0.006],
-            }),
-        }).collect();
-        let found = detect_observed_vertical_rebounds(&frames,1280.0,720.0);
-        assert!(found.iter().any(|v| (11..=14).contains(&v.frame)
-            && v.track_id==15), "upper-body reversal at 36s must be proposed: {found:?}");
+        let frames: Vec<TouchFrame> = points
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| TouchFrame {
+                frame_index: 1068 + i as u64,
+                players: (i >= 11)
+                    .then_some(TouchPlayer {
+                        track_id: 15,
+                        score: 0.65,
+                        touch_probability: None,
+                        bbox_xyxy_norm: [0.409, 0.679, 0.492, 0.891],
+                    })
+                    .into_iter()
+                    .collect(),
+                selected_ball: Some(TouchBall {
+                    source_model: "vballnet".into(),
+                    score: 0.62,
+                    bbox_xyxy_norm: [p[0] - 0.005, p[1] - 0.006, p[0] + 0.005, p[1] + 0.006],
+                }),
+            })
+            .collect();
+        let found = detect_observed_vertical_rebounds(&frames, 1280.0, 720.0);
+        assert!(
+            found
+                .iter()
+                .any(|v| (11..=14).contains(&v.frame) && v.track_id == 15),
+            "upper-body reversal at 36s must be proposed: {found:?}"
+        );
         let mut no_player = frames.clone();
-        for row in &mut no_player { row.players.clear(); }
-        assert!(detect_observed_vertical_rebounds(&no_player,1280.0,720.0).is_empty());
+        for row in &mut no_player {
+            row.players.clear();
+        }
+        assert!(detect_observed_vertical_rebounds(&no_player, 1280.0, 720.0).is_empty());
         let floor = [
-            [0.326,0.698],[0.330,0.722],[0.332,0.740],[0.334,0.764],
-            [0.340,0.774],[0.344,0.785],[0.344,0.778],[0.344,0.778],
-            [0.348,0.788],[0.352,0.792],
-        ].into_iter().enumerate().map(|(i,p)| TouchFrame {
+            [0.326, 0.698],
+            [0.330, 0.722],
+            [0.332, 0.740],
+            [0.334, 0.764],
+            [0.340, 0.774],
+            [0.344, 0.785],
+            [0.344, 0.778],
+            [0.344, 0.778],
+            [0.348, 0.788],
+            [0.352, 0.792],
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| TouchFrame {
             frame_index: 813 + i as u64,
             players: vec![TouchPlayer {
-                track_id:15,score:0.72,touch_probability:None,
-                bbox_xyxy_norm:[0.35,0.568,0.422,0.793],
+                track_id: 15,
+                score: 0.72,
+                touch_probability: None,
+                bbox_xyxy_norm: [0.35, 0.568, 0.422, 0.793],
             }],
-            selected_ball:Some(TouchBall {
-                source_model:"vballnet".into(),score:0.62,
-                bbox_xyxy_norm:[p[0]-0.005,p[1]-0.006,p[0]+0.005,p[1]+0.006],
+            selected_ball: Some(TouchBall {
+                source_model: "vballnet".into(),
+                score: 0.62,
+                bbox_xyxy_norm: [p[0] - 0.005, p[1] - 0.006, p[0] + 0.005, p[1] + 0.006],
             }),
-        }).collect::<Vec<_>>();
-        assert!(detect_observed_vertical_rebounds(&floor,1280.0,720.0).is_empty());
-        assert!(settled_ball_after(&floor,3,1280.0,720.0));
-        assert!(settled_ball_after(&floor,4,1280.0,720.0));
+        })
+        .collect::<Vec<_>>();
+        assert!(detect_observed_vertical_rebounds(&floor, 1280.0, 720.0).is_empty());
+        assert!(settled_ball_after(&floor, 3, 1280.0, 720.0));
+        assert!(settled_ball_after(&floor, 4, 1280.0, 720.0));
     }
 
     fn flight_at_13_seconds(with_rebound: bool) -> Vec<TouchFrame> {

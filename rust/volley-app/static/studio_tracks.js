@@ -252,7 +252,11 @@
     if(state.loadingKey===loadingKey)return;
     if(project&&state.project===project&&state.replay&&state.tracksLoaded&&
       (selected?state.rallyRun===selected:state.fallback)){
+      // Names/automatic links may have changed on the server without a new CPU
+      // version (e.g. after a ReID review). Re-entering Players or pressing
+      // Refresh must read the current revision, not keep a stale photo gallery.
       void loadLibraryRoster();
+      await loadPage({preserveCards:true});
       return;
     }
     reset();state.project=project;state.video="";state.replay="";
@@ -376,7 +380,13 @@
       const savedMatches=result.automatic_identity_matches;
       state.playerMatches=savedMatches&&typeof savedMatches==="object"&&!Array.isArray(savedMatches)?
         savedMatches:{};
+      const previousRevision=state.revision;
       state.revision=String(result.revision||"absent");
+      if(previousRevision!=="absent"&&previousRevision!==state.revision){
+        window.dispatchEvent(new CustomEvent("volley:track-assignments-updated",{
+          detail:{project_id:project,video,replay_id:replay}
+        }));
+      }
       if(state.sourceSha&&state.sourceSha!==String(result.source_replay_sha256)){
         state.groupRevision=null;state.groupLoaded=false;
         state.groups=[];state.grouped.clear();state.playerMatches={};
@@ -530,7 +540,18 @@
       media.append(portrait(id),check);
       const info=node("div","track-card-content");
       const heading=node("div","track-card-title");
-      heading.append(node("strong","","ID "+id),
+      const idLabel=node("span","track-id-label");
+      idLabel.append(node("strong","","ID "+id));
+      // The initial portrait comes from the best measured frame of this Track ID.
+      // Show that video's timestamp only for IDs awaiting assignment.
+      if(!row.assigned_player_id&&!row.excluded&&
+          Number.isSafeInteger(row.best_frame)&&row.best_frame>=0){
+        const seconds=(row.best_frame/30).toFixed(1).replace(".",",")+"с";
+        const time=node("span","track-time-mark",seconds);
+        time.title="Момент кадра на фото";
+        idLabel.append(time);
+      }
+      heading.append(idLabel,
         node("span","track-owner"+(row.assigned_player_name?" assigned":""),
           row.excluded?"Исключён":row.assigned_player_name?(row.assigned_player_name+(row.identity_source==="automatic_photo"?" · авто":"")):row.identity_conflict?"Конфликт одновременной видимости":"Не привязан"));
       const meta=node("small","track-card-observations",
@@ -865,8 +886,8 @@
     state.selected.clear();updateUnassignedLabel();void loadPage();
   });  viewBar.append(viewBack);
   viewBar.append(conflictToggle);
-  modeSwitch.append(groupingControls,viewLabel);
-  ui.list.before(viewBar);
+  // Keep the ID modes and conflict/unassigned filter on one toolbar row.
+  modeSwitch.append(viewBar,groupingControls,viewLabel);
   ui.list.before(modeSwitch);
   ui.list.before(playerGallery);
   setMode("singles");

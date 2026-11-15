@@ -81,6 +81,7 @@ struct ModelEvidence {
     windows: u64,
     decoded_frames: u64,
     source_identity: Value,
+    person_sampling_period_frames: u64,
 }
 
 fn open_evidence(
@@ -131,6 +132,10 @@ fn open_evidence(
         windows,
         decoded_frames: decoded,
         source_identity: manifest["source_identity"].clone(),
+        person_sampling_period_frames: manifest["person_sampling_period_frames"]
+            .as_u64()
+            .filter(|n| (1..=30).contains(n))
+            .unwrap_or(1),
     })
 }
 
@@ -366,6 +371,7 @@ pub(crate) fn do_fusion(state: &AppState, request: &FuseRequest) -> Result<Value
             "decoded_frames":ball.decoded_frames,
             "emitted_frames":totals.frames,
             "player_proposals":totals.players,
+            "player_sampling_period_frames":ravel.person_sampling_period_frames,
             "ball_candidates":totals.ball_candidates,
             "selected_ball_vballnet":totals.selected_vball,
             "ball_policy":"vballnet_only",
@@ -490,6 +496,7 @@ mod tests {
             windows: 2,
             decoded_frames: 18,
             source_identity: manifest["source_identity"].clone(),
+            person_sampling_period_frames: 1,
         }
     }
     #[test]

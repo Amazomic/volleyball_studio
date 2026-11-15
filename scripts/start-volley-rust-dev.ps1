@@ -7,7 +7,7 @@ Default port 8875 keeps this Studio separate from other services.
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet("Start","Status","Stop","Restart","Doctor","Check")]
+    [ValidateSet("Start","Detach","Status","Stop","Restart","Doctor","Check")]
     [string]$Action="Start",
     [string]$Distro="Ubuntu-25.04",
     [string]$Bind="127.0.0.1:8875",

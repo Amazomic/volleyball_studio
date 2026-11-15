@@ -7,7 +7,27 @@ struct PhotoInput {
     video: String,
     replay_id: String,
     track_id: u64,
+    image_sha256: String,
     bytes: Vec<u8>,
+}
+
+fn exclude_cross_athlete_reference_collisions(photos: &mut Vec<PhotoInput>) {
+    let mut owners = BTreeMap::<String, Option<String>>::new();
+    for photo in photos.iter() {
+        owners
+            .entry(photo.image_sha256.clone())
+            .and_modify(|owner| {
+                if owner.as_deref() != Some(photo.player_id.as_str()) {
+                    *owner = None;
+                }
+            })
+            .or_insert_with(|| Some(photo.player_id.clone()));
+    }
+    photos.retain(|photo| {
+        owners
+            .get(&photo.image_sha256)
+            .is_some_and(|owner| owner.as_deref() == Some(photo.player_id.as_str()))
+    });
 }
 
 pub(super) struct Snapshot {
@@ -46,11 +66,10 @@ pub(super) fn snapshot(state: &AppState, req: &ReidReviewRequest) -> Result<Snap
         .iter()
         .filter_map(Value::as_u64)
         .collect::<BTreeSet<_>>();
-    let rebuild = req.action == "auto_assign";
     let eligible = ctx
         .tracks
         .keys()
-        .filter(|id| (rebuild || !assigned.contains_key(&id.to_string())) && (rebuild || !excluded.contains(id)))
+        .filter(|id| !assigned.contains_key(&id.to_string()) && !excluded.contains(id))
         .collect::<Vec<_>>();
     if eligible.len() > 1024 {
         return Err(storage::bad_request(
@@ -117,12 +136,12 @@ pub(super) fn snapshot(state: &AppState, req: &ReidReviewRequest) -> Result<Snap
                 track_id: row["track_id"]
                     .as_u64()
                     .ok_or_else(|| storage::bad_request("Invalid reference track"))?,
+                image_sha256: sha.to_owned(),
                 bytes,
             });
         }
     }
-    // An empty album means there are no identity references yet, not a CPU
-    // postprocessing failure. Preserve the analysis and report zero matches.
+    exclude_cross_athlete_reference_collisions(&mut photos);
     Ok(Snapshot {
         ctx,
         identity,
@@ -183,6 +202,100 @@ async fn decode(bytes: &[u8]) -> Result<Vec<f32>, ApiError> {
     volley_inference::reid_openvino::bgr24_to_nchw(&result.stdout).map_err(storage::bad_request)
 }
 
+/// Only a competition for the same athlete needs the extra video crops:
+/// independent tracklets in different rallies already have one clear owner.
+pub(super) fn contested_photo_tracks(ctx: &Inputs, matches: &Value) -> BTreeSet<u64> {
+    let mut owner_tracks = BTreeMap::<&str, Vec<u64>>::new();
+    for (id, proposals) in matches.as_object().into_iter().flat_map(|m| m.iter()) {
+        let (Ok(track), Some(owner)) = (
+            id.parse::<u64>(),
+            proposals
+                .as_array()
+                .and_then(|rows| rows.first())
+                .and_then(|row| row["player_id"].as_str()),
+        ) else {
+            continue;
+        };
+        if ctx.tracks.contains_key(&track) {
+            owner_tracks.entry(owner).or_default().push(track);
+        }
+    }
+    let mut contested = BTreeSet::new();
+    for group in owner_tracks.values() {
+        for (index, id) in group.iter().enumerate() {
+            for other in group.iter().skip(index + 1) {
+                if tracks_co_visible(&ctx.tracks[id], &ctx.tracks[other]) {
+                    contested.insert(*id);
+                    contested.insert(*other);
+                }
+            }
+        }
+    }
+    contested
+}
+
+/// Choose an independently measured crop well away from the best photo.
+/// The index only stores measured (never interpolated) samples inside rallies.
+fn independent_photo_sample(track: &Aggregate) -> Option<&PhotoSample> {
+    track
+        .photo_samples
+        .iter()
+        .filter(|sample| sample.frame.abs_diff(track.best_frame) >= 60)
+        .max_by_key(|sample| sample.frame.abs_diff(track.best_frame))
+}
+
+async fn decode_track_crop(
+    video: &Path,
+    frame: u64,
+    [x, y, w, h]: [u32; 4],
+) -> Result<Vec<f32>, ApiError> {
+    let sec = format!("{:.6}", frame as f64 / 30.0);
+    let filter = format!(
+        "crop={w}:{h}:{x}:{y},scale={}:{}:flags=bilinear,format=bgr24",
+        volley_inference::reid_openvino::WIDTH,
+        volley_inference::reid_openvino::HEIGHT
+    );
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(35),
+        tokio::process::Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                &sec,
+                "-i",
+            ])
+            .arg(video)
+            .args([
+                "-vf",
+                &filter,
+                "-frames:v",
+                "1",
+                "-an",
+                "-pix_fmt",
+                "bgr24",
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| storage::bad_request("Independent Track ID photo timed out"))?
+    .map_err(|e| storage::bad_request(format!("FFmpeg independent Track ID photo: {e}")))?;
+    if !output.status.success()
+        || output.stdout.len() != volley_inference::reid_openvino::PIXELS * 3
+    {
+        return Err(storage::bad_request(
+            "Independent Track ID photo could not be decoded",
+        ));
+    }
+    volley_inference::reid_openvino::bgr24_to_nchw(&output.stdout).map_err(storage::bad_request)
+}
+
 pub(super) async fn compare(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -223,8 +336,7 @@ pub(super) async fn compare(
         .ctx
         .tracks
         .keys()
-        .filter(|id| (req.action == "auto_assign" || !assigned.contains_key(&id.to_string()))
-            && (req.action == "auto_assign" || !excluded.contains(id)))
+        .filter(|id| !assigned.contains_key(&id.to_string()) && !excluded.contains(id))
         .copied()
         .collect::<Vec<_>>();
     if ids.is_empty() {
@@ -323,25 +435,100 @@ pub(super) async fn compare(
             vector,
         })
         .collect::<Vec<_>>();
-    // CPU postprocessing is a complete rebuild: old manual/automatic links
-    // must never suppress photo candidates from the new identity pass.
-    let mut match_identity = snap.identity.clone();
-    if req.action == "auto_assign" {
-        match_identity["assignments"] = json!({});
-        match_identity["excluded_ids"] = json!([]);
-    }
-    let matches = photo_match_candidates(&snap.ctx, &match_identity, &snap.vectors, &refs)
+    let first_pass = photo_match_candidates(&snap.ctx, &snap.identity, &snap.vectors, &refs)
         .map_err(storage::bad_request)?;
+    let contested = contested_photo_tracks(&snap.ctx, &first_pass);
+    let mut independently_verified = BTreeMap::<u64, Vec<f32>>::new();
+    if !contested.is_empty() {
+        let plan = preparation::plan_for(&state, &req.project_id, &req.video)?;
+        let source = plan
+            .ready_path()
+            .ok_or_else(|| storage::bad_request("Prepared Track ID video missing"))?;
+        let video = volley_media::probe(source).map_err(storage::bad_request)?;
+        let mut crops = Vec::<(u64, Vec<f32>)>::new();
+        for id in contested.iter().take(128) {
+            let Some(track) = snap.ctx.tracks.get(id) else {
+                continue;
+            };
+            let Some(sample) = independent_photo_sample(track) else {
+                continue;
+            };
+            let Ok(crop) = crop_box(sample.bbox, video.width, video.height) else {
+                continue;
+            };
+            // Supplemental evidence is best effort: an inaccessible or too
+            // blurry late crop should not abort the entire CPU postprocessing.
+            if let Ok(input) = decode_track_crop(source, sample.frame, crop).await {
+                crops.push((*id, input));
+            }
+        }
+        if !crops.is_empty() {
+            let repo = state.repository_root.clone();
+            let library = std::env::var("VOLLEY_OPENVINO_C_LIB")
+                .map_err(|_| storage::bad_request("Native OpenVINO C runtime is not configured"))?;
+            independently_verified = tokio::task::spawn_blocking(
+                move || -> Result<BTreeMap<u64, Vec<f32>>, ApiError> {
+                    let mut encoder =
+                        volley_inference::reid_openvino::Encoder::load(&repo, Path::new(&library))
+                            .map_err(storage::bad_request)?;
+                    let mut compared = BTreeMap::new();
+                    for (id, input) in crops {
+                        compared.insert(id, encoder.infer(&input).map_err(storage::bad_request)?);
+                    }
+                    Ok(compared)
+                },
+            )
+            .await
+            .map_err(|e| storage::internal(format!("Second ReID crop worker: {e}")))??;
+        }
+    }
+    let matches = if independently_verified.is_empty() {
+        first_pass
+    } else {
+        photo_match_candidates_with_samples(
+            &snap.ctx,
+            &snap.identity,
+            &snap.vectors,
+            &independently_verified,
+            &refs,
+        )
+        .map_err(storage::bad_request)?
+    };
     Ok(
         json!({"schema":"volley-native-player-photo-comparison/1", "project_id":snap.ctx.project_id,
         "replay_id":snap.ctx.replay_id,"source_replay_sha256":snap.ctx.source_sha,
-        "player_matches":matches,"photo_count":refs.len(),"identity_revision":snap.identity_revision,"album_revisions":snap.albums,"model_fingerprint":snap.model,"auto_assign_enabled":false,"confirmed":false}),
+        "player_matches":matches,"photo_count":refs.len(),
+        "independent_photo_checks":independently_verified.len(),
+        "identity_revision":snap.identity_revision,"album_revisions":snap.albums,"model_fingerprint":snap.model,"auto_assign_enabled":false,"confirmed":false}),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_image_shared_by_two_athletes_cannot_identify_either() {
+        let photo = |player_id: &str, sha: &str| PhotoInput {
+            player_id: player_id.to_owned(),
+            project_id: "project".into(),
+            video: "match.mp4".into(),
+            replay_id: "replay".into(),
+            track_id: 1,
+            image_sha256: sha.to_owned(),
+            bytes: vec![],
+        };
+        let mut refs = vec![
+            photo("first", "same"),
+            photo("second", "same"),
+            photo("first", "good-first"),
+            photo("second", "good-second"),
+        ];
+        exclude_cross_athlete_reference_collisions(&mut refs);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].image_sha256, "good-first");
+        assert_eq!(refs[1].image_sha256, "good-second");
+    }
 
     #[tokio::test]
     async fn saved_jpeg_decodes_to_openvino_input() {

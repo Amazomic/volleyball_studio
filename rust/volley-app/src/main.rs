@@ -27,6 +27,7 @@ mod native_preview_pose;
 mod native_rally_marks;
 mod native_rally_preview;
 mod native_reid_cache;
+mod native_report_montage;
 mod playback;
 mod player_catalog;
 mod player_continuity;
@@ -51,6 +52,7 @@ mod studio_pipeline;
 mod studio_restart;
 mod studio_web;
 mod touch_preview;
+mod training_samples;
 mod versioned_store;
 mod video_edits;
 
@@ -110,7 +112,10 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
         .route("/studio/tabs.js", get(studio_web::tabs_js))
         .route("/studio/tracks.js", get(studio_web::tracks_js))
         .route("/studio/stats.js", get(studio_web::stats_js))
-        .route("/studio/highlights.js", get(studio_web::highlights_js))
+        .route(
+            "/studio/montage-builder.js",
+            get(studio_web::montage_builder_js),
+        )
         .route("/studio/quick-reel.js", get(studio_web::quick_reel_js))
         .route("/studio/selection.wasm", get(studio_web::selection_wasm))
         .route("/studio/app.css", get(studio_web::css))
@@ -162,12 +167,20 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
         )
         .route("/api/video-info", get(catalog::get_video_info))
         .route("/api/project-source/lookup", get(project_upload::lookup))
+        .route(
+            "/api/project-source/native-pick",
+            post(projects::native_pick),
+        )
         .route("/api/video-source", get(playback::video_source))
         .route(
             "/api/video-edit",
             get(video_edits::get).post(video_edits::set),
         )
         .route("/api/video-court/detect", post(court_detection::detect))
+        .route(
+            "/api/training/examples",
+            get(training_samples::list).post(training_samples::edit),
+        )
         .route("/api/video-view", get(playback::video_view))
         .route("/api/video-media", get(playback::video_media))
         .route("/api/video-preview", get(playback::video_preview))
@@ -176,8 +189,11 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
         .route("/api/analysis-history", get(history::get_history))
         .route("/api/analysis-runs", get(analysis_runs::get_runs))
         .route("/api/players/library", get(catalog::get_library))
-        .route("/api/players/library/native", post(player_catalog::edit))
-        .route("/api/players/native/tracks/reset-project", post(native_player_tracks::reset_project))
+        .route("/api/players/library/native", post(player_catalog::edit))
+        .route(
+            "/api/players/native/tracks/reset-project",
+            post(native_player_tracks::reset_project),
+        )
         .route(
             "/api/players/native/tracks",
             get(native_player_tracks::read).post(native_player_tracks::edit),
@@ -193,6 +209,10 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
         .route(
             "/api/montage/native/player-highlights",
             post(native_player_highlights::highlights),
+        )
+        .route(
+            "/api/montage/native/game-report",
+            post(native_report_montage::report),
         )
         .route(
             "/api/players/native/statistics",
@@ -443,6 +463,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     analysis_management::recover_projects(&state).map_err(|(_, message)| {
         io::Error::other(format!("Analysis recovery failed: {}", message.0))
     })?;
+    if state.writes_enabled {
+        let cleanup_state = state.clone();
+        tokio::task::spawn_blocking(move || {
+            projects::cleanup_orphaned_deletions(&cleanup_state);
+            analysis_management::cleanup_orphaned_deletions(&cleanup_state);
+        });
+    }
     println!(
         "Volleyball Studio (development, INCOMPLETE): http://{addr}/internal/rewrite-status (isolated writes={writes_enabled})"
     );

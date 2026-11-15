@@ -260,7 +260,11 @@ async fn quick_montage(
             audio_volume: 40.0,
             encoder: Some("auto".into()),
             layout: VideoLayout::Vertical,
+            target_duration_sec: None,
+            camera_zoom: 1.25,
+            camera_tracks: None,
             verified_highlights: None,
+            report_outro: None,
         }),
     )
     .await

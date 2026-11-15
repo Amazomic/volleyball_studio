@@ -78,12 +78,13 @@ pub async fn player_labels(
     let result = tokio::task::spawn_blocking(move || {
         let run =
             native_rally_preview::inspect_project(&state, &query.project_id, &query.rally_run_id)?;
-        let (source_sha, assignment_revision, names) = native_player_tracks::display_player_names(
-            &state,
-            &run.project_id,
-            &run.video,
-            &run.replay_id,
-        )?;
+        let (source_sha, assignment_revision, names, manual_track_ids) =
+            native_player_tracks::display_player_names(
+                &state,
+                &run.project_id,
+                &run.video,
+                &run.replay_id,
+            )?;
         if source_sha != run.replay_sha {
             return Err(storage::bad_request(
                 "Player links do not belong to the selected CPU replay",
@@ -98,6 +99,7 @@ pub async fn player_labels(
             "source_replay_sha256":run.replay_sha,
             "assignment_revision":assignment_revision,
             "names":names,
+            "manual_track_ids":manual_track_ids,
             "identity_source":"manual_and_automatic"
         }))
     })
@@ -351,6 +353,57 @@ fn box_norm(value: &Value) -> Option<[f64; 4]> {
     Some(bb)
 }
 
+// Rendering must never show a visual-only interpolated ID over a measured
+// player. Photo/identity review deliberately excludes interpolated evidence,
+// so drawing a competing inferred ID creates apparent identity swaps in video.
+fn overlay_players(frame: &Value) -> Vec<Value> {
+    let inferred = frame["interpolated_track_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64)
+        .collect::<std::collections::BTreeSet<_>>();
+    let players = frame["tracked_players"].as_array();
+    let observed_boxes = players
+        .into_iter()
+        .flatten()
+        .filter(|p| {
+            p["track_id"]
+                .as_u64()
+                .is_some_and(|id| !inferred.contains(&id))
+        })
+        .filter_map(|p| box_norm(&p["detection"]["bbox_xyxy_norm"]))
+        .collect::<Vec<_>>();
+    let clashes = |a: [f64; 4], b: [f64; 4]| {
+        let intersection =
+            (a[2].min(b[2]) - a[0].max(b[0])).max(0.0) * (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+        let area = |v: [f64; 4]| (v[2] - v[0]) * (v[3] - v[1]);
+        let iou = intersection / (area(a) + area(b) - intersection).max(1e-12);
+        let center_distance = (((a[0] + a[2] - b[0] - b[2]) * 0.5).powi(2)
+            + ((a[1] + a[3] - b[1] - b[3]) * 0.5).powi(2))
+        .sqrt();
+        iou > 0.20 || center_distance < 0.045
+    };
+    players
+        .into_iter()
+        .flatten()
+        .take(128)
+        .filter_map(|p| {
+            let id = p["track_id"].as_u64().filter(|id| *id > 0)?;
+            if p["is_verified_athlete"] != false {
+                return None;
+            }
+            let bb = box_norm(&p["detection"]["bbox_xyxy_norm"])?;
+            if inferred.contains(&id)
+                && observed_boxes.iter().any(|measured| clashes(bb, *measured))
+            {
+                return None;
+            }
+            Some(json!({"id":id,"box":bb}))
+        })
+        .collect()
+}
+
 fn raw_frame(
     frame: &Value,
     ball_threshold: u8,
@@ -484,20 +537,7 @@ fn extract_frames(
             .filter(|score| score.is_finite() && *score >= min_ball_score)
             .and_then(|_| box_norm(&frame["selected_ball"]["detection"]["bbox_xyxy_norm"]))
             .map(|bb| json!([(bb[0] + bb[2]) * 0.5, (bb[1] + bb[3]) * 0.5]));
-        let players = frame["tracked_players"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .take(128)
-            .filter_map(|p| {
-                let id = p["track_id"].as_u64().filter(|id| *id > 0)?;
-                if p["is_verified_athlete"] != false {
-                    return None;
-                }
-                let bb = box_norm(&p["detection"]["bbox_xyxy_norm"])?;
-                Some(json!({"id":id,"box":bb}))
-            })
-            .collect::<Vec<_>>();
+        let players = overlay_players(&frame);
         let raw = raw_thresholds
             .map(|(ball, ravel, player, touch)| raw_frame(&frame, ball, ravel, player, touch));
         output.push(json!({
@@ -650,7 +690,14 @@ pub async fn get(
             raw_thresholds,
         )?;
         let poses_available = if let Some(fusion) = fusion_for_pose {
-            native_preview_pose::enrich(&pose_root, &fusion, start, end, &mut frames)?
+            native_preview_pose::processed_window(
+                &pose_root,
+                &fusion,
+                total,
+                start,
+                end,
+                &mut frames,
+            )?
         } else {
             false
         };
@@ -671,6 +718,33 @@ pub async fn get(
         "poses_available":poses_available,
         "touches_verified":false,"athlete_identities_verified":false,
     })))
+}
+
+/// Source-verified single frame used by the human training library.
+/// Reuses the exact same index and pose provenance as the user preview.
+pub(crate) async fn training_frame(
+    state: Arc<AppState>,
+    project_id: &str,
+    rally_run_id: &str,
+    frame: u64,
+) -> Result<Value, storage::ApiError> {
+    let Json(overlay) = get(
+        State(state),
+        Query(OverlayQuery {
+            project_id: project_id.to_owned(),
+            rally_run_id: rally_run_id.to_owned(),
+            start_frame: frame.saturating_sub(6),
+            count: 13,
+            raw: None,
+            pose: Some(true),
+            ball_confidence: None,
+            ravel_ball_confidence: None,
+            player_confidence: None,
+            touch_confidence: None,
+        }),
+    )
+    .await?;
+    Ok(overlay)
 }
 
 /// Independent immutable GPU view: the selected fusion is authoritative, not any CPU replay.
@@ -1130,6 +1204,32 @@ mod tests {
         assert!((frames[0]["ball"][0].as_f64().unwrap() - 0.25).abs() < 1e-12);
         assert!((frames[1]["ball"][0].as_f64().unwrap() - 0.35).abs() < 1e-12);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inferred_player_labels_never_cover_a_different_measured_player() {
+        let frame = json!({
+            "interpolated_track_ids":[2,3],
+            "tracked_players":[
+                {"track_id":1,"is_verified_athlete":false,
+                    "detection":{"bbox_xyxy_norm":[0.40,0.30,0.48,0.64]}},
+                {"track_id":2,"is_verified_athlete":false,
+                    "detection":{"bbox_xyxy_norm":[0.415,0.32,0.485,0.63]}},
+                {"track_id":3,"is_verified_athlete":false,
+                    "detection":{"bbox_xyxy_norm":[0.72,0.27,0.79,0.63]}}
+            ]
+        });
+        let players = overlay_players(&frame);
+        assert_eq!(players.len(), 2);
+        assert_eq!(players[0]["id"], 1, "measured player retains its ID");
+        assert_eq!(
+            players[1]["id"], 3,
+            "independent visual interpolation remains visible"
+        );
+        assert!(
+            !players.iter().any(|player| player["id"] == 2),
+            "ghost player may not put a second identity over a measured body"
+        );
     }
 
     #[test]

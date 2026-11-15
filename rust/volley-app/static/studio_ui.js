@@ -8,32 +8,49 @@
   const prefersReducedMotion=window.matchMedia("(prefers-reduced-motion: reduce)");
   const activeTasks=new Set();
   let pending=0,frame=0,hiddenTimer=null,lastTime=0,angle=0,speed=0,lastIconTime=0;
+  // The browser tab repaints favicons independently of the page compositor.
+  // Cache small, quantized PNG frames rather than encoding a new PNG every tick.
+  const iconSize=48,iconStepDegrees=2,iconFrameCount=360/iconStepDegrees;
+  const iconFrameIntervalMs=45;
+  const iconFrames=new Map();
+  let lastIconFrame=-1;
   const canvas=favicon?document.createElement("canvas"):null;
-  if(canvas){canvas.width=64;canvas.height=64;}
+  if(canvas){canvas.width=iconSize;canvas.height=iconSize;}
   const ctx=canvas?.getContext?.("2d");
+  if(ctx)ctx.imageSmoothingQuality="high";
   let iconImage=null;
   const motionAllowed=()=>!prefersReducedMotion.matches &&
     document.body.dataset.uiMotion!=="reduce";
   const working=()=>pending>0||activeTasks.size>0;
 
   function paintFavicon(time,force=false){
-    if(!favicon||!ctx||!iconImage||(!force&&time-lastIconTime<32))return;
+    if(!favicon||!ctx||!iconImage||
+      (!force&&time-lastIconTime<iconFrameIntervalMs))return;
+    const iconFrame=Math.round(angle/iconStepDegrees)%iconFrameCount;
+    if(iconFrame===lastIconFrame)return;
     try{
-      ctx.clearRect(0,0,64,64);
-      ctx.save();
-      ctx.translate(32,32);
-      ctx.rotate(angle*Math.PI/180);
-      ctx.drawImage(iconImage,-32,-32,64,64);
-      ctx.restore();
-      favicon.href=canvas.toDataURL("image/png");
+      let imageUrl=iconFrames.get(iconFrame);
+      if(!imageUrl){
+        ctx.clearRect(0,0,iconSize,iconSize);
+        ctx.save();
+        ctx.translate(iconSize/2,iconSize/2);
+        ctx.rotate(iconFrame*iconStepDegrees*Math.PI/180);
+        ctx.drawImage(iconImage,-iconSize/2,-iconSize/2,iconSize,iconSize);
+        ctx.restore();
+        imageUrl=canvas.toDataURL("image/png");
+        iconFrames.set(iconFrame,imageUrl);
+      }
+      favicon.href=imageUrl;
+      lastIconFrame=iconFrame;
       lastIconTime=time;
-    }catch{/* Keep the original SVG favicon when canvas is unavailable. */}
+    }catch{/* Preserve the last working icon if the canvas cannot encode. */}
   }
   if(ctx&&typeof Image==="function"){
     const image=new Image();
     image.onload=()=>{
       iconImage=image;
-      if(working())paintFavicon(performance.now(),true);
+      // The first frame replaces the initial PNG without waiting for a task.
+      paintFavicon(performance.now(),true);
     };
     image.src=ball.currentSrc||ball.src||"/studio/volleyball-photo.png";
   }

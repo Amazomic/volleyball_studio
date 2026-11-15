@@ -27,7 +27,7 @@
     pipelineId:"",pipelineProject:"",pipelineTimer:null,
     starting:false,stopRequested:false,polling:false,pollErrors:0,completedId:"",
     logKey:"",logOffset:0,logBusy:false,logLastCall:"",logPending:null,
-    historyRows:[],historyFilter:"all",historyEpoch:0,historyOffset:0,
+    historyRows:[],historyFilter:"all",historyEpoch:0,historyOffset:0,latestPipeline:null,
     revision:"absent",players:[],mutating:false,playersLoaded:false,
     projectMemberIds:new Set(),trackCoverScope:"",trackCovers:new Map(),playerTrackCounts:null
   };
@@ -396,43 +396,151 @@
       return true;
     }catch(error){output.textContent="Не удалось загрузить журнал: "+String(error.message||error);return false;}
   };
+  const liveHistory=()=>{
+    const status=state.latestPipeline;
+    return status&&status.project_id===projectId()&&status.id&&status.status!=="idle"?status:null;
+  };
+  const liveHistoryLine=status=>{
+    const pct=Number(status.progress_percent);
+    return String(status.stage||"Обработка")+" · "+
+      (Number.isFinite(pct)?Math.max(0,Math.min(pct,100)).toFixed(1)+"%":"—");
+  };
+  const historyClock=status=>{
+    const moving=["queued","running","cancelling"].includes(status.status);
+    const since=Math.max(0,Date.now()-(state.historyStatusAt||Date.now()));
+    const base=status.elapsed_ms==null?NaN:Number(status.elapsed_ms);
+    const elapsed=Number.isFinite(base)?base+(moving?since:0):null;
+    const remaining=Number(status.remaining_ms);
+    return {elapsed,remaining:moving&&status.remaining_ms!=null&&
+      Number.isFinite(remaining)?Math.max(0,remaining-since):null};
+  };
+  const historyTimeLine=(row,current)=>{
+    if(!current)return Number.isFinite(row.duration_ms)?
+      "Всего · "+historyDuration(row.duration_ms):"";
+    const clock=historyClock(current);
+    if(current.status==="queued")return "Ожидает запуска";
+    const prefix=current.status==="complete"?"Завершён":
+      current.status==="failed"?"Ошибка":
+      current.status==="cancelled"?"Отменён":
+      current.status==="interrupted"?"Прерван":"Выполняется";
+    return clock.elapsed==null?"Время выполнения уточняется":
+      prefix+" · "+historyDuration(clock.elapsed);
+  };
+  const historyEtaLine=current=>{
+    if(!current||!["running","queued","cancelling"].includes(current.status))return "";
+    if(current.status==="queued")return "Ожидание очереди";
+    const eta=historyClock(current).remaining;
+    return eta==null?"Осталось: рассчитывается":"Осталось ≈ "+historyDuration(eta);
+  };
+  const renderStageTimeline=(target,row,current)=>{
+    clear(target);
+    const stages=(Array.isArray(current?.stages)&&current.stages.length)?
+      current.stages:(Array.isArray(row?.stages)?row.stages:[]);
+    if(!stages.length){
+      target.append(make("div","analysis-history-no-stages",
+        current?"Стадии появятся после запуска.":"Данные о стадиях отсутствуют."));
+      return;
+    }
+    const now=Date.now();
+    for(const entry of stages){
+      const live=!!current&&["running","cancelling"].includes(current.status)&&
+        entry.finished_ms==null;
+      const started=entry.started_ms==null?NaN:Number(entry.started_ms);
+      const elapsed=live&&Number.isFinite(started)?Math.max(0,now-started):
+        entry.duration_ms==null?null:Number(entry.duration_ms);
+      const stateLabel=live?"В процессе":entry.duration_ms==null?"Без времени":"Готово";
+      const line=make("div","analysis-history-stage"+(live?" is-running":""));
+      line.append(make("span","analysis-history-stage-mark",live?"●":"✓"),
+        make("span","analysis-history-stage-name",String(entry.name||"Стадия")),
+        make("span","analysis-history-stage-state",stateLabel),
+        make("span","analysis-history-stage-duration",historyDuration(elapsed)));
+      target.append(line);
+    }
+  };
   const renderHistory=()=>{
+    // Preserve the existing streaming log/progress nodes when history is refreshed.
+    $("studio-analysis-live-host").append(ui.progress,ui.logPanel);
     clear(ui.historyList);
+    const latest=liveHistory();
+    const active=latest&&["queued","running","cancelling"].includes(latest.status);
     const rows=state.historyRows.filter(row=>state.historyFilter==="all"||
-      row.mode===state.historyFilter||!row.mode||row.mode==="full");
-    if(!rows.length){ui.historyList.textContent=state.historyRows.length?"На загруженных страницах запусков нет.":"Запусков пока нет.";return;}
+      row.mode===state.historyFilter||!row.mode||row.mode==="full"||
+      (active&&row.id===latest.id));
+    // The status endpoint can observe a new job before the history endpoint lists it.
+    if(active&&!rows.some(row=>row.id===latest.id)){
+      rows.unshift({id:latest.id,mode:latest.mode,video:latest.video,
+        status:latest.status,stage:latest.stage,stages:[],started_ms:null});
+    }
+    if(!rows.length){ui.historyList.textContent=state.historyRows.length?
+      "На загруженных страницах запусков нет.":"Запусков пока нет.";return;}
     const labels={gpu:"Нейросеть",post:"Постобработка",full:"Полный анализ"};
-    const statuses={queued:"В очереди",running:"Выполняется",complete:"Завершён",failed:"Ошибка",cancelled:"Отменён",interrupted:"Прерван"};
+    const statuses={queued:"В очереди",running:"Выполняется",cancelling:"Останавливается",
+      complete:"Завершён",failed:"Ошибка",cancelled:"Отменён",interrupted:"Прерван"};
     for(const row of rows){
+      const current=latest&&latest.id===row.id?latest:null;
+      const currentStatus=current?.status||row.status;
       const details=make("details","analysis-history-run"),summary=make("summary");
+      details.dataset.runId=row.id;
       summary.append(make("strong","",(labels[row.mode]||labels.full)+" · "+String(row.video||"—")));
       const date=Number.isFinite(row.started_ms)?new Date(row.started_ms).toLocaleString():"Дата недоступна";
-      summary.append(make("span","",date),make("span","",statuses[row.status]||String(row.status||"—")),
-        make("span","",historyDuration(row.duration_ms)));
+      summary.append(make("span","analysis-history-date",date),
+        make("span","analysis-history-status",statuses[currentStatus]||String(currentStatus||"—")),
+        make("span","analysis-history-runtime",historyTimeLine(row,current)));
       if(row.result_reused===true)summary.append(make("span","","Готовый результат"));
       else if(row.gpu_reused===true)summary.append(make("span","","GPU использован повторно"));
+      if(current)summary.append(make("span","analysis-history-live-stage",liveHistoryLine(current)));
+      if(current)summary.append(make("span","analysis-history-eta",historyEtaLine(current)));
       details.append(summary);
       const body=make("div","analysis-history-detail"),stages=make("div","analysis-history-stages");
-      if(Array.isArray(row.stages)&&row.stages.length){
-        for(const stage of row.stages)stages.append(make("span","",String(stage.name||"Этап")+": "+historyDuration(stage.duration_ms)));
-      }else stages.textContent="Длительность этапов для этого запуска недоступна.";
+      renderStageTimeline(stages,row,current);
       body.append(stages);
+      if(current){
+        body.append(ui.progress,ui.logPanel);
+        if(["queued","running","cancelling"].includes(current.status))details.open=true;
+      }else{
+        const log=make("details"),title=make("summary","","Журнал выполнения"),
+          output=make("pre","analysis-run-log-output","Загрузка…");
+        log.append(title,output);body.append(log);
+        let loaded=false;
+        const logProject=projectId();
+        log.addEventListener("toggle",()=>{
+          if(log.open&&!loaded){loaded=true;
+            historyLog(logProject,row.id,output).then(ok=>{if(!ok)loaded=false;});
+          }
+        });
+      }
       if(row.error)body.append(make("p","",String(row.error)));
-      const log=make("details"),title=make("summary","","Журнал выполнения"),output=make("pre","analysis-run-log-output","Загрузка…");
-      log.append(title,output);body.append(log);details.append(body);
-      let loaded=false;
-      log.addEventListener("toggle",()=>{
-        if(log.open&&!loaded){loaded=true;historyLog(projectId(),row.id,output).then(ok=>{if(!ok)loaded=false;});}
-      });
-      ui.historyList.append(details);
+      details.append(body);ui.historyList.append(details);
     }
+  };
+  const updateLiveHistory=status=>{
+    if(status.project_id!==projectId()||!status.id||status.status==="idle")return;
+    state.latestPipeline=status;
+    let item=[...ui.historyList.children].find(node=>node.dataset?.runId===status.id);
+    if(!item){renderHistory();item=[...ui.historyList.children].find(node=>node.dataset?.runId===status.id);}
+    if(!item)return;
+    const statuses={queued:"В очереди",running:"Выполняется",cancelling:"Останавливается",
+      complete:"Завершён",failed:"Ошибка",cancelled:"Отменён",interrupted:"Прерван"};
+    const label=item.querySelector(".analysis-history-status");
+    if(label)label.textContent=statuses[status.status]||String(status.status);
+    const stage=item.querySelector(".analysis-history-live-stage");
+    if(stage)stage.textContent=liveHistoryLine(status);
+    const runtime=item.querySelector(".analysis-history-runtime");
+    if(runtime)runtime.textContent=historyTimeLine(null,status);
+    const eta=item.querySelector(".analysis-history-eta");
+    if(eta)eta.textContent=historyEtaLine(status);
+    const stages=item.querySelector(".analysis-history-stages");
+    if(stages)renderStageTimeline(stages,null,status);
+    if(["queued","running","cancelling"].includes(status.status))item.open=true;
   };
   const loadHistory=async(append=false)=>{
     const project=projectId(),epoch=++state.historyEpoch,offset=append?state.historyOffset:0;
-    if(!append){state.historyRows=[];state.historyOffset=0;}
+    if(!append)state.historyOffset=0;
     ui.historyMore.classList.add("hidden");
     if(!project){ui.historyList.textContent="Выберите проект.";return;}
-    if(!append)ui.historyList.textContent="Загрузка истории…";
+    // Keep the visible live run and its log mounted while refreshing history.
+    if(!append&&!ui.historyList.children.length&&!liveHistory())
+      ui.historyList.textContent="Загрузка истории…";
     try{
       const data=await get("/api/studio/pipeline/history",{project_id:project,offset});
       if(epoch!==state.historyEpoch||project!==projectId())return;
@@ -445,6 +553,7 @@
       renderHistory();
     }catch(error){if(epoch===state.historyEpoch){
       if(append)ui.historyMore.classList.remove("hidden");
+      else if(liveHistory())renderHistory();
       else ui.historyList.textContent="Не удалось загрузить историю: "+String(error.message||error);
     }}
   };
@@ -461,6 +570,12 @@
     finally{ui.historyClear.disabled=false;}
   });
   ui.historyMore.addEventListener("click",()=>loadHistory(true));
+  // Only update the existing current row: do not rebuild it or remount the log.
+  setInterval(()=>{
+    const current=liveHistory();
+    if(current&&["queued","running","cancelling"].includes(current.status))
+      updateLiveHistory(current);
+  },1000);
   for(const button of document.querySelectorAll("[data-history-filter]")){
     button.addEventListener("click",()=>{
       state.historyFilter=button.dataset.historyFilter;
@@ -510,6 +625,8 @@
           analysis_id:status.analysis_id,postprocessing_id:status.postprocessing_id}
       }));
     }
+    state.historyStatusAt=Date.now();
+    updateLiveHistory(status);
     if(!active&&status.id===state.pipelineId){
       stopPipelinePolling();
       state.pipelineId="";state.pipelineProject="";state.stopRequested=false;
@@ -622,12 +739,14 @@
           !/^[a-f0-9]{32}$/.test(String(response.id||"")))
         throw Error("Сервер не подтвердил создание анализа");
       state.pipelineId=response.id;state.pipelineProject=project;
-      loadHistory();
       resetLog();ui.logPanel.open=true;
+      state.latestPipeline=response;
+      renderHistory();
+      loadHistory();
       ui.progress.value=0;state.stopRequested=false;
-      saveMessage(mode==="gpu"?"Запущен отдельный анализ: VballNet → RTMDet + RTMPose → объединение.":
+      saveMessage(mode==="gpu"?"Запущен отдельный анализ: VballNet → RF-DETR Medium + RTMPose → объединение.":
         mode==="post"?"Запущена новая CPU-постобработка выбранного GPU-анализа.":
-        "Запущен полный анализ: VballNet → RTMDet + RTMPose → CPU.");
+        "Запущен полный анализ: VballNet → RF-DETR Medium + RTMPose → CPU.");
       stopPipelinePolling();
       await pollPipeline();
       if(state.pipelineId)state.pipelineTimer=setInterval(pollPipeline,1800);
@@ -863,6 +982,8 @@
     updateProfile();
   });
   ui.project.addEventListener("change",()=>{
+    $("studio-analysis-live-host").append(ui.progress,ui.logPanel);
+    state.latestPipeline=null;
     resetLog();
     state.historyEpoch++;state.historyRows=[];state.historyOffset=0;ui.historyMore.classList.add("hidden");ui.historyList.textContent="Выберите проект.";
     state.analysisGeneration++;

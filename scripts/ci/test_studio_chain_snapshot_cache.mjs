@@ -54,13 +54,13 @@ const s={
   project,projectVideos:[video],chain:null,chainEpoch:0,analysis:"",run:"",generation:0,
   items:[],selected:{clear(){}}
 };
-const ui={analysis:{value:"",disabled:true},run:{value:"",disabled:true}};
+const ui={analysis:{value:"",disabled:true},run:{value:"",disabled:true},video:{currentTime:0}};
 const msgs=[],events=[];
 const saved={project,analysis:restored.choices[0].value,run:rally};
 let resolveRuns,cardsRequested=0,metadataReads=0;
 const metadata=new Promise(resolve=>{resolveRuns=resolve;});
 const context={
-  s,ui,overlay:{raw:false},ensurePreviewVideo(){},
+  s,ui,overlay:{raw:false},ensurePreviewVideo(){},setOverlaySource(){},prefetchOverlayAtFrame(){},fps:()=>30,rawFusion:()=>null,
   window:{VolleyStudioChain:chain,dispatchEvent:e=>events.push(e.type)},
   CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail;}},
   sourceSelection:{save:(p,a,r)=>{saved.project=p;saved.analysis=a;saved.run=r;}},

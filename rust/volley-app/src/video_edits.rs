@@ -118,7 +118,7 @@ pub async fn get(
 
 // Coordinates are normalized against the *image*, not the editing stage.
 // The extra margin permits estimated court corners outside the camera view.
-fn court_is_valid(court: &[[f64; 2]]) -> bool {
+pub(crate) fn court_is_valid(court: &[[f64; 2]]) -> bool {
     court.is_empty()
         || (court.len() == 4
             && court
@@ -146,7 +146,11 @@ pub async fn set(
             .trim_end_sec
             .is_some_and(|end| !end.is_finite() || end <= edit.trim_start_sec)
         || !court_is_valid(&edit.court)
-        || edit.net.is_some_and(|line| line.iter().flatten().any(|v| !v.is_finite() || !(-0.5..=1.5).contains(v)))
+        || edit.net.is_some_and(|line| {
+            line.iter()
+                .flatten()
+                .any(|v| !v.is_finite() || !(-0.5..=1.5).contains(v))
+        })
     {
         return Err(storage::bad_request(
             "Invalid trim interval or court corners",

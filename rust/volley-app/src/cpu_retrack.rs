@@ -30,6 +30,9 @@ const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_ROW_BYTES: usize = 512 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
+mod gap_interpolation;
+mod pose_source;
+mod track_merge;
 
 pub(crate) use volley_core::contracts::job_id as opaque_id;
 pub(crate) fn safe_file(folder: &Path, name: &str, limit: u64) -> Result<PathBuf, String> {
@@ -131,11 +134,14 @@ struct ReplayTotals {
     tentative_tracks: u64,
     unconfirmed_tracks: u64,
     short_track_detections: u64,
+    duplicate_track_ids_merged: u64,
+    pose_detections: u64,
 }
 
 /// Replay once with provisional IDs, then filter complete-video track evidence
 /// before publishing any derived Track IDs. A single streaming pass cannot
 /// retract the first frame of an ID later shown to be a two-frame false positive.
+#[cfg(test)]
 fn replay_frames(
     source: &Path,
     output: &Path,
@@ -146,9 +152,31 @@ fn replay_frames(
     if !(1..=48 * 3600 * 30).contains(&count) {
         return Err("Invalid fused CPU frame count".into());
     }
+    replay_frames_with_pose(source, output, count, config, expected_sha, None)
+}
+
+fn replay_frames_with_pose(
+    source: &Path,
+    output: &Path,
+    count: u64,
+    config: TrackingOptions,
+    expected_sha: &str,
+    pose: Option<&pose_source::Snapshot>,
+) -> Result<(String, ReplayTotals, u64), String> {
+    if !(1..=48 * 3600 * 30).contains(&count) {
+        return Err("Invalid fused CPU frame count".into());
+    }
     let config = config.validate()?;
     let tentative = output.with_extension("unconfirmed");
-    let result = replay_frames_verified(source, &tentative, output, count, config, expected_sha);
+    let result = replay_frames_verified(
+        source,
+        &tentative,
+        output,
+        count,
+        config,
+        expected_sha,
+        pose,
+    );
     // This intermediate output is never exposed as a CPU run, including errors.
     let _ = fs::remove_file(tentative);
     result
@@ -235,6 +263,13 @@ fn fill_confirmed_track_gaps(
                         && aw.max(bw) / aw.min(bw) <= 1.8
                         && ah.max(bh) / ah.min(bh) <= 1.8
                         && drift <= (0.035 + (duration - 1) as f64 * 0.003).min(0.15)
+                        // The missing ID may have been replaced by another
+                        // source-observed ID during the gap. Do not paint a
+                        // second synthetic body across an already tracked
+                        // player (reproduced at video 1:19:35.7).
+                        && !gap_interpolation::alternate_track_bridges_gap(
+                            &queued, track_id, *left, prior, current, &observation,
+                        )
                     {
                         for entry in queued.iter_mut().filter(|v| {
                             let f = v["frame_index"].as_u64().unwrap_or(u64::MAX);
@@ -321,8 +356,10 @@ fn replay_frames_verified(
     count: u64,
     config: TrackingOptions,
     expected_sha: &str,
+    pose: Option<&pose_source::Snapshot>,
 ) -> Result<(String, ReplayTotals, u64), String> {
     let mut reader = BoundedReader::open(source)?;
+    let mut pose_rows = pose.map(pose_source::PoseRows::open).transpose()?;
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -344,8 +381,29 @@ fn replay_frames_verified(
         {
             return Err("Fusion frame index or raw status changed".into());
         }
-        let tracking = tracker.process_frame(expected_frame, &frame.player_candidates)?;
+        let (proposals, joints, pose_count) = if let Some(rows) = pose_rows.as_mut() {
+            rows.frame(expected_frame, &frame.player_candidates)?
+        } else {
+            (frame.player_candidates.clone(), Vec::new(), 0)
+        };
+        let tracking = tracker.process_frame_with_poses(expected_frame, &proposals, &joints)?;
         confirmations.observe(expected_frame, &tracking.tracks)?;
+        totals.pose_detections += pose_count;
+        // Explicit provenance: RTMPose estimates are measured on actual RGB
+        // frames; legacy detector proposals are never mislabeled as joints.
+        let mut tracked_players = serde_json::to_value(&tracking.tracks)
+            .map_err(|e| format!("Serialize tracked pose observations: {e}"))?;
+        if let Some(rows) = tracked_players.as_array_mut() {
+            for row in rows {
+                let index = row["detection"]["query_index"].as_u64().unwrap_or(u64::MAX) as usize;
+                let measured = joints.get(index).is_some_and(Option::is_some);
+                row["measurement_source"] = json!(if measured {
+                    "rtmpose_rgb"
+                } else {
+                    "detector_bbox"
+                });
+            }
+        }
         totals.frames += 1;
         totals.rejected += tracking.rejected_boxes as u64;
         totals.ambiguous += tracking.ambiguous_detections as u64;
@@ -357,7 +415,7 @@ fn replay_frames_verified(
         }
         let mut bytes = serde_json::to_vec(&json!({
             "frame_index":expected_frame,
-            "tracked_players":tracking.tracks,
+            "tracked_players":tracked_players,
             "raw_player_candidates":frame.player_candidates,
             "ball_candidates":frame.ball_candidates,
             "selected_ball":selected_ball,
@@ -378,6 +436,9 @@ fn replay_frames_verified(
     }
     if reader.line()?.is_some() {
         return Err("Extra undeclared GPU fusion frames".into());
+    }
+    if let Some(rows) = pose_rows {
+        rows.finish(count)?;
     }
     if reader.finish() != expected_sha {
         return Err("GPU fusion checksum mismatch during CPU replay".into());
@@ -463,9 +524,23 @@ fn replay_frames_verified(
         .map_err(|e| format!("Sync confirmed CPU frames: {e}"))?;
     drop(writer);
     let observed_sha = format!("{:x}", sha.finalize());
+    // Merge genuinely duplicated bodies while every observation is still
+    // independent. Never use the later visual interpolation for identity.
+    let (canonical_sha, merged) = track_merge::merge(output, &observed_sha, count)?;
+    totals.duplicate_track_ids_merged = merged;
     let (continuous_sha, _inferred_positions) =
-        fill_confirmed_track_gaps(output, &observed_sha, count)?;
-    Ok((continuous_sha, totals, summary.confirmed_tracks))
+        fill_confirmed_track_gaps(output, &canonical_sha, count)?;
+    Ok((continuous_sha, totals, summary.confirmed_tracks - merged))
+}
+
+fn confirmation_threshold(requested: u64, sample_period: Option<u64>) -> u64 {
+    // The dense default requires 12 observed frames. At 3 Hz, requiring
+    // six independent observations already represents about 1.7 seconds.
+    if sample_period == Some(10) && requested == TrackingOptions::default().min_track_observations {
+        6
+    } else {
+        requested
+    }
 }
 
 pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, ApiError> {
@@ -479,7 +554,7 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
     if !opaque_id(&req.fusion_id) {
         return Err(storage::bad_request("Invalid GPU fusion ID"));
     }
-    let settings = req
+    let mut settings = req
         .settings
         .unwrap_or_default()
         .validate()
@@ -538,6 +613,13 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             "Fusion window count does not match emitted frames",
         ));
     }
+    // Sparse inference reduces real observations by 10x. Preserve custom
+    // thresholds, but calibrate the default for confirmation based on the
+    // sampling metadata. Interpolated frames never count as measurements.
+    settings.min_track_observations = confirmation_threshold(
+        settings.min_track_observations,
+        manifest["player_sampling_period_frames"].as_u64(),
+    );
     let expected = manifest["sha256"]
         .as_str()
         .filter(|v| {
@@ -548,6 +630,10 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
         .ok_or_else(|| storage::bad_request("Fusion SHA-256 missing or invalid"))?;
     let source =
         safe_file(&source_folder, "frames.jsonl", MAX_INPUT_BYTES).map_err(storage::bad_request)?;
+    // Pose evidence was measured on actual GPU RGB frames and bound to the
+    // selected fusion SHA. Legacy fusions without RTMPose remain readable.
+    let pose_source =
+        pose_source::locate(&project_root, &req.fusion_id).map_err(storage::bad_request)?;
     let root = project_root.join("native_cpu_replays");
     match fs::symlink_metadata(&root) {
         Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
@@ -563,8 +649,14 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
     fs::create_dir(&directory).map_err(|e| storage::internal(format!("Create CPU replay: {e}")))?;
     let result = (|| -> Result<Value, String> {
         let part = directory.join("tracked_frames.jsonl.partial");
-        let (digest, totals, track_count) =
-            replay_frames(&source, &part, frames, settings, expected)?;
+        let (digest, totals, track_count) = replay_frames_with_pose(
+            &source,
+            &part,
+            frames,
+            settings,
+            expected,
+            pose_source.as_ref(),
+        )?;
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared video changed during CPU replay".into());
         }
@@ -579,6 +671,10 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             "replay_id":replay_id,
             "source_fusion_id":req.fusion_id,
             "source_fusion_sha256":expected,
+            "track_association_version":if pose_source.is_some(){"pose_coco17_primary_v1"}else{"detector_box_legacy_v1"},
+            "source_pose_run_id":pose_source.as_ref().map(|s| s.id.as_str()),
+            "source_pose_sha256":pose_source.as_ref().map(|s| s.sha.as_str()),
+            "pose_measured_track_proposals":totals.pose_detections,
             "ball_selection_policy":"vballnet_only_v1",
             "source_identity":{"bytes":size,"mtime_ns":mtime},
             "fps":30,
@@ -589,6 +685,7 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             "discarded_short_track_detections":totals.short_track_detections,
             "discarded_short_track_ids":totals.unconfirmed_tracks,
             "tentative_track_count":totals.tentative_tracks,
+            "duplicate_track_ids_merged":totals.duplicate_track_ids_merged,
             "ambiguous_detections":totals.ambiguous,
             "frames_with_ball_proposals":totals.frames_with_ball,
             "provisional_track_count":track_count,
@@ -660,6 +757,14 @@ pub async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_confirmation_uses_real_samples_without_loosening_custom_limits() {
+        assert_eq!(confirmation_threshold(12, None), 12);
+        assert_eq!(confirmation_threshold(12, Some(1)), 12);
+        assert_eq!(confirmation_threshold(12, Some(10)), 6);
+        assert_eq!(confirmation_threshold(20, Some(10)), 20);
+    }
     fn example(frame: u64, x: f64, q: usize) -> Candidate {
         Candidate {
             frame_index: frame,
@@ -764,26 +869,143 @@ mod tests {
                 crop.score = 0.70;
                 tracked.push(json!({"track_id":2,"detection":crop,"is_verified_athlete":false}));
             }
-            bytes.extend(serde_json::to_vec(&json!({
-                "frame_index":frame,"tracked_players":tracked,
-                "track_ids_provisional":true,"confirmed_athlete_identities":false,
-                "touches_confirmed":false
-            })).unwrap());
+            bytes.extend(
+                serde_json::to_vec(&json!({
+                    "frame_index":frame,"tracked_players":tracked,
+                    "track_ids_provisional":true,"confirmed_athlete_identities":false,
+                    "touches_confirmed":false
+                }))
+                .unwrap(),
+            );
             bytes.push(b'\n');
         }
         fs::write(&source, &bytes).unwrap();
         let sha = format!("{:x}", Sha256::digest(&bytes));
         let (written, inferred) = fill_confirmed_track_gaps(&source, &sha, 6).unwrap();
         assert_eq!(inferred, 0);
-        assert_eq!(written, format!("{:x}", Sha256::digest(fs::read(&source).unwrap())));
+        assert_eq!(
+            written,
+            format!("{:x}", Sha256::digest(fs::read(&source).unwrap()))
+        );
         for (frame, line) in fs::read_to_string(&source).unwrap().lines().enumerate() {
             let row: Value = serde_json::from_str(line).unwrap();
             let tracks = row["tracked_players"].as_array().unwrap();
             assert_eq!(tracks.len(), 1, "duplicate on frame {frame}");
-            assert_eq!(tracks[0]["track_id"], if frame == 0 || frame == 5 {1} else {2});
+            assert_eq!(
+                tracks[0]["track_id"],
+                if frame == 0 || frame == 5 { 1 } else { 2 }
+            );
         }
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn video_1h19m35s_does_not_interpolate_ghost_id_795_over_real_id_792() {
+        // Observed, not interpolated RTMDet/RTMPose positions from the
+        // saved GPU/CPU evidence in mm, frames 143220..143290.
+        // The neural detector sees one moving athlete, but the old tracker
+        // switched its ID from 795 to 792 and back. The former interpolation
+        // drew ID 795 over ID 792 for ~2 seconds, creating six boxes for five people.
+        let anchors: &[(u64, u64, [f64; 4], [f64; 2])] = &[
+            (
+                0,
+                795,
+                [0.419879, 0.673657, 0.486111, 0.870334],
+                [0.441386, 0.694498],
+            ),
+            (
+                10,
+                792,
+                [0.396340, 0.687423, 0.463623, 0.944206],
+                [0.428407, 0.714420],
+            ),
+            (
+                20,
+                792,
+                [0.339293, 0.693956, 0.444178, 0.991796],
+                [0.371909, 0.720245],
+            ),
+            (
+                30,
+                792,
+                [0.300434, 0.691609, 0.374569, 1.0],
+                [0.324086, 0.723238],
+            ),
+            (
+                40,
+                792,
+                [0.275320, 0.688571, 0.334482, 0.967441],
+                [0.298120, 0.715828],
+            ),
+            (
+                50,
+                792,
+                [0.266388, 0.669926, 0.325408, 0.971117],
+                [0.298848, 0.700619],
+            ),
+            (
+                60,
+                792,
+                [0.273589, 0.663533, 0.340887, 0.969568],
+                [0.315762, 0.693472],
+            ),
+            (
+                70,
+                795,
+                [0.310650, 0.656498, 0.351806, 0.875109],
+                [0.342388, 0.679225],
+            ),
+        ];
+        let root = std::env::temp_dir().join(format!("volley-ghost-gap-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("confirmed.jsonl");
+        let mut bytes = Vec::new();
+        for frame in 0..=70_u64 {
+            let tracked = anchors
+                .iter()
+                .filter(|(f, _, _, _)| *f == frame)
+                .map(|&(_, track_id, bbox_xyxy_norm, head)| {
+                    json!({"track_id":track_id,"is_verified_athlete":false,
+                    "detection":{
+                        "frame_index":frame,"class_name":"player",
+                        "score":0.70,"bbox_xyxy_norm":bbox_xyxy_norm,
+                        "query_index":0,"head_point_norm":head
+                    }})
+                })
+                .collect::<Vec<_>>();
+            bytes.extend(
+                serde_json::to_vec(&json!({
+                    "frame_index":frame,"tracked_players":tracked
+                }))
+                .unwrap(),
+            );
+            bytes.push(b'\n');
+        }
+        fs::write(&file, &bytes).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let (after, inferred) = fill_confirmed_track_gaps(&file, &sha, 71).unwrap();
+        assert!(
+            inferred > 0,
+            "legitimate gaps in ID 792 remain interpolated"
+        );
+        assert_eq!(
+            after,
+            format!("{:x}", Sha256::digest(fs::read(&file).unwrap()))
+        );
+        for (index, line) in fs::read_to_string(&file).unwrap().lines().enumerate() {
+            let row: Value = serde_json::from_str(line).unwrap();
+            let ids = row["tracked_players"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["track_id"].as_u64().unwrap())
+                .collect::<Vec<_>>();
+            if index > 0 && index < 70 {
+                assert!(!ids.contains(&795), "ghost ID 795 at frame offset {index}");
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn cpu_discards_short_ids_from_every_frame_but_preserves_raw_candidates() {
         let root = std::env::temp_dir().join(format!("volley-short-id-{}", Uuid::new_v4()));
@@ -1045,6 +1267,148 @@ mod tests {
             .join("manifest.json");
         assert_eq!(storage::read_json(&first_manifest).unwrap().unwrap(), first);
         assert!(!repo.join("results").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pose_first_replay_stabilizes_ids_without_detector_boxes_and_keeps_provenance() {
+        let root = std::env::temp_dir().join(format!("volley-cpu-pose-{}", Uuid::new_v4()));
+        let pose_dir = root.join("poses");
+        fs::create_dir_all(&pose_dir).unwrap();
+        let fusion = root.join("fusion.jsonl");
+        let mut fusion_bytes = Vec::new();
+        for frame in 0..90_u64 {
+            let proposals = if frame % 10 == 0 {
+                vec![
+                    Candidate {
+                        frame_index: frame,
+                        class_name: "player".into(),
+                        score: 0.84,
+                        bbox_xyxy_norm: [0.18, 0.15, 0.35, 0.78],
+                        query_index: Some(0),
+                        touch_probability: None,
+                        head_point_norm: Some([0.24, 0.2]),
+                    },
+                    Candidate {
+                        frame_index: frame,
+                        class_name: "player".into(),
+                        score: 0.84,
+                        bbox_xyxy_norm: [0.60, 0.15, 0.78, 0.78],
+                        query_index: Some(1),
+                        touch_probability: None,
+                        head_point_norm: Some([0.66, 0.2]),
+                    },
+                ]
+            } else {
+                vec![]
+            };
+            let mut line = serde_json::to_vec(&json!({
+                "frame_index":frame,"player_candidates":proposals,
+                "ball_candidates":[],"selected_ball":null,
+                "player_track_ids_confirmed":false,"touches_confirmed":false
+            }))
+            .unwrap();
+            line.push(b'\n');
+            fusion_bytes.extend(line);
+        }
+        fs::write(&fusion, &fusion_bytes).unwrap();
+        let mut pose_bytes = Vec::new();
+        for frame in (0..90_u64).step_by(3) {
+            let person = |x: f64| {
+                let keypoints = (0..17)
+                    .map(|i| {
+                        json!([
+                            x + (i % 3) as f64 * 0.014,
+                            0.20 + (i / 3) as f64 * 0.055,
+                            0.96
+                        ])
+                    })
+                    .collect::<Vec<_>>();
+                json!({"box":[x-0.03,0.16,x+0.11,0.81],
+                    "crop_origin":if frame%10==0 {"observed"}else{"interpolated_box"},
+                    "keypoints":keypoints})
+            };
+            let mut line = serde_json::to_vec(&json!({
+                "frame":frame,"players":[person(0.21+frame as f64*0.0003),person(0.63)]
+            }))
+            .unwrap();
+            line.push(b'\n');
+            pose_bytes.extend(line);
+        }
+        fs::write(pose_dir.join("poses.jsonl"), &pose_bytes).unwrap();
+        let snapshot = pose_source::Snapshot {
+            id: "abc".into(),
+            folder: pose_dir.clone(),
+            stride: 3,
+            sha: format!("{:x}", Sha256::digest(&pose_bytes)),
+        };
+        let output = root.join("tracked.jsonl");
+        let fusion_sha = format!("{:x}", Sha256::digest(&fusion_bytes));
+        let (sha, counts, ids) = replay_frames_with_pose(
+            &fusion,
+            &output,
+            90,
+            TrackingOptions {
+                min_track_observations: 6,
+                ..TrackingOptions::default()
+            },
+            &fusion_sha,
+            Some(&snapshot),
+        )
+        .unwrap();
+        assert_eq!(
+            ids, 2,
+            "each measured body must keep one provisional Track ID"
+        );
+        assert!(counts.pose_detections >= 59);
+        let bytes = fs::read(&output).unwrap();
+        assert_eq!(format!("{:x}", Sha256::digest(&bytes)), sha);
+        let rows = String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let at_three = &rows[3];
+        assert_eq!(
+            at_three["raw_player_candidates"].as_array().unwrap().len(),
+            0
+        );
+        assert_eq!(at_three["tracked_players"].as_array().unwrap().len(), 2);
+        assert!(at_three["tracked_players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["measurement_source"] == "rtmpose_rgb"));
+        let at_ten = &rows[10];
+        assert_eq!(at_ten["raw_player_candidates"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            at_ten["interpolated_track_ids"].as_array().unwrap().len(),
+            2,
+            "between real pose samples only the existing IDs may be visually interpolated"
+        );
+        assert!(
+            at_ten["tracked_players"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|p| p["measurement_source"].is_null()),
+            "render-only interpolation cannot claim a measured RTMPose observation"
+        );
+        let ids_at_three = at_three["tracked_players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["track_id"].as_u64().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        let ids_at_seventy_five = rows[75]["tracked_players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["track_id"].as_u64().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(ids_at_three, ids_at_seventy_five);
+        assert!(fs::read(&fusion).unwrap() == fusion_bytes);
+        assert!(fs::read(pose_dir.join("poses.jsonl")).unwrap() == pose_bytes);
         fs::remove_dir_all(root).unwrap();
     }
 

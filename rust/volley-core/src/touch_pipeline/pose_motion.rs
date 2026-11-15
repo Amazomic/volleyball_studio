@@ -64,8 +64,10 @@ pub fn pose_contact_at_frame(
     width: u32,
     height: u32,
     settings: TouchSettings,
-) -> Option<(PoseEvidence, f64)> {
-    pose_contact_with_ball(frames, poses, current, track_id, width, height, settings, None)
+) -> Option<(PoseEvidence, pose_contact::BodyContact)> {
+    pose_contact_with_ball(
+        frames, poses, current, track_id, width, height, settings, None,
+    )
 }
 
 /// The override is only used after a dual-sided observed VBallNet trajectory
@@ -79,7 +81,7 @@ fn pose_contact_with_ball(
     height: u32,
     settings: TouchSettings,
     inferred_ball: Option<([f64; 2], f64)>,
-) -> Option<(PoseEvidence, f64)> {
+) -> Option<(PoseEvidence, pose_contact::BodyContact)> {
     let first = frames.first()?.frame_index;
     let (w, h) = (width as f64, height as f64);
     let player = current.players.iter().find(|p| p.track_id == track_id)?;
@@ -98,9 +100,13 @@ fn pose_contact_with_ball(
         }
         ([position[0] / w, position[1] / h], radius)
     } else {
-        let ball = current.selected_ball.as_ref().filter(|b| b.source_model == "vballnet")?;
+        let ball = current
+            .selected_ball
+            .as_ref()
+            .filter(|b| b.source_model == "vballnet")?;
         let radius = ((ball.bbox_xyxy_norm[2] - ball.bbox_xyxy_norm[0]) * w
-            + (ball.bbox_xyxy_norm[3] - ball.bbox_xyxy_norm[1]) * h) * 0.25;
+            + (ball.bbox_xyxy_norm[3] - ball.bbox_xyxy_norm[1]) * h)
+            * 0.25;
         (center(ball.bbox_xyxy_norm), radius)
     };
     // RTMPose and VBallNet are sampled independently. A missing VBallNet
@@ -110,17 +116,36 @@ fn pose_contact_with_ball(
     let sample_ball = |sample: &PoseFrame, before_impact: bool| -> Option<[f64; 2]> {
         let impact = current.frame_index;
         let (lo, hi) = if before_impact {
-            (sample.frame_index.saturating_sub(3), sample.frame_index.saturating_add(3).min(impact.saturating_sub(1)))
+            (
+                sample.frame_index.saturating_sub(3),
+                sample
+                    .frame_index
+                    .saturating_add(3)
+                    .min(impact.saturating_sub(1)),
+            )
         } else {
-            (sample.frame_index.saturating_sub(3).max(impact.saturating_add(1)), sample.frame_index.saturating_add(3))
+            (
+                sample
+                    .frame_index
+                    .saturating_sub(3)
+                    .max(impact.saturating_add(1)),
+                sample.frame_index.saturating_add(3),
+            )
         };
-        if lo > hi { return None; }
+        if lo > hi {
+            return None;
+        }
         (lo..=hi)
             .filter_map(|at| {
                 let offset = at.checked_sub(first)?;
                 let frame = frames.get(usize::try_from(offset).ok()?)?;
-                if frame.frame_index != at { return None; }
-                let ball = frame.selected_ball.as_ref().filter(|b| b.source_model == "vballnet")?;
+                if frame.frame_index != at {
+                    return None;
+                }
+                let ball = frame
+                    .selected_ball
+                    .as_ref()
+                    .filter(|b| b.source_model == "vballnet")?;
                 let [x, y] = center(ball.bbox_xyxy_norm);
                 Some((at.abs_diff(sample.frame_index), [x * w, y * h]))
             })
@@ -195,7 +220,7 @@ fn pose_contact_with_ball(
         min_confidence: settings.pose_min_confidence,
         max_distance_ratio: settings.pose_max_distance,
     };
-    let separation = pose_contact::trajectory_body_intersection(&evidence)?;
+    let separation = pose_contact::trajectory_body_contact(&evidence)?;
     Some((
         PoseEvidence {
             keypoints: interpolated,
@@ -207,6 +232,101 @@ fn pose_contact_with_ball(
         },
         separation,
     ))
+}
+
+#[must_use]
+pub fn pose_contact_from_nearby_sample(
+    frames: &[TouchFrame],
+    poses: &[PoseFrame],
+    current: &TouchFrame,
+    track_id: u64,
+    width: u32,
+    height: u32,
+    settings: TouchSettings,
+) -> Option<(PoseEvidence, pose_contact::BodyContact, u64)> {
+    let first = frames.first()?.frame_index;
+    let (w, h) = (width as f64, height as f64);
+    let current_player = current.players.iter().find(|p| p.track_id == track_id)?;
+    let current_box = current_player.bbox_xyxy_norm;
+    let player_height = (current_box[3] - current_box[1]) * h;
+    if player_height < 26.0 || !player_height.is_finite() {
+        return None;
+    }
+    let ball = current
+        .selected_ball
+        .as_ref()
+        .filter(|b| b.source_model == "vballnet" && b.score >= settings.min_ball_score)?;
+    let ball_point = center(ball.bbox_xyxy_norm);
+    let ball_px = [ball_point[0] * w, ball_point[1] * h];
+    let radius = ((ball.bbox_xyxy_norm[2] - ball.bbox_xyxy_norm[0]) * w
+        + (ball.bbox_xyxy_norm[3] - ball.bbox_xyxy_norm[1]) * h)
+        * 0.25;
+    let mut best: Option<(f64, PoseEvidence, pose_contact::BodyContact, u64)> = None;
+    for sample in poses
+        .iter()
+        .filter(|p| p.frame_index.abs_diff(current.frame_index) <= 3)
+    {
+        let Some(pose) = sample.players.iter().find(|p| p.track_id == track_id) else {
+            continue;
+        };
+        let Some(sample_player) = sample
+            .frame_index
+            .checked_sub(first)
+            .and_then(|i| frames.get(i as usize))
+            .filter(|f| f.frame_index == sample.frame_index)
+            .and_then(|f| f.players.iter().find(|p| p.track_id == track_id))
+        else {
+            continue;
+        };
+        let bbox = sample_player.bbox_xyxy_norm;
+        let dx = (current_box[0] + current_box[2] - bbox[0] - bbox[2]) * 0.5;
+        let dy = (current_box[1] + current_box[3] - bbox[1] - bbox[3]) * 0.5;
+        let sample_height = (bbox[3] - bbox[1]) * h;
+        if sample_height < 26.0
+            || !(0.70..=1.40).contains(&(sample_height / player_height))
+            || (dx * w).hypot(dy * h) > player_height * 0.18
+        {
+            continue;
+        }
+        let mut points = pose.keypoints;
+        for point in &mut points {
+            if point[2] < settings.pose_min_confidence {
+                continue;
+            }
+            point[0] += dx;
+            point[1] += dy;
+        }
+        let Some(contact) = pose_contact::sampled_body_contact(
+            points,
+            ball_px,
+            w,
+            h,
+            player_height,
+            radius,
+            settings.pose_min_confidence,
+            settings.pose_max_distance,
+        ) else {
+            continue;
+        };
+        let rank = contact.normalized_distance
+            + 0.002 * sample.frame_index.abs_diff(current.frame_index) as f64;
+        if best.as_ref().is_none_or(|old| rank < old.0) {
+            best = Some((
+                rank,
+                PoseEvidence {
+                    keypoints: points,
+                    ball_x_norm: ball_point[0],
+                    ball_y_norm: ball_point[1],
+                    video_width: w,
+                    video_height: h,
+                    player_bbox_norm: current_box,
+                },
+                contact,
+                sample.frame_index,
+            ));
+        }
+    }
+    best.map(|(_, evidence, contact, sample_frame)| (evidence, contact, sample_frame))
 }
 
 /// Missing ball at impact is common under a striking hand. Estimate only
@@ -227,16 +347,29 @@ fn occluded_ball_impact(
     let (w, h) = (width as f64, height as f64);
     let observed = |i: usize| -> Option<(f64, [f64; 2], f64)> {
         let row = frames.get(i)?;
-        let ball = row.selected_ball.as_ref().filter(|b| {
-            b.source_model == "vballnet" && b.score >= settings.min_ball_score
-        })?;
+        let ball = row
+            .selected_ball
+            .as_ref()
+            .filter(|b| b.source_model == "vballnet" && b.score >= settings.min_ball_score)?;
         let p = center(ball.bbox_xyxy_norm);
         let radius = ((ball.bbox_xyxy_norm[2] - ball.bbox_xyxy_norm[0]) * w
-            + (ball.bbox_xyxy_norm[3] - ball.bbox_xyxy_norm[1]) * h) * 0.25;
-        (radius > 1.0 && radius < 20.0).then_some((row.frame_index as f64, [p[0] * w, p[1] * h], radius))
+            + (ball.bbox_xyxy_norm[3] - ball.bbox_xyxy_norm[1]) * h)
+            * 0.25;
+        (radius > 1.0 && radius < 20.0).then_some((
+            row.frame_index as f64,
+            [p[0] * w, p[1] * h],
+            radius,
+        ))
     };
-    let left = (index - 9..index).rev().filter_map(observed).take(2).collect::<Vec<_>>();
-    let right = (index + 1..=index + 9).filter_map(observed).take(2).collect::<Vec<_>>();
+    let left = (index - 9..index)
+        .rev()
+        .filter_map(observed)
+        .take(2)
+        .collect::<Vec<_>>();
+    let right = (index + 1..=index + 9)
+        .filter_map(observed)
+        .take(2)
+        .collect::<Vec<_>>();
     if left.len() != 2 || right.len() != 2 {
         return None;
     }
@@ -250,18 +383,23 @@ fn occluded_ball_impact(
     {
         return None;
     }
-    let before = [(l1.1[0] - l2.1[0]) / (l1.0 - l2.0),
-                  (l1.1[1] - l2.1[1]) / (l1.0 - l2.0)];
-    let after = [(r2.1[0] - r1.1[0]) / (r2.0 - r1.0),
-                 (r2.1[1] - r1.1[1]) / (r2.0 - r1.0)];
+    let before = [
+        (l1.1[0] - l2.1[0]) / (l1.0 - l2.0),
+        (l1.1[1] - l2.1[1]) / (l1.0 - l2.0),
+    ];
+    let after = [
+        (r2.1[0] - r1.1[0]) / (r2.0 - r1.0),
+        (r2.1[1] - r1.1[1]) / (r2.0 - r1.0),
+    ];
     let (speed_before, speed_after) = (before[0].hypot(before[1]), after[0].hypot(after[1]));
-    if speed_before < 2.0 || speed_after < 2.0
-        || speed_before > 55.0 || speed_after > 55.0 {
+    if speed_before < 2.0 || speed_after < 2.0 || speed_before > 55.0 || speed_after > 55.0 {
         return None;
     }
     let residual = (after[0] - before[0]).hypot(after[1] - before[1]);
-    let angle = ((before[0] * after[0] + before[1] * after[1])
-        / (speed_before * speed_after)).clamp(-1.0, 1.0).acos().to_degrees();
+    let angle = ((before[0] * after[0] + before[1] * after[1]) / (speed_before * speed_after))
+        .clamp(-1.0, 1.0)
+        .acos()
+        .to_degrees();
     // A ball accelerating along its unchanged flight direction is not a
     // player touch, even if its speed increases through a brief dropout.
     // The minimum physical turn is part of the saved global CPU profile.
@@ -269,29 +407,39 @@ fn occluded_ball_impact(
         return None;
     }
     let t = frame.frame_index as f64;
-    let inbound = [l1.1[0] + before[0] * (t - l1.0),
-                   l1.1[1] + before[1] * (t - l1.0)];
-    let outbound = [r1.1[0] - after[0] * (r1.0 - t),
-                    r1.1[1] - after[1] * (r1.0 - t)];
+    let inbound = [
+        l1.1[0] + before[0] * (t - l1.0),
+        l1.1[1] + before[1] * (t - l1.0),
+    ];
+    let outbound = [
+        r1.1[0] - after[0] * (r1.0 - t),
+        r1.1[1] - after[1] * (r1.0 - t),
+    ];
     // The two real-flight extrapolations must converge within a bounded
     // one-ball-width tolerance. Fast hits can place the inferred physical
     // collision between the nearest sampled frames.
     if (inbound[0] - outbound[0]).hypot(inbound[1] - outbound[1]) > 42.0 {
         return None;
     }
-    let impact = [(inbound[0] + outbound[0]) * 0.5,
-                  (inbound[1] + outbound[1]) * 0.5];
+    let impact = [
+        (inbound[0] + outbound[0]) * 0.5,
+        (inbound[1] + outbound[1]) * 0.5,
+    ];
     if !(0.0..=w).contains(&impact[0]) || !(0.0..=h).contains(&impact[1]) {
         return None;
     }
     let radius = (l1.2 + r1.2) * 0.5;
-    Some((impact, radius, crate::motion::MotionEvidence {
-        motion_frame: frame.frame_index as i64,
-        speed_before,
-        speed_after,
-        angle,
-        residual,
-    }))
+    Some((
+        impact,
+        radius,
+        crate::motion::MotionEvidence {
+            motion_frame: frame.frame_index as i64,
+            speed_before,
+            speed_after,
+            angle,
+            residual,
+        },
+    ))
 }
 
 /// A pose overlap is not a Touch if the velocity break belongs to a
@@ -316,8 +464,14 @@ fn local_observed_velocity_break(
     let left_near = point(index.checked_sub(1)?)?;
     let right_near = point(index + 1)?;
     let right = point(index + 3)?;
-    let before = [(left_near[0] - left[0]) * 0.5, (left_near[1] - left[1]) * 0.5];
-    let after = [(right[0] - right_near[0]) * 0.5, (right[1] - right_near[1]) * 0.5];
+    let before = [
+        (left_near[0] - left[0]) * 0.5,
+        (left_near[1] - left[1]) * 0.5,
+    ];
+    let after = [
+        (right[0] - right_near[0]) * 0.5,
+        (right[1] - right_near[1]) * 0.5,
+    ];
     // Allow gravity-induced acceleration, but not a large nonlinear turn
     // from the natural ballistic arc alone.
     Some((after[0] - before[0]).hypot(after[1] - before[1] - 4.0))
@@ -327,14 +481,21 @@ fn local_observed_velocity_break(
 /// actual rebound. Check the next three independently observed VBallNet
 /// samples, skipping dropouts; they must continue descending together.
 fn still_descending_after_pose_overlap(frames: &[TouchFrame], index: usize) -> bool {
-    let Some(ball) = frames.get(index).and_then(|f| f.selected_ball.as_ref())
-        .filter(|b| b.source_model == "vballnet") else {
+    let Some(ball) = frames
+        .get(index)
+        .and_then(|f| f.selected_ball.as_ref())
+        .filter(|b| b.source_model == "vballnet")
+    else {
         return false;
     };
     let mut y_previous = center(ball.bbox_xyxy_norm)[1];
     let mut descent_count = 0usize;
     for frame in frames.iter().skip(index + 1).take(5) {
-        let Some(ball) = frame.selected_ball.as_ref().filter(|b| b.source_model == "vballnet") else {
+        let Some(ball) = frame
+            .selected_ball
+            .as_ref()
+            .filter(|b| b.source_model == "vballnet")
+        else {
             continue;
         };
         let y = center(ball.bbox_xyxy_norm)[1];
@@ -360,8 +521,7 @@ fn unsupported_anticipated_impact(
     width: f64,
     height: f64,
 ) -> bool {
-    (motion_frame > index as i64
-        && still_descending_after_pose_overlap(frames, index))
+    (motion_frame > index as i64 && still_descending_after_pose_overlap(frames, index))
         || (motion_frame > index as i64 + 2
             && local_observed_velocity_break(frames, index, width, height)
                 .is_none_or(|residual| residual < 12.0))
@@ -452,7 +612,7 @@ pub fn evaluate_pose_block(
         }
         let point = center(ball.bbox_xyxy_norm);
         let ball_px = [point[0] * w, point[1] * h];
-        let mut best: Option<(f64, u64, PoseEvidence)> = None;
+        let mut best: Option<(f64, u64, PoseEvidence, pose_contact::BodyContact)> = None;
         for player in &frame.players {
             let Some((evidence, distance)) = pose_contact_at_frame(
                 frames,
@@ -465,11 +625,19 @@ pub fn evaluate_pose_block(
             ) else {
                 continue;
             };
-            if best.as_ref().is_none_or(|candidate| distance < candidate.0) {
-                best = Some((distance, player.track_id, evidence));
+            if best
+                .as_ref()
+                .is_none_or(|candidate| distance.normalized_distance < candidate.0)
+            {
+                best = Some((
+                    distance.normalized_distance,
+                    player.track_id,
+                    evidence,
+                    distance,
+                ));
             }
         }
-        let Some((distance, track_id, evidence)) = best else {
+        let Some((distance, track_id, evidence, landmark)) = best else {
             continue;
         };
         let Some(player) = frame.players.iter().find(|p| p.track_id == track_id) else {
@@ -513,6 +681,8 @@ pub fn evaluate_pose_block(
             court: None,
             physical_motion_supported: true,
             body_contact_supported: true,
+            contact_landmark: Some(landmark),
+            contact_pose_sample_frame: None,
             ball_occluded_at_contact: false,
             inferred_body_reach_supported: false,
             athlete_identity_verified: false,
@@ -527,16 +697,30 @@ pub fn evaluate_pose_block(
         else {
             continue;
         };
-        let mut best: Option<(f64, u64, PoseEvidence)> = None;
+        let mut best: Option<(f64, u64, PoseEvidence, pose_contact::BodyContact)> = None;
         for player in &frame.players {
             let Some((evidence, distance)) = pose_contact_with_ball(
-                frames, poses, frame, player.track_id, width, height, settings,
+                frames,
+                poses,
+                frame,
+                player.track_id,
+                width,
+                height,
+                settings,
                 Some((point, radius)),
             ) else {
                 continue;
             };
-            if best.as_ref().is_none_or(|candidate| distance < candidate.0) {
-                best = Some((distance, player.track_id, evidence));
+            if best
+                .as_ref()
+                .is_none_or(|candidate| distance.normalized_distance < candidate.0)
+            {
+                best = Some((
+                    distance.normalized_distance,
+                    player.track_id,
+                    evidence,
+                    distance,
+                ));
             }
         }
         // If COCO17 joints disappear during a jump, keep a lower-confidence
@@ -544,62 +728,75 @@ pub fn evaluate_pose_block(
         // kink. The body must be a stable, already tracked person, never a
         // fleeting duplicate or an arbitrary neighboring detection.
         let reach_candidate = if best.is_none() && !settings.require_pose {
-            frame.players.iter().filter_map(|player| {
-                let bb = pixel_bbox(player.bbox_xyxy_norm, w, h);
-                let height = bb[3] - bb[1];
-                if height < 25.0 {
-                    return None;
-                }
-                let continuity = frames[index.saturating_sub(6)..(index + 7).min(frames.len())]
-                    .iter()
-                    .filter(|row| row.players.iter().any(|p| p.track_id == player.track_id))
-                    .count();
-                if continuity < 6 {
-                    return None;
-                }
-                // A fully extended attack can meet the ball above a cropped
-                // torso box; geometry alone remains an unconfirmed proposal.
-                let top = bb[1] - 0.55 * height;
-                let bottom = bb[3] + 0.10 * height;
-                let margin = 0.28 * (bb[2] - bb[0]);
-                if point[0] < bb[0] - margin || point[0] > bb[2] + margin
-                    || point[1] < top || point[1] > bottom {
-                    return None;
-                }
-                let head_distance = (point[0] - (bb[0] + bb[2]) * 0.5).abs()
-                    / (bb[2] - bb[0]).max(1.0);
-                Some((head_distance - 0.15 * player.score, player.track_id))
-            }).min_by(|a, b| a.0.total_cmp(&b.0))
+            frame
+                .players
+                .iter()
+                .filter_map(|player| {
+                    let bb = pixel_bbox(player.bbox_xyxy_norm, w, h);
+                    let height = bb[3] - bb[1];
+                    if height < 25.0 {
+                        return None;
+                    }
+                    let continuity = frames[index.saturating_sub(6)..(index + 7).min(frames.len())]
+                        .iter()
+                        .filter(|row| row.players.iter().any(|p| p.track_id == player.track_id))
+                        .count();
+                    if continuity < 6 {
+                        return None;
+                    }
+                    // A fully extended attack can meet the ball above a cropped
+                    // torso box; geometry alone remains an unconfirmed proposal.
+                    let top = bb[1] - 0.55 * height;
+                    let bottom = bb[3] + 0.10 * height;
+                    let margin = 0.28 * (bb[2] - bb[0]);
+                    if point[0] < bb[0] - margin
+                        || point[0] > bb[2] + margin
+                        || point[1] < top
+                        || point[1] > bottom
+                    {
+                        return None;
+                    }
+                    let head_distance =
+                        (point[0] - (bb[0] + bb[2]) * 0.5).abs() / (bb[2] - bb[0]).max(1.0);
+                    Some((head_distance - 0.15 * player.score, player.track_id))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
         } else {
             None
         };
-        let (track_id, distance, witness) = if let Some((distance, track_id, evidence)) = best {
-            (track_id, distance, Some(evidence))
-        } else if let Some((_, track_id)) = reach_candidate {
-            (track_id, settings.pose_max_distance * 0.8, None)
-        } else {
-            continue;
-        };
+        let (track_id, distance, witness, landmark) =
+            if let Some((distance, track_id, evidence, landmark)) = best {
+                (track_id, distance, Some(evidence), Some(landmark))
+            } else if let Some((_, track_id)) = reach_candidate {
+                (track_id, settings.pose_max_distance * 0.8, None, None)
+            } else {
+                continue;
+            };
         let Some(player) = frame.players.iter().find(|p| p.track_id == track_id) else {
             continue;
         };
         let bbox = pixel_bbox(player.bbox_xyxy_norm, w, h);
         let score = if witness.is_some() {
-            (0.48 + 0.20 * (1.0 - distance / settings.pose_max_distance)
-                + 0.12 * player.score).clamp(0.0, 0.85)
+            (0.48 + 0.20 * (1.0 - distance / settings.pose_max_distance) + 0.12 * player.score)
+                .clamp(0.0, 0.85)
         } else {
-            (0.49 + 0.12 * player.score + 0.07 * (motion.residual / 30.0).min(1.0))
-                .clamp(0.0, 0.70)
+            (0.49 + 0.12 * player.score + 0.07 * (motion.residual / 30.0).min(1.0)).clamp(0.0, 0.70)
         };
         let action_prediction = standing_height(frames, index, track_id, h)
-            .and_then(|standing| action_prediction::predict(PositionEvidence {
-                ball_y_px: point[1], ball_radius_px: radius,
-                player_bbox_px: bbox, standing_height_px: standing,
-                touch_score: score, track_score: player.score,
-                context: CourtContext::Unavailable,
-            }))
+            .and_then(|standing| {
+                action_prediction::predict(PositionEvidence {
+                    ball_y_px: point[1],
+                    ball_radius_px: radius,
+                    player_bbox_px: bbox,
+                    standing_height_px: standing,
+                    touch_score: score,
+                    track_score: player.score,
+                    context: CourtContext::Unavailable,
+                })
+            })
             .map(|geometry| {
-                witness.as_ref()
+                witness
+                    .as_ref()
                     .and_then(|evidence| pose_classification::refine(evidence, &geometry))
                     .unwrap_or(geometry)
             });
@@ -619,6 +816,8 @@ pub fn evaluate_pose_block(
             court: None,
             physical_motion_supported: true,
             body_contact_supported: witness.is_some(),
+            contact_landmark: landmark,
+            contact_pose_sample_frame: None,
             ball_occluded_at_contact: true,
             inferred_body_reach_supported: witness.is_none(),
             athlete_identity_verified: false,
@@ -647,23 +846,35 @@ mod tests {
             (624, [0.521, 0.535]),
             (625, [0.521, 0.580]),
         ];
-        let mut frames = (613..636u64).map(|frame_index| TouchFrame {
-            frame_index,
-            players: vec![],
-            selected_ball: None,
-        }).collect::<Vec<_>>();
+        let mut frames = (613..636u64)
+            .map(|frame_index| TouchFrame {
+                frame_index,
+                players: vec![],
+                selected_ball: None,
+            })
+            .collect::<Vec<_>>();
         for (frame_index, p) in observations {
-            frames[(frame_index-613) as usize].selected_ball = Some(TouchBall {
-                source_model: "vballnet".into(),score:0.65,
-                bbox_xyxy_norm: [p[0]-0.005,p[1]-0.006,p[0]+0.005,p[1]+0.006],
+            frames[(frame_index - 613) as usize].selected_ball = Some(TouchBall {
+                source_model: "vballnet".into(),
+                score: 0.65,
+                bbox_xyxy_norm: [p[0] - 0.005, p[1] - 0.006, p[0] + 0.005, p[1] + 0.006],
             });
         }
-        let at = (622-613) as usize;
+        let at = (622 - 613) as usize;
         let diagnostic = occluded_ball_impact(
-            &frames, at, 1280, 720,
-            TouchSettings { occluded_min_turn_deg: 0.0, ..TouchSettings::default() },
+            &frames,
+            at,
+            1280,
+            720,
+            TouchSettings {
+                occluded_min_turn_deg: 0.0,
+                ..TouchSettings::default()
+            },
         );
-        assert!(diagnostic.is_some(), "speed-only false witness must be reproducible");
+        assert!(
+            diagnostic.is_some(),
+            "speed-only false witness must be reproducible"
+        );
         assert!(
             occluded_ball_impact(&frames, at, 1280, 720, TouchSettings::default()).is_none(),
             "The saved global turning threshold must reject this ballistic gap"
@@ -690,14 +901,18 @@ mod tests {
             (630, None),
             (631, None),
         ];
-        let frames = observed.into_iter().map(|(frame_index,xy)| TouchFrame {
-            frame_index,
-            selected_ball: xy.map(|p| TouchBall {
-                source_model: "vballnet".to_string(), score:0.65,
-                bbox_xyxy_norm: [p[0]-0.005,p[1]-0.005,p[0]+0.005,p[1]+0.005],
-            }),
-            players: vec![],
-        }).collect::<Vec<_>>();
+        let frames = observed
+            .into_iter()
+            .map(|(frame_index, xy)| TouchFrame {
+                frame_index,
+                selected_ball: xy.map(|p| TouchBall {
+                    source_model: "vballnet".to_string(),
+                    score: 0.65,
+                    bbox_xyxy_norm: [p[0] - 0.005, p[1] - 0.005, p[0] + 0.005, p[1] + 0.005],
+                }),
+                players: vec![],
+            })
+            .collect::<Vec<_>>();
         let at_625 = 625 - 619;
         assert_eq!(
             local_observed_velocity_break(&frames, at_625, 1280.0, 720.0),
@@ -716,33 +931,51 @@ mod tests {
             unsupported_anticipated_impact(&frames, at_625, 628 - 619, 1280.0, 720.0),
             "The frame-628 reversal must not be borrowed by frame 625"
         );
-        assert!(!unsupported_anticipated_impact(
-            &frames, 630 - 619, 630 - 619, 1280.0, 720.0
-        ), "Contact at its own motion frame is unaffected");
+        assert!(
+            !unsupported_anticipated_impact(&frames, 630 - 619, 630 - 619, 1280.0, 720.0),
+            "Contact at its own motion frame is unaffected"
+        );
     }
 
     #[test]
     fn straight_ball_near_pose_at_38_4s_does_not_claim_later_attack() {
         let samples = [
-            [0.520,0.417], [0.529,0.438], [0.537,0.451],
-            [0.549,0.479], [0.555,0.503], [0.570,0.535],
-            [0.576,0.563], [0.588,0.590], [0.600,0.625],
-            [0.611,0.670], [0.619,0.698], [0.621,0.660],
-            [0.627,0.649], [0.631,0.601], [0.631,0.556],
+            [0.520, 0.417],
+            [0.529, 0.438],
+            [0.537, 0.451],
+            [0.549, 0.479],
+            [0.555, 0.503],
+            [0.570, 0.535],
+            [0.576, 0.563],
+            [0.588, 0.590],
+            [0.600, 0.625],
+            [0.611, 0.670],
+            [0.619, 0.698],
+            [0.621, 0.660],
+            [0.627, 0.649],
+            [0.631, 0.601],
+            [0.631, 0.556],
         ];
-        let frames = samples.iter().enumerate().map(|(i, p)| TouchFrame {
-            frame_index: 1147 + i as u64,
-            selected_ball: Some(TouchBall {
-                source_model: "vballnet".to_owned(),
-                score: 0.65,
-                bbox_xyxy_norm: [p[0]-0.005,p[1]-0.005,p[0]+0.005,p[1]+0.005],
-            }),
-            players: vec![],
-        }).collect::<Vec<_>>();
+        let frames = samples
+            .iter()
+            .enumerate()
+            .map(|(i, p)| TouchFrame {
+                frame_index: 1147 + i as u64,
+                selected_ball: Some(TouchBall {
+                    source_model: "vballnet".to_owned(),
+                    score: 0.65,
+                    bbox_xyxy_norm: [p[0] - 0.005, p[1] - 0.005, p[0] + 0.005, p[1] + 0.005],
+                }),
+                players: vec![],
+            })
+            .collect::<Vec<_>>();
         let local_false = local_observed_velocity_break(&frames, 5, 1280.0, 720.0).unwrap();
         let local_rebound = local_observed_velocity_break(&frames, 10, 1280.0, 720.0).unwrap();
         assert!(local_false < 12.0, "smooth frame 1152: {local_false}");
-        assert!(local_rebound > 12.0, "real frame 1157 rebound: {local_rebound}");
+        assert!(
+            local_rebound > 12.0,
+            "real frame 1157 rebound: {local_rebound}"
+        );
     }
 
     #[test]
@@ -750,47 +983,60 @@ mod tests {
         // Coordinates are from the saved new3 VBallNet replay at 695..708.
         // Frames 697..700 were a remote false localization, suppressed
         // before reaching this detector. COCO17 is unavailable at the impact.
-        let mut frames = (690..715u64).map(|frame_index| TouchFrame {
-            frame_index,
-            players: vec![TouchPlayer {
-                track_id: 8,
-                score: 0.74,
-                bbox_xyxy_norm: [0.448, 0.452, 0.493, 0.605],
-                touch_probability: None,
-            }],
-            selected_ball: None,
-        }).collect::<Vec<_>>();
+        let mut frames = (690..715u64)
+            .map(|frame_index| TouchFrame {
+                frame_index,
+                players: vec![TouchPlayer {
+                    track_id: 8,
+                    score: 0.74,
+                    bbox_xyxy_norm: [0.448, 0.452, 0.493, 0.605],
+                    touch_probability: None,
+                }],
+                selected_ball: None,
+            })
+            .collect::<Vec<_>>();
         let evidence = [
-            (695, [0.477, 0.372]), (696, [0.475, 0.382]),
-            (701, [0.443, 0.354]), (702, [0.430, 0.347]),
-            (707, [0.389, 0.337]), (708, [0.385, 0.337]),
+            (695, [0.477, 0.372]),
+            (696, [0.475, 0.382]),
+            (701, [0.443, 0.354]),
+            (702, [0.430, 0.347]),
+            (707, [0.389, 0.337]),
+            (708, [0.385, 0.337]),
         ];
         for (frame, point) in evidence {
             frames[frame - 690].selected_ball = Some(crate::touch_pipeline::TouchBall {
                 source_model: "vballnet".to_owned(),
                 score: 0.72,
                 bbox_xyxy_norm: [
-                    point[0] - 0.005, point[1] - 0.008,
-                    point[0] + 0.005, point[1] + 0.008,
+                    point[0] - 0.005,
+                    point[1] - 0.008,
+                    point[0] + 0.005,
+                    point[1] + 0.008,
                 ],
             });
         }
-        let events = evaluate_pose_block(
-            &frames, &[], 1280, 720, 695, 709, TouchSettings::default(),
-        ).unwrap();
-        assert!(events.iter().any(|event| (697..=700).contains(&event.frame_index)
-            && event.provisional_track_id == Some(8)
-            && event.ball_occluded_at_contact
-            && event.inferred_body_reach_supported
-            && !event.body_contact_supported),
-            "a jump-contact trajectory kink may yield an unverified tracked Touch: {events:?}");
+        let events =
+            evaluate_pose_block(&frames, &[], 1280, 720, 695, 709, TouchSettings::default())
+                .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| (697..=700).contains(&event.frame_index)
+                    && event.provisional_track_id == Some(8)
+                    && event.ball_occluded_at_contact
+                    && event.inferred_body_reach_supported
+                    && !event.body_contact_supported),
+            "a jump-contact trajectory kink may yield an unverified tracked Touch: {events:?}"
+        );
         // The same physical kink without an observed player must NOT become a Touch.
         for frame in &mut frames {
             frame.players.clear();
         }
-        assert!(evaluate_pose_block(
-            &frames, &[], 1280, 720, 695, 709, TouchSettings::default()
-        ).unwrap().is_empty());
+        assert!(
+            evaluate_pose_block(&frames, &[], 1280, 720, 695, 709, TouchSettings::default())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn sparse_rebound(rebound: bool) -> (Vec<TouchFrame>, Vec<PoseFrame>) {
@@ -837,6 +1083,46 @@ mod tests {
     }
 
     #[test]
+    fn nearby_pose_sample_rescues_contact_without_both_temporal_pose_sides() {
+        let (frames, poses) = sparse_rebound(true);
+        let exact = vec![poses.iter().find(|p| p.frame_index == 32).unwrap().clone()];
+        let settings = TouchSettings::default();
+        assert!(
+            pose_contact_at_frame(&frames, &exact, &frames[32], 42, 640, 360, settings).is_none()
+        );
+        let (_, contact, source_frame) =
+            pose_contact_from_nearby_sample(&frames, &exact, &frames[32], 42, 640, 360, settings)
+                .expect("same-track sampled wrist near observed rebound should be recoverable");
+        assert_eq!(source_frame, 32);
+        assert!(contact.valid(640, 360));
+        assert!(contact.distance_px < 20.0);
+        assert!(pose_contact_from_nearby_sample(
+            &frames,
+            &exact,
+            &frames[32],
+            99,
+            640,
+            360,
+            settings,
+        )
+        .is_none());
+        let mut remote = exact.clone();
+        for point in &mut remote[0].players[0].keypoints {
+            *point = [0.91, 0.91, 0.95];
+        }
+        assert!(pose_contact_from_nearby_sample(
+            &frames,
+            &remote,
+            &frames[32],
+            42,
+            640,
+            360,
+            settings,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn nearby_motion_peak_can_confirm_earlier_body_contact() {
         // Model a contact near frame 30 while the fitted motion break peaks
         // at frame 32. Only observed VBallNet-like coordinates are used.
@@ -859,7 +1145,10 @@ mod tests {
             ball_motion_change(&balls, frame, 0, config).is_none()
                 && ball_motion_change(&balls, frame, 3, config).is_some()
         });
-        assert!(offset_contact.is_some(), "motion window must recover a nearby kink");
+        assert!(
+            offset_contact.is_some(),
+            "motion window must recover a nearby kink"
+        );
     }
 
     #[test]
@@ -872,9 +1161,18 @@ mod tests {
             frames[at - 1].selected_ball = Some(observed);
         }
         let event = pose_contact_at_frame(
-            &frames, &poses, &frames[32], 42, 640, 360, TouchSettings::default(),
+            &frames,
+            &poses,
+            &frames[32],
+            42,
+            640,
+            360,
+            TouchSettings::default(),
         );
-        assert!(event.is_some(), "independent pose/ball sampling must not erase contact");
+        assert!(
+            event.is_some(),
+            "independent pose/ball sampling must not erase contact"
+        );
     }
 
     #[test]
@@ -896,28 +1194,37 @@ mod tests {
         assert_eq!(kept[0].frame_index, primary.frame_index);
     }
 
-
     #[test]
     fn occluded_ball_with_real_inbound_outbound_flights_can_hit_wrist() {
         let (mut frames, poses) = sparse_rebound(true);
         frames[32].selected_ball = None;
-        let inferred = occluded_ball_impact(
-            &frames, 32, 640, 360, TouchSettings::default()
-        ).expect("two real flights must converge at an occluded collision");
+        let inferred = occluded_ball_impact(&frames, 32, 640, 360, TouchSettings::default())
+            .expect("two real flights must converge at an occluded collision");
         assert!(inferred.2.angle > 35.0);
-        assert!(pose_contact_with_ball(
-            &frames, &poses, &frames[32], 42, 640, 360,
-            TouchSettings::default(), Some((inferred.0, inferred.1))
-        ).is_some(), "a body witness must confirm the hypothesized rebound");
+        assert!(
+            pose_contact_with_ball(
+                &frames,
+                &poses,
+                &frames[32],
+                42,
+                640,
+                360,
+                TouchSettings::default(),
+                Some((inferred.0, inferred.1))
+            )
+            .is_some(),
+            "a body witness must confirm the hypothesized rebound"
+        );
     }
 
     #[test]
     fn missing_ball_during_straight_flight_is_not_a_contact() {
         let (mut frames, _) = sparse_rebound(false);
         frames[32].selected_ball = None;
-        assert!(occluded_ball_impact(
-            &frames, 32, 640, 360, TouchSettings::default()
-        ).is_none(), "occlusion alone cannot create a touch");
+        assert!(
+            occluded_ball_impact(&frames, 32, 640, 360, TouchSettings::default()).is_none(),
+            "occlusion alone cannot create a touch"
+        );
     }
     #[test]
     fn sparse_vballnet_rebound_is_not_lost_when_pose_confirms_contact() {

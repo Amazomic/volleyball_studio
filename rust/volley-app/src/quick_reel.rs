@@ -267,6 +267,12 @@ fn read_source(state: &AppState, id: &str) -> Result<Source, ApiError> {
     verify_source(&item)?;
     Ok(item)
 }
+/// Resolve a selection created by the trusted native file picker.
+pub(crate) fn picked_path(state: &AppState, id: &str) -> Result<PathBuf, ApiError> {
+    let source = read_source(state, id)?;
+    Ok(PathBuf::from(source.source))
+}
+
 pub async fn select_sources(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

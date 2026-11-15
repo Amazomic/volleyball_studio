@@ -131,6 +131,7 @@ fn observe_track(
         best_box: [0.0; 4],
         photo_samples: Vec::new(),
         visible_spans: Vec::new(),
+        observed_pairs: BTreeMap::new(),
     });
     if let Some((_, end)) = record.visible_spans.last_mut() {
         if *end == frame_idx || end.saturating_add(1) == frame_idx {
@@ -162,6 +163,52 @@ fn observe_track(
     }
     Ok(())
 }
+fn boxes_co_located(a: [f64; 4], b: [f64; 4]) -> bool {
+    let width_a = a[2] - a[0];
+    let height_a = a[3] - a[1];
+    let width_b = b[2] - b[0];
+    let height_b = b[3] - b[1];
+    if width_a <= 0.0 || width_b <= 0.0 || height_a <= 0.0 || height_b <= 0.0 {
+        return false;
+    }
+    let area_a = width_a * height_a;
+    let area_b = width_b * height_b;
+    let intersection =
+        (a[2].min(b[2]) - a[0].max(b[0])).max(0.0) * (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+    let iou = intersection / (area_a + area_b - intersection);
+    let center_x = ((a[0] + a[2]) - (b[0] + b[2])).abs() * 0.5;
+    let center_y = ((a[1] + a[3]) - (b[1] + b[3])).abs() * 0.5;
+    iou >= 0.62
+        && area_a.min(area_b) / area_a.max(area_b) >= 0.55
+        && center_x <= 0.2 * width_a.min(width_b)
+        && center_y <= 0.2 * height_a.min(height_b)
+}
+
+fn record_observed_pairs(tracks: &mut TrackObservations, frame: u64, boxes: &[(u64, [f64; 4])]) {
+    for (position, (first_id, first_box)) in boxes.iter().enumerate() {
+        for (second_id, second_box) in boxes.iter().skip(position + 1) {
+            let pair = ((*first_id).min(*second_id), (*first_id).max(*second_id));
+            let same_position = boxes_co_located(*first_box, *second_box);
+            for id in [*first_id, *second_id] {
+                let observation = tracks
+                    .get_mut(&id)
+                    .expect("observed Track ID already indexed")
+                    .observed_pairs
+                    .entry(pair)
+                    .or_default();
+                if same_position {
+                    observation.same_position = observation.same_position.saturating_add(1);
+                } else {
+                    observation.distinct_position = observation.distinct_position.saturating_add(1);
+                    if observation.first_distinct_frame.is_none() {
+                        observation.first_distinct_frame = Some(frame);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn scan_with_scope(
     path: &Path,
     expected_sha: &str,
@@ -186,7 +233,14 @@ fn scan_with_scope(
             return Err("Native track source is out of order or claims verified identities".into());
         }
         let in_play = windows.is_some_and(|w| w.contains(frame_idx));
+        let inferred: BTreeSet<u64> = frame.interpolated_track_ids.iter().copied().collect();
+        if inferred.len() != frame.interpolated_track_ids.len()
+            || inferred.len() > frame.tracked_players.len()
+        {
+            return Err("Duplicate or invalid inferred Track ID metadata".into());
+        }
         let mut appeared = BTreeSet::new();
+        let mut observed_boxes = Vec::new();
         for tracked in &frame.tracked_players {
             if tracked.track_id == 0
                 || tracked.track_id > i64::MAX as u64
@@ -200,12 +254,28 @@ fn scan_with_scope(
             tracked
                 .detection
                 .validate(frame_idx - frame_idx % 9, "players")?;
+            // Interpolated positions are visual continuity, not independent
+            // observations of an athlete. Including them makes two separate
+            // IDs appear co-visible during a gap and fabricates ReID conflicts.
+            if inferred.contains(&tracked.track_id) {
+                continue;
+            }
+            observed_boxes.push((tracked.track_id, tracked.detection.bbox_xyxy_norm));
             observe_track(&mut full, tracked, frame_idx)?;
             if in_play {
                 if let Some(ref mut selected) = scoped {
                     observe_track(selected, tracked, frame_idx)?;
                 }
             }
+        }
+        record_observed_pairs(&mut full, frame_idx, &observed_boxes);
+        if in_play {
+            if let Some(ref mut selected) = scoped {
+                record_observed_pairs(selected, frame_idx, &observed_boxes);
+            }
+        }
+        if !inferred.is_subset(&appeared) {
+            return Err("Interpolated Track ID metadata references a missing player".into());
         }
     }
     if reader.line()?.is_some() {
@@ -500,5 +570,159 @@ mod rally_scope_tests {
         assert!(!scoped.contains_key(&10));
         assert!(scan_with_scope(&path, &"0".repeat(64), 48, Some(&windows)).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod inferred_visibility_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use uuid::Uuid;
+
+    #[test]
+    fn inferred_positions_never_create_co_visibility_or_reid_samples() {
+        let root = std::env::temp_dir().join(format!("track-observation-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let file = root.join("frames.jsonl");
+        let mut bytes = Vec::new();
+        for frame in 0..9_u64 {
+            let first_actual = [0, 2, 8].contains(&frame);
+            let second_actual = [4, 6].contains(&frame);
+            let first_inferred = (3..8).contains(&frame);
+            let second_inferred = frame == 5;
+            let mut players = Vec::new();
+            let mut inferred = Vec::new();
+            for (id, include, synthetic) in [
+                (7, first_actual || first_inferred, first_inferred),
+                (8, second_actual || second_inferred, second_inferred),
+            ] {
+                if !include {
+                    continue;
+                }
+                players.push(json!({
+                    "track_id":id,"is_verified_athlete":false,
+                    "detection":{
+                        "frame_index":frame,"class_name":"player",
+                        "score":0.88,"query_index":0,
+                        "bbox_xyxy_norm":[0.30,0.30,0.40,0.70]
+                    }
+                }));
+                if synthetic {
+                    inferred.push(id);
+                }
+            }
+            let row = json!({
+                "frame_index":frame,
+                "selected_ball":null,
+                "tracked_players":players,
+                "interpolated_track_ids":inferred,
+                "track_ids_provisional":true,
+                "confirmed_athlete_identities":false,
+                "touches_confirmed":false
+            });
+            bytes.extend(serde_json::to_vec(&row).unwrap());
+            bytes.push(b'\n');
+        }
+        fs::write(&file, &bytes).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let indexed = index_replay(&file, &sha, 9).unwrap();
+        assert_eq!(indexed[&7].observed, 3);
+        assert_eq!(indexed[&8].observed, 2);
+        assert!(!tracks_co_visible(&indexed[&7], &indexed[&8]));
+        assert!(indexed[&7]
+            .photo_samples
+            .iter()
+            .all(|p| [0, 2, 8].contains(&p.frame)));
+        assert!(indexed[&8]
+            .photo_samples
+            .iter()
+            .all(|p| [4, 6].contains(&p.frame)));
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod spatial_duplicate_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use uuid::Uuid;
+
+    fn observed_pair(second_boxes: &[[f64; 4]], interpolated: bool) -> TrackObservations {
+        let root = std::env::temp_dir().join(format!("track-pair-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let file = root.join("tracked_frames.jsonl");
+        let mut bytes = Vec::new();
+        for (frame, second) in second_boxes.iter().enumerate() {
+            let players = vec![
+                json!({
+                    "track_id": 7, "is_verified_athlete": false,
+                    "detection": {
+                        "frame_index":frame, "class_name":"player", "score":0.92, "query_index":0,
+                        "bbox_xyxy_norm":[0.2,0.1,0.4,0.7]
+                    }
+                }),
+                json!({
+                    "track_id": 8, "is_verified_athlete": false,
+                    "detection": {
+                        "frame_index":frame, "class_name":"player", "score":0.90, "query_index":0,
+                        "bbox_xyxy_norm":second
+                    }
+                }),
+            ];
+            let row = json!({
+                "frame_index":frame, "tracked_players":players,
+                "interpolated_track_ids":if interpolated {vec![8]} else {vec![]},
+                "track_ids_provisional":true,
+                "confirmed_athlete_identities":false,
+                "touches_confirmed":false
+            });
+            bytes.extend(serde_json::to_vec(&row).unwrap());
+            bytes.push(b'\n');
+        }
+        fs::write(&file, &bytes).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let indexed = index_replay(&file, &sha, second_boxes.len() as u64).unwrap();
+        fs::remove_dir_all(root).unwrap();
+        indexed
+    }
+
+    #[test]
+    fn true_duplicate_player_boxes_can_share_athlete_assignment() {
+        let boxes = [[0.21, 0.11, 0.41, 0.71]; 4];
+        let indexed = observed_pair(&boxes, false);
+        assert_eq!(indexed[&7].observed_pairs[&(7, 8)].same_position, 4);
+        assert_eq!(indexed[&7].observed_pairs[&(7, 8)].distinct_position, 0);
+        assert!(!tracks_co_visible(&indexed[&7], &indexed[&8]));
+    }
+
+    #[test]
+    fn spatially_distinct_players_still_conflict() {
+        let boxes = [[0.60, 0.1, 0.80, 0.7]; 4];
+        let indexed = observed_pair(&boxes, false);
+        assert_eq!(indexed[&7].observed_pairs[&(7, 8)].distinct_position, 4);
+        assert!(tracks_co_visible(&indexed[&7], &indexed[&8]));
+    }
+
+    #[test]
+    fn brief_or_inconsistent_overlap_does_not_suppress_identity_conflict() {
+        let short = observed_pair(&[[0.2, 0.1, 0.4, 0.7]], false);
+        assert!(tracks_co_visible(&short[&7], &short[&8]));
+        let mixed = observed_pair(
+            &[
+                [0.2, 0.1, 0.4, 0.7],
+                [0.2, 0.1, 0.4, 0.7],
+                [0.6, 0.1, 0.8, 0.7],
+            ],
+            false,
+        );
+        assert!(tracks_co_visible(&mixed[&7], &mixed[&8]));
+    }
+
+    #[test]
+    fn interpolated_boxes_do_not_create_spatial_duplicate_evidence() {
+        let boxes = [[0.2, 0.1, 0.4, 0.7]; 4];
+        let indexed = observed_pair(&boxes, true);
+        assert!(!indexed.contains_key(&8));
+        assert!(indexed[&7].observed_pairs.is_empty());
     }
 }

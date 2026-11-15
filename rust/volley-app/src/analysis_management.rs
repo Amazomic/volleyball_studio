@@ -69,7 +69,8 @@ mod tests {
             Some("Мой анализ")
         );
         request.action = "delete".into();
-        edit(&root, &request).unwrap();
+        let staged = edit(&root, &request).unwrap().expect("staged cleanup");
+        assert!(staged.is_dir());
         assert!(!root.join("native_gpu_fusions").join(f).exists());
         assert!(!root.join("native_cpu_replays").join(replay).exists());
         assert!(!root.join("native_cpu_touch_runs").join(touch).exists());
@@ -457,8 +458,8 @@ pub(crate) fn catalog_guard(state: &AppState, project_id: &str) -> Result<File, 
         .truncate(false)
         .open(path)
         .map_err(|e| storage::internal(format!("Analysis lock: {e}")))?;
-    lock.lock_exclusive()
-        .map_err(|e| storage::internal(format!("Lock analysis: {e}")))?;
+    lock.try_lock_exclusive()
+        .map_err(|_| storage::conflict("Данные проекта заняты другой операцией"))?;
     Ok(lock)
 }
 
@@ -585,6 +586,44 @@ pub(crate) fn recover_projects(state: &AppState) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Reclaim previously committed trash following an unexpected shutdown.
+/// Uncommitted transactions are restored separately by recover_projects.
+pub(crate) fn cleanup_orphaned_deletions(state: &AppState) {
+    if !state.writes_enabled {
+        return;
+    }
+    let Ok(projects) = projects::load_projects(state) else {
+        return;
+    };
+    for project in projects {
+        let Some(id) = project["id"].as_str() else {
+            continue;
+        };
+        if storage::project_id(id).is_err() {
+            continue;
+        }
+        let root = projects::project_root(state).join(id);
+        let Ok(entries) = fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(token) = name.strip_prefix(".deleted-analysis-") else {
+                continue;
+            };
+            if uuid::Uuid::parse_str(token).is_err()
+                || !fs::symlink_metadata(entry.path())
+                    .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+            {
+                continue;
+            }
+            if let Err(error) = fs::remove_dir_all(entry.path()) {
+                eprintln!("Recover background analysis cleanup {}: {error}", name);
+            }
+        }
+    }
+}
+
 const STAGES: [(&str, &str); 5] = [
     ("gpu", "native_gpu_runs"),
     ("fusion", "native_gpu_fusions"),
@@ -652,7 +691,7 @@ pub(crate) fn display_name(root: &Path, kind: &str, id: &str) -> Result<Option<S
     Ok(names[format!("{kind}:{id}")].as_str().map(str::to_owned))
 }
 
-fn edit(root: &Path, req: &EditRequest) -> Result<(), ApiError> {
+fn edit(root: &Path, req: &EditRequest) -> Result<Option<std::path::PathBuf>, ApiError> {
     recover(root)?;
     if !opaque_id(&req.id)
         || !matches!(req.kind.as_str(), "gpu" | "fusion" | "unlinked" | "rallies")
@@ -700,7 +739,8 @@ fn edit(root: &Path, req: &EditRequest) -> Result<(), ApiError> {
             ));
         }
         names_map.insert(key, json!(name));
-        return storage::write_json_atomic(&names_path, &names);
+        storage::write_json_atomic(&names_path, &names)?;
+        return Ok(None);
     }
     if req.action != "delete" {
         return Err(storage::bad_request("Неизвестное действие"));
@@ -931,10 +971,30 @@ fn edit(root: &Path, req: &EditRequest) -> Result<(), ApiError> {
             "Commit analysis deletion: {error}"
         )));
     }
-    if fs::remove_dir_all(txn).is_ok() {
-        let _ = fs::remove_file(root.join("native_analysis_deletion_committed.json"));
+    // Rename the committed transaction out of the fixed staging slot before
+    // responding. Deletion of large evidence trees must not block the UI.
+    let trash = root.join(format!(
+        ".deleted-analysis-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let staged = match fs::rename(&txn, &trash) {
+        Ok(()) => {
+            let _ = fs::remove_file(root.join("native_analysis_deletion_committed.json"));
+            trash
+        }
+        Err(error) => {
+            eprintln!("Analysis cleanup staging rename: {error}");
+            txn
+        }
+    };
+    for (stage, id) in &selected {
+        names_map.remove(&format!("{stage}:{id}"));
     }
-    Ok(())
+    names_map.remove(&key);
+    if let Err(error) = storage::write_json_atomic(&names_path, &names) {
+        eprintln!("Analysis display-name cleanup: {error:?}");
+    }
+    Ok(Some(staged))
 }
 
 pub async fn change(
@@ -947,17 +1007,36 @@ pub async fn change(
     projects::existing_project(&state, &req.project_id)?;
     let _lock = project_guard::write_guard(&state, &req.project_id)?;
     let _catalog_lock = catalog_guard(&state, &req.project_id)?;
-    if crate::studio_pipeline::has_active().await
-        || state.full_inference.has_active().await
-        || state.quick_reel.has_active().await
-        || state.montage.has_active().await
-        || state.preparation.has_active().await
+    if crate::studio_pipeline::uses_analysis(&state, &req.project_id, &req.video, &req.id).await? {
+        return Err(storage::conflict(
+            "Этот результат используется выполняющимся анализом",
+        ));
+    }
+    if req.action == "delete"
+        && (state
+            .full_inference
+            .has_active_for_project(&req.project_id)
+            .await
+            || state.montage.has_active_for_project(&req.project_id).await
+            || state
+                .preparation
+                .has_active_for_project(&req.project_id)
+                .await)
     {
-        return Err(storage::conflict("Дождитесь завершения активного анализа"));
+        return Err(storage::conflict(
+            "Удаление недоступно во время другой операции с данными",
+        ));
     }
     let root = projects::project_root(&state).join(&req.project_id);
     safe_folder(&root).map_err(storage::bad_request)?;
-    edit(&root, &req)?;
+    let staged = edit(&root, &req)?;
+    if let Some(trash) = staged {
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = fs::remove_dir_all(&trash) {
+                eprintln!("Background analysis cleanup {}: {error}", trash.display());
+            }
+        });
+    }
     Ok(Json(json!({"ok":true})))
 }
 

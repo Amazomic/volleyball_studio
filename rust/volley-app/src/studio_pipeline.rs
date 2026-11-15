@@ -328,7 +328,10 @@ fn history_rows(state: &AppState, project_id: &str, offset: usize) -> Result<Val
             .enumerate()
             .map(|(index, (name, start))| {
                 let end = starts.get(index + 1).map(|(_, time)| *time).or(finished);
-                json!({"name":name,"duration_ms":end.and_then(|time| time.checked_sub(*start))})
+                json!({"name":name,"started_ms":start,"finished_ms":end,
+                    "duration_ms":end.and_then(|time| time.checked_sub(*start)),
+                    "active":end.is_none() && ["queued","running","cancelling"].contains(
+                        &status["status"].as_str().unwrap_or(""))})
             })
             .collect();
         rows.push(json!({"id":id,"video":status["video"],"mode":status["mode"],
@@ -481,6 +484,42 @@ fn manager() -> &'static Mutex<Option<Running>> {
 pub(crate) async fn has_active() -> bool {
     manager().lock().await.is_some()
 }
+
+pub(crate) async fn has_active_for_project(project_id: &str) -> bool {
+    manager()
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|job| job.project_id == project_id)
+}
+
+/// Protect only artifacts used by the running studio pipeline; unrelated saved
+/// analyses can be renamed or deleted without interrupting GPU/CPU processing.
+pub(crate) async fn uses_analysis(
+    state: &AppState,
+    project_id: &str,
+    video: &str,
+    artifact_id: &str,
+) -> Result<bool, ApiError> {
+    let slot = manager().lock().await;
+    let Some(running) = slot.as_ref().filter(|job| job.project_id == project_id) else {
+        return Ok(false);
+    };
+    let root = folder(state, project_id, false)?;
+    let status = read(&status_path(&root, &running.id)?)?;
+    if status["video"] != video {
+        return Ok(false);
+    }
+    let directly_used = ["source_analysis_id", "analysis_id", "reused_from_id"]
+        .iter()
+        .any(|key| status[*key].as_str() == Some(artifact_id));
+    let nested_used = ["gpu_jobs", "cpu_runs"]
+        .iter()
+        .filter_map(|key| status[*key].as_object())
+        .flat_map(|values| values.values())
+        .any(|value| value.as_str() == Some(artifact_id));
+    Ok(directly_used || nested_used)
+}
 fn reason(error: ApiError) -> String {
     error.1 .0["error"]
         .as_str()
@@ -532,10 +571,35 @@ fn status_path(root: &Path, id: &str) -> Result<PathBuf, ApiError> {
     cpu_retrack::safe_folder(&run).map_err(storage::bad_request)?;
     Ok(run.join("status.json"))
 }
+fn epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+fn finish_timed_stage(status: &mut Value) {
+    let now = epoch_ms();
+    if let Some(last) = status["stages"]
+        .as_array_mut()
+        .and_then(|rows| rows.last_mut())
+    {
+        if last["finished_ms"].is_null() {
+            if let Some(start) = last["started_ms"].as_u64() {
+                last["duration_ms"] = json!(now.saturating_sub(start));
+                last["finished_ms"] = json!(now);
+            }
+        }
+    }
+    status["finished_ms"] = json!(now);
+}
+
 fn progress(path: &Path, status: &mut Value, stage: &str, percent: f64) -> Result<(), String> {
     let stage_name = stage.split_once(": ").map_or(stage, |(name, _)| name);
     let previous = status["stage"].as_str().unwrap_or("");
     let previous_name = previous.split_once(": ").map_or(previous, |(name, _)| name);
+    let now = epoch_ms();
     if stage_name != previous_name {
         log_entry(
             path,
@@ -545,6 +609,39 @@ fn progress(path: &Path, status: &mut Value, stage: &str, percent: f64) -> Resul
             "Начало этапа",
             None,
         )?;
+        if !status["stages"].is_array() {
+            status["stages"] = json!([]);
+        }
+        if let Some(rows) = status["stages"].as_array_mut() {
+            if let Some(last) = rows.last_mut() {
+                if last["finished_ms"].is_null() {
+                    let start = last["started_ms"].as_u64().unwrap_or(now);
+                    last["finished_ms"] = json!(now);
+                    last["duration_ms"] = json!(now.saturating_sub(start));
+                }
+            }
+            rows.push(json!({"name":stage_name,"started_ms":now,
+                "finished_ms":null,"duration_ms":null}));
+        }
+        status["stage_samples"] = json!([]);
+    }
+    // A bounded rate window is useful for GPU stages; do not project an
+    // entire mixed CPU/GPU pipeline from its global percentage.
+    let samples = status["stage_samples"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let previous_sample = samples.last();
+    if previous_sample.is_none_or(|last| {
+        now.saturating_sub(last["timestamp_ms"].as_u64().unwrap_or(0)) >= 2500
+            && (percent - last["percent"].as_f64().unwrap_or(percent)).abs() >= 0.05
+    }) {
+        let mut updated = samples;
+        updated.push(json!({"timestamp_ms":now,"percent":percent}));
+        if updated.len() > 45 {
+            updated.drain(..updated.len() - 45);
+        }
+        status["stage_samples"] = json!(updated);
     }
     status["status"] = json!("running");
     status["stage"] = json!(stage);
@@ -664,6 +761,22 @@ fn gpu_lineage_valid(
         {
             return false;
         }
+        // Old saved GPU runs remain selectable for CPU-only postprocessing.
+        // New full analyses must include the new pre-pose crop stage and
+        // never silently reuse a pose run from the old hold-last-box code.
+        if saved["gpu_model_stack"] == requested_gpu_model_stack() {
+            let plan = project.join("native_gpu_pose_runs").join(pose_id);
+            if pose["crop_plan_version"] != "two_sided_box_interpolation_v1"
+                || pose["crop_plan_file"] != "pose_crop_boxes.jsonl"
+                || pose["crop_plan_frames"] != fusion["emitted_frames"]
+                || pose["crop_plan_max_gap_frames"] != 120
+                || !valid_sha(&pose["crop_plan_sha256"])
+                || cpu_retrack::safe_file(&plan, "pose_crop_boxes.jsonl", MAX_SOURCE_EVIDENCE)
+                    .is_err()
+            {
+                return false;
+            }
+        }
     }
     true
 }
@@ -712,6 +825,9 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
     track["schema"] == "volley-native-cpu-tracking/1"
         && track["state"] == "provisional_tracklets_rebuilt"
         && track["interpolated_positions_version"] == "bounded_same_track_3s_v1"
+        && (saved["gpu_model_stack"] != requested_gpu_model_stack()
+            || !request.gpu.pose_enabled
+            || track["track_association_version"] == "pose_coco17_primary_v1")
         && track["replay_id"] == replay
         && track["source_fusion_id"] == fusion
         && track["ball_selection_policy"] == "vballnet_only_v1"
@@ -741,11 +857,31 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
         && rallies["project_id"] == request.project_id
         && rallies["video"] == request.video
 }
-const GPU_MODEL_STACK: &str = "vballnet_rtmdet_rtmpose_tiled_coco17_batch8_v4";
+const GPU_MODEL_STACK: &str = "vballnet_rtmdet_rtmpose_tiled_coco17_3hz_pose_boxes_v6";
+const RFDETR_GPU_MODEL_STACK: &str =
+    "vballnet_rfdetr_medium_18250b5a_rtmpose_detboxes_coco17_3hz_v1";
+
+/// The GPU-evidence cache must not be shared by different detector weights
+/// or detector-to-pose box policies.
+fn person_detector_label() -> &'static str {
+    match volley_inference::person::DetectorVariant::from_env() {
+        Ok(volley_inference::person::DetectorVariant::RfDetrMedium) => "RF-DETR Medium + RTMPose",
+        Ok(volley_inference::person::DetectorVariant::RtmDetNano) => "RTMDet + RTMPose",
+        Err(_) => "Детектор игроков + RTMPose",
+    }
+}
+
+fn requested_gpu_model_stack() -> &'static str {
+    match volley_inference::person::DetectorVariant::from_env() {
+        Ok(volley_inference::person::DetectorVariant::RfDetrMedium) => RFDETR_GPU_MODEL_STACK,
+        Ok(volley_inference::person::DetectorVariant::RtmDetNano) => GPU_MODEL_STACK,
+        Err(_) => "invalid_person_detector_selection_no_gpu_cache_reuse",
+    }
+}
 
 fn compatible_version(saved: &Value, request: &StartRequest, identity: &Value) -> bool {
     saved["schema"] == SCHEMA
-        && saved["gpu_model_stack"] == GPU_MODEL_STACK
+        && saved["gpu_model_stack"] == requested_gpu_model_stack()
         && saved["project_id"] == request.project_id
         && saved["video"] == request.video
         && saved["profile"]["gpu"] == serde_json::to_value(&request.gpu).unwrap_or(Value::Null)
@@ -943,7 +1079,7 @@ async fn gpu(
     let model_name = if model == ModelKind::Ball {
         "VballNet"
     } else {
-        "RTMDet + RTMPose"
+        person_detector_label()
     };
     progress(path, status, &format!("GPU · {model_name}"), from)?;
     log_event(
@@ -1312,7 +1448,7 @@ async fn pipeline(
             return Err("cancelled".into());
         }
         let fusion_id = require_id(status, "analysis_id")?;
-        progress(path, status, "GPU · RTMPose-M: позы игроков", 82.0)?;
+        progress(path, status, "GPU · Интерполяция рамок", 82.0)?;
         log_native(
             path,
             "GPU · RTMPose-M",
@@ -1335,13 +1471,17 @@ async fn pipeline(
                 request.gpu.gpu_memory_limit_mb,
                 request.gpu.cpu_threads,
                 cancel,
-                |p| {
-                    progress(
-                        path,
-                        status,
-                        "GPU · RTMPose-M: позы игроков",
-                        82.0 + p * 2.5,
-                    )
+                |phase, p| {
+                    if phase == "boxes" {
+                        progress(path, status, "GPU · Интерполяция рамок", 82.0 + p * 0.4)
+                    } else {
+                        progress(
+                            path,
+                            status,
+                            "GPU · RTMPose-M: позы игроков",
+                            82.4 + p * 2.1,
+                        )
+                    }
                 },
             )
         })?;
@@ -1352,8 +1492,8 @@ async fn pipeline(
             "GPU · RTMPose-M",
             "success",
             &format!(
-                "Позы сохранены: samples={}, players={}",
-                pose["sampled_frames"], pose["player_poses"]
+                "Позы сохранены: samples={}, players={}; рамок восстановлено={}",
+                pose["sampled_frames"], pose["player_poses"], pose["crop_plan_interpolated_boxes"]
             ),
         )?;
     }
@@ -1607,6 +1747,7 @@ async fn perform(
         }
     }
     status["current_gpu_job_id"] = Value::Null;
+    finish_timed_stage(&mut status);
     let _ = save(&path, &status);
     let mut slot = manager().lock().await;
     if slot.as_ref().is_some_and(|current| current.id == id) {
@@ -1730,10 +1871,11 @@ pub async fn start(
     let status = json!({
         "schema":SCHEMA,"id":id,"project_id":request.project_id,"video":request.video,
         "status":"queued","stage":"В очереди","progress_percent":0.0,
+        "started_ms":epoch_ms(),"finished_ms":null,"stages":[],"stage_samples":[],
         "profile":{"gpu":request.gpu,"post":request.post},
         "mode":request.mode,"source_analysis_id":request.source_analysis_id,
         "client_request_id":request.client_request_id,
-        "gpu_model_stack":GPU_MODEL_STACK,
+        "gpu_model_stack":requested_gpu_model_stack(),
         "gpu_jobs":{},"cpu_runs":{},"analysis_id":null,
         "postprocessing_id":null,"current_gpu_job_id":null,
         "source_identity":null,"gpu_reused":false,"result_reused":false,
@@ -1763,6 +1905,115 @@ pub async fn start(
     tokio::spawn(perform(state, request, id.clone(), cancelled, path));
     Ok(Json(json!({"schema":SCHEMA,"id":id,"status":"queued"})))
 }
+// A pipeline's comparable completed runs cannot change while it is active.
+// Compute these once per run rather than rereading up to 25 log files on every
+// 1.8-second status poll. The key includes the run ID for automatic invalidation.
+fn eta_reference_history(state: &AppState, project: &str, run: &str) -> Result<Value, ApiError> {
+    type Cached = Option<(String, String, Value)>;
+    static CACHE: OnceLock<std::sync::Mutex<Cached>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some((saved_project, saved_run, history)) = guard.as_ref() {
+            if saved_project == project && saved_run == run {
+                return Ok(history.clone());
+            }
+        }
+    }
+    let history = history_rows(state, project, 0)?;
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((project.to_owned(), run.to_owned(), history.clone()));
+    }
+    Ok(history)
+}
+
+// Stage-aware ETA from comparable completed runs on the same source video.
+// We use observed GPU throughput only inside the current stage; CPU stages
+// have no reliable fractional progress and use their measured durations.
+fn stage_aware_remaining(current: &Value, history: &Value, now: u64) -> Option<u64> {
+    let active = current["stages"].as_array()?.last()?;
+    let name = active["name"].as_str()?;
+    let elapsed = now.saturating_sub(active["started_ms"].as_u64()?);
+    let mut this_stage = Vec::new();
+    let mut future = Vec::new();
+    for run in history["runs"]
+        .as_array()?
+        .iter()
+        .filter(|run| {
+            run["status"] == "complete"
+                && run["mode"] == current["mode"]
+                && run["video"] == current["video"]
+                && run["gpu_reused"] == current["gpu_reused"]
+        })
+        .take(20)
+    {
+        let Some(stages) = run["stages"].as_array() else {
+            continue;
+        };
+        let Some(index) = stages.iter().position(|item| item["name"] == name) else {
+            continue;
+        };
+        let Some(duration) = stages[index]["duration_ms"].as_u64() else {
+            continue;
+        };
+        let tail = stages[index + 1..]
+            .iter()
+            .map(|item| item["duration_ms"].as_u64())
+            .collect::<Option<Vec<_>>>();
+        let Some(tail) = tail else { continue };
+        this_stage.push(duration);
+        future.push(tail.into_iter().sum::<u64>());
+    }
+    fn median(mut values: Vec<u64>) -> Option<u64> {
+        if values.is_empty() {
+            return None;
+        }
+        values.sort_unstable();
+        Some(values[values.len() / 2])
+    }
+    let historical_stage = median(this_stage)?;
+    let historical_future = median(future)?;
+    let mut stage_left = historical_stage.saturating_sub(elapsed);
+    let target = if name == "Подготовка исходного видео" {
+        Some(8.0)
+    } else if name == "GPU · VballNet" {
+        Some(44.0)
+    } else if name == "GPU · RTMDet + RTMPose" || name == "GPU · RF-DETR Medium + RTMPose" {
+        Some(80.0)
+    } else if name == "GPU · Интерполяция рамок" {
+        Some(82.4)
+    } else if name == "GPU · RTMPose-M" {
+        Some(84.5)
+    } else {
+        None
+    };
+    if let (Some(target), Some(samples)) = (target, current["stage_samples"].as_array()) {
+        if samples.len() >= 2 {
+            let newest = samples.last()?;
+            let oldest = samples.iter().find(|sample| {
+                newest["timestamp_ms"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .saturating_sub(sample["timestamp_ms"].as_u64().unwrap_or(0))
+                    >= 12_000
+            });
+            if let Some(oldest) = oldest {
+                let change = newest["percent"].as_f64()? - oldest["percent"].as_f64()?;
+                let span = newest["timestamp_ms"]
+                    .as_u64()?
+                    .saturating_sub(oldest["timestamp_ms"].as_u64()?);
+                if change >= 0.25 && span >= 12_000 {
+                    let projected = ((target - newest["percent"].as_f64()?).max(0.0) * span as f64
+                        / change) as u64;
+                    let bounded = projected.min(historical_stage.saturating_mul(5).max(30_000));
+                    stage_left = ((stage_left as f64 * 0.35) + (bounded as f64 * 0.65)) as u64;
+                }
+            }
+        }
+    }
+    let remaining = stage_left.saturating_add(historical_future);
+    (remaining <= 7 * 24 * 3_600_000).then_some(remaining.max(1000))
+}
+
 pub async fn status(
     State(state): State<Arc<AppState>>,
     Query(query): Query<StatusQuery>,
@@ -1805,6 +2056,28 @@ pub async fn status(
                 result["stage"] = json!("Сервер перезапущен");
                 result["error"] = json!("Анализ не завершён до перезапуска сервера");
             }
+        }
+    }
+    // Presentation fields are computed at read time, never persisted as fake
+    // progress. Existing (pre-timeline) runs still retain their log history.
+    let now = epoch_ms();
+    if let Some(start) = result["started_ms"].as_u64() {
+        let end = result["finished_ms"].as_u64().unwrap_or(now);
+        result["elapsed_ms"] = json!(end.saturating_sub(start));
+    }
+    if ["queued", "running", "cancelling"].contains(&result["status"].as_str().unwrap_or(""))
+        && result["stages"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    {
+        let app = state.clone();
+        let project = query.project_id.clone();
+        let run = id.clone();
+        if let Ok(Ok(history)) =
+            tokio::task::spawn_blocking(move || eta_reference_history(&app, &project, &run)).await
+        {
+            result["remaining_ms"] =
+                stage_aware_remaining(&result, &history, now).map_or(Value::Null, |ms| json!(ms));
         }
     }
     Ok(Json(result))
@@ -1872,6 +2145,26 @@ mod tests {
         assert_eq!(records[0]["kind"], "stage_start");
         assert_eq!(records[0]["stage"], "GPU");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn eta_uses_matching_stage_durations_not_global_percent() {
+        let now = 200_000;
+        let current = json!({"mode":"post","video":"match.mp4","gpu_reused":true,
+            "stages":[{"name":"Постобработка · физические касания","started_ms":180_000}],
+            "stage_samples":[]});
+        let history = json!({"runs":[
+            {"status":"complete","mode":"post","video":"match.mp4","gpu_reused":true,
+             "stages":[{"name":"Постобработка · Track ID","duration_ms":30000},
+                {"name":"Постобработка · физические касания","duration_ms":80000},
+                {"name":"Постобработка · розыгрыши","duration_ms":10000}]},
+            {"status":"complete","mode":"gpu","video":"match.mp4","gpu_reused":false,
+             "stages":[{"name":"Постобработка · физические касания","duration_ms":500}]}
+        ]});
+        assert_eq!(stage_aware_remaining(&current, &history, now), Some(70_000));
+        let other = json!({"mode":"post","video":"other.mp4","gpu_reused":true,
+            "stages":[{"name":"Постобработка · физические касания","started_ms":180_000}]});
+        assert_eq!(stage_aware_remaining(&other, &history, now), None);
     }
 
     #[test]
@@ -2037,7 +2330,7 @@ mod branching_tests {
         let saved = json!({
             "schema":SCHEMA,"project_id":request.project_id,"video":request.video,
             "status":"complete","pipeline_complete":true,"source_identity":identity,
-            "gpu_model_stack":GPU_MODEL_STACK,
+            "gpu_model_stack":requested_gpu_model_stack(),
             "profile":{"gpu":request.gpu,"post":request.post},
             "gpu_jobs":{"ball":gpu_ball,"players":gpu_players},
             "analysis_id":analysis,"cpu_runs":{"tracking":replay,"touches":touch,"rallies":rally},

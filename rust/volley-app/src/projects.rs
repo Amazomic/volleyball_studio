@@ -54,8 +54,99 @@ pub(crate) fn uploaded_video_root(state: &AppState) -> PathBuf {
 
 /// Resolve either an immutable original in repository/project or a validated
 /// browser upload in the isolated Rust data root, never a caller-supplied path.
+fn linked_source_root(state: &AppState) -> PathBuf {
+    state.data_root.join("linked_sources")
+}
+
+/// Only metadata minted by the native picker can grant access to an external file.
+fn linked_source(state: &AppState, name: &str) -> Result<Option<PathBuf>, ApiError> {
+    let Some(tail) = name.strip_prefix("linked_") else {
+        return Ok(None);
+    };
+    let Some((id, _extension)) = tail.rsplit_once('.') else {
+        return Ok(None);
+    };
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(None);
+    }
+    let record = linked_source_root(state).join(format!("{name}.json"));
+    let metadata = match fs::symlink_metadata(&record) {
+        Ok(metadata) => metadata,
+        Err(_) => return Err(storage::bad_request("Linked video is no longer registered")),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 8192 {
+        return Err(storage::bad_request("Unsafe linked video record"));
+    }
+    let value = storage::read_json(&record)?
+        .ok_or_else(|| storage::bad_request("Linked video record missing"))?;
+    let path = value["path"]
+        .as_str()
+        .ok_or_else(|| storage::bad_request("Invalid video link"))?;
+    let original = Path::new(path);
+    if !original.is_absolute() {
+        return Err(storage::bad_request("Invalid video link path"));
+    }
+    let target = original
+        .canonicalize()
+        .map_err(|_| storage::bad_request("Original video is unavailable"))?;
+    if !target.is_file() || target.metadata().is_ok_and(|m| m.len() < 1024) {
+        return Err(storage::bad_request("Original video is unavailable"));
+    }
+    Ok(Some(target))
+}
+
+/// Native picker directly links original videos: no upload or SHA-256.
+pub async fn native_pick(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Value> {
+    storage::validate_origin(&headers)?;
+    let Json(picked) = crate::quick_reel::native_pick(State(state.clone()), headers).await?;
+    let rows = picked["videos"].as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        return Ok(Json(json!({"videos":[],"cancelled":true})));
+    }
+    let state2 = state.clone();
+    let linked = tokio::task::spawn_blocking(move || {
+        let folder = linked_source_root(&state2);
+        fs::create_dir_all(&folder)
+            .map_err(|e| storage::internal(format!("Linked source dir: {e}")))?;
+        let mut result = Vec::new();
+        for row in rows {
+            let token = row["id"]
+                .as_str()
+                .ok_or_else(|| storage::bad_request("Missing selection token"))?;
+            let path = crate::quick_reel::picked_path(&state2, token)?;
+            let extension = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| storage::bad_request("Video extension missing"))?
+                .to_ascii_lowercase();
+            let name = format!("linked_{}.{}", Uuid::new_v4().simple(), extension);
+            storage::video_name(&name)?;
+            let display_name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| storage::bad_request("Invalid video filename"))?;
+            storage::write_json_atomic(
+                &folder.join(format!("{name}.json")),
+                &json!({"path":path.to_string_lossy().to_string()}),
+            )?;
+            result.push(json!({"name":name,"display_name":display_name,
+                "size_gb":row["size_gb"],"origin":"linked"}));
+        }
+        Ok::<_, ApiError>(result)
+    })
+    .await
+    .map_err(|e| storage::internal(format!("File picker task: {e}")))??;
+    Ok(Json(json!({"videos":linked})))
+}
+
 pub(crate) fn canonical_source(state: &AppState, name: &str) -> Result<PathBuf, ApiError> {
     storage::video_name(name)?;
+    if let Some(path) = linked_source(state, name)? {
+        return Ok(path);
+    }
     let original = state.repository_root.join("project").join(name);
     let uploaded_root = uploaded_video_root(state);
     let isolated = uploaded_root.join(name);
@@ -600,7 +691,9 @@ fn update_record(state: &AppState, request: Value) -> Result<Value, ApiError> {
     })
 }
 
-fn delete_from_root(root: &Path, id: &str) -> Result<(), ApiError> {
+/// The registry and folder rename are the user-visible commit. Large file
+/// deletion happens later, without holding project/catalog locks.
+fn delete_from_root(root: &Path, id: &str) -> Result<(PathBuf, Vec<String>), ApiError> {
     storage::project_id(id)?;
     let registry = root.join("projects.json");
     let mut data =
@@ -621,15 +714,72 @@ fn delete_from_root(root: &Path, id: &str) -> Result<(), ApiError> {
     let staged = root.join(format!(".deleted-{}", Uuid::new_v4().simple()));
     fs::rename(&source, &staged)
         .map_err(|e| storage::internal(format!("Stage project deletion: {e}")))?;
-    rows.remove(index);
+    let removed = rows.remove(index);
+    let shared: HashSet<String> = rows
+        .iter()
+        .filter_map(|row| row["videos"].as_array())
+        .flat_map(|videos| videos.iter().filter_map(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    let exclusive = removed["videos"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|video| storage::video_name(video).is_ok() && !shared.contains(*video))
+        .map(str::to_owned)
+        .collect();
     if let Err(error) = storage::write_json_atomic(&registry, &data) {
         fs::rename(&staged, &source)
             .map_err(|e| storage::internal(format!("Restore project after registry error: {e}")))?;
         return Err(error);
     }
-    fs::remove_dir_all(&staged)
-        .map_err(|e| storage::internal(format!("Remove staged project: {e}")))?;
-    Ok(())
+    Ok((staged, exclusive))
+}
+
+/// Remove only Studio-owned uploads and link records that no surviving project
+/// references. An original video in repository/project or an external linked
+/// file is never removed by project deletion.
+fn cleanup_staged_project(state: &AppState, staged: PathBuf, candidates: Vec<String>) {
+    if let Err(error) = fs::remove_dir_all(&staged) {
+        eprintln!("Background project cleanup {}: {error}", staged.display());
+    }
+    if let Err(error) = with_registry_lock(state, || {
+        let referenced: HashSet<String> = load_projects(state)?
+            .iter()
+            .filter_map(|p| p["videos"].as_array())
+            .flat_map(|videos| videos.iter().filter_map(Value::as_str))
+            .map(str::to_owned)
+            .collect();
+        for video in candidates {
+            if referenced.contains(&video) {
+                continue;
+            }
+            let uploaded = uploaded_video_root(state);
+            let mut files = vec![
+                uploaded.join(&video),
+                uploaded.join(format!("{video}.json")),
+            ];
+            if video.starts_with("linked_") {
+                files.push(linked_source_root(state).join(format!("{video}.json")));
+            }
+            for file in files {
+                match fs::symlink_metadata(&file) {
+                    Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
+                        if let Err(error) = fs::remove_file(&file) {
+                            eprintln!("Background video cleanup {}: {error}", file.display());
+                        }
+                    }
+                    Ok(_) => eprintln!("Skipping unsafe video cleanup {}", file.display()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => eprintln!("Video cleanup check {}: {error}", file.display()),
+                }
+            }
+        }
+        Ok(())
+    }) {
+        eprintln!("Background project source cleanup: {error:?}");
+    }
 }
 
 pub async fn delete_project(
@@ -642,18 +792,104 @@ pub async fn delete_project(
         .as_str()
         .ok_or_else(|| storage::bad_request("Укажите идентификатор проекта"))?;
     existing_project(&state, id)?;
+    // Only jobs using THIS project block its deletion. Independent runs
+    // must remain accessible, even if they are still processing.
+    if crate::studio_pipeline::has_active_for_project(id).await
+        || state.full_inference.has_active_for_project(id).await
+        || state.montage.has_active_for_project(id).await
+        || state.preparation.has_active_for_project(id).await
+    {
+        return Err(storage::conflict(
+            "Этот проект используется выполняющейся задачей",
+        ));
+    }
     let _guard = crate::project_guard::write_guard(&state, id)?;
     let _catalog = crate::analysis_management::catalog_guard(&state, id)?;
-    if crate::studio_pipeline::has_active().await
-        || state.full_inference.has_active().await
-        || state.quick_reel.has_active().await
-        || state.montage.has_active().await
-        || state.preparation.has_active().await
-    {
-        return Err(storage::conflict("Дождитесь завершения активного анализа"));
-    }
-    with_registry_lock(&state, || delete_from_root(&project_root(&state), id))?;
+    let (staged, exclusive) =
+        with_registry_lock(&state, || delete_from_root(&project_root(&state), id))?;
+    let cleanup_state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        cleanup_staged_project(&cleanup_state, staged, exclusive);
+    });
     Ok(Json(json!({"ok":true})))
+}
+
+/// Retry committed trash after an interrupted process. Nothing in these
+/// folders is visible in the registry, and a source still referenced by
+/// another project is rechecked before its Studio-owned copy is removed.
+pub(crate) fn cleanup_orphaned_deletions(state: &AppState) {
+    if !state.writes_enabled {
+        return;
+    }
+    let root = project_root(state);
+    let Ok(entries) = fs::read_dir(&root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(token) = name.strip_prefix(".deleted-") else {
+            continue;
+        };
+        if Uuid::parse_str(token).is_err()
+            || !fs::symlink_metadata(entry.path())
+                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+        {
+            continue;
+        }
+        let staged = entry.path();
+        let Some(record) = storage::read_json(&staged.join("project.json"))
+            .ok()
+            .flatten()
+        else {
+            eprintln!(
+                "Skipping project trash without a valid project.json: {}",
+                staged.display()
+            );
+            continue;
+        };
+        let Some(id) = record["id"].as_str() else {
+            continue;
+        };
+        if storage::project_id(id).is_err() {
+            continue;
+        }
+        // A crash between folder staging and registry commit must RESTORE the
+        // project, not silently erase data still listed in the registry.
+        let restored = with_registry_lock(state, || {
+            if load_projects(state)?
+                .iter()
+                .any(|project| project["id"].as_str() == Some(id))
+            {
+                let target = root.join(id);
+                if target.exists() {
+                    return Err(storage::conflict(
+                        "Original project folder already exists during deletion recovery",
+                    ));
+                }
+                fs::rename(&staged, &target)
+                    .map_err(|e| storage::internal(format!("Restore interrupted delete: {e}")))?;
+                return Ok(true);
+            }
+            Ok(false)
+        });
+        match restored {
+            Ok(true) => continue,
+            Err(error) => {
+                eprintln!("Project deletion recovery {}: {error:?}", staged.display());
+                continue;
+            }
+            Ok(false) => {}
+        }
+        let candidates = record["videos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|video| storage::video_name(video).is_ok())
+            .map(str::to_owned)
+            .collect();
+        cleanup_staged_project(state, staged, candidates);
+    }
 }
 
 pub async fn create_project(
@@ -767,13 +1003,34 @@ mod tests {
             &serde_json::json!({"schema":1,"projects":[{"id":"123456abcdef"},{"id":"other"}]}),
         )
         .unwrap();
-        super::delete_from_root(&root, "123456abcdef").unwrap();
+        let (staged, _) = super::delete_from_root(&root, "123456abcdef").unwrap();
         assert!(!root.join("123456abcdef").exists());
         assert!(root.join("other").exists());
         let data = crate::storage::read_json(&root.join("projects.json"))
             .unwrap()
             .unwrap();
         assert_eq!(data["projects"].as_array().unwrap().len(), 1);
+        std::fs::remove_dir_all(staged).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn deletion_returns_only_unshared_video_names() {
+        let root =
+            std::env::temp_dir().join(format!("volley-delete-links-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("123456abcdef")).unwrap();
+        std::fs::create_dir_all(root.join("fedcba654321")).unwrap();
+        crate::storage::write_json_atomic(
+            &root.join("projects.json"),
+            &serde_json::json!({"schema":1,"projects":[
+                {"id":"123456abcdef","videos":["shared.mp4","exclusive.mp4"]},
+                {"id":"fedcba654321","videos":["shared.mp4"]}
+            ]}),
+        )
+        .unwrap();
+        let (staged, exclusive) = super::delete_from_root(&root, "123456abcdef").unwrap();
+        assert_eq!(exclusive, vec!["exclusive.mp4"]);
+        assert!(staged.is_dir());
+        assert!(root.join("fedcba654321").is_dir());
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

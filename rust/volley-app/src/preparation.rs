@@ -69,6 +69,13 @@ impl PreparationManager {
     pub(crate) async fn has_active(&self) -> bool {
         !self.jobs.lock().await.is_empty()
     }
+    pub(crate) async fn has_active_for_project(&self, project_id: &str) -> bool {
+        self.jobs
+            .lock()
+            .await
+            .values()
+            .any(|job| job.subscribed_projects.contains(project_id))
+    }
     pub fn new() -> Self {
         Self {
             jobs: Mutex::new(HashMap::new()),

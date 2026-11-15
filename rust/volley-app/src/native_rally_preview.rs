@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -33,6 +33,23 @@ const MAX_EVIDENCE: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_PREVIEW: usize = 80;
 const MAX_EVENTS_PER_CARD: usize = 48;
 const MAX_RALLIES: usize = 200_000;
+
+pub(crate) fn retain_rally_touch(
+    last: &mut BTreeMap<u64, u64>,
+    frame: u64,
+    track: u64,
+    pose_verified: bool,
+) -> bool {
+    if !pose_verified
+        && last
+            .get(&track)
+            .is_some_and(|p| frame.saturating_sub(*p) <= 4)
+    {
+        return false;
+    }
+    last.insert(track, frame);
+    true
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -109,7 +126,11 @@ pub(crate) struct NativeMotion {
     court: Option<volley_core::court_geometry::CourtContactEvidence>,
     physical_motion_supported: bool,
     #[serde(default)]
-    body_contact_supported: bool,
+    pub(crate) body_contact_supported: bool,
+    #[serde(default)]
+    pub(crate) contact_landmark: Option<volley_core::pose_contact::BodyContact>,
+    #[serde(default)]
+    contact_pose_sample_frame: Option<u64>,
     #[serde(default)]
     ball_occluded_at_contact: bool,
     #[serde(default)]
@@ -126,6 +147,9 @@ impl NativeMotion {
     pub(crate) fn probability(&self) -> f64 {
         self.probability
     }
+    pub(crate) fn ball_occluded_at_contact(&self) -> bool {
+        self.ball_occluded_at_contact
+    }
     pub(crate) fn action_prediction(&self) -> Option<&ActionPrediction> {
         self.action_prediction.as_ref()
     }
@@ -136,8 +160,19 @@ impl NativeMotion {
                 <= volley_core::touch_pipeline::MAX_OBSERVED_TOUCH_OFFSET_FRAMES
             && self.physical_motion_supported
             && (!self.body_contact_supported || self.provisional_track_id.is_some())
+            && self.contact_pose_sample_frame.is_none_or(|at| {
+                self.body_contact_supported
+                    && self.contact_landmark.is_some()
+                    && at < frames
+                    && at.abs_diff(self.frame_index) <= 3
+            })
+            && self
+                .contact_landmark
+                .as_ref()
+                .is_none_or(|part| part.valid(width, height))
             && (!self.ball_occluded_at_contact
-                || self.body_contact_supported || self.inferred_body_reach_supported)
+                || self.body_contact_supported
+                || self.inferred_body_reach_supported)
             && (!self.inferred_body_reach_supported
                 || self.ball_occluded_at_contact && !self.body_contact_supported)
             && !self.athlete_identity_verified
@@ -622,7 +657,8 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
         let mut contacts = BoundedReader::open(&run.touch_file)?;
         let mut touch_frames = Vec::<u64>::new();
         let mut raw_touch_count = 0u64;
-        let mut last_track_per_rally = vec![None::<u64>; intervals.len()];
+        let mut last_attributed = BTreeMap::<u64, u64>::new();
+
         let mut estimated_actions = Vec::<Value>::new();
         // Complete postprocessing result, including physical Touch candidates
         // whose action type could not be classified. Never mix with GPU boxes.
@@ -652,26 +688,39 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
             }
             let rally_index =
                 intervals.partition_point(|interval| interval.end < event.frame_index);
-            if intervals
-                .get(rally_index)
-                .is_some_and(|interval| interval.start <= event.frame_index)
-            {
-                if last_track_per_rally[rally_index] == Some(track_id) {
-                    continue;
-                }
-                last_track_per_rally[rally_index] = Some(track_id);
-            }
+
             touch_frames.push(event.frame_index);
-            let predicted_kind = if let Some((_, _, kind)) = contextual {
-                *kind
+            let in_rally = intervals
+                .get(rally_index)
+                .is_some_and(|interval| interval.start <= event.frame_index);
+            let pose_verified = event.body_contact_supported && event.contact_landmark.is_some();
+            let touch_attributed = in_rally
+                && retain_rally_touch(
+                    &mut last_attributed,
+                    event.frame_index,
+                    track_id,
+                    pose_verified,
+                );
+            let verified_contact = touch_attributed && pose_verified;
+            let predicted_kind = if verified_contact {
+                if let Some((_, _, kind)) = contextual {
+                    *kind
+                } else {
+                    event.action_prediction().map(|prediction| prediction.kind)
+                }
             } else {
-                event.action_prediction().map(|prediction| prediction.kind)
+                None
             };
             touch_annotations.push(json!({
                 "frame_index":event.frame_index,
                 "kind":predicted_kind.map(ActionKind::as_str),
                 "ball_position_px":[event.ball_x_px,event.ball_y_px],
                 "provisional_track_id":event.provisional_track_id,
+                "contact_landmark":event.contact_landmark,
+                "contact_pose_sample_frame":event.contact_pose_sample_frame,
+                "contact_verified":verified_contact,
+                "touch_attributed":touch_attributed,
+                "assignment_method":if touch_attributed {if verified_contact {"pose"} else {"nearest_player"}} else {"candidate"},
             }));
             if let Some(kind) = predicted_kind {
                 estimated_actions.push(json!({
@@ -794,7 +843,8 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
     let mut contacts = BoundedReader::open(&run.touch_file)?;
     let mut prior = None;
     let mut count = 0u64;
-    let mut last_track_per_card = vec![None::<u64>; cards.len()];
+    let mut last_attributed = vec![BTreeMap::<u64, u64>::new(); cards.len()];
+
     while let Some(bytes) = contacts.line()? {
         let event: NativeMotion = serde_json::from_slice(&bytes)
             .map_err(|e| format!("Invalid native Touch evidence row: {e}"))?;
@@ -844,19 +894,28 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
                 row["ignored_serve_toss_count"] = json!(suppressed + 1);
                 continue;
             }
-            if last_track_per_card[idx] == Some(track_id) {
+            let pose_verified = event.body_contact_supported && event.contact_landmark.is_some();
+            if !retain_rally_touch(
+                &mut last_attributed[idx],
+                event.frame_index,
+                track_id,
+                pose_verified,
+            ) {
                 continue;
             }
-            last_track_per_card[idx] = Some(track_id);
             let prev = row["motion_event_count"].as_u64().unwrap_or(0);
             row["motion_event_count"] = json!(prev + 1);
-            let resolved_kind = if let Some(ref resolved) = context {
-                resolved["estimated_kind"].as_str()
+            let resolved_kind = if pose_verified {
+                if let Some(ref resolved) = context {
+                    resolved["estimated_kind"].as_str()
+                } else {
+                    event
+                        .action_prediction
+                        .as_ref()
+                        .map(|prediction| prediction.kind.as_str())
+                }
             } else {
-                event
-                    .action_prediction
-                    .as_ref()
-                    .map(|prediction| prediction.kind.as_str())
+                None
             };
             if let Some(kind) = resolved_kind {
                 let counts = row["estimated_action_counts"]
@@ -876,9 +935,20 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
                     .map_err(|e| format!("Serialize motion evidence: {e}"))?;
                 detail["frame_index"] = json!(event.frame_index);
                 detail["ball_position_px"] = json!([event.ball_x_px, event.ball_y_px]);
-                detail["action_prediction"] = json!(event.action_prediction);
-                if let Some(ref rally_context) = context {
-                    detail["rally_context"] = rally_context.clone();
+                detail["action_prediction"] = if pose_verified {
+                    json!(event.action_prediction)
+                } else {
+                    Value::Null
+                };
+                detail["assignment_method"] = json!(if pose_verified {
+                    "pose"
+                } else {
+                    "nearest_player"
+                });
+                if pose_verified {
+                    if let Some(ref rally_context) = context {
+                        detail["rally_context"] = rally_context.clone();
+                    }
                 }
                 if event.court.is_some() {
                     detail["court"] = json!(event.court);
@@ -1052,6 +1122,13 @@ pub struct ManualMontageRequest {
     pub encoder: Option<String>,
     #[serde(default)]
     pub layout: volley_media::montage::VideoLayout,
+    #[serde(default)]
+    pub target_duration_sec: Option<f64>,
+    #[serde(default = "default_camera_zoom")]
+    pub camera_zoom: f64,
+}
+fn default_camera_zoom() -> f64 {
+    1.25
 }
 fn default_volume() -> f64 {
     40.0
@@ -1127,6 +1204,157 @@ pub(crate) fn verified_quick_rally_candidates(
     }
     Ok(rows)
 }
+
+/// A camera track is derived only from a complete SHA-verified native replay.
+/// Low-score, isolated and motionless detections cannot steer the crop.
+pub(crate) fn verified_camera_tracks(
+    state: &AppState,
+    run: &ValidatedRun,
+    clips: &[volley_media::montage::SelectedClip],
+) -> Result<Vec<Vec<volley_media::montage::CameraPoint>>, String> {
+    use volley_media::montage::CameraPoint;
+    if clips.is_empty()
+        || clips.len() > 80
+        || clips.iter().any(|clip| {
+            clip.video != run.video
+                || clip.start_frame > clip.end_frame
+                || clip.end_frame >= run.frames
+        })
+    {
+        return Err("Камера: клипы не принадлежат проверенному CPU-источнику".into());
+    }
+    let base = projects::project_root(state)
+        .join(&run.project_id)
+        .join("native_cpu_replays")
+        .join(&run.replay_id);
+    let path = safe_file(&base, "tracked_frames.jsonl", MAX_EVIDENCE)?;
+    let mut rows = BoundedReader::open(&path)?;
+    let mut found = vec![Vec::<CameraPoint>::new(); clips.len()];
+    for frame in 0..run.frames {
+        let bytes = rows.line()?.ok_or("Camera source replay is truncated")?;
+        let row: Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("Bad camera replay frame: {e}"))?;
+        if row["frame_index"].as_u64() != Some(frame)
+            || row["track_ids_provisional"] != true
+            || row["confirmed_athlete_identities"] != false
+            || row["touches_confirmed"] != false
+        {
+            return Err("Camera frame has incorrect source identity or order".into());
+        }
+        let ball = &row["selected_ball"];
+        if ball["source_model"] != "vballnet" {
+            continue;
+        }
+        let detection = &ball["detection"];
+        let score = detection["score"].as_f64().unwrap_or_default();
+        if !score.is_finite()
+            || score < 0.55
+            || detection["frame_index"].as_u64() != Some(frame)
+            || detection["class_name"] != "ball"
+        {
+            continue;
+        }
+        let Some(coords) = detection["bbox_xyxy_norm"].as_array() else {
+            continue;
+        };
+        if coords.len() != 4 {
+            continue;
+        }
+        let Some(v) = coords.iter().map(Value::as_f64).collect::<Option<Vec<_>>>() else {
+            continue;
+        };
+        if !v.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            || v[0] >= v[2]
+            || v[1] >= v[3]
+        {
+            continue;
+        }
+        let (x, y) = ((v[0] + v[2]) / 2.0, (v[1] + v[3]) / 2.0);
+        for (clip, track) in clips.iter().zip(found.iter_mut()) {
+            if (clip.start_frame..=clip.end_frame).contains(&frame) {
+                track.push(CameraPoint {
+                    time_sec: (frame - clip.start_frame) as f64 / 30.0,
+                    x,
+                    y,
+                });
+            }
+        }
+    }
+    if rows.line()?.is_some() || rows.finish() != run.replay_sha {
+        return Err("Камера: исходный видеотрек изменён (SHA256)".into());
+    }
+    found.into_iter().map(clean_camera_track).collect()
+}
+fn clean_camera_track(
+    raw: Vec<volley_media::montage::CameraPoint>,
+) -> Result<Vec<volley_media::montage::CameraPoint>, String> {
+    use volley_media::montage::CameraPoint;
+    if raw.len() < 3 {
+        return Err("Недостаточно уверенных точек VBallNet для слежения за мячом".into());
+    }
+    // An observation needs a plausible moving neighbour. A fixed false positive
+    // and a sudden cross-court jump are both excluded before smoothing.
+    let plausible = |a: &CameraPoint, b: &CameraPoint| {
+        let delta_t = (b.time_sec - a.time_sec).abs();
+        let distance = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+        delta_t > 0.0 && delta_t <= 0.75 && (0.003..=0.40).contains(&distance)
+    };
+    let mut kept = Vec::new();
+    for (i, row) in raw.iter().enumerate() {
+        if (i > 0 && plausible(&raw[i - 1], row))
+            || (i + 1 < raw.len() && plausible(row, &raw[i + 1]))
+        {
+            kept.push(row.clone());
+        }
+    }
+    if kept.len() < 3 {
+        return Err("Статичная/разорванная траектория не подходит для слежения за мячом".into());
+    }
+    let first = &kept[0];
+    let last = kept.last().unwrap();
+    if ((first.x - last.x).powi(2) + (first.y - last.y).powi(2)).sqrt() < 0.012
+        && kept
+            .iter()
+            .all(|p| (p.x - first.x).abs() < 0.025 && (p.y - first.y).abs() < 0.025)
+    {
+        return Err("Ложная неподвижная точка мяча отклонена".into());
+    }
+    let mut smooth = Vec::new();
+    let mut last_x = kept[0].x;
+    let mut last_y = kept[0].y;
+    for point in kept {
+        if smooth
+            .last()
+            .is_some_and(|prev: &CameraPoint| point.time_sec - prev.time_sec < 0.14)
+        {
+            continue;
+        }
+        let delta_t = smooth.last().map_or(0.15, |prev: &CameraPoint| {
+            (point.time_sec - prev.time_sec).max(0.01)
+        });
+        // Respect maximum crop motion and prevent camera shake.
+        let alpha = (delta_t * 2.5).clamp(0.15, 0.65);
+        last_x += alpha * (point.x - last_x);
+        last_y += alpha * (point.y - last_y);
+        smooth.push(CameraPoint {
+            time_sec: point.time_sec,
+            x: last_x,
+            y: last_y,
+        });
+    }
+    if smooth.len() > 100 {
+        let stride = (smooth.len() + 99) / 100;
+        let last = smooth.last().cloned();
+        smooth = smooth.into_iter().step_by(stride).collect();
+        if let Some(last) = last {
+            if smooth.last().is_none_or(|p| p.time_sec != last.time_sec) {
+                smooth.push(last);
+            }
+        }
+    }
+    Ok(smooth)
+}
+
 pub(crate) fn verified_manual_clips(
     run: &ValidatedRun,
     ids: Vec<String>,
@@ -1178,10 +1406,17 @@ pub async fn start_manual_montage(
     let preparing = state.clone();
     let project_for_worker = project_id.clone();
     let run_for_worker = run_id.clone();
-    let clips = tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
+    let layout = request.layout;
+    let (clips, camera_tracks) = tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
         let _guard = project_guard::write_guard(&preparing, &project_for_worker)?;
         let run = inspect_project(&preparing, &project_for_worker, &run_for_worker)?;
-        manual_plan(&run, ids).map_err(storage::bad_request)
+        let clips = manual_plan(&run, ids).map_err(storage::bad_request)?;
+        let tracks = if layout == volley_media::montage::VideoLayout::VerticalFollow {
+            Some(verified_camera_tracks(&preparing, &run, &clips).map_err(storage::bad_request)?)
+        } else {
+            None
+        };
+        Ok((clips, tracks))
     })
     .await
     .map_err(|e| storage::internal(format!("Manual rally planning task: {e}")))??;
@@ -1195,7 +1430,11 @@ pub async fn start_manual_montage(
             audio_volume: request.audio_volume,
             encoder: request.encoder,
             layout: request.layout,
+            target_duration_sec: request.target_duration_sec,
+            camera_zoom: request.camera_zoom,
+            camera_tracks,
             verified_highlights: None,
+            report_outro: None,
         }),
     )
     .await?;
@@ -1291,6 +1530,9 @@ mod tests {
                     "depth_ratio":0.35,"posture_ratio":0.4
                 })),
                 "physical_motion_supported":true,"athlete_identity_verified":false,
+                "body_contact_supported":true,
+                "contact_landmark":{"joint_indices":[9,9],"point_px":[150.0,100.0],
+                    "distance_px":0.0,"normalized_distance":0.0},
             });
             events.extend_from_slice(serde_json::to_string(&row).unwrap().as_bytes());
             events.push(b'\n');
@@ -1369,6 +1611,74 @@ mod tests {
         let mut corrupted = run.clone();
         corrupted.touch_sha = "0".repeat(64);
         assert!(generate(&corrupted, Choice::Timeline).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn preview_counts_unverified_as_generic_assigned_touches() {
+        let (mut run, root) = fixture();
+        let mut events = fs::read_to_string(&run.touch_file)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        events[0]["body_contact_supported"] = json!(false);
+        events[0]["contact_landmark"] = Value::Null;
+        events[1]["provisional_track_id"] = json!(3);
+        let mut bytes = Vec::new();
+        for event in &events {
+            bytes.extend(serde_json::to_vec(event).unwrap());
+            bytes.push(b'\n');
+        }
+        fs::write(&run.touch_file, &bytes).unwrap();
+        run.touch_sha = format!("{:x}", Sha256::digest(&bytes));
+        let page = generate(
+            &run,
+            Choice::Page {
+                offset: 0,
+                limit: 1,
+                filter: "all".into(),
+                sort_by: "time".into(),
+                marked: BTreeSet::new(),
+            },
+        )
+        .unwrap();
+        let card = &page.value["items"][0];
+        assert_eq!(card["raw_motion_event_count"], 2);
+        assert_eq!(card["motion_event_count"], 2);
+        assert_eq!(card["unclassified_action_count"], 2);
+        assert_eq!(card["motion_events"][0]["frame_index"], 40);
+        assert_eq!(
+            card["motion_events"][0]["assignment_method"],
+            "nearest_player"
+        );
+        assert_eq!(card["motion_events"][0]["action_prediction"], Value::Null);
+        let timeline = generate(&run, Choice::Timeline).unwrap();
+        assert_eq!(
+            timeline.value["touch_annotations"][0]["touch_attributed"],
+            true
+        );
+        assert_eq!(timeline.value["touch_annotations"][0]["kind"], Value::Null);
+        assert_eq!(
+            timeline.value["touch_annotations"][0]["assignment_method"],
+            "nearest_player"
+        );
+        assert_eq!(
+            timeline.value["touch_annotations"][0]["contact_verified"],
+            false
+        );
+        assert_eq!(
+            timeline.value["touch_annotations"][1]["contact_verified"],
+            true
+        );
+        assert_eq!(
+            timeline.value["touch_annotations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|event| event["contact_verified"] == true)
+                .count(),
+            5
+        );
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

@@ -6,7 +6,7 @@ use crate::{
     cpu_retrack::{opaque_id, safe_file, safe_folder, BoundedReader},
     inference_stream, native_preview_pose, preparation, project_guard, projects,
     storage::{self, ApiError, ApiResult},
-    video_edits, AppState,
+    training_samples, video_edits, AppState,
 };
 use axum::{
     extract::{Query, State},
@@ -30,8 +30,8 @@ use volley_core::{
     pose_classification,
     touch_pipeline::{
         evaluate_block, evaluate_pose_block, exclude_ball_teleports, pose_contact_at_frame,
-        reconstruct_track_gaps, PhysicalTouchCandidate, PoseFrame, PosePlayer, TouchAlgorithm,
-        TouchBall, TouchFrame, TouchPlayer, TouchSettings,
+        pose_contact_from_nearby_sample, reconstruct_track_gaps, PhysicalTouchCandidate, PoseFrame,
+        PosePlayer, TouchAlgorithm, TouchBall, TouchFrame, TouchPlayer, TouchSettings,
     },
 };
 
@@ -226,6 +226,140 @@ mod ball_confidence_tests {
     }
 }
 
+// Gap reconstruction is useful for geometry and tracking continuity, but it
+// may add a player that was absent from the immutable CPU source frame. Do
+// not persist a Touch for such an inferred-only observation: Rally consumers
+// verify the exact frame/Track ID pair against the signed replay.
+fn nearest_source_track_for_ball(
+    frames: &[TouchFrame],
+    event: &PhysicalTouchCandidate,
+    width: u32,
+    height: u32,
+) -> Option<u64> {
+    let first = frames.first()?.frame_index;
+    let frame = event
+        .frame_index
+        .checked_sub(first)
+        .and_then(|index| frames.get(index as usize))
+        .filter(|frame| frame.frame_index == event.frame_index)?;
+    let (w, h) = (width as f64, height as f64);
+    frame
+        .players
+        .iter()
+        .filter(|player| player.track_id > 0 && player.score.is_finite() && player.score > 0.0)
+        .map(|player| {
+            let [left, top, right, bottom] = player.bbox_xyxy_norm;
+            let px = event.ball_x_px;
+            let py = event.ball_y_px;
+            let dx = (left * w - px).max(px - right * w).max(0.0);
+            let dy = (top * h - py).max(py - bottom * h).max(0.0);
+            let cx = (left + right) * 0.5 * w;
+            let cy = (top + bottom) * 0.5 * h;
+            let rank = dx.hypot(dy) + 0.01 * (cx - px).hypot(cy - py);
+            (rank, player.track_id)
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+        .map(|(_, track_id)| track_id)
+}
+
+fn source_frame_contains_track(frames: &[TouchFrame], frame_index: u64, track_id: u64) -> bool {
+    let Some(first) = frames.first() else {
+        return false;
+    };
+    frame_index
+        .checked_sub(first.frame_index)
+        .and_then(|offset| usize::try_from(offset).ok())
+        .and_then(|offset| frames.get(offset))
+        .is_some_and(|frame| {
+            frame.frame_index == frame_index
+                && frame
+                    .players
+                    .iter()
+                    .any(|player| player.track_id == track_id)
+        })
+}
+
+#[cfg(test)]
+mod source_track_integrity_tests {
+    use super::*;
+
+    #[test]
+    fn unverified_touch_uses_nearest_observed_player_not_original_guess() {
+        let source = vec![TouchFrame {
+            frame_index: 32,
+            selected_ball: None,
+            players: vec![
+                TouchPlayer {
+                    track_id: 3,
+                    score: 0.9,
+                    bbox_xyxy_norm: [0.10, 0.20, 0.30, 0.75],
+                    touch_probability: None,
+                },
+                TouchPlayer {
+                    track_id: 8,
+                    score: 0.9,
+                    bbox_xyxy_norm: [0.60, 0.20, 0.80, 0.75],
+                    touch_probability: None,
+                },
+            ],
+        }];
+        let event = PhysicalTouchCandidate {
+            frame_index: 32,
+            provisional_track_id: Some(3),
+            probability: 0.8,
+            ball_x_px: 430.0,
+            ball_y_px: 155.0,
+            motion_frame_index: 32,
+            direction_change_deg: 150.0,
+            speed_before_px_frame: 10.0,
+            speed_after_px_frame: 20.0,
+            velocity_residual_px_frame: 30.0,
+            technique: "unknown_touch",
+            action_prediction: None,
+            court: None,
+            physical_motion_supported: true,
+            body_contact_supported: false,
+            contact_landmark: None,
+            contact_pose_sample_frame: None,
+            ball_occluded_at_contact: false,
+            inferred_body_reach_supported: false,
+            athlete_identity_verified: false,
+        };
+        assert_eq!(
+            nearest_source_track_for_ball(&source, &event, 640, 360),
+            Some(8)
+        );
+        assert_eq!(nearest_source_track_for_ball(&[], &event, 640, 360), None);
+    }
+
+    #[test]
+    fn reconstructed_player_does_not_authorize_missing_source_track() {
+        let mut original = (100..103)
+            .map(|frame_index| TouchFrame {
+                frame_index,
+                players: Vec::new(),
+                selected_ball: None,
+            })
+            .collect::<Vec<_>>();
+        let player = TouchPlayer {
+            track_id: 17,
+            score: 0.9,
+            bbox_xyxy_norm: [0.30, 0.20, 0.40, 0.70],
+            touch_probability: None,
+        };
+        original[0].players.push(player.clone());
+        original[2].players.push(player);
+        let interpolated = reconstruct_track_gaps(&original);
+        assert!(interpolated[1].players.iter().any(|p| p.track_id == 17));
+        assert!(source_frame_contains_track(&original, 100, 17));
+        assert!(source_frame_contains_track(&original, 102, 17));
+        assert!(!source_frame_contains_track(&original, 101, 17));
+        assert!(!source_frame_contains_track(&original, 100, 18));
+        assert!(!source_frame_contains_track(&original, 99, 17));
+        assert!(!source_frame_contains_track(&original, 103, 17));
+    }
+}
+
 fn emit_record(
     writer: &mut BufWriter<std::fs::File>,
     hash: &mut Sha256,
@@ -297,7 +431,7 @@ fn refine_pose_events(
         if (event.ball_x_px - center[0]).hypot(event.ball_y_px - center[1]) > radius.max(2.0) {
             continue;
         }
-        let Some((evidence, _intersection)) = pose_contact_at_frame(
+        let contact = pose_contact_at_frame(
             frames,
             &poses,
             frame,
@@ -305,11 +439,35 @@ fn refine_pose_events(
             video_width,
             video_height,
             settings,
-        ) else {
+        )
+        .map(|(evidence, point)| (evidence, point, None))
+        .or_else(|| {
+            if settings.require_pose
+                || event.ball_occluded_at_contact
+                || event.direction_change_deg < 75.0
+                || event.velocity_residual_px_frame < 18.0
+                || event.motion_frame_index.abs_diff(event.frame_index) > 3
+            {
+                return None;
+            }
+            pose_contact_from_nearby_sample(
+                frames,
+                &poses,
+                frame,
+                track_id,
+                video_width,
+                video_height,
+                settings,
+            )
+            .map(|(evidence, point, sample_frame)| (evidence, point, Some(sample_frame)))
+        });
+        let Some((evidence, point, sample_frame)) = contact else {
             continue;
         };
         supported[index] = true;
         event.body_contact_supported = true;
+        event.contact_landmark = Some(point);
+        event.contact_pose_sample_frame = sample_frame;
         if let Some(geometry) = event.action_prediction.as_ref() {
             if let Some(refined) = pose_classification::refine(&evidence, geometry) {
                 event.action_prediction = Some(refined);
@@ -325,6 +483,87 @@ fn refine_pose_events(
             index += 1;
             keep
         });
+    }
+    Ok(())
+}
+
+/// Match manually named motions only after independent same-Track-ID ball/body
+/// evidence. Training cannot create touches or invent athlete identities.
+fn apply_training(
+    events: &mut [PhysicalTouchCandidate],
+    frames: &[TouchFrame],
+    pose_source: Option<(&Path, &str)>,
+    width: u32,
+    height: u32,
+    settings: TouchSettings,
+    training: &[training_samples::Example],
+) -> Result<(), String> {
+    if events.is_empty() || training.is_empty() {
+        return Ok(());
+    }
+    let Some((root, fusion)) = pose_source else {
+        return Ok(());
+    };
+    let poses = pose_frames(root, fusion, frames)?;
+    let Some(first) = frames.first().map(|f| f.frame_index) else {
+        return Ok(());
+    };
+    for event in events {
+        if !event.physical_motion_supported || !event.body_contact_supported {
+            continue;
+        }
+        let Some(track_id) = event.provisional_track_id else {
+            continue;
+        };
+        let Some(frame) = event
+            .frame_index
+            .checked_sub(first)
+            .and_then(|n| frames.get(n as usize))
+            .filter(|f| f.frame_index == event.frame_index)
+        else {
+            continue;
+        };
+        let Some((evidence, _)) =
+            pose_contact_at_frame(frames, &poses, frame, track_id, width, height, settings)
+        else {
+            continue;
+        };
+        let Some(geometry) = event.action_prediction.as_ref() else {
+            continue;
+        };
+        let movement = poses
+            .iter()
+            .filter_map(|sample| {
+                if sample.frame_index.abs_diff(event.frame_index) > 6 {
+                    return None;
+                }
+                let pose = sample.players.iter().find(|p| p.track_id == track_id)?;
+                let current = sample
+                    .frame_index
+                    .checked_sub(first)
+                    .and_then(|index| frames.get(index as usize))?;
+                let player = current.players.iter().find(|p| p.track_id == track_id)?;
+                let ball = current
+                    .selected_ball
+                    .as_ref()
+                    .filter(|b| b.source_model == "vballnet")
+                    .map(|b| {
+                        let bb = b.bbox_xyxy_norm;
+                        [(bb[0] + bb[2]) * 0.5, (bb[1] + bb[3]) * 0.5]
+                    });
+                Some(training_samples::MotionSample {
+                    offset: (sample.frame_index as i64 - event.frame_index as i64) as i16,
+                    keypoints: pose.keypoints,
+                    bbox: player.bbox_xyxy_norm,
+                    ball,
+                })
+            })
+            .collect::<Vec<_>>();
+        if let Some(prediction) =
+            training_samples::predict(&evidence, geometry, training, &movement)
+        {
+            event.action_prediction = Some(prediction);
+        }
     }
     Ok(())
 }
@@ -353,6 +592,7 @@ pub(crate) fn detect_stream(
         settings,
         None,
         None,
+        &[],
     )
 }
 
@@ -367,6 +607,7 @@ fn detect_stream_with_pose(
     settings: TouchSettings,
     pose_source: Option<(&Path, &str)>,
     court: Option<&CourtTransform>,
+    training: &[training_samples::Example],
 ) -> Result<(String, u64, u64), String> {
     settings.validate()?;
     if count == 0 || count > 48 * 3600 * 30 {
@@ -458,11 +699,21 @@ fn detect_stream_with_pose(
                     // pose evidence to labels of already-found legacy touches.
                     let poses = pose_frames(root, fusion, evidence_frames)?;
                     events.extend(evaluate_pose_block(
-                        evidence_frames, &poses, width, height, start, end, settings,
+                        evidence_frames,
+                        &poses,
+                        width,
+                        height,
+                        start,
+                        end,
+                        settings,
                     )?);
                     events.sort_by(|a, b| {
-                        b.body_contact_supported.cmp(&a.body_contact_supported)
-                            .then_with(|| b.velocity_residual_px_frame.total_cmp(&a.velocity_residual_px_frame))
+                        b.body_contact_supported
+                            .cmp(&a.body_contact_supported)
+                            .then_with(|| {
+                                b.velocity_residual_px_frame
+                                    .total_cmp(&a.velocity_residual_px_frame)
+                            })
                             .then_with(|| b.probability.total_cmp(&a.probability))
                     });
                     let mut unique = Vec::new();
@@ -479,18 +730,44 @@ fn detect_stream_with_pose(
                 }
                 events
             };
+            apply_training(
+                &mut events,
+                evidence_frames,
+                pose_source,
+                width,
+                height,
+                settings,
+                training,
+            )?;
+            for event in &mut events {
+                if !event.body_contact_supported || event.contact_landmark.is_none() {
+                    event.provisional_track_id =
+                        nearest_source_track_for_ball(&block, event, width, height);
+                    event.action_prediction = None;
+                    event.body_contact_supported = false;
+                    event.contact_landmark = None;
+                    event.contact_pose_sample_frame = None;
+                }
+            }
             if let Some(calibration) = court {
                 court_touch::annotate(&mut events, evidence_frames, calibration);
             }
             for event in events {
-                // A physical Touch without an exact-frame CPU Track is not publishable.
-                if event.provisional_track_id.is_none() {
+                // Reconstructed gap positions must not acquire authority as
+                // source-frame detections. Check before cross-chunk dedup so
+                // an inferred candidate cannot suppress a genuine contact.
+                let Some(track_id) = event.provisional_track_id else {
+                    continue;
+                };
+                if !source_frame_contains_track(&block, event.frame_index, track_id) {
                     continue;
                 }
                 motion_candidates += 1;
                 if let Some(ref last) = pending {
                     if event.frame_index.saturating_sub(last.frame_index) <= separation {
-                        if event.probability > last.probability {
+                        if (event.body_contact_supported, event.probability)
+                            > (last.body_contact_supported, last.probability)
+                        {
                             pending = Some(event);
                         }
                         continue;
@@ -595,6 +872,7 @@ pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, Api
         ));
     }
     let court_calibration = video_edits::court_snapshot(state, &req.project_id, &req.video)?;
+    let training_examples = training_samples::touch_examples(state)?;
     let project_dir = projects::project_root(state).join(&req.project_id);
     safe_folder(&project_dir).map_err(storage::bad_request)?;
     let replay_root = project_dir.join("native_cpu_replays");
@@ -667,7 +945,12 @@ pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, Api
         let part = folder.join("touch_candidates.jsonl.partial");
         let pose_requested = req.pose_classification
             || settings.require_pose
-            || settings.algorithm == TouchAlgorithm::PoseMotion;
+            || settings.algorithm == TouchAlgorithm::PoseMotion
+            || native_preview_pose::source_info(&project_dir, &fusion_id)?.is_some();
+        let training_sha = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&training_examples).map_err(|e| e.to_string())?)
+        );
         let pose_info = if pose_requested {
             native_preview_pose::source_info(&project_dir, &fusion_id)?
         } else {
@@ -681,11 +964,9 @@ pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, Api
             dimensions.width,
             dimensions.height,
             settings,
-            (req.pose_classification
-                || settings.require_pose
-                || settings.algorithm == TouchAlgorithm::PoseMotion)
-                .then_some((project_dir.as_path(), fusion_id.as_str())),
+            pose_requested.then_some((project_dir.as_path(), fusion_id.as_str())),
             court_calibration.as_ref().map(|value| &value.transform),
+            &training_examples,
         )?;
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared source changed during CPU Touch replay".into());
@@ -714,8 +995,10 @@ pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, Api
             "motion_supported_proposals_before_dedup":raw,
             "touch_candidates":events,
             "method":if settings.algorithm == TouchAlgorithm::PoseMotion { "vballnet_trajectory_body_contact_v7" } else { "vballnet_gravity_player_geometry_pose_contact_v7" },
-            "pose_classification_requested":req.pose_classification || settings.require_pose || settings.algorithm == TouchAlgorithm::PoseMotion,
-            "pose_source_fusion_id": if req.pose_classification || settings.require_pose || settings.algorithm == TouchAlgorithm::PoseMotion {json!(fusion_id)} else {Value::Null},
+            "pose_classification_requested":pose_requested,
+            "human_training_example_count":training_examples.len(),
+            "human_training_touch_sha256":training_sha,
+            "pose_source_fusion_id": if pose_requested {json!(fusion_id)} else {Value::Null},
             "pose_source":pose_info.as_ref().map(|(id, sha, stride)| json!({"pose_run_id":id,"sha256":sha,"stride":stride})),
             "body_trajectory_intersection_required":settings.algorithm == TouchAlgorithm::PoseMotion || settings.require_pose,
             "ball_source_switch_guard":true,
@@ -960,6 +1243,8 @@ mod tests {
             }),
             physical_motion_supported: true,
             body_contact_supported: false,
+            contact_landmark: None,
+            contact_pose_sample_frame: None,
             ball_occluded_at_contact: false,
             inferred_body_reach_supported: false,
             athlete_identity_verified: false,
@@ -1039,6 +1324,7 @@ mod tests {
             },
             Some((&root, &fusion)),
             None,
+            &[],
         )
         .unwrap();
         assert_eq!(count, 1);

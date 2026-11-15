@@ -207,7 +207,7 @@
       if(token!==generation||epoch!==editEpoch)return;
       if(!result.detected){message(result.message||"Не удалось уверенно распознать разметку. Отметьте углы вручную.",true);return;}
       corners=result.court;net=result.net||null;setMarking(true);markModified();draw();
-      message("Найдена разметка ("+result.supporting_frames+"/"+result.sampled_frames+" кадров). Проверьте углы и сетку, при необходимости перетащите точки, затем сохраните.");
+      message((result.inferred?"Часть границ достроена по размерам площадки и перспективе — проверьте положение каждой точки. ":result.temporal_composite?"Разметка восстановлена из нескольких кадров — проверьте её. ":result.weak_consensus?"Предварительная разметка (мало совпавших кадров). ":"Найдена разметка. ")+"Подтверждений: "+result.supporting_frames+"/"+result.sampled_frames+". Проверьте углы и сетку, при необходимости перетащите точки, затем сохраните.");
     }catch(error){if(token===generation)message(error.message,true);}
     finally{button.disabled=!valid();}
   });  modeButton.addEventListener("click",()=>setMarking(!marking));
@@ -288,6 +288,20 @@
         baseRevision=revision(data);
         if(epoch===editEpoch){dirty=false;removeDraft();}else{flushDraft();}
         message("Обрезка и разметка площадки сохранены.");
+        if(court.length===4){
+          try{
+            const learned=await api("/api/training/examples",{
+              method:"POST",headers:{"Content-Type":"application/json"},
+              body:JSON.stringify({action:"court",project_id:project,video:source,
+                frame_index:Math.max(0,Math.floor((video.currentTime||0)*30)),corners:court,net})
+            });
+            if(token===generation&&learned.ok)
+              message("Разметка сохранена и добавлена в обучающие примеры.");
+          }catch(error){
+            if(token===generation)
+              message("Поле сохранено, но обучающий пример не записан: "+error.message,true);
+          }
+        }
       }
     }catch(error){
       if(token===generation)message(error.message,true);

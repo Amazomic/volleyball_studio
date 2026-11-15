@@ -10,7 +10,10 @@ pub use ball_continuity::{
     repair_vballnet_trajectory_with_players,
 };
 pub use player_gap::reconstruct as reconstruct_track_gaps;
-pub use pose_motion::{evaluate_pose_block, pose_contact_at_frame, PoseFrame, PosePlayer};
+pub use pose_motion::{
+    evaluate_pose_block, pose_contact_at_frame, pose_contact_from_nearby_sample, PoseFrame,
+    PosePlayer,
+};
 
 /// Maximum time between a real observed VBallNet anchor and a predicted
 /// impact inside the bounded (at most ten-frame) missing-ball island.
@@ -91,7 +94,7 @@ impl Default for TouchSettings {
             // geometry intersection; motion evidence is still mandatory.
             pose_min_confidence: 0.28,
             pose_max_distance: 0.34,
-            occluded_min_turn_deg: 35.0,
+            occluded_min_turn_deg: 5.0,
         }
     }
 }
@@ -146,6 +149,11 @@ pub struct PhysicalTouchCandidate {
     /// A same-Track-ID COCO17 joint or body segment independently corroborates the hit.
     /// False means a motion-supported, tracked but unconfirmed proposal.
     pub body_contact_supported: bool,
+    /// Closest time-validated COCO17 joint or limb, in original video pixels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contact_landmark: Option<crate::pose_contact::BodyContact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contact_pose_sample_frame: Option<u64>,
     /// Impact frame had no observed VBallNet ball: position inferred from
     /// independently observed flights on both sides of an occlusion.
     pub ball_occluded_at_contact: bool,
@@ -299,9 +307,7 @@ pub fn evaluate_block(
         let outside_x = (bbox[0] - candidate.ball_x)
             .max(candidate.ball_x - bbox[2])
             .max(0.0);
-        if candidate.motion.speed_after < 10.0
-            && outside_x > 0.30 * body_width
-        {
+        if candidate.motion.speed_after < 10.0 && outside_x > 0.30 * body_width {
             continue;
         }
         let radius = ((ball.bbox_xyxy_norm[2] - ball.bbox_xyxy_norm[0]) * w
@@ -346,6 +352,8 @@ pub fn evaluate_block(
             court: None,
             physical_motion_supported: true,
             body_contact_supported: false,
+            contact_landmark: None,
+            contact_pose_sample_frame: None,
             ball_occluded_at_contact: false,
             inferred_body_reach_supported: false,
             athlete_identity_verified: false,

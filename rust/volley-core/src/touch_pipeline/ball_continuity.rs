@@ -16,9 +16,92 @@ fn distance(a: [f64; 2], b: [f64; 2]) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1])
 }
 
+/// Repeated detections of a fixed background feature can become a sticky
+/// high-confidence "ball", including across brief returns to the real flight.
+/// Detect that *temporal* pattern before rejecting isolated teleport islands.
+/// Local neighborhoods fit both the streaming CPU halo and preview paging.
+fn flag_stationary_landmarks(samples: &[Option<[f64; 2]>], width: f64, height: f64) -> Vec<bool> {
+    const NEIGHBORHOOD: usize = 16;
+    const MIN_REPEAT: usize = 7;
+    const MIN_SPAN: usize = 8;
+    const LONG_DWELL: usize = 14;
+    let mut flagged = vec![false; samples.len()];
+    let stationary_radius = (width.max(height) * 0.008).max(7.0);
+    let teleport = (width * 0.09).max(90.0);
+    for (index, candidate) in samples.iter().enumerate() {
+        let Some(point) = candidate else { continue };
+        let origin = [point[0] * width, point[1] * height];
+        let begin = index.saturating_sub(NEIGHBORHOOD);
+        let end = index.saturating_add(NEIGHBORHOOD + 1).min(samples.len());
+        let mut count = 0;
+        let mut first = None;
+        let mut last = index;
+        let mut min_xy = [f64::INFINITY; 2];
+        let mut max_xy = [f64::NEG_INFINITY; 2];
+        let (mut sum_t, mut sum_tt) = (0.0, 0.0);
+        let (mut sum_x, mut sum_y, mut sum_tx, mut sum_ty) = (0.0, 0.0, 0.0, 0.0);
+        let mut abrupt_switch = false;
+        for near in begin..end {
+            let Some(other) = samples[near] else { continue };
+            let other = [other[0] * width, other[1] * height];
+            if distance(origin, other) > stationary_radius {
+                continue;
+            }
+            count += 1;
+            first.get_or_insert(near);
+            last = near;
+            let t = (near - begin) as f64;
+            sum_t += t;
+            sum_tt += t * t;
+            sum_x += other[0];
+            sum_y += other[1];
+            sum_tx += t * other[0];
+            sum_ty += t * other[1];
+            for axis in 0..2 {
+                min_xy[axis] = min_xy[axis].min(other[axis]);
+                max_xy[axis] = max_xy[axis].max(other[axis]);
+            }
+            // A real slow-moving ball cannot jump a tenth of the image
+            // within 1-3 frames and return repeatedly to the same pixel.
+            for delta in 1..=3 {
+                for adjacent in [near.checked_sub(delta), near.checked_add(delta)] {
+                    let Some(adjacent) = adjacent.filter(|&j| j >= begin && j < end) else {
+                        continue;
+                    };
+                    if let Some(remote) = samples[adjacent] {
+                        abrupt_switch |=
+                            distance(other, [remote[0] * width, remote[1] * height]) >= teleport;
+                    }
+                }
+            }
+        }
+        // A slowly traveling real ball may spend many frames within this
+        // neighborhood. Its full path still spans more than a fixed pixel.
+        let spread = distance(min_xy, max_xy);
+        let denominator = count as f64 * sum_tt - sum_t * sum_t;
+        let drift = if denominator > 0.0 {
+            let vx = (count as f64 * sum_tx - sum_t * sum_x) / denominator;
+            let vy = (count as f64 * sum_ty - sum_t * sum_y) / denominator;
+            vx.hypot(vy)
+        } else {
+            f64::INFINITY
+        };
+        if count >= MIN_REPEAT
+            && spread <= stationary_radius * 1.25
+            && drift < 0.55
+            && last - first.unwrap_or(index) >= MIN_SPAN
+            && (abrupt_switch
+                || (count >= LONG_DWELL && last - first.unwrap_or(index) >= LONG_DWELL))
+        {
+            flagged[index] = true;
+        }
+    }
+    flagged
+}
+
 /// A wrong VBallNet location can have *higher* confidence than the real
 /// ball. Compare motion on both sides instead of deleting every low-score
-/// sample. Only short out-and-back teleport islands are suppressed.
+/// sample. Reject both persistent stationary landmarks and brief out-and-back islands.
 fn suppress_false_ball_islands(
     samples: &mut [Option<[f64; 2]>],
     width: u32,
@@ -29,6 +112,51 @@ fn suppress_false_ball_islands(
         return rejected;
     }
     let (w, h) = (f64::from(width), f64::from(height));
+    // Reject single-frame out-and-back jumps BEFORE removing stationary
+    // landmarks. Otherwise both neighbors can be suppressed as a sticky
+    // background target, leaving the isolated false detection as a touch.
+    let teleport = (w * 0.09).max(90.0);
+    let observed = samples.to_vec();
+    let stationary = flag_stationary_landmarks(samples, w, h);
+    for index in 1..samples.len() - 1 {
+        let (Some(before), Some(point), Some(after)) =
+            (observed[index - 1], observed[index], observed[index + 1])
+        else {
+            continue;
+        };
+        let a = [before[0] * w, before[1] * h];
+        let p = [point[0] * w, point[1] * h];
+        let b = [after[0] * w, after[1] * h];
+        if distance(a, b) <= teleport * 0.5
+            && distance(a, p) >= teleport
+            && distance(p, b) >= teleport
+        {
+            // A real flight may have one valid frame between two false
+            // stationary readings. Preserve that frame when the real flight
+            // independently supports it just before or after the switch.
+            let locally_supported = (index.saturating_sub(3)
+                ..index.saturating_add(4).min(observed.len()))
+                .filter(|&near| near != index && !stationary[near])
+                .any(|near| {
+                    observed[near].is_some_and(|other| {
+                        distance(p, [other[0] * w, other[1] * h])
+                            <= 26.0 + 32.0 * index.abs_diff(near) as f64
+                    })
+                });
+            if !locally_supported {
+                samples[index] = None;
+                rejected[index] = true;
+            }
+        }
+    }
+    // Work on the remaining observations so one false landmark cannot
+    // repeatedly become an anchor for a reconstructed trajectory.
+    for (index, is_landmark) in stationary.into_iter().enumerate() {
+        if is_landmark {
+            samples[index] = None;
+            rejected[index] = true;
+        }
+    }
     // At 30 FPS a one-frame move of >~100 px at 720p is suspect,
     // but it is *not* removed unless observations on both sides
     // independently agree that a short remote island is false.
@@ -36,16 +164,22 @@ fn suppress_false_ball_islands(
     const MAX_BRIDGE_FRAMES: usize = 11;
     for before in 0..samples.len() - 2 {
         let Some(a) = samples[before] else { continue };
-        let Some(next) = samples[before + 1] else {
+        // A dropout just before the false detection is common. Compare the
+        // first *observed* position within three frames, not only the next
+        // frame, so an isolated remote detection cannot anchor a new flight.
+        let Some(first_remote) =
+            (before + 1..(before + 4).min(samples.len())).find(|&index| samples[index].is_some())
+        else {
             continue;
         };
+        let next = samples[first_remote].expect("observed remote candidate");
         let a_px = [a[0] * w, a[1] * h];
         let next_px = [next[0] * w, next[1] * h];
         if distance(a_px, next_px) < min_teleport {
             continue;
         }
         let end = (before + MAX_BRIDGE_FRAMES + 1).min(samples.len());
-        for after in before + 2..end {
+        for after in first_remote + 1..end {
             let Some(b) = samples[after] else { continue };
             let b_px = [b[0] * w, b[1] * h];
             let gap = (after - before) as f64;
@@ -162,6 +296,91 @@ mod tests {
     }
 
     #[test]
+    fn persistent_right_side_landmark_is_not_a_ball_track() {
+        // A false stationary detection can win for seconds, beyond the
+        // old 11-frame out-and-back bridge. Neither confidence nor duration
+        // makes this a genuine ball trajectory.
+        let observed = (0..92)
+            .map(|i| {
+                Some(if (16..=73).contains(&i) {
+                    [0.932 + (i % 3) as f64 * 0.001, 0.587]
+                } else {
+                    [0.28 + i as f64 * 0.001, 0.34]
+                })
+            })
+            .collect::<Vec<_>>();
+        let flags = flag_ball_teleports(&observed, 1280, 720);
+        assert!(flags[16..=73].iter().all(|flag| *flag));
+        assert!(!flags[15] && !flags[74]);
+        let (repaired, _) = repair_vballnet_trajectory(&observed, 1280, 720);
+        assert!(repaired[16..=73]
+            .iter()
+            .all(|p| p.is_none_or(|p| p[0] < 0.6)));
+        assert_eq!(repaired[15], observed[15]);
+        assert_eq!(repaired[74], observed[74]);
+    }
+
+    #[test]
+    fn alternating_real_ball_and_sticky_background_target_preserves_real_ball() {
+        // The landmark repeatedly steals the selected VBallNet candidate,
+        // while the real ball is still observed between false streaks.
+        let observed = (0..52)
+            .map(|i| {
+                Some(if (9..42).contains(&i) && (i - 9) % 10 < 7 {
+                    [0.932, 0.586 + (i % 3) as f64 * 0.002]
+                } else {
+                    [0.35 + i as f64 * 0.0015, 0.38]
+                })
+            })
+            .collect::<Vec<_>>();
+        let flags = flag_ball_teleports(&observed, 1280, 720);
+        for i in 0..observed.len() {
+            if (9..42).contains(&i) && (i - 9) % 10 < 7 {
+                assert!(flags[i], "sticky false position must be rejected at {i}");
+            } else {
+                assert!(!flags[i], "real observation must survive at {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn short_stationary_pause_without_teleport_is_not_a_false_landmark() {
+        let observed = (0..40)
+            .map(|i| {
+                Some(if (13..22).contains(&i) {
+                    [0.423, 0.36]
+                } else if i < 13 {
+                    [0.423 - (13 - i) as f64 * 0.002, 0.36]
+                } else {
+                    [0.423 + (i - 21) as f64 * 0.002, 0.36]
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(flag_ball_teleports(&observed, 1280, 720).iter().all(|f| !f));
+    }
+
+    #[test]
+    fn remote_detection_after_dropout_does_not_become_new_ball_track() {
+        let mut observed = (0..24)
+            .map(|i| Some([0.31 + i as f64 * 0.003, 0.36]))
+            .collect::<Vec<_>>();
+        observed[9] = None;
+        observed[10] = Some([0.94, 0.65]);
+        observed[11] = Some([0.94, 0.65]);
+        observed[12] = None;
+        let (repaired, synthetic) = repair_vballnet_trajectory(&observed, 1280, 720);
+        for i in 10..=11 {
+            assert!(repaired[i].is_none_or(|p| p[0] < 0.6));
+            if repaired[i].is_some() {
+                assert!(synthetic[i]);
+            }
+        }
+        assert_eq!(observed[10], Some([0.94, 0.65]));
+        assert_eq!(repaired[8], observed[8]);
+        assert_eq!(repaired[13], observed[13]);
+    }
+
+    #[test]
     fn remote_landmark_island_removed_without_changing_source() {
         let frames: Vec<_> = (0..30_u64)
             .map(|i| {
@@ -192,13 +411,20 @@ mod tests {
         // a stationary right-edge false ball at 697..700 and 703..706.
         let mut observations = vec![None; 17];
         let samples = [
-            (0, [0.477, 0.372]), (1, [0.475, 0.382]),
-            (2, [0.932, 0.587]), (3, [0.932, 0.583]),
-            (4, [0.930, 0.583]), (5, [0.930, 0.587]),
-            (6, [0.443, 0.354]), (7, [0.430, 0.347]),
-            (8, [0.932, 0.587]), (9, [0.932, 0.587]),
-            (10, [0.934, 0.583]), (11, [0.936, 0.580]),
-            (12, [0.389, 0.337]), (13, [0.385, 0.337]),
+            (0, [0.477, 0.372]),
+            (1, [0.475, 0.382]),
+            (2, [0.932, 0.587]),
+            (3, [0.932, 0.583]),
+            (4, [0.930, 0.583]),
+            (5, [0.930, 0.587]),
+            (6, [0.443, 0.354]),
+            (7, [0.430, 0.347]),
+            (8, [0.932, 0.587]),
+            (9, [0.932, 0.587]),
+            (10, [0.934, 0.583]),
+            (11, [0.936, 0.580]),
+            (12, [0.389, 0.337]),
+            (13, [0.385, 0.337]),
         ];
         for (i, xy) in samples {
             observations[i] = Some(xy);
@@ -207,14 +433,14 @@ mod tests {
         for row in &mut players {
             row.push([0.448, 0.452, 0.493, 0.605]);
         }
-        let (repaired, synthetic) = repair_vballnet_trajectory_with_players(
-            &observations, &players, 1280, 720,
-        );
+        let (repaired, synthetic) =
+            repair_vballnet_trajectory_with_players(&observations, &players, 1280, 720);
         for i in 2..=5 {
             assert!(
                 repaired[i].is_some_and(|p| p[0] < 0.55),
                 "false ball island at frame {} must be reconstructed: {:?}",
-                695 + i, repaired[i]
+                695 + i,
+                repaired[i]
             );
             assert!(synthetic[i]);
         }
@@ -222,7 +448,8 @@ mod tests {
             assert!(
                 repaired[i].is_some_and(|p| p[0] < 0.55),
                 "second false island at frame {} must be reconstructed: {:?}",
-                695 + i, repaired[i]
+                695 + i,
+                repaired[i]
             );
             assert!(synthetic[i]);
         }
@@ -347,5 +574,20 @@ mod tests {
             .collect();
         let filtered = exclude_ball_teleports(&frames, 1280, 720);
         assert!(filtered.iter().all(|f| f.selected_ball.is_some()));
+    }
+    #[test]
+    fn isolated_ball_at_player_after_stationary_right_edge_is_rejected() {
+        // Real project 00:55.5: VBallNet stays at the right edge before and
+        // after frame 1665, but momentarily selects a false ball by the player.
+        // Even pose proximity must not convert this one-frame jump into Touch.
+        let mut frames: Vec<_> = (0..48_u64).map(|i| sample(i, 0.932)).collect();
+        let false_ball = frames[25].selected_ball.as_mut().unwrap();
+        false_ball.bbox_xyxy_norm = [0.273, 0.895, 0.293, 0.931];
+        let cleaned = exclude_ball_teleports(&frames, 1280, 720);
+        assert!(cleaned[25].selected_ball.is_none());
+        assert!(
+            frames[25].selected_ball.is_some(),
+            "GPU replay is immutable"
+        );
     }
 }

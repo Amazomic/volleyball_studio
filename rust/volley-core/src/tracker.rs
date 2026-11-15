@@ -6,7 +6,9 @@ use crate::{bbox_iou, fusion::Candidate};
 use serde::{Deserialize, Serialize};
 mod association;
 mod confirmation;
+mod pose_matching;
 pub use confirmation::{TrackConfirmation, TrackConfirmationSummary};
+pub use pose_matching::PoseEvidence;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -82,6 +84,7 @@ struct ActiveTrack {
     last_frame: u64,
     bbox: [f64; 4],
     head: Option<[f64; 2]>,
+    pose: Option<(u64, PoseEvidence)>,
     observations: u64,
     prev: Option<(u64, [f64; 4])>,
 }
@@ -174,11 +177,23 @@ pub fn same_head_body_duplicate(a: &Candidate, b: &Candidate) -> bool {
     let head_dy = (ha[1] - hb[1]).abs();
     let shared_width = (ba[2].min(bb[2]) - ba[0].max(bb[0])).max(0.0);
     let narrow = (ba[2] - ba[0]).min(bb[2] - bb[0]);
-    narrow > 0.012
+    let overlap = bbox_iou(ba, bb);
+    let common_y = (ba[3].min(bb[3]) - ba[1].max(bb[1])).max(0.0);
+    let short_height = height(ba).min(height(bb));
+    (narrow > 0.012
         && head_dx < 0.012
         && head_dy < 0.018
         && shared_width > narrow * 0.55
-        && bbox_iou(ba, bb) > 0.30
+        && overlap > 0.30)
+        // Two RTMPose crops of one head can disagree about whether legs
+        // are visible. The IoU then falls below 0.30 despite almost
+        // identical heads and substantial torso overlap (mm, 25:54.2).
+        || (narrow > 0.012
+            && head_dx < 0.008
+            && head_dy < 0.009
+            && shared_width > narrow * 0.78
+            && common_y > short_height * 0.40
+            && overlap > 0.14)
 }
 /// A lower-confidence partial skeleton can sit inside a fuller same-player
 /// detection while its inferred nose drifts due to net occlusion. Require
@@ -194,7 +209,10 @@ pub fn same_partial_body_duplicate(strong: &Candidate, weak: &Candidate) -> bool
     let (a, b) = (strong.bbox_xyxy_norm, weak.bbox_xyxy_norm);
     let (aw, ah) = (a[2] - a[0], height(a));
     let (bw, bh) = (b[2] - b[0], height(b));
-    if aw < 0.025 || bw < 0.025 || ah < 0.12 || bh < 0.12
+    if aw < 0.025
+        || bw < 0.025
+        || ah < 0.12
+        || bh < 0.12
         || ah.max(bh) / ah.min(bh) > 1.7
         || (a_head[0] - b_head[0]).abs() > 0.045
         || (a_head[1] - b_head[1]).abs() > 0.065
@@ -204,8 +222,7 @@ pub fn same_partial_body_duplicate(strong: &Candidate, weak: &Candidate) -> bool
     let width = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
     let vertical = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
     let smaller_area = (aw * ah).min(bw * bh);
-    width * vertical >= 0.60 * smaller_area
-        && (center(a)[0] - center(b)[0]).abs() < 0.035
+    width * vertical >= 0.60 * smaller_area && (center(a)[0] - center(b)[0]).abs() < 0.035
 }
 fn distance(a: [f64; 2], b: [f64; 2]) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1])
@@ -213,7 +230,13 @@ fn distance(a: [f64; 2], b: [f64; 2]) -> f64 {
 /// Match a detection to a living track with velocity, size and position cues.
 /// A vanished track remains eligible for the configured grace period. Matching
 /// is still provisional: geometry cannot prove an athlete's real-world identity.
-fn score_match(t: &ActiveTrack, c: &Candidate, frame: u64, config: TrackingOptions) -> Option<f64> {
+fn score_match(
+    t: &ActiveTrack,
+    c: &Candidate,
+    frame: u64,
+    config: TrackingOptions,
+    pose: Option<PoseEvidence>,
+) -> Option<f64> {
     let gap = frame.checked_sub(t.last_frame)?;
     if gap == 0 || gap > config.max_gap_frames {
         return None;
@@ -224,10 +247,35 @@ fn score_match(t: &ActiveTrack, c: &Candidate, frame: u64, config: TrackingOptio
         return None;
     }
     let ratio = ha.max(hb) / ha.min(hb);
+    // The measured torso is authoritative when the crop expands or shrinks
+    // around outstretched limbs. It must still obey its own movement gate.
+    let pose_score = match (t.pose, pose) {
+        (Some((at, previous)), Some(current))
+            if frame.saturating_sub(at) <= config.max_gap_frames =>
+        {
+            Some(previous.similarity(&current, frame - at)?)
+        }
+        _ => None,
+    };
     // A small far-court player can lose legs behind the net: RTMPose then
     // publishes a torso-only box, which should not force a fresh ID after a
     // short occlusion. Prolonged gaps still need matching position and head.
-    let size_ratio_limit = if gap > 8 && ha.min(hb) < 0.15 {
+    let same_head_sparse_crop = (8..=15).contains(&gap)
+        && t.head
+            .zip(c.head_point_norm)
+            .is_some_and(|(prior, observed)| {
+                (prior[0] - observed[0]).abs() < 0.018
+                    && (prior[1] - observed[1]).abs() < 0.028
+                    && (center(t.bbox)[0] - center(c.bbox_xyxy_norm)[0]).abs() < 0.035
+                    && bbox_iou(t.bbox, c.bbox_xyxy_norm) > 0.14
+            });
+    let size_ratio_limit = if pose_score.is_some_and(|score| score >= 0.65) {
+        3.2
+    } else if same_head_sparse_crop {
+        // One player may go from a 0.15-high upper-body crop to a
+        // 0.32-high full skeleton in the next 3-Hz observation.
+        2.5
+    } else if gap > 8 && ha.min(hb) < 0.15 {
         2.30
     } else {
         1.8
@@ -264,13 +312,55 @@ fn score_match(t: &ActiveTrack, c: &Candidate, frame: u64, config: TrackingOptio
     // A player hidden behind the net stays in a bounded region of the court.
     // Keep the Track ID alive for 90 frames without matching an arbitrary
     // person half a screen away when the player reappears.
+    // After a measured rightward/leftward run, a long gap must not let a
+    // geometrically nearby *different* player inherit the Track ID by moving
+    // sharply opposite the previous trajectory. This occurs when two people
+    // cross behind the net and one RTMPose skeleton disappears temporarily.
+    // With strong new pose evidence we still permit a real player to turn.
+    if gap >= 16 && pose_score.is_none_or(|similarity| similarity < 0.83) {
+        if let Some((previous_frame, previous_bbox)) = t.prev {
+            let previous_gap = t.last_frame.saturating_sub(previous_frame);
+            let prior_dx = base[0] - center(previous_bbox)[0];
+            let resumed_dx = observed[0] - base[0];
+            if (1..=15).contains(&previous_gap)
+                && prior_dx.abs() >= 0.012
+                && resumed_dx.abs() >= 0.022
+                && resumed_dx * prior_dx < 0.0
+            {
+                return None;
+            }
+        }
+    }
     let max_movement = (0.052 + 0.0032 * gap as f64).min(0.34);
-    let distance = distance(predicted, observed);
-    if distance > max_movement {
+    let displacement = distance(predicted, observed);
+    // With 3-Hz detector samples, a bent or partly occluded skeleton can
+    // change the box center/height without moving the player's actual head.
+    // The previous strict box-only score minted a second ID at frame 143210.
+    // Only sparse, nearby samples with two consistent head anchors may use
+    // this alternate association path; one-frame/dense tracking stays strict.
+    let sparse_head_match = if (8..=15).contains(&gap) && ratio <= 2.5 {
+        t.head
+            .zip(c.head_point_norm)
+            .and_then(|(previous, current)| {
+                let head_limit = 0.025 + 0.005 * gap as f64;
+                let head_delta = distance(previous, current);
+                let horizontal_limit = (max_movement * 1.35).min(0.15);
+                (head_delta <= head_limit
+                    && (base[0] - observed[0]).abs() <= horizontal_limit
+                    && displacement <= max_movement * 1.50)
+                    .then_some((1.0 - head_delta / head_limit).clamp(0.0, 1.0))
+            })
+    } else {
+        None
+    };
+    if displacement > max_movement
+        && sparse_head_match.is_none()
+        && pose_score.is_none_or(|score| score < 0.72)
+    {
         return None;
     }
     let overlap = bbox_iou(t.bbox, c.bbox_xyxy_norm);
-    let spatial = (1.0 - distance / max_movement).clamp(0.0, 1.0);
+    let spatial = (1.0 - displacement / max_movement).clamp(0.0, 1.0);
     let size = (1.0 - (ratio - 1.0) / (size_ratio_limit - 1.0)).clamp(0.0, 1.0);
     // Fresh tracks favor IoU; after an occlusion a missing IoU must not
     // automatically generate a new ID for the same moving player.
@@ -287,6 +377,21 @@ fn score_match(t: &ActiveTrack, c: &Candidate, frame: u64, config: TrackingOptio
         let similarity = (1.0 - (previous[0] - head[0]).hypot(previous[1] - head[1]) / threshold)
             .clamp(0.0, 1.0);
         score = 0.82 * score + 0.18 * similarity;
+    }
+    if let Some(head_similarity) = sparse_head_match {
+        // Sparse 3-Hz sampling needs the head anchor to outweigh bounding
+        // box crop changes. This is *not* image ReID or a blind ID merge:
+        // both heads and nearby horizontal trajectories must agree.
+        let horizontal =
+            (1.0 - (base[0] - observed[0]).abs() / (max_movement * 1.35)).clamp(0.0, 1.0);
+        let head_anchored =
+            0.40 + 0.35 * head_similarity + 0.15 * size + 0.10 * horizontal - 0.04 * freshness;
+        score = score.max(head_anchored);
+    }
+    if let Some(pose_score) = pose_score {
+        // A measured torso trajectory outweighs disagreements between crop
+        // shapes, but cannot teleport or override an invalid skeleton.
+        score = score.max(0.40 + 0.53 * pose_score);
     }
     let threshold = config.min_assignment_score - 0.08 * freshness;
     // Prefer a stable, repeatedly observed skeleton over a transient duplicate,
@@ -318,6 +423,24 @@ impl ProvisionalTracker {
         })
     }
     pub fn process_frame(&mut self, frame: u64, raw: &[Candidate]) -> Result<TrackedFrame, String> {
+        self.process_frame_with_poses(frame, raw, &[])
+    }
+
+    /// Pose measurements are aligned 1:1 with candidate rows, including
+    /// short-lived crop proposals. One-to-one global association and Track ID
+    /// publication still use the same tracker and confirmation pipeline.
+    pub fn process_frame_with_poses(
+        &mut self,
+        frame: u64,
+        raw: &[Candidate],
+        pose: &[Option<PoseEvidence>],
+    ) -> Result<TrackedFrame, String> {
+        if !pose.is_empty() && pose.len() != raw.len() {
+            return Err("Pose measurement/candidate count mismatch".into());
+        }
+        if pose.iter().flatten().any(|e| !e.valid()) {
+            return Err("Invalid RTMPose measurement".into());
+        }
         if self.last_frame.is_some_and(|last| frame <= last) {
             return Err("CPU tracking frames must be strictly increasing".into());
         }
@@ -341,7 +464,8 @@ impl ProvisionalTracker {
         // genuinely overlapping but distinct contemporaneous players.
         let mut valid = raw
             .iter()
-            .filter(|c| {
+            .enumerate()
+            .filter(|(_, c)| {
                 c.score >= self.config.min_player_score
                     && c.bbox_xyxy_norm[0] >= 0.0
                     && c.bbox_xyxy_norm[1] >= 0.0
@@ -350,16 +474,16 @@ impl ProvisionalTracker {
                     && c.bbox_xyxy_norm[2] > c.bbox_xyxy_norm[0]
                     && c.bbox_xyxy_norm[3] > c.bbox_xyxy_norm[1]
             })
-            .cloned()
+            .map(|(i, c)| (c.clone(), pose.get(i).copied().flatten()))
             .collect::<Vec<_>>();
         valid.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| a.query_index.cmp(&b.query_index))
+            b.0.score
+                .total_cmp(&a.0.score)
+                .then_with(|| a.0.query_index.cmp(&b.0.query_index))
         });
-        let mut selected: Vec<Candidate> = Vec::new();
-        for c in valid {
-            if selected.iter().any(|used| {
+        let mut selected: Vec<(Candidate, Option<PoseEvidence>)> = Vec::new();
+        for (c, evidence) in valid {
+            if selected.iter().any(|(used, _)| {
                 bbox_iou(used.bbox_xyxy_norm, c.bbox_xyxy_norm) > self.config.nms_iou
                     || same_distant_skeleton(used, &c)
                     || same_head_body_duplicate(used, &c)
@@ -369,7 +493,7 @@ impl ProvisionalTracker {
             }) {
                 continue;
             }
-            selected.push(c);
+            selected.push((c, evidence));
         }
         let skipped = raw.len() - selected.len();
         self.total_skipped += skipped as u64;
@@ -380,10 +504,10 @@ impl ProvisionalTracker {
         // than minting another ID whenever reciprocal best choices disagree.
         let scores: Vec<Vec<Option<f64>>> = selected
             .iter()
-            .map(|candidate| {
+            .map(|(candidate, evidence)| {
                 self.active
                     .iter()
-                    .map(|track| score_match(track, candidate, frame, self.config))
+                    .map(|track| score_match(track, candidate, frame, self.config, *evidence))
                     .collect()
             })
             .collect();
@@ -397,14 +521,17 @@ impl ProvisionalTracker {
             })
             .count();
         let mut out = Vec::with_capacity(selected.len());
-        for (ci, c) in selected.into_iter().enumerate() {
+        for (ci, (c, evidence)) in selected.into_iter().enumerate() {
             let id = if let Some(ti) = assignments[ci] {
                 let t = &mut self.active[ti];
                 let id = t.id;
                 t.prev = Some((t.last_frame, t.bbox));
                 t.last_frame = frame;
                 t.bbox = c.bbox_xyxy_norm;
-                t.head = c.head_point_norm;
+                t.head = c.head_point_norm.or(t.head);
+                if let Some(evidence) = evidence {
+                    t.pose = Some((frame, evidence));
+                }
                 t.observations += 1;
                 id
             } else {
@@ -415,6 +542,7 @@ impl ProvisionalTracker {
                     last_frame: frame,
                     bbox: c.bbox_xyxy_norm,
                     head: c.head_point_norm,
+                    pose: evidence.map(|e| (frame, e)),
                     observations: 1,
                     prev: None,
                 });
@@ -458,6 +586,309 @@ mod tests {
             head_point_norm: Some([x + 0.05, 0.2]),
         }
     }
+
+    #[test]
+    fn measured_joint_motion_is_primary_for_pose_track_association() {
+        fn skeleton(x: f64) -> PoseEvidence {
+            let mut joints = [[0.0; 3]; 17];
+            for (i, joint) in joints.iter_mut().enumerate() {
+                *joint = [
+                    x + (i % 3) as f64 * 0.014,
+                    0.20 + (i / 3) as f64 * 0.055,
+                    0.94,
+                ];
+            }
+            PoseEvidence { joints }
+        }
+        let mut tracker = ProvisionalTracker::new(TrackingOptions::default()).unwrap();
+        let mut first = [detection(0, 0, 0.25, 0.9), detection(0, 1, 0.65, 0.9)];
+        first[0].bbox_xyxy_norm = [0.22, 0.15, 0.35, 0.80];
+        first[1].bbox_xyxy_norm = [0.62, 0.15, 0.75, 0.80];
+        let before = tracker
+            .process_frame_with_poses(0, &first, &[Some(skeleton(0.25)), Some(skeleton(0.65))])
+            .unwrap();
+        let left = before.tracks[0].track_id;
+        let right = before.tracks[1].track_id;
+        assert_ne!(left, right);
+        let mut next = [detection(3, 1, 0.66, 0.9), detection(3, 0, 0.26, 0.9)];
+        next[0].bbox_xyxy_norm = [0.63, 0.16, 0.74, 0.75];
+        next[1].bbox_xyxy_norm = [0.23, 0.16, 0.34, 0.75];
+        let after = tracker
+            .process_frame_with_poses(3, &next, &[Some(skeleton(0.66)), Some(skeleton(0.26))])
+            .unwrap();
+        assert_eq!(after.tracks.len(), 2);
+        assert_eq!(
+            after
+                .tracks
+                .iter()
+                .find(|t| t.detection.bbox_xyxy_norm[0] < 0.5)
+                .unwrap()
+                .track_id,
+            left
+        );
+        assert_eq!(
+            after
+                .tracks
+                .iter()
+                .find(|t| t.detection.bbox_xyxy_norm[0] > 0.5)
+                .unwrap()
+                .track_id,
+            right
+        );
+        assert!(tracker
+            .process_frame_with_poses(6, &[], &[Some(skeleton(0.25))])
+            .is_err());
+        assert!(tracker.process_frame_with_poses(6, &[], &[]).is_ok());
+    }
+    #[test]
+    fn torso_measurement_overrides_unreliable_crop_but_not_a_teleport() {
+        let skeleton = |x: f64| {
+            let mut joints = [[0.0; 3]; 17];
+            for (i, joint) in joints.iter_mut().enumerate() {
+                *joint = [
+                    x + (i % 3) as f64 * 0.012,
+                    0.2 + (i / 3) as f64 * 0.055,
+                    0.95,
+                ];
+            }
+            PoseEvidence { joints }
+        };
+        let mut tracker = ProvisionalTracker::new(TrackingOptions::default()).unwrap();
+        let mut initial = detection(0, 0, 0.20, 0.86);
+        initial.bbox_xyxy_norm = [0.18, 0.16, 0.33, 0.78];
+        let id = tracker
+            .process_frame_with_poses(0, &[initial], &[Some(skeleton(0.20))])
+            .unwrap()
+            .tracks[0]
+            .track_id;
+        let mut badly_cropped = detection(3, 0, 0.52, 0.86);
+        badly_cropped.bbox_xyxy_norm = [0.50, 0.18, 0.67, 0.76];
+        let recovered = tracker
+            .process_frame_with_poses(3, &[badly_cropped], &[Some(skeleton(0.21))])
+            .unwrap();
+        assert_eq!(
+            recovered.tracks[0].track_id, id,
+            "real torso must not get a new ID solely because crop drifted"
+        );
+        let mut teleport = detection(6, 0, 0.50, 0.86);
+        teleport.bbox_xyxy_norm = [0.51, 0.20, 0.65, 0.76];
+        let invalid = tracker
+            .process_frame_with_poses(6, &[teleport], &[Some(skeleton(0.78))])
+            .unwrap();
+        assert_ne!(
+            invalid.tracks[0].track_id, id,
+            "a remote measured torso cannot steal an existing Track ID"
+        );
+    }
+    #[test]
+    fn sparse_full_and_upper_body_crops_at_25m54s_are_one_track() {
+        // Real GPU proposals in mm, 25:53.7–25:54.7 (10-frame sampling).
+        // The upper torso crop and full-body pose share the *same* head.
+        // Original tracker treated the height jump as a new player and
+        // published two Track IDs around frame 46626.
+        let samples: &[(u64, [f64; 4], [f64; 2], Option<([f64; 4], [f64; 2])>)] = &[
+            (
+                46580,
+                [0.525055, 0.627472, 0.598560, 0.868285],
+                [0.561951, 0.652633],
+                None,
+            ),
+            (
+                46590,
+                [0.527968, 0.634933, 0.600697, 0.789512],
+                [0.562892, 0.652935],
+                None,
+            ),
+            (
+                46600,
+                [0.530560, 0.622365, 0.607799, 0.942932],
+                [0.562159, 0.656500],
+                None,
+            ),
+            (
+                46610,
+                [0.520413, 0.631329, 0.597414, 0.942371],
+                [0.556352, 0.660752],
+                None,
+            ),
+            (
+                46620,
+                [0.512124, 0.653987, 0.591641, 1.0],
+                [0.549670, 0.686537],
+                Some((
+                    [0.521917, 0.611417, 0.592416, 0.744142],
+                    [0.544763, 0.686180],
+                )),
+            ),
+            (
+                46630,
+                [0.518856, 0.680530, 0.591950, 1.0],
+                [0.550680, 0.712518],
+                Some((
+                    [0.523511, 0.615371, 0.590210, 0.770552],
+                    [0.548320, 0.709169],
+                )),
+            ),
+            (
+                46640,
+                [0.495287, 0.690481, 0.581243, 1.0],
+                [0.535071, 0.721524],
+                None,
+            ),
+        ];
+        let mut tracker = ProvisionalTracker::new(TrackingOptions::default()).unwrap();
+        let mut original_id = None;
+        for &(frame, bbox, head, duplicate) in samples {
+            let mut raw = vec![Candidate {
+                frame_index: frame,
+                class_name: "player".into(),
+                score: 0.74,
+                bbox_xyxy_norm: bbox,
+                query_index: Some(0),
+                touch_probability: None,
+                head_point_norm: Some(head),
+            }];
+            if let Some((bbox, head)) = duplicate {
+                raw.push(Candidate {
+                    frame_index: frame,
+                    class_name: "player".into(),
+                    score: 0.39,
+                    bbox_xyxy_norm: bbox,
+                    query_index: Some(1),
+                    touch_probability: None,
+                    head_point_norm: Some(head),
+                });
+            }
+            let output = tracker.process_frame(frame, &raw).unwrap();
+            assert_eq!(
+                output.tracks.len(),
+                1,
+                "duplicate full/torso pose published as a second player on frame {frame}"
+            );
+            let id = output.tracks[0].track_id;
+            if let Some(old) = original_id {
+                assert_eq!(
+                    id, old,
+                    "lost identity when pose crop height changed on {frame}"
+                );
+            } else {
+                original_id = Some(id);
+            }
+        }
+        assert_eq!(tracker.next_id(), 2);
+    }
+
+    #[test]
+    fn sparse_pose_crop_switch_keeps_one_real_track_on_match_frame_143271() {
+        // Reproduced from the project's immutable RTMDet+RTMPose fusion
+        // at 1:19:33–1:19:37. The person is observed once every 10 frames.
+        // Old scoring minted ID 795 when skeleton height suddenly shrank,
+        // then alternated 792/795 and visual gap filling showed both.
+        let poses: &[(u64, [f64; 4], [f64; 2])] = &[
+            (
+                143180,
+                [0.306648, 0.703008, 0.391561, 0.981631],
+                [0.346432, 0.731657],
+            ),
+            (
+                143190,
+                [0.303618, 0.715990, 0.408617, 0.981838],
+                [0.365802, 0.743991],
+            ),
+            (
+                143200,
+                [0.363920, 0.714587, 0.457196, 0.977589],
+                [0.414689, 0.741023],
+            ),
+            (
+                143210,
+                [0.410619, 0.678486, 0.495099, 0.864729],
+                [0.437288, 0.698998],
+            ),
+            (
+                143220,
+                [0.419879, 0.673657, 0.486111, 0.870334],
+                [0.441386, 0.694498],
+            ),
+            (
+                143230,
+                [0.396340, 0.687423, 0.463623, 0.944206],
+                [0.428407, 0.714420],
+            ),
+            (
+                143240,
+                [0.339293, 0.693956, 0.444178, 0.991796],
+                [0.371909, 0.720245],
+            ),
+            (
+                143250,
+                [0.300434, 0.691609, 0.374569, 1.000000],
+                [0.324086, 0.723238],
+            ),
+            (
+                143260,
+                [0.275320, 0.688571, 0.334482, 0.967441],
+                [0.298120, 0.715828],
+            ),
+            (
+                143270,
+                [0.266388, 0.669926, 0.325408, 0.971117],
+                [0.298848, 0.700619],
+            ),
+            (
+                143280,
+                [0.273589, 0.663533, 0.340887, 0.969568],
+                [0.315762, 0.693472],
+            ),
+            (
+                143290,
+                [0.310650, 0.656498, 0.351806, 0.875108],
+                [0.342388, 0.679225],
+            ),
+            (
+                143300,
+                [0.316034, 0.629298, 0.392278, 0.900635],
+                [0.368010, 0.655470],
+            ),
+            (
+                143310,
+                [0.344605, 0.607810, 0.398583, 0.858006],
+                [0.372356, 0.632993],
+            ),
+            (
+                143320,
+                [0.338485, 0.611227, 0.399336, 0.869621],
+                [0.364912, 0.637498],
+            ),
+        ];
+        let mut tracker = ProvisionalTracker::new(TrackingOptions::default()).unwrap();
+        let mut expected = None;
+        for &(frame, bbox, head) in poses {
+            let observation = Candidate {
+                frame_index: frame,
+                class_name: "player".into(),
+                score: 0.70,
+                bbox_xyxy_norm: bbox,
+                query_index: Some(0),
+                touch_probability: None,
+                head_point_norm: Some(head),
+            };
+            let output = tracker.process_frame(frame, &[observation]).unwrap();
+            assert_eq!(output.tracks.len(), 1);
+            let id = output.tracks[0].track_id;
+            if let Some(initial) = expected {
+                assert_eq!(id, initial, "fragmented source player on frame {frame}");
+            } else {
+                expected = Some(id);
+            }
+        }
+        assert_eq!(
+            tracker.next_id(),
+            2,
+            "one person must never spawn a ghost ID"
+        );
+    }
+
     #[test]
     fn rejects_shorter_duplicate_near_timur_at_10_7s() {
         let mut tracker = ProvisionalTracker::new(TrackingOptions::default()).unwrap();
@@ -468,7 +899,9 @@ mod tests {
         crop.bbox_xyxy_norm = [0.271, 0.641, 0.343, 0.862];
         crop.head_point_norm = Some([0.314, 0.686]);
         assert!(same_partial_body_duplicate(&full, &crop));
-        let result = tracker.process_frame(321, &[crop.clone(), full.clone()]).unwrap();
+        let result = tracker
+            .process_frame(321, &[crop.clone(), full.clone()])
+            .unwrap();
         assert_eq!(result.tracks.len(), 1, "crop cannot mint second ID");
         assert_eq!(result.tracks[0].detection.query_index, full.query_index);
         crop.head_point_norm = Some([0.385, 0.686]);
@@ -497,6 +930,7 @@ mod tests {
             last_frame: 482,
             bbox: [0.639, 0.686, 0.684, 0.925],
             head: None,
+            pose: None,
             observations: 12,
             prev: Some((481, [0.633, 0.724, 0.682, 0.996])),
         };
@@ -506,6 +940,7 @@ mod tests {
                 &make(483, [0.642, 0.704, 0.684, 0.965]),
                 483,
                 options,
+                None,
             )
             .is_some(),
             "Cropped athlete at 482/483 must keep same ID"
@@ -515,6 +950,7 @@ mod tests {
             last_frame: 368,
             bbox: [0.493, 0.437, 0.529, 0.499],
             head: None,
+            pose: None,
             observations: 12,
             prev: None,
         };
@@ -524,6 +960,7 @@ mod tests {
                 &make(408, [0.482, 0.438, 0.507, 0.551]),
                 408,
                 options,
+                None,
             )
             .is_some(),
             "Missing legs behind net must not force another ID"
@@ -677,7 +1114,9 @@ mod tests {
         assert!(same_head_body_duplicate(&full, &upper));
         assert!(bbox_iou(full.bbox_xyxy_norm, upper.bbox_xyxy_norm) < 0.65);
         let mut tracker = ProvisionalTracker::new(TrackingOptions::default()).unwrap();
-        let out = tracker.process_frame(0, &[full.clone(), upper.clone()]).unwrap();
+        let out = tracker
+            .process_frame(0, &[full.clone(), upper.clone()])
+            .unwrap();
         assert_eq!(out.tracks.len(), 1);
         assert_eq!(out.rejected_boxes, 1);
         upper.head_point_norm = Some([0.555, 0.42]);
@@ -791,6 +1230,36 @@ mod tests {
         assert_eq!(settings.validate().unwrap().max_gap_frames, 90);
         let tracker = ProvisionalTracker::new(settings).unwrap();
         assert_eq!(tracker.config.max_gap_frames, 90);
+    }
+
+    #[test]
+    fn crossing_player_cannot_steal_trajectory_after_sparse_pose_gap() {
+        // Real short-match failure: ID 4 represented a light-shirt athlete
+        // moving right at frames 530/540. The next observation at 580 was a
+        // different black-shirt athlete, left of the last body/head position.
+        // The old proximity-only matching silently reused ID 4 for both.
+        let mut tracker = ProvisionalTracker::new(TrackingOptions::default()).unwrap();
+        let original = tracker
+            .process_frame(530, &[detection(530, 0, 0.550, 0.70)])
+            .unwrap()
+            .tracks[0]
+            .track_id;
+        let still_original = tracker
+            .process_frame(540, &[detection(540, 0, 0.568, 0.76)])
+            .unwrap();
+        assert_eq!(still_original.tracks[0].track_id, original);
+        // After 40 frames with no skeleton measurement, this opposite-moving
+        // candidate is too ambiguous to claim the prior athlete's identity.
+        let wrong_body = tracker
+            .process_frame(580, &[detection(580, 1, 0.533, 0.73)])
+            .unwrap();
+        assert_ne!(wrong_body.tracks[0].track_id, original);
+        // The legitimate athlete can still be recovered later inside the
+        // full 3-second grace period when her trajectory is compatible.
+        let rightward = tracker
+            .process_frame(590, &[detection(590, 2, 0.662, 0.76)])
+            .unwrap();
+        assert_eq!(rightward.tracks[0].track_id, original);
     }
 
     #[test]

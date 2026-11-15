@@ -1,5 +1,6 @@
-//! Explicitly reviewed athlete attacks -> ranked original-video rally clips.
-//! No speculative visual ReID or auto-classified actions can produce entries.
+//! Player reels from the exact SHA-verified contacts credited by Report.
+//! Action prediction is an estimate; a saved human action review may override
+//! its label. No unlabeled tracks or contacts outside rallies produce clips.
 use crate::{
     montage, native_action_review, native_player_statistics, native_player_tracks,
     native_rally_preview::{self, ValidatedRun},
@@ -24,6 +25,12 @@ const MAX_CLIPS: usize = 80;
 pub struct Request {
     project_id: String,
     player_id: String,
+    #[serde(default = "default_action_kind")]
+    action_kind: String,
+    #[serde(default = "default_clip_context")]
+    clip_context_sec: f64,
+    #[serde(default)]
+    target_duration_sec: Option<f64>,
     rally_run_ids: Vec<String>,
     #[serde(default = "preview")]
     operation: String,
@@ -39,10 +46,21 @@ pub struct Request {
     encoder: Option<String>,
     #[serde(default)]
     layout: VideoLayout,
+    #[serde(default = "default_zoom")]
+    camera_zoom: f64,
     #[serde(default)]
     audio_file: Option<String>,
     #[serde(default = "default_volume")]
     audio_volume: f64,
+}
+fn default_zoom() -> f64 {
+    1.25
+}
+fn default_action_kind() -> String {
+    "attack".into()
+}
+fn default_clip_context() -> f64 {
+    1.0
 }
 fn preview() -> String {
     "preview".into()
@@ -66,6 +84,8 @@ struct Candidate {
     start: u64,
     end: u64,
     verified_attacks: u64,
+    human_reviewed: u64,
+    frames: Vec<u64>,
 }
 impl Candidate {
     fn view(&self) -> Value {
@@ -73,9 +93,10 @@ impl Candidate {
             "key":self.key,"candidate_id":self.candidate_id,
             "rally_run_id":self.rally_run_id,"video":self.video,
             "detected_start_frame":self.start,"detected_end_frame":self.end,
-            "manually_verified_player_attacks":self.verified_attacks,
-            "action_label_source":"explicit_human_review",
-            "athlete_link_source":"manually_reviewed_native_track_ids"
+            "verified_player_actions":self.verified_attacks,
+            "human_reviewed_actions":self.human_reviewed,
+            "action_label_source":"pose_supported_prediction_or_explicit_review",
+            "athlete_link_source":"reviewed_or_auto_linked_roster_player"
         })
     }
 }
@@ -114,35 +135,63 @@ fn select_candidates(
         })
         .collect()
 }
-/// Source review can name an action, but a physical Touch only counts for a
-/// specific player after the separate, manual, non-excluded Track ID review.
-fn attack_for_player(
-    action: &Value,
+/// A manual label changes the predicted type only for the exact, previously
+/// validated contact frame and track. Other contacts retain Report predictions.
+fn select_player_actions(
+    verified: &[native_player_statistics::MontageContact],
     owners: &native_player_tracks::NativeReviewedOwners,
     player_id: &str,
-) -> Result<Option<(u64, u64)>, String> {
-    if action["action_kind"] != "attack" {
-        return Ok(None);
+    kind: &str,
+    reviewed: &BTreeMap<(u64, u64), String>,
+) -> Vec<(u64, bool)> {
+    verified
+        .iter()
+        .filter_map(|event| {
+            if owners.excluded.contains(&event.track_id)
+                || owners.owners.get(&event.track_id).map(String::as_str) != Some(player_id)
+            {
+                return None;
+            }
+            let manual = reviewed.get(&(event.frame, event.track_id));
+            let actual_kind = manual
+                .map(String::as_str)
+                .or(event.estimated_kind.as_deref())
+                .unwrap_or("unknown_touch");
+            (kind == "all" || kind == actual_kind).then_some((event.frame, manual.is_some()))
+        })
+        .collect()
+}
+fn reviewed_action_labels(response: &Value) -> Result<BTreeMap<(u64, u64), String>, String> {
+    let actions = response["reviewed_actions"]
+        .as_array()
+        .ok_or("Missing reviewed action entries")?;
+    let mut labels = BTreeMap::new();
+    for action in actions {
+        if action["action_verified"] != true
+            || action["motion_supported"] != true
+            || action["action_source"] != "explicit_human_review"
+            || action["athlete_identity_verified"] != false
+        {
+            return Err("Untrusted manual action review".into());
+        }
+        let (Some(frame), Some(track), Some(kind)) = (
+            action["frame_index"].as_u64(),
+            action["provisional_track_id"].as_u64(),
+            action["action_kind"].as_str(),
+        ) else {
+            continue;
+        };
+        if !matches!(
+            kind,
+            "attack" | "block" | "serve" | "dig" | "overhead_pass" | "low_touch"
+        ) {
+            return Err("Unsupported manual action label".into());
+        }
+        if labels.insert((frame, track), kind.to_string()).is_some() {
+            return Err("Duplicate manual action label".into());
+        }
     }
-    if action["action_verified"] != true
-        || action["motion_supported"] != true
-        || action["action_source"] != "explicit_human_review"
-        || action["athlete_identity_verified"] != false
-    {
-        return Err("Unreviewed attack cannot become an athlete highlight".into());
-    }
-    let (Some(frame), Some(track)) = (
-        action["frame_index"].as_u64(),
-        action["provisional_track_id"].as_u64(),
-    ) else {
-        return Ok(None);
-    };
-    if owners.excluded.contains(&track)
-        || owners.owners.get(&track).map(String::as_str) != Some(player_id)
-    {
-        return Ok(None);
-    }
-    Ok(Some((frame, track)))
+    Ok(labels)
 }
 fn rally_for_frame(intervals: &[(String, u64, u64)], frame: u64) -> Option<usize> {
     let index = intervals.partition_point(|(_, start, _)| *start <= frame);
@@ -151,6 +200,7 @@ fn rally_for_frame(intervals: &[(String, u64, u64)], frame: u64) -> Option<usize
 struct Plan {
     response: Value,
     clips: Vec<SelectedClip>,
+    camera_tracks: Option<Vec<Vec<volley_media::montage::CameraPoint>>>,
 }
 fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
     storage::project_id(&request.project_id)?;
@@ -162,6 +212,24 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
         || request.max_clips == 0
         || request.max_clips > MAX_CLIPS
         || !matches!(request.selection_mode.as_str(), "auto" | "manual")
+        || !matches!(
+            request.action_kind.as_str(),
+            "all"
+                | "attack"
+                | "block"
+                | "serve"
+                | "dig"
+                | "overhead_pass"
+                | "low_touch"
+                | "unknown_touch"
+        )
+        || !request.clip_context_sec.is_finite()
+        || !(0.2..=3.0).contains(&request.clip_context_sec)
+        || request
+            .target_duration_sec
+            .is_some_and(|x| !x.is_finite() || !(1.0..=600.0).contains(&x))
+        || !request.camera_zoom.is_finite()
+        || !(1.0..=2.5).contains(&request.camera_zoom)
     {
         return Err(storage::bad_request(
             "Invalid player, native CPU runs or highlight settings",
@@ -208,7 +276,7 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
             ));
         }
         // The legacy and native run adapters MUST NOT be mixed by ID guessing.
-        let owners = native_player_tracks::reviewed_owners(
+        let (owners, automatic_track_ids) = native_player_tracks::statistics_owners(
             state,
             &request.project_id,
             &run.video,
@@ -229,9 +297,10 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
             ));
         }
         athlete_name = Some(name.clone());
-        // This streams both original replay frames AND Touch, enforcing
-        // physically supported same-frame Track ID ownership with both SHAs.
-        native_player_statistics::verify_contacts_for_montage(state, &run, &owners)?;
+        // Exactly the Report-tab selector: same-frame Track ID, ball,
+        // pose contact landmark, SHA checks, and a verified rally interval.
+        let report_contacts =
+            native_player_statistics::verified_contacts_for_montage(state, &run, &owners)?;
         let reviewed = native_action_review::verified_actions(state, &run)?;
         if reviewed["schema"] != "volley-native-action-review/1"
             || reviewed["source_replay_id"] != run.replay_id
@@ -246,28 +315,23 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
         }
         let intervals =
             native_rally_preview::verified_rally_intervals(&run).map_err(storage::bad_request)?;
-        let mut per_rally = vec![0_u64; intervals.len()];
-        let action_rows = reviewed["reviewed_actions"]
-            .as_array()
-            .ok_or_else(|| storage::conflict("Missing human-reviewed actions"))?;
-        let mut counted = BTreeSet::<(u64, u64)>::new();
-        for action in action_rows {
-            let Some((frame, track)) = attack_for_player(action, &owners, &request.player_id)
-                .map_err(storage::conflict)?
-            else {
-                continue;
-            };
-            if !counted.insert((frame, track)) {
-                return Err(storage::conflict(
-                    "Duplicate reviewed attack in same source",
-                ));
-            }
+        let manual_labels = reviewed_action_labels(&reviewed).map_err(storage::conflict)?;
+        let mut per_rally = vec![Vec::<u64>::new(); intervals.len()];
+        let mut per_rally_manual = vec![0_u64; intervals.len()];
+        for (frame, manually_reviewed) in select_player_actions(
+            &report_contacts,
+            &owners,
+            &request.player_id,
+            &request.action_kind,
+            &manual_labels,
+        ) {
             if let Some(index) = rally_for_frame(&intervals, frame) {
-                per_rally[index] += 1;
+                per_rally[index].push(frame);
+                per_rally_manual[index] += u64::from(manually_reviewed);
             }
         }
         for (i, (id, start, end)) in intervals.into_iter().enumerate() {
-            if per_rally[i] == 0 {
+            if per_rally[i].is_empty() {
                 continue;
             }
             candidates.push(Candidate {
@@ -277,7 +341,9 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
                 video: run.video.clone(),
                 start,
                 end,
-                verified_attacks: per_rally[i],
+                verified_attacks: per_rally[i].len() as u64,
+                human_reviewed: per_rally_manual[i],
+                frames: per_rally[i].clone(),
             });
         }
         sources.push(json!({
@@ -285,8 +351,12 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
             "replay_sha256":run.replay_sha,
             "touch_sha256":run.touch_sha,"rally_sha256":run.rally_sha,
             "identity_revision":owners.revision,
+            "resolved_owner_assignments":owners.owners,
+            "excluded_track_ids":owners.excluded,
+            "automatic_track_ids":automatic_track_ids,
             "action_revision":reviewed["revision"],
-            "manual_identity_only":true,"human_reviewed_actions_only":true
+            "identity_source":"report_roster_reviewed_and_reconciled_auto",
+            "action_source":"report_pose_contacts_predicted_or_human_reviewed"
         }));
         runs.insert(run.run_id.clone(), run);
     }
@@ -301,7 +371,9 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
         "{:x}",
         Sha256::digest(
             serde_json::to_vec(&json!({
-                "project_id":request.project_id,"player_id":request.player_id,"sources":sources,
+                "project_id":request.project_id,"player_id":request.player_id,
+                "action_kind":request.action_kind,"clip_context_sec":request.clip_context_sec,
+                "sources":sources,
             }))
             .map_err(|e| storage::internal(format!("Encode highlights fingerprint: {e}")))?
         )
@@ -340,35 +412,104 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
             checked.insert(format!("{id}:{candidate}"), clip);
         }
     }
-    let clips = selected
-        .iter()
-        .map(|entry| {
-            checked
-                .remove(&entry.key)
-                .ok_or_else(|| storage::internal("Missing verified source interval"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    // Build source-authenticated short windows for EACH reviewed contact.
+    // Never substitute an entire rally for an athlete contact reel.
+    let context_before = (request.clip_context_sec * 30.0).round() as u64;
+    let context_after = ((request.clip_context_sec + 0.35) * 30.0).round() as u64;
+    let mut clips = Vec::new();
+    for entry in &selected {
+        let source = checked
+            .remove(&entry.key)
+            .ok_or_else(|| storage::internal("Missing verified source interval"))?;
+        let mut frames = entry.frames.clone();
+        frames.sort_unstable();
+        let mut windows = Vec::<(u64, u64)>::new();
+        for frame in frames {
+            let start = frame.saturating_sub(context_before).max(source.start_frame);
+            let end = frame.saturating_add(context_after).min(source.end_frame);
+            if let Some(last) = windows.last_mut() {
+                if start <= last.1.saturating_add(1) {
+                    last.1 = last.1.max(end);
+                    continue;
+                }
+            }
+            windows.push((start, end));
+        }
+        for (start, end) in windows {
+            let mut clip = SelectedClip {
+                video: source.video.clone(),
+                start_frame: start,
+                end_frame: end,
+                analysis_offset_sec: source.analysis_offset_sec,
+            };
+            if clips.len() == MAX_CLIPS {
+                break;
+            }
+            // A very short final fragment cannot be rendered usefully.
+            if clip.end_frame.saturating_sub(clip.start_frame) < 10 {
+                clip.end_frame = (clip.start_frame + 10).min(source.end_frame);
+            }
+            clips.push(clip);
+        }
+        if clips.len() == MAX_CLIPS {
+            break;
+        }
+    }
+    let camera_tracks = if request.layout == VideoLayout::VerticalFollow {
+        let mut by_source = vec![Vec::new(); clips.len()];
+        for run in runs.values() {
+            let indices: Vec<usize> = clips
+                .iter()
+                .enumerate()
+                .filter_map(|(index, clip)| (clip.video == run.video).then_some(index))
+                .collect();
+            if indices.is_empty() {
+                continue;
+            }
+            let subset = indices
+                .iter()
+                .map(|i| clips[*i].clone())
+                .collect::<Vec<_>>();
+            let calculated = native_rally_preview::verified_camera_tracks(state, run, &subset)
+                .map_err(storage::bad_request)?;
+            for (index, track) in indices.into_iter().zip(calculated) {
+                by_source[index] = track;
+            }
+        }
+        Some(by_source)
+    } else {
+        None
+    };
     let attack_total = selected.iter().map(|c| c.verified_attacks).sum::<u64>();
+    let reviewed_total = selected.iter().map(|c| c.human_reviewed).sum::<u64>();
     let view = json!({
         "schema":"volley-native-reviewed-player-highlights/1",
         "project_id":request.project_id,
         "player_id":request.player_id,"player_name":athlete_name,
         "selection_mode":request.selection_mode,
+        "action_kind":request.action_kind,
+        "clip_context_sec":request.clip_context_sec,
+        "requested_duration_sec":request.target_duration_sec,
         "sources":sources,"source_fingerprint":fingerprint,
         "candidates":candidates.iter().take(80).map(Candidate::view).collect::<Vec<_>>(),
         "total_eligible_rallies":candidates.len(),
         "selected":selected.iter().map(Candidate::view).collect::<Vec<_>>(),
         "selected_verified_attacks":attack_total,
+        "selected_verified_player_contacts":attack_total,
+        "selected_manually_reviewed_actions":reviewed_total,
         "selected_clips":clips.len(),
-        "reviewed_actions_only":true,
-        "manually_linked_athlete_only":true,
-        "automatic_action_classification":false,
+        "short_contact_segments_only":true,
+        "reviewed_actions_only":false,
+        "manually_linked_athlete_only":false,
+        "automatic_action_classification":true,
+        "action_classification_verified":false,
         "render_source":"original_recording",
         "cancellation_route":"/api/montage/native/cancel",
     });
     Ok(Plan {
         response: view,
         clips,
+        camera_tracks,
     })
 }
 pub async fn highlights(
@@ -388,6 +529,8 @@ pub async fn highlights(
     let layout = request.layout;
     let audio_file = request.audio_file.clone();
     let audio_volume = request.audio_volume;
+    let target_duration_sec = request.target_duration_sec;
+    let camera_zoom = request.camera_zoom;
     let state_copy = state.clone();
     let planned = tokio::task::spawn_blocking(move || {
         let _guard = project_guard::write_guard(&state_copy, &request.project_id)?;
@@ -401,7 +544,7 @@ pub async fn highlights(
     }
     if planned.clips.is_empty() {
         return Err(storage::bad_request(
-            "No verified player attacks selected for montage",
+            "Для выбранного игрока и типа действий нет касаний внутри розыгрышей",
         ));
     }
     let evidence = json!({
@@ -412,8 +555,12 @@ pub async fn highlights(
         "sources":planned.response["sources"],
         "selected_rallies":planned.response["selected"],
         "selection_mode":planned.response["selection_mode"],
-        "verified_attack_count":planned.response["selected_verified_attacks"],
-        "human_review_only":true,
+        "estimated_attack_count":if planned.response["action_kind"]=="attack" {planned.response["selected_verified_attacks"].clone()} else {json!(0)},
+        "pose_verified_contact_count":planned.response["selected_verified_player_contacts"],
+        "manually_reviewed_action_count":planned.response["selected_manually_reviewed_actions"],
+        "action_kind":planned.response["action_kind"],
+        "human_review_only":false,
+        "automatic_action_classification_verified":false,
         "source_video":"original_recording",
     });
     let Json(job) = montage::start_native_montage(
@@ -426,7 +573,11 @@ pub async fn highlights(
             audio_volume,
             encoder,
             layout,
+            target_duration_sec,
+            camera_zoom,
+            camera_tracks: planned.camera_tracks,
             verified_highlights: Some(evidence),
+            report_outro: None,
         }),
     )
     .await?;
@@ -448,48 +599,105 @@ mod tests {
             start: 100,
             end: 180,
             verified_attacks: count,
+            human_reviewed: 0,
+            frames: vec![120],
         }
     }
     #[test]
-    fn only_explicit_attacks_of_manually_linked_athlete_count() {
+    fn report_predicted_attacks_are_available_without_manual_review() {
         let mut owners = native_player_tracks::NativeReviewedOwners {
             source_sha: "a".repeat(64),
             revision: "absent".into(),
             owners: BTreeMap::from([(7, "player-a".into()), (8, "player-b".into())]),
             excluded: BTreeSet::new(),
-            roster: BTreeMap::new(),
+            roster: BTreeMap::from([
+                ("player-a".into(), "Alice".into()),
+                ("player-b".into(), "Bob".into()),
+            ]),
         };
-        let verified = json!({
-            "action_kind":"attack","action_verified":true,
+        // This is the already physically validated Report selector output.
+        let report_contacts = vec![
+            native_player_statistics::MontageContact {
+                frame: 20,
+                track_id: 7,
+                estimated_kind: Some("attack".into()),
+            },
+            native_player_statistics::MontageContact {
+                frame: 23,
+                track_id: 7,
+                estimated_kind: Some("dig".into()),
+            },
+            native_player_statistics::MontageContact {
+                frame: 27,
+                track_id: 8,
+                estimated_kind: Some("attack".into()),
+            },
+            native_player_statistics::MontageContact {
+                frame: 30,
+                track_id: 7,
+                estimated_kind: None,
+            },
+        ];
+        let no_review = BTreeMap::new();
+        assert_eq!(
+            select_player_actions(&report_contacts, &owners, "player-a", "attack", &no_review),
+            vec![(20, false)],
+            "The attack shown in Report must appear in the player's reel"
+        );
+        assert_eq!(
+            select_player_actions(&report_contacts, &owners, "player-a", "all", &no_review),
+            vec![(20, false), (23, false), (30, false)]
+        );
+        assert!(
+            select_player_actions(&report_contacts, &owners, "player-b", "dig", &no_review)
+                .is_empty()
+        );
+
+        // Human correction overrides the estimate of this very contact.
+        let reviewed = json!({"reviewed_actions":[{
+            "action_kind":"block","action_verified":true,
             "motion_supported":true,"action_source":"explicit_human_review",
             "athlete_identity_verified":false,
-            "frame_index":20,"provisional_track_id":7,
-        });
-        assert_eq!(
-            attack_for_player(&verified, &owners, "player-a").unwrap(),
-            Some((20, 7))
+            "frame_index":20,"provisional_track_id":7
+        }]});
+        let labels = reviewed_action_labels(&reviewed).unwrap();
+        assert!(
+            select_player_actions(&report_contacts, &owners, "player-a", "attack", &labels)
+                .is_empty()
         );
         assert_eq!(
-            attack_for_player(&verified, &owners, "player-b").unwrap(),
-            None
+            select_player_actions(&report_contacts, &owners, "player-a", "block", &labels),
+            vec![(20, true)]
         );
-        let mut spoof = verified.clone();
-        spoof["action_source"] = json!("automatic_reid");
-        assert!(attack_for_player(&spoof, &owners, "player-a").is_err());
-        spoof = verified.clone();
-        spoof["action_verified"] = json!(false);
-        assert!(attack_for_player(&spoof, &owners, "player-a").is_err());
-        spoof = verified.clone();
-        spoof["action_kind"] = json!("unknown_touch");
+        // A manual label alone never creates an unobserved contact.
+        let fake = BTreeMap::from([((29, 7), "attack".to_string())]);
         assert_eq!(
-            attack_for_player(&spoof, &owners, "player-a").unwrap(),
-            None
+            select_player_actions(&report_contacts, &owners, "player-a", "attack", &fake),
+            vec![(20, false)]
         );
-        owners.excluded.insert(7);
+
+        // Auto-IDs are just as valid as manual IDs once reconciled in stats_owners.
+        owners.owners.insert(9, "player-a".into());
+        let inferred = vec![native_player_statistics::MontageContact {
+            frame: 44,
+            track_id: 9,
+            estimated_kind: Some("attack".into()),
+        }];
         assert_eq!(
-            attack_for_player(&verified, &owners, "player-a").unwrap(),
-            None
+            select_player_actions(&inferred, &owners, "player-a", "attack", &no_review),
+            vec![(44, false)]
         );
+        owners.excluded.insert(9);
+        assert!(
+            select_player_actions(&inferred, &owners, "player-a", "attack", &no_review).is_empty()
+        );
+
+        let mut spoof = reviewed.clone();
+        spoof["reviewed_actions"][0]["action_source"] = json!("automatic_reid");
+        assert!(reviewed_action_labels(&spoof).is_err());
+    }
+    #[test]
+    fn selected_contacts_are_restricted_to_verified_rallies() {
         let intervals = vec![("rally-1".into(), 10, 20), ("rally-2".into(), 30, 40)];
         assert_eq!(rally_for_frame(&intervals, 10), Some(0));
         assert_eq!(rally_for_frame(&intervals, 20), Some(0));

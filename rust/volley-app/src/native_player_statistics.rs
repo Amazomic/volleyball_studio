@@ -1,6 +1,6 @@
 //! Project-scoped person statistics over one unique, SHA-verified native CPU
-//! source per video, counting only explicitly reviewed Track ID assignments.
-//! Unknown touches remain unassigned. This never infers technique from motion.
+//! source per video, counting only resolved roster athletes inside rallies.
+//! Unresolved Track IDs remain diagnostics, not new report players.
 use crate::{
     cpu_retrack::{safe_file, BoundedReader},
     native_player_tracks::{self, NativeReviewedOwners},
@@ -21,6 +21,7 @@ use std::{
 };
 const MAX_SOURCE: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_STATS: u64 = 8 * 1024 * 1024;
+const REPORT_ALGORITHM: &str = "rally-roster-attributed-touches-v3";
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatsSource {
@@ -48,13 +49,26 @@ fn expected_source_matches(current: &Value, expected: &str) -> bool {
 fn preview() -> String {
     "preview".into()
 }
+/// Same-frame, SHA-verified and pose-supported contact credited by the
+/// Report. The estimated_kind is an automatic hypothesis, not a review label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MontageContact {
+    pub frame: u64,
+    pub track_id: u64,
+    pub estimated_kind: Option<String>,
+}
 #[derive(Default, Debug)]
 struct ContactCounts {
+    montage_contacts: Vec<MontageContact>,
     per_track: BTreeMap<u64, u64>,
     estimated_actions: BTreeMap<String, u64>,
     estimated_per_track: BTreeMap<u64, BTreeMap<String, u64>>,
     unassigned: u64,
     touches: u64,
+    excluded_proposals: u64,
+    unverified_proposals: u64,
+    generic_touches: u64,
+    outside_rally_proposals: u64,
 }
 /// Re-verify the exact video-to-touch and frame-to-Track relationship, not
 /// merely that a guessed Track ID appears somewhere in the match.
@@ -79,6 +93,7 @@ fn count_native_contacts(
     let mut before = None::<u64>;
     let mut total = ContactCounts::default();
     let mut verified_touches = 0_u64;
+    let mut last_attributed = BTreeMap::<u64, u64>::new();
     for frame in 0..run.frames {
         let raw = source
             .line()?
@@ -123,33 +138,58 @@ fn count_native_contacts(
                 return Err("Untrusted, duplicate or unphysical Touch candidate".into());
             }
             if contact_frame == frame {
-                if row["selected_ball"].is_null() {
+                if row["selected_ball"].is_null() && !event.ball_occluded_at_contact() {
                     return Err("Source Touch frame has no observed selected ball".into());
                 }
                 if track.is_some_and(|id| !observed.contains(&id)) {
                     return Err("Touch Track ID is absent from the same source frame".into());
                 }
                 verified_touches += 1;
-                if windows.contains(frame) {
-                    total.touches += 1;
-                    if let Some(prediction) = event.action_prediction() {
-                        let kind = prediction.kind.as_str().to_owned();
-                        *total.estimated_actions.entry(kind.clone()).or_default() += 1;
-                        if let Some(track_id) = track.filter(|id| !owners.excluded.contains(id)) {
+                let pose_verified =
+                    event.body_contact_supported && event.contact_landmark.is_some();
+                if !windows.contains(frame) {
+                    total.outside_rally_proposals += 1;
+                } else if let Some(id) = track {
+                    if !native_rally_preview::retain_rally_touch(
+                        &mut last_attributed,
+                        frame,
+                        id,
+                        pose_verified,
+                    ) {
+                        total.unverified_proposals += 1;
+                    } else if owners.excluded.contains(&id) {
+                        total.excluded_proposals += 1;
+                    } else {
+                        total.touches += 1;
+                        *total.per_track.entry(id).or_default() += 1;
+                        if !pose_verified {
+                            total.generic_touches += 1;
+                        }
+                        let estimated_kind = if pose_verified {
+                            event
+                                .action_prediction()
+                                .map(|p| p.kind.as_str().to_owned())
+                        } else {
+                            None
+                        };
+                        total.montage_contacts.push(MontageContact {
+                            frame,
+                            track_id: id,
+                            estimated_kind: estimated_kind.clone(),
+                        });
+                        if let Some(kind) = estimated_kind {
+                            *total.estimated_actions.entry(kind.clone()).or_default() += 1;
                             *total
                                 .estimated_per_track
-                                .entry(track_id)
+                                .entry(id)
                                 .or_default()
                                 .entry(kind)
                                 .or_default() += 1;
                         }
                     }
-                    match track {
-                        Some(id) if !owners.excluded.contains(&id) => {
-                            *total.per_track.entry(id).or_default() += 1
-                        }
-                        _ => total.unassigned += 1,
-                    }
+                } else {
+                    total.unassigned += 1;
+                    total.unverified_proposals += 1;
                 }
                 before = Some(contact_frame);
                 next = contacts
@@ -173,14 +213,14 @@ fn count_native_contacts(
     Ok(total)
 }
 
-/// Montage and statistics share the same full same-frame, two-SHA
-/// verification. A manually linked Track ID seen elsewhere in a run is
-/// insufficient to assign a reviewed Touch to an athlete.
-pub(crate) fn verify_contacts_for_montage(
+/// Montage and statistics share a single SHA-verified contact selector.
+/// Only contacts credited by the Report (inside a rally, matching player and
+/// COCO17 landmark on the exact replay frame) may become player reel cuts.
+pub(crate) fn verified_contacts_for_montage(
     state: &AppState,
     run: &ValidatedRun,
     owners: &NativeReviewedOwners,
-) -> Result<(), ApiError> {
+) -> Result<Vec<MontageContact>, ApiError> {
     let root = projects::project_root(state)
         .join(&run.project_id)
         .join("native_cpu_replays")
@@ -189,8 +229,10 @@ pub(crate) fn verify_contacts_for_montage(
         safe_file(&root, "tracked_frames.jsonl", MAX_SOURCE).map_err(storage::bad_request)?;
     let windows =
         native_rally_preview::verified_track_windows(run).map_err(storage::bad_request)?;
-    count_native_contacts(run, &replay, owners, &windows).map_err(storage::bad_request)?;
-    Ok(())
+    let counts =
+        count_native_contacts(run, &replay, owners, &windows).map_err(storage::bad_request)?;
+    debug_assert_eq!(counts.touches as usize, counts.montage_contacts.len());
+    Ok(counts.montage_contacts)
 }
 fn select_unique_video(seen: &mut BTreeSet<String>, video: &str) -> bool {
     seen.insert(video.to_owned())
@@ -217,6 +259,12 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
     let mut predicted_players = BTreeMap::<String, BTreeMap<String, u64>>::new();
     let mut unknown = 0u64;
     let mut contacts = 0u64;
+    let mut unverified = 0u64;
+    let mut generic = 0u64;
+    let mut excluded_proposals = 0u64;
+    let mut outside_proposals = 0u64;
+    let mut automatic_identity_ids = BTreeSet::<String>::new();
+    let mut automatically_linked_tracks = 0u64;
     let mut rallies = 0u64;
     let mut sources = Vec::new();
     let mut track_breakdown = Vec::new();
@@ -234,12 +282,18 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
                 "Do not double-count multiple CPU revisions of one video",
             ));
         }
-        let owners = native_player_tracks::reviewed_owners(
+        let (owners, auto_ids) = native_player_tracks::statistics_owners(
             state,
             &request.project_id,
             &run.video,
             &run.replay_id,
         )?;
+        automatically_linked_tracks += auto_ids.len() as u64;
+        for track in &auto_ids {
+            if let Some(owner) = owners.owners.get(track) {
+                automatic_identity_ids.insert(owner.clone());
+            }
+        }
         if run.replay_sha != owners.source_sha {
             return Err(storage::conflict(
                 "Stats Touch/Track identity source SHA mismatch",
@@ -268,22 +322,24 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
             .map_err(storage::bad_request)?;
         contacts += subtotal.touches;
         unknown += subtotal.unassigned;
-        for (kind, count) in &subtotal.estimated_actions {
-            *predicted_counts.entry(kind.clone()).or_default() += count;
-        }
-        for (track, actions) in &subtotal.estimated_per_track {
-            if let Some(owner) = owners.owners.get(track) {
-                let totals = predicted_players.entry(owner.clone()).or_default();
-                for (kind, count) in actions {
-                    *totals.entry(kind.clone()).or_default() += count;
-                }
-            }
-        }
+        unverified += subtotal.unverified_proposals;
+        generic += subtotal.generic_touches;
+        excluded_proposals += subtotal.excluded_proposals;
+        outside_proposals += subtotal.outside_rally_proposals;
         let mut run_unassigned = subtotal.unassigned;
         for (tid, count) in subtotal.per_track {
             let athlete = owners.owners.get(&tid);
-            if let Some(player) = athlete {
-                *results.entry(player.clone()).or_default() += count;
+            if let Some(player_id) = athlete {
+                // Report credit requires a real project-roster player, never
+                // a synthetic card derived from an unassigned CPU Track ID.
+                *results.entry(player_id.clone()).or_default() += count;
+                if let Some(actions) = subtotal.estimated_per_track.get(&tid) {
+                    let totals = predicted_players.entry(player_id.clone()).or_default();
+                    for (kind, count) in actions {
+                        *totals.entry(kind.clone()).or_default() += count;
+                        *predicted_counts.entry(kind.clone()).or_default() += count;
+                    }
+                }
             } else {
                 unknown += count;
                 run_unassigned += count;
@@ -291,11 +347,26 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
             track_breakdown.push(json!({
                 "video":run.video,"source_replay_id":run.replay_id,
                 "source_touch_id":run.touch_id,"track_id":tid,"touches":count,
-                "confirmed_player_id":athlete,"manually_reviewed":athlete.is_some(),
+                "confirmed_player_id":athlete,
+                "manually_reviewed":athlete.is_some() && !auto_ids.contains(&tid),
+                "automatic_photo_assignment":auto_ids.contains(&tid),
+                "contact_landmark_required":true,
                 "estimated_actions":subtotal.estimated_per_track.get(&tid).cloned().unwrap_or_default()
             }));
         }
+        let identity_mapping_fingerprint = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&json!({
+                    "owners":owners.owners,
+                    "excluded":owners.excluded,
+                    "automatic_track_ids":auto_ids,
+                }))
+                .map_err(|e| storage::internal(format!("Player identity fingerprint: {e}")))?
+            )
+        );
         sources.push(json!({
+            "identity_mapping_fingerprint":identity_mapping_fingerprint,
             "video":run.video,"rally_run_id":run.run_id,
             "source_replay_id":run.replay_id,"source_replay_sha256":run.replay_sha,
             "source_touch_id":run.touch_id,"source_touch_sha256":run.touch_sha,
@@ -304,6 +375,10 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
             "rally_candidates":run.expected_rallies,
             "total_touch_candidates":subtotal.touches,
             "unassigned_touch_candidates":run_unassigned,
+            "unverified_touch_proposals":subtotal.unverified_proposals,
+            "generic_touch_candidates":subtotal.generic_touches,
+            "excluded_touch_proposals":subtotal.excluded_proposals,
+            "outside_rally_touch_proposals":subtotal.outside_rally_proposals,
             "estimated_actions":subtotal.estimated_actions
         }));
     }
@@ -330,7 +405,11 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
                 "player_id":id,"name":name,"touches":touches,"unclassified_touches":unclassified,
                 "activity":activity,
                 "estimated_actions":actions,
-                "identity_source":"manually_reviewed_native_track_ids"
+                "identity_source":if automatic_identity_ids.contains(id) {
+                    "photo_auto_or_reviewed_native_track_ids"
+                } else {
+                    "manually_reviewed_native_track_ids"
+                }
             })
         })
         .collect::<Vec<_>>();
@@ -342,7 +421,7 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
         )
     );
     let sum: u64 = results.values().sum();
-    if sum + unknown != contacts {
+    if sum + unknown != contacts || players.len() != names.len() {
         return Err(storage::internal(
             "Native stats conservation accounting failed",
         ));
@@ -350,74 +429,187 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
     let has_predictions = !predicted_counts.is_empty();
     Ok(json!({
         "schema":"volley-native-player-statistics/1",
-        "algorithm":"verified-touch-frame-and-manual-athlete-links-v1",
+        "algorithm":REPORT_ALGORITHM,
         "project_id":request.project_id,
         "source_fingerprint":source_checksum,
         "sources":sources,"video_count":selected.len(),
+        "roster_player_ids":names.keys().collect::<Vec<_>>(),
         "rally_candidates":rallies,
         "mean_player_touches":mean_touches,
         "estimated_hits":predicted_counts.get("attack").copied().unwrap_or(0) + predicted_counts.get("serve").copied().unwrap_or(0),
         "total_touch_candidates":contacts,
         "assigned_touch_candidates":sum,
         "unassigned_touch_candidates":unknown,
+        "unverified_touch_proposals":unverified,
+        "excluded_touch_proposals":excluded_proposals,
+        "outside_rally_touch_proposals":outside_proposals,
         "players":players,"raw_tracks":track_breakdown,
         "estimated_actions":predicted_counts,
-        "auto_player_identity_enabled":false,
+        "auto_player_identity_enabled":automatically_linked_tracks > 0,
         "automatic_action_classification":has_predictions,
         "automatic_action_classification_verified":false,
-        "all_contacts_physically_verified":true
+        "all_contacts_physically_verified":true,
+        "all_contacts_pose_verified":generic==0,
+        "fallback_touch_candidates":generic
     }))
 }
+/// One source of truth for report-montage and Report-tab player totals:
+/// only pose-confirmed, source-bound Touch events in verified rally windows.
+pub(crate) fn rally_report_counts(
+    state: &AppState,
+    run: &ValidatedRun,
+    owners: &NativeReviewedOwners,
+) -> Result<BTreeMap<String, (u64, u64, u64)>, ApiError> {
+    let root = projects::project_root(state)
+        .join(&run.project_id)
+        .join("native_cpu_replays")
+        .join(&run.replay_id);
+    let replay =
+        safe_file(&root, "tracked_frames.jsonl", MAX_SOURCE).map_err(storage::bad_request)?;
+    let windows =
+        native_rally_preview::verified_track_windows(run).map_err(storage::bad_request)?;
+    let counts =
+        count_native_contacts(run, &replay, owners, &windows).map_err(storage::bad_request)?;
+    let mut result = BTreeMap::<String, (u64, u64, u64)>::new();
+    for (track, touches) in counts.per_track {
+        let Some(name) = owners
+            .owners
+            .get(&track)
+            .and_then(|owner| owners.roster.get(owner))
+            .cloned()
+        else {
+            continue;
+        };
+        let actions = counts.estimated_per_track.get(&track);
+        let attacks = actions.and_then(|a| a.get("attack")).copied().unwrap_or(0);
+        let blocks = actions.and_then(|a| a.get("block")).copied().unwrap_or(0);
+        let entry = result.entry(name).or_default();
+        entry.0 += touches;
+        entry.1 += attacks;
+        entry.2 += blocks;
+    }
+    Ok(result)
+}
+
+/// Exact selected CPU-rally versions and project roster define the report
+/// snapshot. Manual changes to Track-ID ownership intentionally do not
+/// invalidate it: the explicit "Recalculate statistics" action does that.
+fn matches_saved_report(snapshot: &Value, req: &Request, project: &Value) -> bool {
+    if snapshot["schema"] != "volley-native-player-statistics/1"
+        || snapshot["algorithm"] != REPORT_ALGORITHM
+        || snapshot["project_id"].as_str() != Some(req.project_id.as_str())
+    {
+        return false;
+    }
+    let selected = req
+        .sources
+        .iter()
+        .map(|source| source.rally_run_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let Some(sources) = snapshot["sources"].as_array() else {
+        return false;
+    };
+    let cached = sources
+        .iter()
+        .filter_map(|source| source["rally_run_id"].as_str())
+        .collect::<BTreeSet<_>>();
+    if selected.len() != req.sources.len() || selected != cached || sources.len() != selected.len()
+    {
+        return false;
+    }
+    let roster = project["player_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let saved_roster = snapshot["roster_player_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let players = snapshot["players"].as_array();
+    roster == saved_roster
+        && players.is_some_and(|items| {
+            items.len() == roster.len()
+                && items.iter().all(|player| {
+                    player["player_id"]
+                        .as_str()
+                        .is_some_and(|id| roster.contains(id))
+                })
+        })
+}
+
 fn run(state: &AppState, req: &Request) -> Result<Value, ApiError> {
     let _guard = project_guard::write_guard(state, &req.project_id)?;
-    if !matches!(req.mode.as_str(), "preview" | "recalculate") {
+    if !matches!(req.mode.as_str(), "preview" | "open" | "recalculate") {
         return Err(storage::bad_request(
-            "Native stats mode must be preview or recalculate",
+            "Native stats mode must be preview, open or recalculate",
         ));
     }
-    if req.mode == "preview" && req.expected_source_fingerprint.is_some() {
+    if req.mode != "recalculate"
+        && (req.expected_source_fingerprint.is_some() || req.expected_revision.is_some())
+    {
         return Err(storage::bad_request(
-            "Preview must not claim a saved source fingerprint",
+            "Read/open does not accept a write revision",
         ));
     }
-    if req.mode == "preview" && req.expected_revision.is_some() {
-        return Err(storage::bad_request(
-            "Preview does not accept a write revision",
-        ));
-    }
-    let mut output = calculate(state, req)?;
+    let project_data = projects::existing_project(state, &req.project_id)?;
     let project = projects::project_root(state).join(&req.project_id);
     let file = project.join("native_player_statistics.json");
     let raw =
         versioned_store::read_optional_bounded(&file, MAX_STATS).map_err(storage::bad_request)?;
-    if req.mode == "recalculate" {
-        if !state.writes_enabled {
-            return Err(storage::conflict(
-                "Saving statistics requires isolated project storage",
-            ));
+    let previous_revision = revision(raw.as_deref());
+    if req.mode == "open" {
+        if let Some(saved) = raw.as_deref() {
+            let mut snapshot: Value = serde_json::from_slice(saved).map_err(|e| {
+                storage::bad_request(format!("Invalid native statistics snapshot: {e}"))
+            })?;
+            if matches_saved_report(&snapshot, req, &project_data) {
+                snapshot["saved_revision"] = json!(previous_revision);
+                snapshot["snapshot_persisted"] = json!(true);
+                snapshot["reused_saved_snapshot"] = json!(true);
+                return Ok(snapshot);
+            }
         }
+    }
+    if req.mode == "recalculate" {
         let expected = req
             .expected_revision
             .as_deref()
-            .ok_or_else(|| storage::bad_request("Expected native statistics revision missing"))?;
+            .ok_or_else(|| storage::bad_request("Expected statistics revision missing"))?;
         versioned_store::expect_revision(raw.as_deref(), expected).map_err(storage::conflict)?;
-        if let Some(preview_fingerprint) = req.expected_source_fingerprint.as_deref() {
-            if !expected_source_matches(&output, preview_fingerprint) {
+    }
+    if req.mode != "preview" && !state.writes_enabled {
+        return Err(storage::conflict(
+            "Saving statistics requires isolated project storage",
+        ));
+    }
+    let mut output = calculate(state, req)?;
+    if req.mode == "recalculate" {
+        if let Some(expected) = req.expected_source_fingerprint.as_deref() {
+            if !expected_source_matches(&output, expected) {
                 return Err(storage::conflict(
-                    "CPU or reviewed-athlete sources changed after statistics preview",
+                    "CPU or athlete sources changed since statistics preview",
                 ));
             }
         }
+    }
+    if req.mode != "preview" {
         versioned_store::write_json_checked(&project, &file, &output, MAX_STATS)
             .map_err(storage::bad_request)?;
     }
-    let current = if req.mode == "recalculate" {
-        versioned_store::read_optional_bounded(&file, MAX_STATS).map_err(storage::bad_request)?
+    let current_revision = if req.mode == "preview" {
+        previous_revision
     } else {
-        raw
+        let updated = versioned_store::read_optional_bounded(&file, MAX_STATS)
+            .map_err(storage::bad_request)?;
+        revision(updated.as_deref())
     };
-    output["saved_revision"] = json!(revision(current.as_deref()));
-    output["snapshot_persisted"] = json!(req.mode == "recalculate");
+    output["saved_revision"] = json!(current_revision);
+    output["snapshot_persisted"] = json!(req.mode != "preview");
+    output["reused_saved_snapshot"] = json!(false);
     Ok(output)
 }
 pub async fn statistics(
@@ -476,6 +668,16 @@ mod tests {
                     "direction_change_deg":90.0,"speed_before_px_frame":4.0,
                     "speed_after_px_frame":8.0,"velocity_residual_px_frame":10.0,
                     "technique":"unknown_touch","physical_motion_supported":true,
+                    "action_prediction":if frame==20 {
+                        json!({
+                            "kind":"attack","evidence_score":0.84,
+                            "method":"pose_keypoints_v1","depth_ratio":-0.2,
+                            "posture_ratio":0.25
+                        })
+                    } else {Value::Null},
+                    "body_contact_supported":true,
+                    "contact_landmark":{"joint_indices":[9,9],"point_px":[200.0,100.0],
+                      "distance_px":0.0,"normalized_distance":0.0},
                     "athlete_identity_verified":false
                 });
                 touch_bytes.extend(serde_json::to_vec(&contact).unwrap());
@@ -534,6 +736,26 @@ mod tests {
         assert_eq!(counted.unassigned, 0);
         assert_eq!(counted.per_track.get(&7), Some(&2));
         assert_eq!(counted.per_track.get(&8), Some(&3));
+        assert_eq!(
+            counted
+                .estimated_per_track
+                .get(&7)
+                .and_then(|actions| actions.get("attack")),
+            Some(&1)
+        );
+        let player_attack_frames = counted
+            .montage_contacts
+            .iter()
+            .filter(|contact| {
+                contact.track_id == 7 && contact.estimated_kind.as_deref() == Some("attack")
+            })
+            .map(|contact| contact.frame)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            player_attack_frames,
+            vec![20],
+            "Report's attack must provide exactly the montage frame"
+        );
         owners.owners.remove(&8);
         let counted = count_native_contacts(
             &run,
@@ -556,7 +778,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(counted.unassigned, 3);
+        assert_eq!(counted.unassigned, 0);
+        assert_eq!(counted.excluded_proposals, 3);
+        assert_eq!(counted.touches, 2);
         assert_eq!(counted.per_track.len(), 1);
         fs::remove_dir_all(root).unwrap();
     }
@@ -577,6 +801,52 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn nearest_track_touch_is_counted_without_unjustified_action_kind() {
+        let (root, mut run, replay, owners) = fixture();
+        let mut modified = Vec::new();
+        for line in fs::read_to_string(&run.touch_file).unwrap().lines() {
+            let mut row: Value = serde_json::from_str(line).unwrap();
+            if row["frame_index"] == 20 {
+                row["body_contact_supported"] = json!(false);
+                row.as_object_mut().unwrap().remove("contact_landmark");
+            }
+            if row["frame_index"] == 50 {
+                row["provisional_track_id"] = Value::Null;
+                row["body_contact_supported"] = json!(false);
+                row.as_object_mut().unwrap().remove("contact_landmark");
+            }
+            modified.extend(serde_json::to_vec(&row).unwrap());
+            modified.push(b'\n');
+        }
+        fs::write(&run.touch_file, &modified).unwrap();
+        run.touch_sha = format!("{:x}", Sha256::digest(&modified));
+        let counts = count_native_contacts(
+            &run,
+            &replay,
+            &owners,
+            &native_rally_preview::RallyWindows {
+                intervals: vec![(0, 79)],
+            },
+        )
+        .unwrap();
+        assert_eq!(counts.unverified_proposals, 1);
+        assert_eq!(counts.touches, 4);
+        assert_eq!(counts.per_track.get(&7), Some(&2));
+        assert_eq!(counts.per_track.get(&8), Some(&2));
+        assert_eq!(counts.unassigned, 1);
+        assert!(!counts.estimated_actions.contains_key("attack"));
+        assert_eq!(
+            counts
+                .montage_contacts
+                .iter()
+                .find(|c| c.frame == 20)
+                .unwrap()
+                .estimated_kind,
+            None
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn native_stats_reject_missing_track_in_touch_frame_even_with_new_sha() {
         let (root, mut run, replay, mut owners) = fixture();
@@ -635,6 +905,73 @@ mod tests {
             Some("f".repeat(64).as_str())
         );
     }
+    #[test]
+    fn report_snapshot_reuse_depends_on_roster_and_cpu_version_not_manual_identity() {
+        let project = json!({"player_ids":["player1","player2"]});
+        let source = "a".repeat(32);
+        let request: Request = serde_json::from_value(json!({
+            "project_id":"abcdef012345",
+            "sources":[{"rally_run_id":source}],
+            "mode":"open"
+        }))
+        .unwrap();
+        let snapshot = json!({
+            "schema":"volley-native-player-statistics/1",
+            "algorithm":REPORT_ALGORITHM,
+            "project_id":"abcdef012345",
+            "sources":[{"rally_run_id":source, "identity_revision":"old"}],
+            "roster_player_ids":["player1","player2"],
+            "players":[{"player_id":"player1"},{"player_id":"player2"}]
+        });
+        assert!(matches_saved_report(&snapshot, &request, &project));
+        let mut reassigned = snapshot.clone();
+        reassigned["sources"][0]["identity_revision"] = json!("new");
+        assert!(matches_saved_report(&reassigned, &request, &project));
+        let new_source: Request = serde_json::from_value(json!({
+            "project_id":"abcdef012345",
+            "sources":[{"rally_run_id":"b".repeat(32)}],"mode":"open"
+        }))
+        .unwrap();
+        assert!(!matches_saved_report(&snapshot, &new_source, &project));
+        assert!(!matches_saved_report(
+            &snapshot,
+            &request,
+            &json!({"player_ids":["player1","player3"]})
+        ));
+        reassigned["players"][0]["player_id"] = json!("track:movie:999");
+        assert!(!matches_saved_report(&reassigned, &request, &project));
+    }
+
+    #[test]
+    fn report_only_includes_roster_athlete_credits() {
+        let (root, run, replay, mut owners) = fixture();
+        owners.owners.remove(&8);
+        let counts = count_native_contacts(
+            &run,
+            &replay,
+            &owners,
+            &native_rally_preview::RallyWindows {
+                intervals: vec![(8, 22), (48, 53)],
+            },
+        )
+        .unwrap();
+        let credited = counts
+            .per_track
+            .iter()
+            .filter(|(track, _)| owners.owners.contains_key(track))
+            .map(|(_, count)| count)
+            .sum::<u64>();
+        let unknown = counts
+            .per_track
+            .iter()
+            .filter(|(track, _)| !owners.owners.contains_key(track))
+            .map(|(_, count)| count)
+            .sum::<u64>();
+        assert_eq!((credited, unknown), (2, 1));
+        assert_eq!(credited + unknown, counts.touches);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn native_stats_reject_double_counting_same_video_cpu_revisions() {
         let mut seen = BTreeSet::new();

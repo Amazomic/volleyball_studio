@@ -13,6 +13,18 @@ Block and serve require verified court and rally context and are not inferred fr
 These are hypotheses, NOT human-confirmed match actions.
 
 Primary GPU flags: pose_enabled=true and pose_stride=6 by default.
+The RTMDet + RTMPose player-observation pass now samples the prepared 30 FPS
+video every 10 frames (3 Hz), aligned to global frame indices across 9-frame
+fusion windows. Empty intervening observations are never called model output.
+Confirmed CPU Track IDs fill bounded gaps between real anchors for smooth
+playback; preview skeletons interpolate only between unambiguous real poses.
+The separate pose-evidence pass keeps its own stride (6 by default, 5 Hz):
+when a pose frame falls between sparse detector anchors, it can use a recent
+real detector box for its crop but infers new joints from that exact RGB frame.
+Default CPU confirmation requires six real anchors for a 3 Hz source, while
+custom confirmation thresholds and legacy dense sources remain unchanged.
+This fast mode must be validated on distant/occluded players and rapid contacts;
+interpolated evidence must never be counted as a verified ball touch.
 Postprocessing: pose_classification=true by default; CPU-only runs do not start GPU.
 Preview: the Skelеtons button reads the saved evidence, restricted to rally scopes.
 

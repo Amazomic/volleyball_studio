@@ -348,6 +348,19 @@ pub(super) fn photo_match_candidates(
     vectors: &BTreeMap<u64, Vec<f32>>,
     references: &[PhotoReference],
 ) -> Result<Value, String> {
+    photo_match_candidates_with_samples(ctx, identity, vectors, &BTreeMap::new(), references)
+}
+
+/// A track's highest-scoring crop may belong to someone else after an ID
+/// switch. Combine independent measured crops before choosing the owner:
+/// a lucky 99% score from one corrupted crop must not monopolize an athlete.
+pub(super) fn photo_match_candidates_with_samples(
+    ctx: &Inputs,
+    identity: &Value,
+    vectors: &BTreeMap<u64, Vec<f32>>,
+    alternatives: &BTreeMap<u64, Vec<f32>>,
+    references: &[PhotoReference],
+) -> Result<Value, String> {
     let assignments = identity["assignments"]
         .as_object()
         .ok_or("Invalid assignments")?;
@@ -365,7 +378,12 @@ pub(super) fn photo_match_candidates(
         let Some(track) = ctx.tracks.get(&id) else {
             continue;
         };
-        let mut ranked = BTreeMap::<String, (f64, u64)>::new();
+        let alternative = alternatives
+            .get(&id)
+            .filter(|extra| extra.len() == vector.len());
+        // Each source crop ranks against the best saved image *independently*.
+        // Different poses need not select the very same library photograph.
+        let mut ranked = BTreeMap::<String, (f64, f64, u64)>::new();
         for reference in references {
             if !ctx.roster.contains_key(&reference.player_id)
                 || reference.vector.len() != vector.len()
@@ -390,14 +408,36 @@ pub(super) fn photo_match_candidates(
             if !score.is_finite() || score <= 0.0 {
                 continue;
             }
-            let entry = ranked
-                .entry(reference.player_id.clone())
-                .or_insert((score, reference.track_id));
+            let second_score = alternative.map_or(score, |extra| {
+                extra
+                    .iter()
+                    .zip(&reference.vector)
+                    .map(|(a, b)| f64::from(*a) * f64::from(*b))
+                    .sum::<f64>()
+                    .max(0.0)
+            });
+            let entry = ranked.entry(reference.player_id.clone()).or_insert((
+                score,
+                second_score,
+                reference.track_id,
+            ));
             if score > entry.0 {
-                *entry = (score, reference.track_id);
+                entry.0 = score;
+                entry.2 = reference.track_id;
             }
+            entry.1 = entry.1.max(second_score);
         }
-        let mut rows = ranked.into_iter().collect::<Vec<_>>();
+        let mut rows = ranked
+            .into_iter()
+            .map(|(owner, (best, other, reference))| {
+                let combined = if alternative.is_some() {
+                    0.5 * (best + other)
+                } else {
+                    best
+                };
+                (owner, (combined, reference))
+            })
+            .collect::<Vec<_>>();
         rows.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0).then_with(|| a.0.cmp(&b.0)));
         if !rows.is_empty() {
             matches.insert(id.to_string(), json!(rows.into_iter().take(ctx.roster.len()).map(|(player,(score,track_id))|

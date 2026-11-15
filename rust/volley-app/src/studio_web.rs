@@ -33,7 +33,7 @@ const UI_SCRIPT: &str = include_str!("../static/studio_ui.js");
 const TABS_SCRIPT: &str = include_str!("../static/studio_tabs.js");
 const TRACKS_SCRIPT: &str = include_str!("../static/studio_tracks.js");
 const STATS_SCRIPT: &str = include_str!("../static/studio_stats.js");
-const HIGHLIGHTS_SCRIPT: &str = include_str!("../static/studio_highlights.js");
+const MONTAGE_BUILDER_SCRIPT: &str = include_str!("../static/studio_montage_builder.js");
 const QUICK_REEL_SCRIPT: &str = include_str!("../static/studio_quick_reel.js");
 const SELECTION_WASM: &[u8] = include_bytes!("../static/volley_web.wasm");
 const HTML: &str = include_str!("../static/studio.html");
@@ -179,11 +179,11 @@ pub async fn tabs_js() -> Response {
         TABS_SCRIPT,
     )
 }
-pub async fn highlights_js() -> Response {
+pub async fn montage_builder_js() -> Response {
     studio_asset(
         "text/javascript; charset=utf-8",
-        "studio_highlights.js",
-        HIGHLIGHTS_SCRIPT,
+        "studio_montage_builder.js",
+        MONTAGE_BUILDER_SCRIPT,
     )
 }
 pub async fn quick_reel_js() -> Response {
@@ -494,8 +494,8 @@ mod tests {
         assert!(html.contains("id=\"studio-rallies\""));
         assert!(html.contains("id=\"studio-layout\""));
         assert!(html.contains("id=\"studio-volume\""));
-        assert!(html.contains("id=\"studio-highlights-layout\""));
-        assert!(html.contains("id=\"studio-highlights-music\""));
+        assert!(html.contains("id=\"studio-montage-camera\""));
+        assert!(html.contains("id=\"studio-montage-audio-fit\""));
         assert!(!html.contains("studio-nav-legacy"));
         assert!(!html.contains("id=\"studio-ui-locale\""));
         assert!(html.contains("id=\"studio-inference\""));
@@ -560,12 +560,15 @@ mod tests {
         assert!(stats.starts_with("HTTP/1.1 200 OK"));
         assert!(stats.contains("/api/players/native/statistics"));
         assert!(stats.contains("source_fingerprint"));
-        let highlights = get(addr, "/studio/highlights.js").await;
+        let highlights = get(addr, "/studio/montage-builder.js").await;
         assert!(highlights.starts_with("HTTP/1.1 200 OK"));
         assert!(highlights.contains("/api/montage/native/player-highlights"));
         assert!(highlights.contains("/api/montage/native/cancel"));
         assert!(highlights.contains("/api/montage/native/audio"));
         assert!(highlights.contains("expected_source_fingerprint"));
+        assert!(highlights.contains("/api/montage/native/game-report"));
+        assert!(highlights.contains("camera_zoom"));
+        assert!(highlights.contains("target_duration_sec"));
         let quick = get(addr, "/studio/quick-reel.js").await;
         assert!(quick.starts_with("HTTP/1.1 200 OK"));
         assert!(quick.contains("/api/quick-reel/native/pick"));

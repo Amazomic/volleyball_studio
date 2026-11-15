@@ -9,7 +9,7 @@ if [[ "$data_root" == __default__ ]];then data_root="$HOME/.cache/volley-rust-sa
 mode="$5"
 ort_lib="$6"
 openvino_lib="$7"
-case "$action" in start|stop|status|restart|doctor|check) ;; *) echo "Unknown action" >&2;exit 2;; esac
+case "$action" in start|detach|stop|status|restart|doctor|check) ;; *) echo "Unknown action" >&2;exit 2;; esac
 case "$bind" in 127.0.0.1:*) ;; *) echo "Only localhost IPv4 bind is allowed" >&2;exit 2;; esac
 port="$(printf '%s' "$bind"|cut -d: -f2)"
 if [[ ! "$port" =~ ^[0-9]{4,5}$ ]] || (( 10#$port < 1024 || 10#$port > 65535 ));then
@@ -226,7 +226,7 @@ case "$action" in
     fi
     ;;
   stop) stop_owned;;
-  start|restart)
+  start|restart|detach)
     if [[ "$action" == restart ]];then
       cargo build --release --locked --offline -p volley-app
     fi
@@ -244,6 +244,8 @@ case "$action" in
     else
       export VOLLEY_RUST_DATA_ROOT="$data_root"
     fi
+    # Vetted RF-DETR Medium is selected in this checkout, explicit opt-out allowed.
+    export VOLLEY_PERSON_DETECTOR="${VOLLEY_PERSON_DETECTOR:-rfdetr-medium}"
     export VOLLEY_RUST_BIND="$bind" VOLLEY_REPOSITORY_ROOT="$repo"
     export VOLLEY_DEV_UI_ROOT="$repo/rust/volley-app/static"
     configure_ort_environment
@@ -252,8 +254,40 @@ case "$action" in
       export VOLLEY_OPENVINO_C_LIB="$openvino_lib"
       export LD_LIBRARY_PATH="$(dirname "$openvino_lib")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     fi
-    if [[ "$action" == start ]];then
+    if [[ "$action" == start || "$action" == detach ]];then
       cargo build --release --locked --offline -p volley-app
+    fi
+    if [[ "$action" == detach ]];then
+      # A remote executor can time out even while the Rust service is healthy.
+      # Its process and diagnostic log must be independent of that executor.
+      command -v setsid >/dev/null 2>&1 || { echo "setsid is required for detached Studio" >&2;exit 3; }
+      logfile="$repo/.studio-runtime/studio-server.log"
+      mkdir -p "$(dirname "$logfile")"
+      printf '\n[%s] Starting detached Volleyball Studio on %s\n' "$(date -u +%FT%TZ)" "$bind" >> "$logfile"
+      export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+      # The separate session has no terminal, and the wrapper records exit
+      # status even when the Rust process terminates without a panic.
+      nohup setsid -f bash -c '
+        "$1"
+        result=$?
+        printf "[%s] Volleyball Studio exited: status=%s\n" "$(date -u +%FT%TZ)" "$result"
+        exit "$result"
+      ' _ "$binary" >> "$logfile" 2>&1 </dev/null
+      for _ in $(seq 1 50);do
+        if response="$(listener 2>/dev/null)";then
+          echo "Volleyball Studio detached: http://$bind/studio PID $(json_pid "$response")"
+          echo "Persistent log: $logfile"
+          exit 0
+        fi
+        if port_busy;then
+          echo "Port $port occupied by an unverified listener; see $logfile" >&2
+          exit 2
+        fi
+        sleep .2
+      done
+      echo "Volleyball Studio failed to become ready. Recent log:" >&2
+      tail -n 60 "$logfile" >&2
+      exit 3
     fi
     echo "Starting ONE Volleyball Studio on http://$bind/studio (foreground, Ctrl+C stops)"
     exec "$binary"

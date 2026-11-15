@@ -29,9 +29,10 @@ use tokio::{
 use uuid::Uuid;
 use volley_media::{
     montage::{
-        can_stream_copy, compose_args_for_layout, concat_playlist, native_clip_format,
-        output_profile_for_layout, soundtrack_args, soundtrack_is_audio, verify_mp4_quality,
-        verify_original_segment, OriginalClip, SelectedClip, VideoLayout,
+        can_stream_copy, compose_args_for_layout, compose_follow_args, concat_playlist,
+        native_clip_format, output_profile_for_layout, soundtrack_args, soundtrack_is_audio,
+        verify_mp4_quality, verify_original_segment, CameraPoint, OriginalClip, SelectedClip,
+        VideoLayout,
     },
     probe,
 };
@@ -52,10 +53,21 @@ pub struct MontageRequest {
     pub encoder: Option<String>,
     #[serde(default)]
     pub layout: VideoLayout,
+    #[serde(default)]
+    pub target_duration_sec: Option<f64>,
+    #[serde(default = "default_camera_zoom")]
+    pub camera_zoom: f64,
+    #[serde(skip)]
+    pub(crate) camera_tracks: Option<Vec<Vec<CameraPoint>>>,
+    #[serde(skip)]
+    pub(crate) report_outro: Option<Value>,
     #[serde(skip)]
     pub(crate) verified_highlights: Option<Value>,
 }
 
+fn default_camera_zoom() -> f64 {
+    1.25
+}
 fn default_volume() -> f64 {
     40.0
 }
@@ -109,6 +121,15 @@ impl MontageManager {
             false
         }
     }
+    pub(crate) async fn has_active_for_project(&self, project_id: &str) -> bool {
+        let current = self.current.lock().await;
+        if let Some(job) = current.as_ref() {
+            let status = job.status.lock().await;
+            status.project_id == project_id && matches!(status.state, "queued" | "running")
+        } else {
+            false
+        }
+    }
     pub fn new() -> Self {
         Self {
             current: Mutex::new(None),
@@ -126,6 +147,10 @@ struct Planned {
     encoder: String,
     verified_highlights: Option<Value>,
     layout: VideoLayout,
+    target_duration_sec: Option<f64>,
+    camera_zoom: f64,
+    camera_tracks: Option<Vec<Vec<CameraPoint>>>,
+    report_outro: Option<Value>,
 }
 
 fn validate_audio(state: &AppState, request: &MontageRequest) -> Result<Option<PathBuf>, ApiError> {
@@ -183,6 +208,25 @@ fn prepare_request(state: &AppState, request: MontageRequest) -> Result<Planned,
     if !request.audio_volume.is_finite() || !(0.0..=100.0).contains(&request.audio_volume) {
         return Err(storage::bad_request("Громкость музыки должна быть 0–100"));
     }
+    if !request.camera_zoom.is_finite() || !(1.0..=2.5).contains(&request.camera_zoom) {
+        return Err(storage::bad_request("Увеличение камеры должно быть 1–2,5×"));
+    }
+    if request.layout == VideoLayout::VerticalFollow
+        && request.camera_tracks.as_ref().is_none_or(|tracks| {
+            tracks.len() != request.clips.len() || tracks.iter().any(Vec::is_empty)
+        })
+    {
+        return Err(storage::bad_request(
+            "Нужна SHA-проверенная траектория мяча для каждого клипа",
+        ));
+    }
+    if request.target_duration_sec.is_some_and(|seconds| {
+        !seconds.is_finite() || !(1.0..=MAX_TOTAL_SECONDS).contains(&seconds)
+    }) {
+        return Err(storage::bad_request(
+            "Целевая длительность должна быть 1–600 секунд",
+        ));
+    }
     let encoder = request.encoder.as_deref().unwrap_or("auto");
     if !matches!(encoder, "auto" | "cpu" | "gpu") {
         return Err(storage::bad_request("Кодирование: auto, cpu или gpu"));
@@ -221,12 +265,42 @@ fn prepare_request(state: &AppState, request: MontageRequest) -> Result<Planned,
             OriginalClip::from_analysis(&source, clip.start_frame, clip.end_frame, start)
                 .map_err(storage::bad_request)?;
         total += original.duration_sec();
-        if total > MAX_TOTAL_SECONDS {
+        if total > MAX_TOTAL_SECONDS && request.target_duration_sec.is_none() {
             return Err(storage::bad_request(
                 "Общая длительность выбранных эпизодов превышает 600 секунд",
             ));
         }
         clips.push(original);
+    }
+    if let Some(target) = request.target_duration_sec {
+        let outro_sec = if request.report_outro.is_some() {
+            5.0
+        } else {
+            0.0
+        };
+        if target <= outro_sec + 1.0 {
+            return Err(storage::bad_request(
+                "Видео с отчётом должно быть длиннее 6 секунд",
+            ));
+        }
+        let mut remaining = ((target - outro_sec) * 30.0).round() as u64;
+        let mut fitted = Vec::new();
+        for mut clip in clips {
+            if remaining == 0 {
+                break;
+            }
+            let frames = clip.end_frame - clip.start_frame + 1;
+            if frames > remaining {
+                clip.end_frame = clip.start_frame + remaining - 1;
+            }
+            remaining -= clip.end_frame - clip.start_frame + 1;
+            fitted.push(clip);
+        }
+        clips = fitted;
+        total = clips.iter().map(OriginalClip::duration_sec).sum();
+    }
+    if total > MAX_TOTAL_SECONDS {
+        return Err(storage::bad_request("Монтаж превышает 600 секунд"));
     }
     if total < 1.0 {
         return Err(storage::bad_request(
@@ -254,6 +328,10 @@ fn prepare_request(state: &AppState, request: MontageRequest) -> Result<Planned,
         encoder: encoder.to_owned(),
         verified_highlights: request.verified_highlights,
         layout: request.layout,
+        target_duration_sec: request.target_duration_sec,
+        camera_zoom: request.camera_zoom,
+        camera_tracks: request.camera_tracks,
+        report_outro: request.report_outro,
     })
 }
 
@@ -459,7 +537,8 @@ async fn render(plan: Planned, status: Arc<Mutex<JobStatus>>, mut cancel: watch:
         fs::create_dir_all(&segments).map_err(|e| format!("Нельзя создать папку монтажа: {e}"))?;
         let mut paths = Vec::new();
         let mut formats = Vec::new();
-        let total_duration: f64 = plan.clips.iter().map(OriginalClip::duration_sec).sum();
+        let mut total_duration: f64 = plan.clips.iter().map(OriginalClip::duration_sec).sum();
+        let mut follow_tracks = plan.camera_tracks.clone().unwrap_or_default();
         for (index, clip) in plan.clips.iter().enumerate() {
             if *cancel.borrow() {
                 return Err("cancelled".into());
@@ -492,13 +571,69 @@ async fn render(plan: Planned, status: Arc<Mutex<JobStatus>>, mut cancel: watch:
         }
 
         let final_profile = output_profile_for_layout(&formats, plan.layout)?;
+        if let Some(outro) = &plan.report_outro {
+            let text = outro["lines"].as_array()
+                .ok_or("Missing validated report statistics lines")?
+                .iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n");
+            if text.len() > 2200 || text.is_empty() {
+                return Err("Invalid verified report summary".into());
+            }
+            let text_path = segments.join("report-stats.txt");
+            fs::write(&text_path, text.as_bytes())
+                .map_err(|e| format!("Cannot write report statistics: {e}"))?;
+            // FFmpeg parses ':' in Windows drive letters and the filter's
+            // escaping separately. Use a relative textfile in the controlled
+            // montage temporary directory by changing the FFmpeg cwd.
+            let card = segments.join("report-outro.mp4");
+            let filter_path = text_path.to_string_lossy()
+                .replace('\\', "/").replace(':', "\\:");
+            let font_size = (final_profile.1 / 34).clamp(20, 66);
+            let fonts = [
+                Path::new(r"C:\Windows\Fonts\segoeui.ttf"),
+                Path::new(r"C:\Windows\Fonts\arial.ttf"),
+                Path::new("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+                Path::new("/System/Library/Fonts/Supplemental/Arial.ttf"),
+            ];
+            let font = fonts.iter().find(|font|font.is_file())
+                .ok_or("Шрифт для титров статистики не найден на сервере")?;
+            let font_path = font.to_string_lossy()
+                .replace('\\', "/").replace(':', "\\:");
+            let filter = format!(
+                "drawtext=fontfile='{}':textfile='{}':fontcolor=white:fontsize={}:line_spacing=12:x=(w-text_w)/2:y=(h-text_h)/2",
+                font_path, filter_path, font_size
+            );
+            let card_args = vec![
+                "-nostdin".into(), "-hide_banner".into(), "-loglevel".into(), "error".into(),
+                "-y".into(), "-f".into(), "lavfi".into(), "-i".into(),
+                format!("color=c=0x111827:s={}x{}:r={:.8}:d=5", final_profile.0, final_profile.1, final_profile.2),
+                "-vf".into(), filter,
+                "-frames:v".into(), format!("{}", (final_profile.2 * 5.0).round() as u64),
+                "-c:v".into(), "libx264".into(), "-crf".into(), "15".into(),
+                "-pix_fmt".into(), "yuv420p".into(), "-movflags".into(), "+faststart".into(),
+                card.to_string_lossy().into_owned()
+            ];
+            run_ffmpeg(card_args, 5.0, &status, paths.len(), "Статистика матча", &mut cancel).await?;
+            let check_card = card.clone();
+            let card_format = tokio::task::spawn_blocking(move || {
+                validate_rendered(&check_card, 5.0)?;
+                native_clip_format(&check_card)
+            }).await.map_err(|e| format!("Statistics card verification: {e}"))??;
+            paths.push(card);
+            formats.push(card_format);
+            if plan.layout == VideoLayout::VerticalFollow {
+                // Statistics slate must remain centered and fully visible, no zoom.
+                follow_tracks.push(vec![CameraPoint{time_sec:0.0,x:0.5,y:0.5}]);
+            }
+            total_duration += 5.0;
+        }
         let join_index = paths.len();
         let joined = segments.join("joined.mp4");
         let playlist = segments.join("sources.concat.txt");
         fs::write(&playlist, concat_playlist(&paths)?)
             .map_err(|e| format!("Нельзя сохранить список клипов: {e}"))?;
         let mut used_copy = false;
-        if can_stream_copy(&formats)
+        if plan.layout != VideoLayout::VerticalFollow
+            && plan.report_outro.is_none() && can_stream_copy(&formats)
             && (plan.layout == VideoLayout::Original
                 || formats[0].0 == final_profile.0 && formats[0].1 == final_profile.1)
         {
@@ -530,10 +665,16 @@ async fn render(plan: Planned, status: Arc<Mutex<JobStatus>>, mut cancel: watch:
         if !used_copy {
             // Construct and validate both encoder plans BEFORE starting
             // FFmpeg. Never silently run an empty command on plan failure.
-            let gpu_args =
-                compose_args_for_layout(&paths, &formats, &joined, None, true, plan.layout)?;
-            let cpu_args =
-                compose_args_for_layout(&paths, &formats, &joined, None, false, plan.layout)?;
+            let gpu_args = if plan.layout == VideoLayout::VerticalFollow {
+                compose_follow_args(&paths, &formats, &follow_tracks, plan.camera_zoom, &joined, true)?
+            } else {
+                compose_args_for_layout(&paths, &formats, &joined, None, true, plan.layout)?
+            };
+            let cpu_args = if plan.layout == VideoLayout::VerticalFollow {
+                compose_follow_args(&paths, &formats, &follow_tracks, plan.camera_zoom, &joined, false)?
+            } else {
+                compose_args_for_layout(&paths, &formats, &joined, None, false, plan.layout)?
+            };
             encode_with_fallback(
                 |gpu| {
                     if gpu {
@@ -609,17 +750,24 @@ async fn render(plan: Planned, status: Arc<Mutex<JobStatus>>, mut cancel: watch:
             "original_resolution_verified":plan.layout==VideoLayout::Original,
             "source_clips_native_resolution_verified":true,
             "layout":plan.layout,
-            "entire_frame_visible_without_cropping":true,
+            "entire_frame_visible_without_cropping":plan.layout!=VideoLayout::VerticalFollow,
             "mp4_quality":quality,
             "output_dimensions":{"width":final_profile.0,"height":final_profile.1},
             "output_fps":final_profile.2,
-            "quality_policy":if plan.layout==VideoLayout::Vertical {
+            "quality_policy":if plan.layout==VideoLayout::VerticalFollow {
+                "portrait_follow_sha_verified_ball_crop_lanczos_h264"
+            }else if plan.layout==VideoLayout::Vertical {
                 "portrait_9x16_fit_letterbox_lanczos_h264_crf15_nvenc_cq17"
             }else{
                 "native_resolution_no_downsampling_h264_crf15_nvenc_cq17"
             },
             "verified_highlights":plan.verified_highlights,
+            "verified_report":plan.report_outro,
+            "camera_zoom":plan.camera_zoom,
+            "camera_tracking_sha_verified":plan.layout==VideoLayout::VerticalFollow,
             "duration_sec":total_duration,
+            "requested_duration_sec":plan.target_duration_sec,
+            "shortage_sec":plan.target_duration_sec.map(|target| (target-total_duration).max(0.0)),
             "selected":plan.clips.iter().map(OriginalClip::receipt).collect::<Vec<_>>(),
             "music":plan.audio.as_ref().map(|path| json!({
                 "source":path.file_name().and_then(|name|name.to_str()),
@@ -980,7 +1128,29 @@ pub async fn native_upload_audio(
     tokio::fs::rename(&temp, &target)
         .await
         .map_err(|error| storage::internal(format!("Cannot publish audio upload: {error}")))?;
-    Ok(Json(json!({"audio_file":filename,"bytes":uploaded})))
+    let duration_path = target.clone();
+    let duration_sec = tokio::task::spawn_blocking(move || {
+        let info = volley_media::ffprobe(&duration_path)?;
+        let seconds = info["format"]["duration"]
+            .as_str()
+            .and_then(|value| value.parse::<f64>().ok())
+            .or_else(|| {
+                info["streams"].as_array().and_then(|streams| {
+                    streams
+                        .iter()
+                        .filter(|s| s["codec_type"] == "audio")
+                        .filter_map(|s| s["duration"].as_str().and_then(|v| v.parse::<f64>().ok()))
+                        .next()
+                })
+            });
+        Ok::<_, String>(seconds.filter(|v| v.is_finite() && *v > 0.0))
+    })
+    .await
+    .map_err(|error| storage::internal(format!("Audio duration probe: {error}")))?
+    .map_err(storage::bad_request)?;
+    Ok(Json(
+        json!({"audio_file":filename,"bytes":uploaded,"duration_sec":duration_sec}),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1044,7 +1214,11 @@ pub async fn start_native_from_run(
         audio_volume: request.audio_volume,
         encoder: request.encoder,
         layout: request.layout,
+        target_duration_sec: None,
+        camera_zoom: default_camera_zoom(),
+        camera_tracks: None,
         verified_highlights: None,
+        report_outro: None,
     };
     let Json(mut response) =
         start_native_montage(State(state), headers, Json(montage_request)).await?;
@@ -1100,7 +1274,11 @@ mod highlight_cancellation_tests {
             audio_volume: 40.0,
             encoder: "cpu".into(),
             layout: VideoLayout::Original,
+            target_duration_sec: None,
+            camera_zoom: default_camera_zoom(),
+            camera_tracks: None,
             verified_highlights: Some(json!({"trusted":true})),
+            report_outro: None,
         };
         let status = fixture_status();
         let (tx, rx) = watch::channel(false);

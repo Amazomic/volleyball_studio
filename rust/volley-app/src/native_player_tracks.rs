@@ -95,6 +95,15 @@ struct Aggregate {
     best_box: [f64; 4],
     photo_samples: Vec<PhotoSample>,
     visible_spans: Vec<(u64, u64)>,
+    observed_pairs: BTreeMap<(u64, u64), PairGeometry>,
+}
+#[derive(Debug, Default, Clone, PartialEq)]
+struct PairGeometry {
+    same_position: u32,
+    distinct_position: u32,
+    // Actual timestamp of the first independently detected pair in separate
+    // positions. Never inferred from interpolated or overlapping lifespans.
+    first_distinct_frame: Option<u64>,
 }
 #[derive(Debug, Clone, PartialEq)]
 struct PhotoSample {
@@ -117,6 +126,8 @@ struct Frame {
     frame_index: u64,
     selected_ball: Option<NativeSelectedBall>,
     tracked_players: Vec<Tracked>,
+    #[serde(default)]
+    interpolated_track_ids: Vec<u64>,
     track_ids_provisional: bool,
     confirmed_athlete_identities: bool,
     touches_confirmed: bool,
@@ -192,7 +203,10 @@ pub async fn reset_project(
                 return Err(storage::bad_request("Unsafe Track ID binding entry"));
             }
             let Some(bytes) = versioned_store::read_optional_bounded(&path, MAX_LINKS)
-                .map_err(storage::bad_request)? else { continue };
+                .map_err(storage::bad_request)?
+            else {
+                continue;
+            };
             let mut doc: Value = serde_json::from_slice(&bytes)
                 .map_err(|e| storage::bad_request(format!("Invalid bindings JSON: {e}")))?;
             if doc["schema"] != "volley-native-player-track-links/1"
@@ -201,13 +215,27 @@ pub async fn reset_project(
             {
                 return Err(storage::bad_request("Invalid project Track ID bindings"));
             }
-            let manual = doc["assignments"].as_object().ok_or_else(|| storage::bad_request("Invalid manual bindings"))?.clone();
-            let automatic = doc["automatic_assignments"].as_object().cloned().unwrap_or_default();
-            if manual.is_empty() && automatic.is_empty() { continue; }
+            let manual = doc["assignments"]
+                .as_object()
+                .ok_or_else(|| storage::bad_request("Invalid manual bindings"))?
+                .clone();
+            let automatic = doc["automatic_assignments"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            if manual.is_empty() && automatic.is_empty() {
+                continue;
+            }
             let mut suppressed: BTreeSet<u64> = doc["automatic_suppressed_ids"]
-                .as_array().into_iter().flatten().filter_map(Value::as_u64).collect();
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_u64)
+                .collect();
             for key in manual.keys().chain(automatic.keys()) {
-                let id = key.parse::<u64>().map_err(|_| storage::bad_request("Invalid linked ID"))?;
+                let id = key
+                    .parse::<u64>()
+                    .map_err(|_| storage::bad_request("Invalid linked ID"))?;
                 suppressed.insert(id);
             }
             count += manual.len() + automatic.len();

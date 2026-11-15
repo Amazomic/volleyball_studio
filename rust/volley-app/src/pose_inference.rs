@@ -1,5 +1,6 @@
 //! Immutable, versioned RTMPose evidence over RAVEL player candidates.
 //! Uses the prepared video and selected GPU fusion, never CPU Track IDs.
+mod box_interpolation;
 use crate::{inference_stream, preparation, projects, AppState};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -20,6 +21,7 @@ const MAX_FUSION: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_LINE: u64 = 512 * 1024;
 const MAX_POSES_PER_FRAME: usize = 12;
 const POSE_FILE: &str = "poses.jsonl";
+const CROP_FILE: &str = "pose_crop_boxes.jsonl";
 
 fn file_hash(path: &Path) -> Result<String, String> {
     let mut input = File::open(path).map_err(|e| format!("Hash open {}: {e}", path.display()))?;
@@ -83,6 +85,7 @@ fn iou(a: [f64; 4], b: [f64; 4]) -> f64 {
     intersection / (sa + sb - intersection).max(1e-10)
 }
 
+#[cfg(test)]
 fn boxes(frame: &Value) -> Vec<[f64; 4]> {
     let mut unique = Vec::new();
     if let Some(candidates) = frame["player_candidates"].as_array() {
@@ -112,7 +115,7 @@ pub fn process(
     memory_mb: u64,
     threads: usize,
     cancel: &AtomicBool,
-    mut on_progress: impl FnMut(f64) -> Result<(), String>,
+    mut on_progress: impl FnMut(&'static str, f64) -> Result<(), String>,
 ) -> Result<Value, String> {
     if !app.writes_enabled {
         return Err("Pose analysis requires writable isolated studio storage".into());
@@ -162,18 +165,37 @@ pub fn process(
             "RTMPose-M Body7 model hash differs from verified official ONNX artifact".into(),
         );
     }
-    let mut engine = PoseEngine::load(&app.repository_root, Device::Cuda, threads, memory_mb)?;
     let runs = root.join("native_gpu_pose_runs");
     fs::create_dir_all(&runs).map_err(|e| format!("Create pose run root: {e}"))?;
     let run_id = Uuid::new_v4().simple().to_string();
     let output = runs.join(&run_id);
     fs::create_dir(&output).map_err(|e| format!("Create pose run directory: {e}"))?;
     let result = (|| -> Result<Value, String> {
+        // Separate, immutable, versioned pre-pose stage. The source detections
+        // remain untouched, and synthesized *boxes* are never used for identity.
+        let frames_expected = manifest["emitted_frames"]
+            .as_u64()
+            .filter(|n| *n > 0 && *n <= 48 * 3600 * 30)
+            .ok_or("Fusion does not declare a valid number of frames")?;
+        let crop_partial = output.join("pose_crop_boxes.jsonl.partial");
+        let crop_summary = box_interpolation::prepare(
+            &frames_file,
+            &crop_partial,
+            manifest["sha256"].as_str().ok_or("Missing fusion SHA")?,
+            frames_expected,
+            cancel,
+            |p| on_progress("boxes", p),
+        )?;
+        let crop_file = output.join(CROP_FILE);
+        fs::rename(&crop_partial, &crop_file)
+            .map_err(|e| format!("Commit pose-box preparation: {e}"))?;
+        on_progress("pose", 0.0)?;
+        let mut engine = PoseEngine::load(&app.repository_root, Device::Cuda, threads, memory_mb)?;
         let file = File::create(output.join("poses.jsonl.partial"))
             .map_err(|e| format!("Create pose evidence: {e}"))?;
         let mut writer = BufWriter::new(file);
         let mut checksum = Sha256::new();
-        let mut reader = BufReader::new(File::open(&frames_file).map_err(|e| e.to_string())?);
+        let mut reader = BufReader::new(File::open(&crop_file).map_err(|e| e.to_string())?);
         let mut current_index = 0u64;
         let mut line = Vec::new();
         let mut samples = 0u64;
@@ -196,17 +218,39 @@ pub fn process(
                         .read_until(b'\n', &mut line)
                         .map_err(|e| e.to_string())?;
                     if n == 0 || n as u64 > MAX_LINE || line.last() != Some(&b'\n') {
-                        return Err("Pose fusion stream truncated or malformed".into());
+                        return Err("Prepared pose-box stream truncated or malformed".into());
+                    }
+                    let frame: Value = serde_json::from_slice(&line)
+                        .map_err(|e| format!("Invalid prepared pose-box row: {e}"))?;
+                    if frame["frame_index"].as_u64() != Some(current_index) {
+                        return Err("Prepared pose-box frame index mismatch".into());
                     }
                     if current_index < window.first_frame {
                         current_index += 1;
                         continue;
                     }
-                    let frame: Value = serde_json::from_slice(&line)
-                        .map_err(|e| format!("Invalid GPU fusion row: {e}"))?;
-                    if frame["frame_index"].as_u64() != Some(current_index) {
-                        return Err("Pose fusion frame index mismatch".into());
+                    let boxes = frame["boxes"]
+                        .as_array()
+                        .ok_or("Pose-box plan has no boxes")?;
+                    let observed_count = frame["observed_box_count"]
+                        .as_u64()
+                        .ok_or("Pose-box plan has no observed count")?
+                        as usize;
+                    if boxes.len() > MAX_POSES_PER_FRAME || observed_count > boxes.len() {
+                        return Err("Pose-box plan exceeds player count".into());
                     }
+                    if frame["interpolated_box_indices"]
+                        != json!((observed_count..boxes.len()).collect::<Vec<_>>())
+                    {
+                        return Err("Pose-box plan has invalid interpolation provenance".into());
+                    }
+                    let pose_boxes = boxes
+                        .iter()
+                        .map(|bbox| {
+                            serde_json::from_value::<[f64; 4]>(bbox.clone())
+                                .map_err(|e| format!("Invalid pose-box geometry: {e}"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     let mut poses = Vec::new();
                     // Ball detection is independent of player pose. A missed ball
                     // must not erase a hitter's skeleton (or contact evidence).
@@ -216,11 +260,17 @@ pub fn process(
                         .data
                         .get(..bytes)
                         .ok_or("Pose decoder RGB frame too short")?;
-                    for bb in boxes(&frame) {
+                    for (i, bb) in pose_boxes.into_iter().enumerate() {
                         let points = engine.infer(rgb, bb)?;
-                        let keypoints =
-                            points.map(|p| [p.x as f64, p.y as f64, p.score as f64]);
-                        poses.push(json!({"box":bb,"keypoints":keypoints}));
+                        let keypoints = points.map(|p| [p.x as f64, p.y as f64, p.score as f64]);
+                        let crop_origin = if i < observed_count {
+                            "observed"
+                        } else {
+                            "interpolated_box"
+                        };
+                        poses.push(
+                            json!({"box":bb,"keypoints":keypoints,"crop_origin":crop_origin}),
+                        );
                     }
                     players += poses.len() as u64;
                     samples += 1;
@@ -240,7 +290,10 @@ pub fn process(
                     current_index += 1;
                 }
                 if samples.is_multiple_of(40) {
-                    on_progress((window.first_frame as f64 / estimated as f64).clamp(0.0, 1.0))?;
+                    on_progress(
+                        "pose",
+                        (window.first_frame as f64 / estimated as f64).clamp(0.0, 1.0),
+                    )?;
                 }
                 Ok(())
             },
@@ -253,6 +306,9 @@ pub fn process(
         }
         if file_hash(&frames_file)? != manifest["sha256"].as_str().unwrap_or_default() {
             return Err("GPU fusion changed during RTMPose analysis".into());
+        }
+        if file_hash(&crop_file)? != crop_summary.sha256 {
+            return Err("Prepared pose-box plan changed during RTMPose analysis".into());
         }
         writer.flush().map_err(|e| e.to_string())?;
         writer.get_ref().sync_all().map_err(|e| e.to_string())?;
@@ -267,11 +323,18 @@ pub fn process(
             "sampled_frames":samples, "player_poses":players,
             "model":"RTMPose-M-Body7","model_sha256":hash,
             "source_fusion_sha256":manifest["sha256"], "source_identity":manifest["source_identity"],
+            "crop_plan_version":"two_sided_box_interpolation_v1",
+            "crop_plan_file":CROP_FILE,
+            "crop_plan_sha256":crop_summary.sha256,
+            "crop_plan_frames":crop_summary.frames,
+            "crop_plan_detected_boxes":crop_summary.actual,
+            "crop_plan_interpolated_boxes":crop_summary.inferred,
+            "crop_plan_max_gap_frames":120,
             "file":POSE_FILE, "sha256":format!("{:x}",checksum.finalize())
         });
         crate::storage::write_json_atomic(&output.join("manifest.json"), &pose_manifest)
             .map_err(|e| format!("Write pose manifest: {e:?}"))?;
-        on_progress(1.0)?;
+        on_progress("pose", 1.0)?;
         Ok(pose_manifest)
     })();
     if result.is_err() {
@@ -295,7 +358,8 @@ mod tests {
         assert_eq!(boxes(&without_ball).len(), 2);
         assert!(bbox(
             &json!({"class_name":"player","score":0.34,"bbox_xyxy_norm":[0.6,0.1,0.8,0.8]})
-        ).is_none());
+        )
+        .is_none());
         assert!(bbox(
             &json!({"class_name":"player","score":0.9,"bbox_xyxy_norm":[0.1,0.1,0.101,0.102]})
         )

@@ -99,6 +99,10 @@ struct MotionContact {
     #[serde(default)]
     body_contact_supported: bool,
     #[serde(default)]
+    contact_landmark: Option<volley_core::pose_contact::BodyContact>,
+    #[serde(default)]
+    contact_pose_sample_frame: Option<u64>,
+    #[serde(default)]
     ball_occluded_at_contact: bool,
     #[serde(default)]
     inferred_body_reach_supported: bool,
@@ -109,7 +113,16 @@ impl MotionContact {
         if self.frame_index >= frames
             || !self.physical_motion_supported
             || self.athlete_identity_verified
-            || (self.body_contact_supported && self.provisional_track_id.is_none())
+            // A new CPU rally may contain no Touch without a real source-frame ID.
+            || self.provisional_track_id.is_none()
+            || self
+                .contact_landmark
+                .as_ref()
+                .is_some_and(|part| !part.valid(width, height))
+            || self.contact_pose_sample_frame.is_some_and(|at| {
+                !self.body_contact_supported || self.contact_landmark.is_none()
+                    || at >= frames || at.abs_diff(self.frame_index) > 3
+            })
             || (self.ball_occluded_at_contact
                 && (!self.body_contact_supported && !self.inferred_body_reach_supported
                     || self.provisional_track_id.is_none()))
@@ -869,6 +882,8 @@ mod tests {
             court: None,
             physical_motion_supported: true,
             body_contact_supported: false,
+            contact_landmark: None,
+            contact_pose_sample_frame: None,
             ball_occluded_at_contact: false,
             inferred_body_reach_supported: false,
             athlete_identity_verified: false,
@@ -879,6 +894,8 @@ mod tests {
         assert!(touch.verify(756, 1280, 720).is_err());
         touch.motion_frame_index = 482;
         touch.provisional_track_id = Some(0);
+        assert!(touch.verify(756, 1280, 720).is_err());
+        touch.provisional_track_id = None;
         assert!(touch.verify(756, 1280, 720).is_err());
     }
 

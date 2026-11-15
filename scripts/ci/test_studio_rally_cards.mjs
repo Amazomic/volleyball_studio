@@ -13,17 +13,18 @@ const segment=(from,to)=>{
   return js.slice(a,b);
 };
 const helpers=segment("  const length=item=>","  const valid=id=>");
-const estimates=segment("  const estimatedTypes=item=>","  const view=item=>");
+const estimates=segment("  const estimatedTypes=item=>","  const view=(item,requestedTime=null)=>");
 const renderer=segment("  const cards=()=>{","  const uploadAudio=async()=>{");
 const element=(tag,klass,text)=>({
   tag,klass,textContent:text===undefined?"":String(text),children:[],listeners:{},
   append(...parts){this.children.push(...parts);},
   replaceChildren(...parts){this.children=parts;},
   addEventListener(name,fn){this.listeners[name]=fn;},
+  getBoundingClientRect(){return {left:100,width:200};},
   setAttribute(){},
 });
 const list=element("div","rally-grid");
-const ui={list,caption:{textContent:""},previous:{disabled:false},next:{disabled:false}};
+const ui={list,video:{currentTime:0},caption:{textContent:""},previous:{disabled:false},next:{disabled:false}};
 const s={items:[{
   candidate_id:"a".repeat(24),detected_start_frame:1263,detected_end_frame:1592,
   motion_event_count:7,motion_supported_touch_proposals:7,
@@ -31,14 +32,36 @@ const s={items:[{
   estimated_action_counts:{attack:3,dig:2},unclassified_action_count:2,
 }],offset:0,limit:24,filtered:1,gold:new Set(),current:"",
 selected:{has:()=>false}};
+const playbackCalls=[];
 const context={fps:()=>30,ui,s,wasmReady:true,
+  rallyCardProgresses:new Map(),timeline:{data:null},
   make:element, wipe:el=>el.replaceChildren(),
   valid:id=>/^[a-f0-9]{24}$/.test(id),clock:n=>String(n),
-  document:{createTextNode:s=>({textContent:s})}, view(){},toggleGold(){},toggleSelected(){}};
+  document:{createTextNode:s=>({textContent:s})},
+  view:(...args)=>playbackCalls.push(args),toggleGold(){},toggleSelected(){}};
 runInNewContext(helpers+"\n"+estimates+"\n"+renderer+"\nthis.render=cards;",context);
 context.render();
 const card=list.children[0];
 assert.equal(card.klass,"rally-card");
+const progress=card.children.find(node=>node.klass==="rally-card-progress");
+assert.ok(progress,
+  "Each rally reserves a timeline slot without moving the list during selection");
+let bubbling=false;
+progress.listeners.click({
+  clientX:200,stopPropagation(){bubbling=true;}
+});
+assert.equal(bubbling,true,"Card time clicks must not bubble into the card-start handler");
+assert.equal(playbackCalls.length,1);
+assert.equal(playbackCalls[0][0],s.items[0]);
+assert.ok(Math.abs(playbackCalls[0][1]-(1263+330/2)/30)<0.00001,
+  "Clicking the center of a card must seek to the center of its detected clip");
+playbackCalls.length=0;
+progress.listeners.keydown({
+  key:"End",preventDefault(){},stopPropagation(){},shiftKey:false
+});
+assert.equal(playbackCalls.length,1);
+assert.ok(playbackCalls[0][1]>=(1592/30),
+  "End key should seek toward the final frame");
 const values=(node)=>[node.textContent,...(node.children||[]).flatMap(values)];
 const text=values(card).join(" ");
 assert.match(text,/11\.0 с/,"duration should use every frame including final");

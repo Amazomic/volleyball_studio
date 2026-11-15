@@ -27,14 +27,19 @@ const preview=element("studio-preview-view");
 const montage=element("studio-montage-view");
 assert.ok(preview.includes('id="studio-video"'),"Preview retains playback");
 assert.ok(preview.includes('id="studio-rallies"'),"Preview retains rally selection");
-for(const id of ["studio-montage","studio-highlights-panel"]){
+for(const id of ["studio-montage","studio-montage-presets","studio-montage-mode",
+    "studio-montage-action","studio-montage-duration","studio-montage-start",
+    "studio-montage-player","studio-montage-audio-fit","studio-montage-camera"]){
   assert.ok(!preview.includes('id="'+id+'"'),id+" must not be in preview");
   assert.ok(montage.includes('id="'+id+'"'),id+" must belong to montage");
   assert.equal(html.split('id="'+id+'"').length,2,"No duplicate "+id);
 }
-assert.ok(montage.includes('РУЧНО ПОДТВЕРЖДЁННЫЕ ДЕЙСТВИЯ'));
-assert.ok(montage.includes('Лучшие атаки игрока'));
-assert.ok(montage.includes('02 / РУЧНОЙ МОНТАЖ'));
+assert.ok(!montage.includes('id="studio-highlights-panel"'),
+    "Highlights must not be a second independent montage block");
+assert.ok(montage.includes('data-profile="report"'));
+assert.ok(montage.includes('data-profile="player"'));
+assert.ok(montage.includes('data-profile="attacks"'));
+assert.ok(montage.includes('data-profile="favorites"'));
 assert.match(html, /id="studio-montage-view" class="hidden tab-workspace"/);
 assert.match(html, /id="studio-nav-montage"[^>]+data-studio-tab="montage"/);
 

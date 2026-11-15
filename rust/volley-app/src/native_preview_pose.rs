@@ -446,7 +446,13 @@ pub fn raw_window(
         for pose in poses {
             let bb = valid_box(&pose["box"]).ok_or("Invalid RTMPose box")?;
             let keypoints = keypoints(&pose["keypoints"]).ok_or("Invalid RTMPose keypoints")?;
-            evidence.push(json!({"box":bb,"keypoints":keypoints}));
+            let crop_origin = match pose["crop_origin"].as_str() {
+                None if pose["crop_origin"].is_null() => "observed",
+                Some("observed") => "observed",
+                Some("interpolated_box") => "interpolated_box",
+                _ => return Err("Invalid RTMPose crop provenance".into()),
+            };
+            evidence.push(json!({"box":bb,"keypoints":keypoints,"crop_origin":crop_origin}));
         }
         if frame >= start && frame < end {
             frames[(frame - start) as usize]["raw"]["poses"] = json!(evidence);
@@ -475,6 +481,50 @@ pub fn raw_window(
             .ok_or("Invalid RTMPose source ID")?
             .to_owned(),
     ))
+}
+
+/// RTMPose observations are independent of the CPU tracker and its boxes.
+/// Render every model pose even when the player Track ID is missing, outside
+/// a rally, or too far from a tracked bounding box for safe ID association.
+/// Interpolated joints are explicitly visual-only and never carry Track IDs.
+pub fn processed_window(
+    project_root: &Path,
+    fusion_id: &str,
+    total_frames: u64,
+    start: u64,
+    end: u64,
+    frames: &mut [Value],
+) -> Result<bool, String> {
+    if start >= end || frames.len() != (end - start) as usize {
+        return Err("Invalid processed RTMPose frame bounds".into());
+    }
+    let mut scratch = (start..end)
+        .map(|frame| json!({"frame":frame,"raw":{"poses":[]}}))
+        .collect::<Vec<_>>();
+    if raw_window(
+        project_root,
+        fusion_id,
+        total_frames,
+        start,
+        end,
+        &mut scratch,
+    )?
+    .is_none()
+    {
+        return Ok(false);
+    }
+    for (frame, source) in frames.iter_mut().zip(scratch) {
+        let raw = &source["raw"];
+        let observed = raw["poses"].as_array().filter(|rows| !rows.is_empty());
+        let interpolated = raw["poses_interpolated"]
+            .as_array()
+            .filter(|rows| !rows.is_empty());
+        if let Some(poses) = observed.or(interpolated) {
+            frame["pose_points"] = json!(poses);
+            frame["pose_points_interpolated"] = json!(observed.is_none());
+        }
+    }
+    Ok(true)
 }
 
 /// Enrich only selected rally frame samples. Returns false if old GPU run has no poses.
@@ -589,7 +639,8 @@ mod tests {
                 .collect::<Vec<_>>();
             raw.extend(
                 serde_json::to_vec(&json!({"frame":frame,
-                "players":[{"box":[0.2,0.2,0.5,0.9],"keypoints":keypoints}]}))
+                "players":[{"box":[0.2,0.2,0.5,0.9],"keypoints":keypoints,
+                    "crop_origin":if frame == 3 {"interpolated_box"} else {"observed"}}]}))
                 .unwrap(),
             );
             raw.push(b'\n');
@@ -614,6 +665,11 @@ mod tests {
         assert_eq!(selected.as_deref(), Some(run.as_str()));
         assert_eq!(frames[0]["raw"]["poses"][0]["keypoints"][0][2], 0.91);
         assert_eq!(frames[3]["raw"]["poses"][0]["keypoints"][0][2], 0.91);
+        assert_eq!(frames[0]["raw"]["poses"][0]["crop_origin"], "observed");
+        assert_eq!(
+            frames[3]["raw"]["poses"][0]["crop_origin"],
+            "interpolated_box"
+        );
         // Original model evidence stays sparse and is never substituted.
         assert!(frames[1]["raw"]["poses"].as_array().unwrap().is_empty());
         assert_eq!(frames[0]["raw"]["poses"][0]["keypoints"][0][0], 0.30);
@@ -649,6 +705,26 @@ mod tests {
         );
         assert!(shifted[2]["raw"]["poses_interpolated"].is_null());
         assert_eq!(shifted[2]["raw"]["poses"][0]["keypoints"][0][0], 0.39);
+        // Processed mode must show the source skeleton with NO matched
+        // CPU player or box. Interpolated joints never become detections.
+        let mut processed = (0..5)
+            .map(|frame| json!({"frame":frame,"players":[]}))
+            .collect::<Vec<_>>();
+        assert!(processed_window(&root, &fusion, 9, 0, 5, &mut processed).unwrap());
+        assert_eq!(processed[0]["pose_points"][0]["keypoints"][0][0], 0.30);
+        assert_eq!(processed[1]["pose_points"][0]["keypoints"][0][0], 0.33);
+        assert_eq!(processed[3]["pose_points"][0]["keypoints"][0][0], 0.39);
+        assert_eq!(processed[0]["pose_points_interpolated"], false);
+        assert_eq!(processed[1]["pose_points_interpolated"], true);
+        assert_eq!(processed[3]["pose_points_interpolated"], false);
+        assert!(processed[4]["pose_points"].is_null());
+        assert!(processed
+            .iter()
+            .all(|frame| frame["players"].as_array().unwrap().is_empty()));
+        assert!(processed.iter().all(|frame| frame["raw"].is_null()));
+        assert!(processed
+            .iter()
+            .all(|frame| frame["pose_points"][0]["track_id"].is_null()));
         manifest["sha256"] = json!("0".repeat(64));
         fs::write(
             pose_dir.join("manifest.json"),

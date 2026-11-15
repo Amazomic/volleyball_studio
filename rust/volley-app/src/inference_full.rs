@@ -74,6 +74,11 @@ impl FullInferenceManager {
             .as_ref()
             .is_some_and(|job| !terminal(&snapshot(&job.status).phase))
     }
+    pub(crate) async fn has_active_for_project(&self, project_id: &str) -> bool {
+        self.current.lock().await.as_ref().is_some_and(|job| {
+            job.project_id == project_id && !terminal(&snapshot(&job.status).phase)
+        })
+    }
     pub fn new() -> Self {
         Self {
             current: Mutex::new(None),
@@ -316,23 +321,30 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
             }
             let records = if let Some(engine) = person_engine.as_mut() {
                 let mut detections = Vec::new();
-                engine.detect_frames(&window.data, |offset, poses| {
-                    if context.cancelled.load(Ordering::Acquire) {
-                        return Err("cancelled".into());
-                    }
-                    for (index, pose) in poses.into_iter().enumerate() {
-                        detections.push(RawDetection {
-                            frame_index: window.first_frame + offset as u64,
-                            class_name: "player",
-                            score: pose.score,
-                            bbox_xyxy_norm: pose.bbox.map(|v| v as f32),
-                            query_index: Some(index),
-                            touch_probability: None,
-                            head_point_norm: pose.head.map(|p| p.map(|v| v as f32)),
-                        });
-                    }
-                    Ok(())
-                })?;
+                // 30 FPS evidence timeline, but only three real player/model
+                // observations per second. Never label interpolated frames as ONNX.
+                engine.detect_frames_sampled(
+                    &window.data,
+                    window.first_frame,
+                    10,
+                    |offset, poses| {
+                        if context.cancelled.load(Ordering::Acquire) {
+                            return Err("cancelled".into());
+                        }
+                        for (index, pose) in poses.into_iter().enumerate() {
+                            detections.push(RawDetection {
+                                frame_index: window.first_frame + offset as u64,
+                                class_name: "player",
+                                score: pose.score,
+                                bbox_xyxy_norm: pose.bbox.map(|v| v as f32),
+                                query_index: Some(index),
+                                touch_probability: None,
+                                head_point_norm: pose.head.map(|p| p.map(|v| v as f32)),
+                            });
+                        }
+                        Ok(())
+                    },
+                )?;
                 detections
             } else {
                 let input = normalized_model_window(&window.data, w, h, channels)?;
@@ -378,7 +390,15 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
         "project_id":context.project_id,
         "video":context.video,
         "model":context.config.model,
-        "person_pipeline":if context.config.model == ModelKind::Players { Some("rtmdet_nano_tiled_rtmpose_m_coco17_batch8_v4") } else { None },
+        "person_pipeline":if context.config.model == ModelKind::Players {
+            Some(match volley_inference::person::DetectorVariant::from_env()? {
+                volley_inference::person::DetectorVariant::RtmDetNano =>
+                    "rtmdet_nano_tiled_rtmpose_m_coco17_3hz_v5",
+                volley_inference::person::DetectorVariant::RfDetrMedium =>
+                    "rfdetr_medium_18250b5a_rtmpose_m_detector_boxes_3hz_v1",
+            })
+        } else { None },
+        "person_sampling_period_frames":if context.config.model == ModelKind::Players { 10 } else { 1 },
         "provider":context.config.device,
         "source_identity":{"bytes":before.0,"mtime_ns":before.1},
         "fps":30,

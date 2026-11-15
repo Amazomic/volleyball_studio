@@ -38,16 +38,16 @@ const state={project:"abc",analysis:primaryA,run:runA,
 const parent={insertBefore(){}};
 const select=()=>Object.assign(element("select"),{parentNode:parent,
   options:[{value:"",textContent:"Choose"},{value:primaryA,textContent:"Current GPU"},
-    {value:primaryB,textContent:"Other GPU"}],
+    {value:primaryB,textContent:"Other GPU"}].map(row=>({...row,remove(){this.removed=true;}})),
   selectedOptions:[{textContent:"Current GPU"}]});
 const ui={analysis:select(),run:select()};
 ui.analysis.value=primaryA;
 ui.run.options=[{value:"",textContent:"Choose"},{value:runA,textContent:"Current CPU"},
-  {value:runB,textContent:"Other CPU"}];
+  {value:runB,textContent:"Other CPU"}].map(row=>({...row,remove(){this.removed=true;}}));
 ui.run.value=runA;
 const calls=[],posts=[];
 const pickerCtx={s:state,ui,make:element,wipe:x=>{x.children=[];},
-  document:{addEventListener(){}},window:{confirm:()=>true,prompt:()=> "New name"},
+  document:{addEventListener(){}},window:{confirm:()=>{throw Error("No delete confirmation allowed");},prompt:()=> "New name"},
   post:async(path,body)=>posts.push({path,body}),
   invalidateCatalog(){},message(){},failed:e=>{throw e;},
   loadChain:async(...args)=>calls.push(args),pickers:new Map()};
@@ -63,6 +63,8 @@ assert.equal(cpuHost.children[1].children[0].children.length,3,
   "Every row needs choice, delete and rename buttons");
 const actionButton=(row,action)=>row.children.find(item=>item.cls?.includes("analysis-picker-"+action));
 assert.ok(actionButton(cpuHost.children[1].children[0],"delete").title.startsWith("Удалить:"));
+assert.doesNotMatch(slice("  const makeAnalysisPicker=","  // Shared by the analysis tab"),
+  /window\.confirm\(/,"Picker deletion must never show a confirmation");
 await actionButton(cpuHost.children[1].children[1],"delete").click(); // delete a nonselected CPU run
 assert.equal(calls.length,1);
 assert.deepEqual(Array.from(calls.pop()),[primaryA,runA,true],
@@ -99,8 +101,8 @@ const options=(target,rows,key,label)=>{
   target.options=rows.map(row=>({value:row[key],textContent:label(row)}));
   target.value="";
 };
-const context={s,ui:{analysis,run:cpu},overlay:{raw:false},
-  ensurePreviewVideo(){},
+const context={s,ui:{analysis,run:cpu,video:{currentTime:0}},overlay:{raw:false},
+  ensurePreviewVideo(){},setOverlaySource(){},prefetchOverlayAtFrame(){},fps:()=>30,rawFusion:()=>null,
   window:{VolleyballUi:{ready:Promise.resolve()},
     VolleyStudioChain:{stamp:()=>"",build:()=>refreshed},
     dispatchEvent:()=>counters.events++},
