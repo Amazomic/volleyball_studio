@@ -192,7 +192,9 @@
     gpu_memory_limit_mb:inputValue("studio-gpu-memory"),
     cpu_threads:inputValue("studio-gpu-threads"),
     pose_enabled:$("studio-gpu-pose-enabled").value==="1",
-    pose_stride:inputValue("studio-gpu-pose-stride")
+    pose_stride:inputValue("studio-gpu-pose-stride"),
+    interpolate_players:$("studio-gpu-interpolate-players").checked,
+    interpolate_pose:$("studio-gpu-interpolate-pose").checked
   });
   // Mirrors volley-core's validated native defaults (no JS-only processing).
   const postProfile=()=>({
@@ -233,24 +235,29 @@
     }
   });
   const allProfileFields=()=>[...ui.analysis.querySelectorAll("input[data-default],select[data-default]")];
+  const fieldValue=input=>input.type==="checkbox"?(input.checked?"1":"0"):input.value;
+  const applyFieldValue=(input,value)=>{
+    if(input.type==="checkbox")input.checked=value==="1";
+    else input.value=value;
+  };
   const saveAnalysisSettings=()=>{
     const fields={};
     for(const input of allProfileFields()){
-      if(input.value!==input.dataset.default)
-        fields[input.id]=[input.dataset.default,input.value];
+      if(fieldValue(input)!==input.dataset.default)
+        fields[input.id]=[input.dataset.default,fieldValue(input)];
     }
     analysisFormCache.write(projectId(),ui.video.value,fields);
   };
   const restoreAnalysisSettings=project=>{
     const saved=analysisFormCache.read(project);
     for(const input of allProfileFields()){
-      input.value=input.dataset.default;
+      applyFieldValue(input,input.dataset.default);
       const row=saved?.fields?.[input.id];
       if(Array.isArray(row)&&row.length===2&&
           row[0]===input.dataset.default&&typeof row[1]==="string"&&
           row[1].length<=64){
-        input.value=row[1];
-        if(!input.checkValidity())input.value=input.dataset.default;
+        applyFieldValue(input,row[1]);
+        if(!input.checkValidity())applyFieldValue(input,input.dataset.default);
       }
     }
     return typeof saved?.video==="string"?saved.video:"";
@@ -271,7 +278,7 @@
     const valid=gpuValid&&postValid;
     if(!valid)ui.profileDelta.textContent=invalid;
     if(valid){
-      const changed=allProfileFields().filter(item=>item.value!==item.dataset.default);
+      const changed=allProfileFields().filter(item=>fieldValue(item)!==item.dataset.default);
       ui.profileDelta.textContent=changed.length?
         "Изменено параметров: "+changed.length+
         ". При изменении GPU создаётся новый анализ; при изменении только CPU — новая постобработка.":
@@ -765,7 +772,7 @@
     }catch(e){state.stopRequested=false;updateProfile();saveMessage(String(e.message||e),true);}
   };
   const resetProfile=()=>{
-    for(const input of allProfileFields())input.value=input.dataset.default;
+    for(const input of allProfileFields())applyFieldValue(input,input.dataset.default);
     saveAnalysisSettings();
     updateProfile();
   };
@@ -958,7 +965,7 @@
     }finally{state.mutating=false;}
   });
   ui.playerRefresh.addEventListener("click",()=>loadPlayers().catch(failure));
-  for(const field of allProfileFields())field.addEventListener(field.tagName==="SELECT"?"change":"input",()=>{
+  for(const field of allProfileFields())field.addEventListener(field.tagName==="SELECT"||field.type==="checkbox"?"change":"input",()=>{
     updateProfile();saveAnalysisSettings();
   });
   ui.reset.addEventListener("click",event=>{event.preventDefault();resetProfile();});

@@ -445,6 +445,7 @@ pub(super) async fn run_native_pipeline(
                 video: alias.clone(),
                 fusion_id,
                 settings: None,
+                interpolate_players: true,
             },
             &workspace,
             "CPU: Track ID",

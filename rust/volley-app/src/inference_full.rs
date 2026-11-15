@@ -1053,6 +1053,7 @@ mod tests {
                 video: video.into(),
                 fusion_id: merged["fusion_id"].as_str().unwrap().into(),
                 settings: None,
+                interpolate_players: true,
             },
         )
         .unwrap();

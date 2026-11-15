@@ -389,6 +389,13 @@ pub struct GpuProfile {
     pose_enabled: bool,
     /// Inter-frame stride for pose, independent from nine-frame Vball/RAVEL windows.
     pose_stride: usize,
+    #[serde(default = "default_interpolation_enabled")]
+    interpolate_players: bool,
+    #[serde(default = "default_interpolation_enabled")]
+    interpolate_pose: bool,
+}
+const fn default_interpolation_enabled() -> bool {
+    true
 }
 impl Default for GpuProfile {
     fn default() -> Self {
@@ -398,6 +405,8 @@ impl Default for GpuProfile {
             cpu_threads: 8,
             pose_enabled: true,
             pose_stride: 3,
+            interpolate_players: true,
+            interpolate_pose: true,
         }
     }
 }
@@ -754,6 +763,9 @@ fn gpu_lineage_valid(
             || pose["fusion_id"] != fusion_id
             || pose["model_sha256"] != volley_inference::pose::MODEL_SHA256
             || pose["stride"] != request.gpu.pose_stride
+            || pose["interpolate_players"].as_bool().unwrap_or(true)
+                != request.gpu.interpolate_players
+            || pose["interpolate_pose"].as_bool().unwrap_or(true) != request.gpu.interpolate_pose
             || pose["project_id"] != request.project_id
             || pose["video"] != request.video
             || pose["source_identity"] != *identity
@@ -766,7 +778,12 @@ fn gpu_lineage_valid(
         // never silently reuse a pose run from the old hold-last-box code.
         if saved["gpu_model_stack"] == requested_gpu_model_stack() {
             let plan = project.join("native_gpu_pose_runs").join(pose_id);
-            if pose["crop_plan_version"] != "two_sided_box_interpolation_v1"
+            if pose["crop_plan_version"]
+                != (if request.gpu.interpolate_players {
+                    "two_sided_box_interpolation_v1"
+                } else {
+                    "observations_only_v1"
+                })
                 || pose["crop_plan_file"] != "pose_crop_boxes.jsonl"
                 || pose["crop_plan_frames"] != fusion["emitted_frames"]
                 || pose["crop_plan_max_gap_frames"] != 120
@@ -824,7 +841,11 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
     };
     track["schema"] == "volley-native-cpu-tracking/1"
         && track["state"] == "provisional_tracklets_rebuilt"
-        && track["interpolated_positions_version"] == "bounded_same_track_3s_v1"
+        && track["interpolated_positions_version"] == (if saved["profile"]["gpu"]["interpolate_players"].as_bool().unwrap_or(true) {
+            "bounded_same_track_3s_v1"
+        } else {
+            "disabled_v1"
+        })
         && (saved["gpu_model_stack"] != requested_gpu_model_stack()
             || !request.gpu.pose_enabled
             || track["track_association_version"] == "pose_coco17_primary_v1")
@@ -884,7 +905,8 @@ fn compatible_version(saved: &Value, request: &StartRequest, identity: &Value) -
         && saved["gpu_model_stack"] == requested_gpu_model_stack()
         && saved["project_id"] == request.project_id
         && saved["video"] == request.video
-        && saved["profile"]["gpu"] == serde_json::to_value(&request.gpu).unwrap_or(Value::Null)
+        && serde_json::from_value::<GpuProfile>(saved["profile"]["gpu"].clone())
+            .is_ok_and(|gpu| json!(gpu) == json!(request.gpu))
         // Older pipeline status files can predate the source_identity field;
         // the fusion and both GPU manifests are always validated separately.
         && (saved["source_identity"].is_null() || saved["source_identity"] == *identity)
@@ -1454,7 +1476,8 @@ async fn pipeline(
             "GPU · RTMPose-M",
             "pose_inference::process",
             json!({"fusion_id":fusion_id,"model":"RTMPose-M-Body7","stride":request.gpu.pose_stride,
-                    "threads":request.gpu.cpu_threads,"gpu_memory_limit_mb":request.gpu.gpu_memory_limit_mb}),
+                    "threads":request.gpu.cpu_threads,"gpu_memory_limit_mb":request.gpu.gpu_memory_limit_mb,
+                    "interpolate_players":request.gpu.interpolate_players,"interpolate_pose":request.gpu.interpolate_pose}),
         )?;
         let _permit = app
             .inference_limit
@@ -1470,6 +1493,8 @@ async fn pipeline(
                 request.gpu.pose_stride,
                 request.gpu.gpu_memory_limit_mb,
                 request.gpu.cpu_threads,
+                request.gpu.interpolate_players,
+                request.gpu.interpolate_pose,
                 cancel,
                 |phase, p| {
                     if phase == "boxes" {
@@ -1516,6 +1541,9 @@ async fn pipeline(
             video: request.video.clone(),
             fusion_id,
             settings: Some(request.post.tracking),
+            interpolate_players: status["profile"]["gpu"]["interpolate_players"]
+                .as_bool()
+                .unwrap_or(true),
         },
         cpu_retrack::process,
     )
@@ -2165,6 +2193,30 @@ mod tests {
         let other = json!({"mode":"post","video":"other.mp4","gpu_reused":true,
             "stages":[{"name":"Постобработка · физические касания","started_ms":180_000}]});
         assert_eq!(stage_aware_remaining(&other, &history, now), None);
+    }
+
+    #[test]
+    fn gpu_interpolation_options_default_to_legacy_behavior_and_remain_independent() {
+        let original: GpuProfile = serde_json::from_value(json!({
+            "stride":9,"pose_stride":3,"pose_enabled":true,
+            "cpu_threads":8,"gpu_memory_limit_mb":0
+        }))
+        .unwrap();
+        assert!(original.interpolate_players);
+        assert!(original.interpolate_pose);
+        let changed: GpuProfile = serde_json::from_value(json!({
+            "interpolate_players":false,"interpolate_pose":true
+        }))
+        .unwrap();
+        assert!(!changed.interpolate_players);
+        assert!(changed.interpolate_pose);
+        let other: GpuProfile = serde_json::from_value(json!({
+            "interpolate_players":true,"interpolate_pose":false
+        }))
+        .unwrap();
+        assert!(other.interpolate_players);
+        assert!(!other.interpolate_pose);
+        assert_ne!(json!(other), json!(changed));
     }
 
     #[test]

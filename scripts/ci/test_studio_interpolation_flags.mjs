@@ -1,0 +1,52 @@
+import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
+import {runInNewContext} from "node:vm";
+
+const root=new URL("../../rust/volley-app/static/",import.meta.url);
+const html=readFileSync(new URL("studio.html",root),"utf8");
+const source=readFileSync(new URL("studio_tabs.js",root),"utf8");
+for(const id of ["studio-gpu-interpolate-players","studio-gpu-interpolate-pose"]){
+  assert.match(html,new RegExp('<input id="'+id+'"[^>]*type="checkbox"[^>]*checked[^>]*data-default="1"'));
+}
+const slice=(begin,end)=>{
+  const start=source.indexOf(begin),stop=source.indexOf(end,start);
+  assert.ok(start>=0&&stop>start,begin+" section");
+  return source.slice(start,stop);
+};
+const values={
+  "studio-gpu-stride":9,"studio-gpu-memory":0,"studio-gpu-threads":8,
+  "studio-gpu-pose-stride":3,
+};
+const boxes={
+  "studio-gpu-pose-enabled":{value:"1"},
+  "studio-gpu-interpolate-players":{type:"checkbox",checked:true,dataset:{default:"1"},id:"studio-gpu-interpolate-players",checkValidity:()=>true},
+  "studio-gpu-interpolate-pose":{type:"checkbox",checked:true,dataset:{default:"1"},id:"studio-gpu-interpolate-pose",checkValidity:()=>true}
+};
+const state={saved:null};
+const context={
+  $:id=>boxes[id],inputValue:id=>values[id],
+  ui:{analysis:{querySelectorAll:()=>[boxes["studio-gpu-interpolate-players"],boxes["studio-gpu-interpolate-pose"]]},video:{value:"clip.mp4"}},
+  projectId:()=>"abc123def456",
+  analysisFormCache:{write:(project,video,fields)=>{state.saved={project,video,fields};},
+    read:()=>({video:state.saved?.video,fields:state.saved?.fields})}
+};
+runInNewContext(slice("  const gpuProfile=()","  // Mirrors volley-core")+
+  slice("  const allProfileFields=()","  const selectedGpuSource=()")+
+  "\nthis.api={gpuProfile,saveAnalysisSettings,restoreAnalysisSettings,fieldValue,applyFieldValue};",context);
+const api=context.api;
+assert.equal(api.gpuProfile().interpolate_players,true);
+assert.equal(api.gpuProfile().interpolate_pose,true);
+boxes["studio-gpu-interpolate-players"].checked=false;
+api.saveAnalysisSettings();
+assert.equal(state.saved.fields["studio-gpu-interpolate-players"][1],"0");
+assert.ok(!("studio-gpu-interpolate-pose" in state.saved.fields));
+boxes["studio-gpu-interpolate-players"].checked=true;
+api.restoreAnalysisSettings("abc123def456");
+assert.equal(api.gpuProfile().interpolate_players,false);
+assert.equal(api.gpuProfile().interpolate_pose,true);
+boxes["studio-gpu-interpolate-players"].checked=true;
+boxes["studio-gpu-interpolate-pose"].checked=false;
+const gpu=api.gpuProfile();
+assert.equal(gpu.interpolate_players,true);
+assert.equal(gpu.interpolate_pose,false);
+console.log("GPU interpolation checkboxes: defaults, independent payload, persisted settings OK");

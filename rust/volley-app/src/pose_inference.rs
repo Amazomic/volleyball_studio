@@ -114,6 +114,8 @@ pub fn process(
     stride: usize,
     memory_mb: u64,
     threads: usize,
+    interpolate_players: bool,
+    interpolate_pose: bool,
     cancel: &AtomicBool,
     mut on_progress: impl FnMut(&'static str, f64) -> Result<(), String>,
 ) -> Result<Value, String> {
@@ -183,6 +185,7 @@ pub fn process(
             &crop_partial,
             manifest["sha256"].as_str().ok_or("Missing fusion SHA")?,
             frames_expected,
+            interpolate_players,
             cancel,
             |p| on_progress("boxes", p),
         )?;
@@ -323,7 +326,9 @@ pub fn process(
             "sampled_frames":samples, "player_poses":players,
             "model":"RTMPose-M-Body7","model_sha256":hash,
             "source_fusion_sha256":manifest["sha256"], "source_identity":manifest["source_identity"],
-            "crop_plan_version":"two_sided_box_interpolation_v1",
+            "crop_plan_version":if interpolate_players {"two_sided_box_interpolation_v1"} else {"observations_only_v1"},
+            "interpolate_players":interpolate_players,
+            "interpolate_pose":interpolate_pose,
             "crop_plan_file":CROP_FILE,
             "crop_plan_sha256":crop_summary.sha256,
             "crop_plan_frames":crop_summary.frames,

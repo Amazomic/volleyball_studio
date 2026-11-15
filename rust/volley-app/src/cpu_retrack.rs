@@ -60,6 +60,11 @@ pub struct ReplayRequest {
     pub(crate) fusion_id: String,
     #[serde(default)]
     pub(crate) settings: Option<TrackingOptions>,
+    #[serde(default = "default_interpolation_enabled")]
+    pub(crate) interpolate_players: bool,
+}
+const fn default_interpolation_enabled() -> bool {
+    true
 }
 #[derive(Deserialize)]
 pub struct ReplayQuery {
@@ -157,6 +162,7 @@ fn replay_frames(
     replay_frames_with_pose(source, output, count, config, expected_sha, None)
 }
 
+#[cfg(test)]
 fn replay_frames_with_pose(
     source: &Path,
     output: &Path,
@@ -164,6 +170,18 @@ fn replay_frames_with_pose(
     config: TrackingOptions,
     expected_sha: &str,
     pose: Option<&pose_source::Snapshot>,
+) -> Result<(String, ReplayTotals, u64), String> {
+    replay_frames_with_pose_options(source, output, count, config, expected_sha, pose, true)
+}
+
+fn replay_frames_with_pose_options(
+    source: &Path,
+    output: &Path,
+    count: u64,
+    config: TrackingOptions,
+    expected_sha: &str,
+    pose: Option<&pose_source::Snapshot>,
+    interpolate_players: bool,
 ) -> Result<(String, ReplayTotals, u64), String> {
     if !(1..=48 * 3600 * 30).contains(&count) {
         return Err("Invalid fused CPU frame count".into());
@@ -178,6 +196,7 @@ fn replay_frames_with_pose(
         config,
         expected_sha,
         pose,
+        interpolate_players,
     );
     // This intermediate output is never exposed as a CPU run, including errors.
     let _ = fs::remove_file(tentative);
@@ -360,6 +379,7 @@ fn replay_frames_verified(
     config: TrackingOptions,
     expected_sha: &str,
     pose: Option<&pose_source::Snapshot>,
+    interpolate_players: bool,
 ) -> Result<(String, ReplayTotals, u64), String> {
     let mut reader = BoundedReader::open(source)?;
     let mut pose_rows = pose.map(pose_source::PoseRows::open).transpose()?;
@@ -533,8 +553,11 @@ fn replay_frames_verified(
     totals.duplicate_track_ids_merged = merged;
     let (turnover_sha, splits) = identity_turnover::split(output, &canonical_sha, count)?;
     totals.identity_turnover_splits = splits;
-    let (continuous_sha, _inferred_positions) =
-        fill_confirmed_track_gaps(output, &turnover_sha, count)?;
+    let (continuous_sha, _inferred_positions) = if interpolate_players {
+        fill_confirmed_track_gaps(output, &turnover_sha, count)?
+    } else {
+        (turnover_sha, 0)
+    };
     Ok((
         continuous_sha,
         totals,
@@ -658,13 +681,14 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
     fs::create_dir(&directory).map_err(|e| storage::internal(format!("Create CPU replay: {e}")))?;
     let result = (|| -> Result<Value, String> {
         let part = directory.join("tracked_frames.jsonl.partial");
-        let (digest, totals, track_count) = replay_frames_with_pose(
+        let (digest, totals, track_count) = replay_frames_with_pose_options(
             &source,
             &part,
             frames,
             settings,
             expected,
             pose_source.as_ref(),
+            req.interpolate_players,
         )?;
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared video changed during CPU replay".into());
@@ -674,7 +698,8 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
         let record = json!({
             "schema":"volley-native-cpu-tracking/1",
             "state":"provisional_tracklets_rebuilt",
-            "interpolated_positions_version":"bounded_same_track_3s_v1",
+            "interpolated_positions_version":if req.interpolate_players {"bounded_same_track_3s_v1"} else {"disabled_v1"},
+            "interpolate_players":req.interpolate_players,
             "project_id":req.project_id,
             "video":req.video,
             "replay_id":replay_id,
@@ -1253,6 +1278,7 @@ mod tests {
             video: video.into(),
             fusion_id: fusion_id.into(),
             settings: None,
+            interpolate_players: true,
         };
         let first = process(&state, &request).unwrap();
         assert_eq!(first["provisional_track_count"], 1);
@@ -1418,6 +1444,37 @@ mod tests {
             .map(|p| p["track_id"].as_u64().unwrap())
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(ids_at_three, ids_at_seventy_five);
+        let without_gaps = root.join("tracked-no-interpolation.jsonl");
+        let (disabled_sha, _, disabled_tracks) = replay_frames_with_pose_options(
+            &fusion,
+            &without_gaps,
+            90,
+            TrackingOptions {
+                min_track_observations: 6,
+                ..TrackingOptions::default()
+            },
+            &fusion_sha,
+            Some(&snapshot),
+            false,
+        )
+        .unwrap();
+        let disabled_bytes = fs::read(&without_gaps).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&disabled_bytes)),
+            disabled_sha
+        );
+        assert_eq!(disabled_tracks, 2);
+        let off_rows = String::from_utf8(disabled_bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert!(off_rows[10]["tracked_players"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(off_rows[10].get("interpolated_track_ids").is_none());
+        assert_eq!(off_rows[3]["tracked_players"].as_array().unwrap().len(), 2);
         assert!(fs::read(&fusion).unwrap() == fusion_bytes);
         assert!(fs::read(pose_dir.join("poses.jsonl")).unwrap() == pose_bytes);
         fs::remove_dir_all(root).unwrap();

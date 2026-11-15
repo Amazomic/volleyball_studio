@@ -1694,3 +1694,10 @@ Studio показывает кнопку перехода между debug и re
 - Raw VBallNet and person jobs remain stored separately as immutable evidence, but the analysis picker now displays only their fused source; an actually orphaned raw job remains selectable.
 - Added regression test with two fused jobs and one orphan. `cargo test -p volley-web --offline --locked`: 9 passed; crate format check and release WASM build passed. WASM Node UI-wide translation budget check remains failing on unrelated existing untranslated static phrases.
 - Handoff: `docs/agent-runs/2026-11-15-gpu-chain-fusion-visibility.md`.
+
+### 2026-11-15 · Управление интерполяцией в первом GPU-анализе
+
+- Добавлены независимые чекбоксы «Интерполяция игроков» и «Интерполяция позы» (по умолчанию активны). Их значения сохраняются в профиле первичного GPU-запуска, соблюдается совместимость с прежними анализами.
+- Первый выключатель управляет восстановлением GPU crop-рамок RTMPose, CPU gap-fill треков и сглаживанием позиций в касаниях. Второй выключает заполнение промежуточных точек RTMPose в raw/processed overlay и CPU touch analysis. Измеренная нейросетями информация остаётся неизменной.
+- При новой CPU-постобработке используется сохранённый профиль выбранного GPU-запуска, а не текущие галочки на форме. GPU/CPU версии и манифесты фиксируют режимы для проверяемого происхождения.
+- Изменения и тесты: см. `docs/agent-runs/2026-11-15-interpolation-options.md`.

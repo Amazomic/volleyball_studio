@@ -46,7 +46,10 @@ fn read_manifest(path: &Path) -> Result<Option<Value>, String> {
     Ok(Some(value))
 }
 
-fn pose_run(project_root: &Path, fusion: &str) -> Result<Option<(PathBuf, String, usize)>, String> {
+fn pose_run(
+    project_root: &Path,
+    fusion: &str,
+) -> Result<Option<(PathBuf, String, usize, bool)>, String> {
     let runs = project_root.join("native_gpu_pose_runs");
     if !runs.exists() {
         return Ok(None);
@@ -123,7 +126,12 @@ fn pose_run(project_root: &Path, fusion: &str) -> Result<Option<(PathBuf, String
                 "Multiple pose runs for selected GPU fusion; refusing ambiguous overlay".into(),
             );
         }
-        found = Some((path, sha.to_owned(), stride as usize));
+        found = Some((
+            path,
+            sha.to_owned(),
+            stride as usize,
+            manifest["interpolate_pose"].as_bool().unwrap_or(true),
+        ));
     }
     Ok(found)
 }
@@ -132,7 +140,7 @@ pub fn source_info(
     project_root: &Path,
     fusion: &str,
 ) -> Result<Option<(String, String, usize)>, String> {
-    let Some((path, sha, stride)) = pose_run(project_root, fusion)? else {
+    let Some((path, sha, stride, _)) = pose_run(project_root, fusion)? else {
         return Ok(None);
     };
     index_for(&path, &sha, stride)?;
@@ -423,7 +431,7 @@ pub fn raw_window(
     {
         return Err("Invalid raw RTMPose source or frame bounds".into());
     }
-    let Some((path, sha, stride)) = pose_run(project_root, fusion_id)? else {
+    let Some((path, sha, stride, interpolate_pose)) = pose_run(project_root, fusion_id)? else {
         return Ok(None);
     };
     let index = index_for(&path, &sha, stride)?;
@@ -467,7 +475,7 @@ pub fn raw_window(
         }
         samples.push((frame, evidence));
     }
-    for pair in samples.windows(2) {
+    for pair in samples[..if interpolate_pose { samples.len() } else { 0 }].windows(2) {
         let (before_frame, before) = (&pair[0].0, &pair[0].1);
         let (after_frame, after) = (&pair[1].0, &pair[1].1);
         // Never extrapolate across missing model samples or scene cuts.
@@ -567,14 +575,14 @@ fn enrich_with_tolerance(
     if !volley_core::contracts::job_id(fusion_id) {
         return Err("Invalid source fusion ID for RTMPose preview".into());
     }
-    let Some((path, sha, stride)) = pose_run(project_root, fusion_id)? else {
+    let Some((path, sha, stride, interpolate_pose)) = pose_run(project_root, fusion_id)? else {
         return Ok(false);
     };
     let index = index_for(&path, &sha, stride)?;
     // Closest observed RTMPose frame within half a sampling interval.
     // This keeps poses visible between sampled frames without generating
     // synthetic coordinates or accidentally attaching an unrelated player.
-    let tolerance = if exact {
+    let tolerance = if exact || !interpolate_pose {
         0
     } else {
         (stride as u64).div_ceil(2)
@@ -634,9 +642,12 @@ pub(crate) fn enrich_continuous(
     if frames.is_empty() {
         return Ok(true);
     }
-    let Some((path, sha, stride)) = pose_run(project_root, fusion_id)? else {
+    let Some((path, sha, stride, interpolate_pose)) = pose_run(project_root, fusion_id)? else {
         return Ok(false);
     };
+    if !interpolate_pose {
+        return Ok(true);
+    }
     let index = index_for(&path, &sha, stride)?;
     let lo = index.partition_point(|(at, _)| *at < start.saturating_sub(stride as u64));
     let hi = index.partition_point(|(at, _)| *at < end.saturating_add(stride as u64));
@@ -816,6 +827,30 @@ mod tests {
         assert!(enrich_continuous(&root, &fusion, 1, 4, &mut shifted_tracked).unwrap());
         assert_eq!(shifted_tracked[0]["players"][0]["pose_interpolated"], true);
         assert_eq!(shifted_tracked[2]["players"][0]["pose_interpolated"], false);
+        manifest["interpolate_pose"] = json!(false);
+        fs::write(
+            pose_dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let mut disabled = (0..5)
+            .map(|frame| json!({"frame":frame,"raw":{"poses":[]}}))
+            .collect::<Vec<_>>();
+        raw_window(&root, &fusion, 9, 0, 5, &mut disabled).unwrap();
+        assert_eq!(disabled[0]["raw"]["poses"][0]["keypoints"][0][0], 0.30);
+        assert_eq!(disabled[3]["raw"]["poses"][0]["keypoints"][0][0], 0.39);
+        assert!(disabled[1]["raw"].get("poses_interpolated").is_none());
+        assert!(disabled[2]["raw"].get("poses_interpolated").is_none());
+        let mut without_pose_gap = (0..5)
+            .map(|frame| {
+                json!({"frame":frame,
+                "players":[{"id":7,"box":[0.2,0.2,0.5,0.9]}]})
+            })
+            .collect::<Vec<_>>();
+        assert!(enrich_continuous(&root, &fusion, 0, 5, &mut without_pose_gap).unwrap());
+        assert!(without_pose_gap[1]["players"][0].get("pose").is_none());
+        assert!(without_pose_gap[2]["players"][0].get("pose").is_none());
+        assert!(without_pose_gap[3]["players"][0].get("pose").is_some());
         manifest["sha256"] = json!("0".repeat(64));
         fs::write(
             pose_dir.join("manifest.json"),

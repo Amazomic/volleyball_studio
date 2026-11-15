@@ -591,6 +591,7 @@ pub(crate) fn detect_stream(
         width,
         height,
         settings,
+        true,
         None,
         None,
         &[],
@@ -606,6 +607,7 @@ fn detect_stream_with_pose(
     width: u32,
     height: u32,
     settings: TouchSettings,
+    interpolate_players: bool,
     pose_source: Option<(&Path, &str)>,
     court: Option<&CourtTransform>,
     training: &[training_samples::Example],
@@ -669,7 +671,11 @@ fn detect_stream_with_pose(
             let clean = exclude_ball_teleports(&block, width, height);
             // Reconstruct bounded positions of existing tracked skeletons only.
             // The immutable replay and original GPU player detections remain unchanged.
-            let continuous = reconstruct_track_gaps(&clean);
+            let continuous = if interpolate_players {
+                reconstruct_track_gaps(&clean)
+            } else {
+                clean
+            };
             let filtered = if let Some(calibration) = court {
                 court_touch::filter_on_court(&continuous, calibration)
             } else {
@@ -965,6 +971,7 @@ pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, Api
             dimensions.width,
             dimensions.height,
             settings,
+            manifest["interpolate_players"].as_bool().unwrap_or(true),
             pose_requested.then_some((project_dir.as_path(), fusion_id.as_str())),
             court_calibration.as_ref().map(|value| &value.transform),
             &training_examples,
@@ -991,6 +998,7 @@ pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, Api
             "width":dimensions.width,"height":dimensions.height,"fps":30,
             "frames":frames,
             "settings":settings,
+            "interpolate_players":manifest["interpolate_players"].as_bool().unwrap_or(true),
             "court_revision":court_calibration.as_ref().map(|c| &c.revision),
             "court_context_enabled":court_calibration.is_some(),
             "motion_supported_proposals_before_dedup":raw,
@@ -1331,6 +1339,7 @@ mod tests {
                 algorithm: TouchAlgorithm::PoseMotion,
                 ..TouchSettings::default()
             },
+            true,
             Some((&root, &fusion)),
             None,
             &[],

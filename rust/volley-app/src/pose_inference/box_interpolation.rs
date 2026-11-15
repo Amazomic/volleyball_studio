@@ -206,6 +206,7 @@ pub(super) fn prepare(
     output: &Path,
     expected_source_sha256: &str,
     expected_frames: u64,
+    interpolate_players: bool,
     cancel: &AtomicBool,
     mut progress: impl FnMut(f64) -> Result<(), String>,
 ) -> Result<Summary, String> {
@@ -239,7 +240,11 @@ pub(super) fn prepare(
         }
         let detected = observed(&frame);
         anchors.retain(|a| frame_index.saturating_sub(a.frame) <= MAX_GAP);
-        let pairs = paired(&anchors, &detected, frame_index);
+        let pairs = if interpolate_players {
+            paired(&anchors, &detected, frame_index)
+        } else {
+            Vec::new()
+        };
         // Reserve the actual detections before adding inferred shapes, so
         // nearby real people always take precedence.
         pending.push_back(Frame {
@@ -325,6 +330,9 @@ mod tests {
         "head_point_norm":if head {json!([x+0.06,0.22])} else {Value::Null}})
     }
     fn run(frames: &[Vec<Value>]) -> Vec<Value> {
+        run_with_mode(frames, true)
+    }
+    fn run_with_mode(frames: &[Vec<Value>], interpolate_players: bool) -> Vec<Value> {
         let dir = std::env::temp_dir().join(format!("volley-pose-boxes-{}", Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
         let source = dir.join("fusion.jsonl");
@@ -344,6 +352,7 @@ mod tests {
             &output,
             &sha,
             frames.len() as u64,
+            interpolate_players,
             &AtomicBool::new(false),
             |_| Ok(()),
         )
@@ -373,6 +382,20 @@ mod tests {
         assert_eq!(rows[10]["observed_box_count"], 1);
         assert!(rows[11]["boxes"].as_array().unwrap().is_empty());
     }
+    #[test]
+    fn disabled_interpolation_keeps_only_measured_boxes() {
+        let mut samples = vec![Vec::new(); 15];
+        samples[0].push(candidate(0, 0.20, true));
+        samples[10].push(candidate(10, 0.25, true));
+        let rows = run_with_mode(&samples, false);
+        assert_eq!(rows[0]["observed_box_count"], 1);
+        assert_eq!(rows[10]["observed_box_count"], 1);
+        for row in rows.iter().take(10).skip(1) {
+            assert_eq!(row["interpolated_box_indices"], json!([]));
+            assert_eq!(row["boxes"], json!([]));
+        }
+    }
+
     #[test]
     fn one_missing_athlete_is_filled_while_another_is_observed() {
         let mut frames = vec![Vec::new(); 13];
@@ -435,6 +458,7 @@ mod tests {
             &dir.join("crops"),
             &"0".repeat(64),
             1,
+            true,
             &AtomicBool::new(false),
             |_| Ok(()),
         );
