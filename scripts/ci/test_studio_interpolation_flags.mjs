@@ -15,11 +15,9 @@ const slice=(begin,end)=>{
 };
 const values={
   "studio-gpu-stride":9,"studio-gpu-memory":0,"studio-gpu-threads":8,
-  "studio-gpu-pose-stride":3,
 };
 const boxes={
   "studio-gpu-pose-enabled":{value:"1"},
-  "studio-gpu-pose-mode":{value:"photo"},
   "studio-gpu-interpolate-players":{type:"checkbox",checked:true,dataset:{default:"1"},id:"studio-gpu-interpolate-players",checkValidity:()=>true},
   "studio-gpu-interpolate-pose":{type:"checkbox",checked:true,dataset:{default:"1"},id:"studio-gpu-interpolate-pose",checkValidity:()=>true}
 };
@@ -37,6 +35,8 @@ runInNewContext(slice("  const gpuProfile=()","  // Mirrors volley-core")+
 const api=context.api;
 assert.equal(api.gpuProfile().interpolate_players,true);
 assert.equal(api.gpuProfile().interpolate_pose,true);
+assert.equal(api.gpuProfile().pose_stride,10);
+assert.ok(html.indexOf('id="studio-gpu-interpolate-players"')>html.indexOf('id="studio-post-heading"'));
 boxes["studio-gpu-interpolate-players"].checked=false;
 api.saveAnalysisSettings();
 assert.equal(state.saved.fields["studio-gpu-interpolate-players"][1],"0");
@@ -50,4 +50,4 @@ boxes["studio-gpu-interpolate-pose"].checked=false;
 const gpu=api.gpuProfile();
 assert.equal(gpu.interpolate_players,true);
 assert.equal(gpu.interpolate_pose,false);
-console.log("GPU interpolation checkboxes: defaults, independent payload, persisted settings OK");
+console.log("CPU player interpolation and pose-preview interpolation: defaults and saved settings OK");

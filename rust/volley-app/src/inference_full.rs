@@ -326,7 +326,7 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
                 engine.detect_frames_sampled(
                     &window.data,
                     window.first_frame,
-                    10,
+                    volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES as u64,
                     |offset, poses| {
                         if context.cancelled.load(Ordering::Acquire) {
                             return Err("cancelled".into());
@@ -398,7 +398,9 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
                     "rfdetr_medium_18250b5a_detector_boxes_pose_deferred_3hz_v2",
             })
         } else { None },
-        "person_sampling_period_frames":if context.config.model == ModelKind::Players { 10 } else { 1 },
+        "person_sampling_period_frames":if context.config.model == ModelKind::Players {
+            volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES
+        } else { 1 },
         "provider":context.config.device,
         "source_identity":{"bytes":before.0,"mtime_ns":before.1},
         "fps":30,

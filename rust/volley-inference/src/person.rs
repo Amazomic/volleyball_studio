@@ -10,6 +10,7 @@ use ort::{
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+pub const PERSON_SAMPLE_PERIOD_FRAMES: usize = 10;
 pub const DETECTOR_FILE: &str = "RTMDet-Nano-Person.onnx";
 pub const DETECTOR_SHA256: &str =
     "b8585adb6d1352796f6e86337e09c3459b830645a7e7192d9381670bea2facbd";

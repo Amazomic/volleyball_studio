@@ -380,15 +380,8 @@
                                 </div>
                 <div><label class="field-label" for="studio-gpu-stride">Шаг окон, кадров</label>
                                   <input id="studio-gpu-stride" type="number" min="1" max="9" step="1" value="9" data-default="9"></div>
-                <div><label class="field-label" for="studio-gpu-pose-mode">RTMPose · режим анализа поз</label>
-                  <select id="studio-gpu-pose-mode" data-default="photo">
-                    <option value="photo">По фото · отдельные кадры</option>
-                    <option value="video">По видео · каждый кадр</option>
-                  </select></div>
-                <div id="studio-gpu-pose-step-field"><label class="field-label" for="studio-gpu-pose-stride">Шаг фото, кадров (1–30)</label>
-                  <input id="studio-gpu-pose-stride" type="number" min="1" max="30" step="1" value="3" data-default="3"></div>
-                <div class="analysis-profile-toggle"><label><input id="studio-gpu-interpolate-players" type="checkbox" checked data-default="1"> Интерполяция игроков</label></div>
-                <div class="analysis-profile-toggle"><label><input id="studio-gpu-interpolate-pose" type="checkbox" checked data-default="1"> Интерполяция позы</label></div>
+                <p class="panel-note">RF-DETR и RTMPose-M синхронизированы: каждые 10 кадров (3 раза/с). В первичном анализе используются только обнаруженные рамки.</p>
+                <div class="analysis-profile-toggle"><label><input id="studio-gpu-interpolate-pose" type="checkbox" checked data-default="1"> Интерполяция точек позы в предпросмотре</label></div>
               </div>
               <details class="analysis-profile-advanced">
                 <summary>Настройки GPU · дополнительно</summary>
@@ -468,6 +461,7 @@
                 <summary>Настройки постобработки · дополнительно</summary>
                 <div class="analysis-profile-subtitle">Игроки и позы</div>
                 <div class="analysis-profile-fields">
+                  <div class="analysis-profile-toggle"><label><input id="studio-gpu-interpolate-players" type="checkbox" checked data-default="1"> Интерполяция игроков в CPU</label></div>
                   <div>
                                   <label class="field-label" for="studio-post-pose-classify">Учитывать кисти, локти и плечи RTMPose</label>
                                   <select id="studio-post-pose-classify" data-default="1"><option value="1">Включено (геометрия — резерв)</option><option value="0">Только геометрия</option></select>

@@ -187,26 +187,16 @@
     }
     return value;
   };
-  const updatePoseMode=()=>{
-    const photo=$("studio-gpu-pose-mode").value==="photo";
-    $("studio-gpu-pose-step-field").classList.toggle("hidden",!photo);
-    $("studio-gpu-pose-stride").disabled=!photo;
-  };
-  const gpuProfile=()=>{
-    const poseMode=$("studio-gpu-pose-mode").value;
-    if(!["photo","video"].includes(poseMode))
-      throw Error("Выберите режим анализа поз");
-    return {
+  const gpuProfile=()=>({
       stride:inputValue("studio-gpu-stride"),
       gpu_memory_limit_mb:inputValue("studio-gpu-memory"),
       cpu_threads:inputValue("studio-gpu-threads"),
       pose_enabled:$("studio-gpu-pose-enabled").value==="1",
-      pose_mode:poseMode,
-      pose_stride:poseMode==="video"?1:inputValue("studio-gpu-pose-stride"),
+      pose_mode:"photo",
+      pose_stride:10,
       interpolate_players:$("studio-gpu-interpolate-players").checked,
       interpolate_pose:$("studio-gpu-interpolate-pose").checked
-    };
-  };
+  });
   // Mirrors volley-core's validated native defaults (no JS-only processing).
   const postProfile=()=>({
     pose_classification:$("studio-post-pose-classify").value==="1",
@@ -283,7 +273,6 @@
     }catch{return "";}
   };
   const updateProfile=()=>{
-    updatePoseMode();
     let gpuValid=true,postValid=true,invalid="";
     try{gpuProfile();}catch(e){gpuValid=false;invalid=String(e.message||e);}
     try{postProfile();}catch(e){postValid=false;invalid=String(e.message||e);}

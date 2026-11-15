@@ -408,7 +408,7 @@ impl Default for GpuProfile {
             cpu_threads: 8,
             pose_enabled: true,
             pose_mode: crate::pose_inference::PoseInputMode::Photo,
-            pose_stride: 3,
+            pose_stride: volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES,
             interpolate_players: true,
             interpolate_pose: true,
         }
@@ -772,8 +772,9 @@ fn gpu_lineage_valid(
                     .pose_mode
                     .effective_stride(request.gpu.pose_stride)
             || pose["pose_mode"].as_str().unwrap_or("photo") != request.gpu.pose_mode.name()
-            || pose["interpolate_players"].as_bool().unwrap_or(true)
-                != request.gpu.interpolate_players
+            || (saved["gpu_model_stack"] != requested_gpu_model_stack()
+                && pose["interpolate_players"].as_bool().unwrap_or(true)
+                    != request.gpu.interpolate_players)
             || pose["interpolate_pose"].as_bool().unwrap_or(true) != request.gpu.interpolate_pose
             || pose["project_id"] != request.project_id
             || pose["video"] != request.video
@@ -782,23 +783,13 @@ fn gpu_lineage_valid(
         {
             return false;
         }
-        // Old saved GPU runs remain selectable for CPU-only postprocessing.
-        // New full analyses must include the new pre-pose crop stage and
-        // never silently reuse a pose run from the old hold-last-box code.
         if saved["gpu_model_stack"] == requested_gpu_model_stack() {
-            let plan = project.join("native_gpu_pose_runs").join(pose_id);
-            if pose["crop_plan_version"]
-                != (if request.gpu.interpolate_players {
-                    "two_sided_box_interpolation_v1"
-                } else {
-                    "observations_only_v1"
-                })
-                || pose["crop_plan_file"] != "pose_crop_boxes.jsonl"
-                || pose["crop_plan_frames"] != fusion["emitted_frames"]
-                || pose["crop_plan_max_gap_frames"] != 120
-                || !valid_sha(&pose["crop_plan_sha256"])
-                || cpu_retrack::safe_file(&plan, "pose_crop_boxes.jsonl", MAX_SOURCE_EVIDENCE)
-                    .is_err()
+            if pose["box_source_version"] != "detector_observed_sampling_v1"
+                || pose["source_person_sampling_period_frames"]
+                    != volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES
+                || pose["interpolate_players"] != false
+                || pose["stride"] != volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES
+                || !pose["crop_plan_file"].is_null()
             {
                 return false;
             }
@@ -850,7 +841,7 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
     };
     track["schema"] == "volley-native-cpu-tracking/1"
         && track["state"] == "provisional_tracklets_rebuilt"
-        && track["interpolated_positions_version"] == (if saved["profile"]["gpu"]["interpolate_players"].as_bool().unwrap_or(true) {
+        && track["interpolated_positions_version"] == (if request.gpu.interpolate_players {
             "bounded_same_track_3s_v2"
         } else {
             "disabled_v1"
@@ -887,9 +878,9 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
         && rallies["project_id"] == request.project_id
         && rallies["video"] == request.video
 }
-const GPU_MODEL_STACK: &str = "vballnet_rtmdet_rtmpose_tiled_coco17_3hz_pose_boxes_v6";
+const GPU_MODEL_STACK: &str = "vballnet_rtmdet_rtmpose_tiled_coco17_3hz_observed_pose_v7";
 const RFDETR_GPU_MODEL_STACK: &str =
-    "vballnet_rfdetr_medium_18250b5a_detboxes_pose_deferred_3hz_v2";
+    "vballnet_rfdetr_medium_18250b5a_detboxes_aligned_observed_pose_v3";
 
 /// The GPU-evidence cache must not be shared by different detector weights
 /// or detector-to-pose box policies.
@@ -915,7 +906,10 @@ fn compatible_version(saved: &Value, request: &StartRequest, identity: &Value) -
         && saved["project_id"] == request.project_id
         && saved["video"] == request.video
         && serde_json::from_value::<GpuProfile>(saved["profile"]["gpu"].clone())
-            .is_ok_and(|gpu| json!(gpu) == json!(request.gpu))
+            .is_ok_and(|mut gpu| {
+                gpu.interpolate_players = request.gpu.interpolate_players;
+                json!(gpu) == json!(request.gpu)
+            })
         // Older pipeline status files can predate the source_identity field;
         // the fusion and both GPU manifests are always validated separately.
         && (saved["source_identity"].is_null() || saved["source_identity"] == *identity)
@@ -1318,6 +1312,7 @@ async fn pipeline(
         status["analysis_id"] = source["analysis_id"].clone();
         status["gpu_jobs"] = source["gpu_jobs"].clone();
         status["profile"]["gpu"] = source["profile"]["gpu"].clone();
+        status["profile"]["gpu"]["interpolate_players"] = json!(request.gpu.interpolate_players);
         status["gpu_reused"] = json!(true);
         status["reused_from_id"] = source["id"].clone();
         save(path, status)?;
@@ -1477,17 +1472,17 @@ async fn pipeline(
             return Err("cancelled".into());
         }
         let fusion_id = require_id(status, "analysis_id")?;
-        progress(path, status, "GPU · Интерполяция рамок", 82.0)?;
+        progress(path, status, "GPU · RTMPose-M: позы игроков", 82.0)?;
         log_native(
             path,
             "GPU · RTMPose-M",
             "pose_inference::process",
             json!({"fusion_id":fusion_id,"model":"RTMPose-M-Body7",
-                    "pose_mode":request.gpu.pose_mode.name(),
-                    "stride":request.gpu.pose_mode.effective_stride(request.gpu.pose_stride),
-                    "photo_stride":request.gpu.pose_stride,
-                    "threads":request.gpu.cpu_threads,"gpu_memory_limit_mb":request.gpu.gpu_memory_limit_mb,
-                    "interpolate_players":request.gpu.interpolate_players,"interpolate_pose":request.gpu.interpolate_pose}),
+                    "stride":volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES,
+                    "box_source":"observed_detector_only",
+                    "threads":request.gpu.cpu_threads,
+                    "gpu_memory_limit_mb":request.gpu.gpu_memory_limit_mb,
+                    "interpolate_pose":request.gpu.interpolate_pose}),
         )?;
         let _permit = app
             .inference_limit
@@ -1500,24 +1495,17 @@ async fn pipeline(
                 &request.project_id,
                 &request.video,
                 &fusion_id,
-                request.gpu.pose_mode,
-                request.gpu.pose_stride,
                 request.gpu.gpu_memory_limit_mb,
                 request.gpu.cpu_threads,
-                request.gpu.interpolate_players,
                 request.gpu.interpolate_pose,
                 cancel,
-                |phase, p| {
-                    if phase == "boxes" {
-                        progress(path, status, "GPU · Интерполяция рамок", 82.0 + p * 0.4)
-                    } else {
-                        progress(
-                            path,
-                            status,
-                            "GPU · RTMPose-M: позы игроков",
-                            82.4 + p * 2.1,
-                        )
-                    }
+                |_, p| {
+                    progress(
+                        path,
+                        status,
+                        "GPU · RTMPose-M: позы игроков",
+                        82.0 + p * 2.5,
+                    )
                 },
             )
         })?;
@@ -1528,8 +1516,8 @@ async fn pipeline(
             "GPU · RTMPose-M",
             "success",
             &format!(
-                "Позы сохранены: samples={}, players={}; рамок восстановлено={}",
-                pose["sampled_frames"], pose["player_poses"], pose["crop_plan_interpolated_boxes"]
+                "Позы сохранены: samples={}, players={}; рамки только RF-DETR",
+                pose["sampled_frames"], pose["player_poses"]
             ),
         )?;
     }
@@ -1846,6 +1834,15 @@ pub async fn start(
             "GPU-профиль вне допустимых диапазонов",
         ));
     }
+    if request.mode.allows_gpu_execution()
+        && request.gpu.pose_enabled
+        && (request.gpu.pose_mode != crate::pose_inference::PoseInputMode::Photo
+            || request.gpu.pose_stride != volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES)
+    {
+        return Err(storage::bad_request(
+            "RTMPose должен использовать те же кадры, что RF-DETR: шаг 10 (3 раза/с)",
+        ));
+    }
     request
         .post
         .tracking
@@ -2021,9 +2018,7 @@ fn stage_aware_remaining(current: &Value, history: &Value, now: u64) -> Option<u
         || name == "GPU · RF-DETR Medium"
     {
         Some(80.0)
-    } else if name == "GPU · Интерполяция рамок" {
-        Some(82.4)
-    } else if name == "GPU · RTMPose-M" {
+    } else if name == "GPU · RTMPose-M: позы игроков" || name == "GPU · RTMPose-M" {
         Some(84.5)
     } else {
         None
@@ -2236,6 +2231,42 @@ mod tests {
         assert!(other.interpolate_players);
         assert!(!other.interpolate_pose);
         assert_ne!(json!(other), json!(changed));
+    }
+
+    #[test]
+    fn gpu_defaults_match_person_detector_frame_sampling() {
+        let profile = GpuProfile::default();
+        assert_eq!(
+            profile.pose_stride,
+            volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES
+        );
+        assert_eq!(
+            profile.pose_mode,
+            crate::pose_inference::PoseInputMode::Photo
+        );
+        assert!(profile.interpolate_players);
+    }
+
+    #[test]
+    fn cpu_player_interpolation_is_not_a_gpu_cache_key() {
+        let identity = json!({"bytes":1234,"mtime_ns":5678});
+        let mut request: StartRequest = serde_json::from_value(json!({
+            "project_id":"abc123def456","video":"match.mp4"
+        }))
+        .unwrap();
+        let saved = json!({
+            "schema":SCHEMA,
+            "gpu_model_stack":requested_gpu_model_stack(),
+            "project_id":request.project_id,
+            "video":request.video,
+            "profile":{"gpu":request.gpu},
+            "source_identity":identity
+        });
+        assert!(compatible_version(&saved, &request, &identity));
+        request.gpu.interpolate_players = false;
+        assert!(compatible_version(&saved, &request, &identity));
+        request.gpu.interpolate_pose = false;
+        assert!(!compatible_version(&saved, &request, &identity));
     }
 
     #[test]
