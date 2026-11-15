@@ -319,17 +319,31 @@ pub async fn select_sources(
 /// Native desktop explorer: original files are only linked by absolute path,
 /// never uploaded or copied. The fixed PowerShell program has no user input.
 const PICK_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$owner = New-Object System.Windows.Forms.Form
+$owner.Text = 'Volleyball Studio'
+$owner.TopMost = $true
+$owner.ShowInTaskbar = $false
+$owner.Opacity = 0
+$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
 $d = New-Object System.Windows.Forms.OpenFileDialog
-$d.Title = 'Volleyball Studio — Quick Reel'
+$d.Title = 'Volleyball Studio — Выбор видео'
 $d.Filter = 'Video files|*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.mts'
 $d.Multiselect = $true
 $d.CheckFileExists = $true
-if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-    [Console]::Out.WriteLine((ConvertTo-Json -InputObject @($d.FileNames) -Compress))
-} else {
-    [Console]::Out.WriteLine('[]')
+try {
+    $owner.Show()
+    $owner.Activate()
+    if ($d.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+        [Console]::Out.WriteLine((ConvertTo-Json -InputObject @($d.FileNames) -Compress))
+    } else {
+        [Console]::Out.WriteLine('[]')
+    }
+} finally {
+    $d.Dispose()
+    $owner.Dispose()
 }
 "#;
 
