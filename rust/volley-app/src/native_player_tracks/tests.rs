@@ -63,7 +63,7 @@ fn photo_links_join_lost_tracks_without_real_co_visibility() {
 }
 
 #[test]
-fn overlapping_people_try_next_photo_match_above_threshold() {
+fn overlapping_people_do_not_fallback_to_weaker_athlete() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
     let mut ctx = context(&root, sha, tracks);
@@ -168,11 +168,11 @@ fn automatic_photo_links_enforce_threshold_and_conflicting_tracks() {
     assert_eq!(chosen.len(), 1);
     assert_eq!(chosen[&7], "abcdef012345");
     doc["excluded_ids"] = json!([7]);
-    let below = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.99}],"8":[{"player_id":"abcdef012345","cosine_similarity":0.30}]});
+    let below = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.99}],"8":[{"player_id":"abcdef012345","cosine_similarity":0.35 - 0.00001}]});
     assert!(choose_automatic_photo_links(&ctx, &doc, &below)
         .unwrap()
         .is_empty());
-    let above = json!({"8":[{"player_id":"abcdef012345","cosine_similarity":0.30001}]});
+    let above = json!({"8":[{"player_id":"abcdef012345","cosine_similarity":0.35001}]});
     assert_eq!(
         choose_automatic_photo_links(&ctx, &doc, &above)
             .unwrap()
