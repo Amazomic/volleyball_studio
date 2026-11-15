@@ -1,6 +1,3 @@
-//! RAVEL-free person observations: RTMDet-nano proposals confirmed by RTMPose.
-//! Tracking uses a box reconstructed from observed COCO17 joints, not the
-//! detector's preliminary bounding rectangle.
 use crate::{
     pose::{Keypoint, PoseEngine, KPT_COUNT},
     Device,
@@ -55,6 +52,10 @@ impl DetectorVariant {
                 )),
             },
         }
+    }
+
+    fn needs_pose_in_gpu_evidence(self) -> bool {
+        self == Self::RtmDetNano
     }
 
     fn file(self) -> &'static str {
@@ -193,7 +194,7 @@ fn same_person_box(a: [f64; 4], b: [f64; 4]) -> bool {
 
 pub struct PersonEngine {
     detector: Session,
-    pose: PoseEngine,
+    pose: Option<PoseEngine>,
     variant: DetectorVariant,
 }
 impl PersonEngine {
@@ -212,6 +213,23 @@ impl PersonEngine {
         )
     }
 
+    pub fn load_for_gpu_evidence(
+        repo: &Path,
+        device: Device,
+        threads: usize,
+        memory_mb: u64,
+    ) -> Result<Self, String> {
+        let variant = DetectorVariant::from_env()?;
+        Self::load_with_pose_policy(
+            repo,
+            device,
+            threads,
+            memory_mb,
+            variant,
+            variant.needs_pose_in_gpu_evidence(),
+        )
+    }
+
     /// Explicit selection for controlled experiments; default RTMDet remains unchanged.
     pub fn load_with_detector(
         repo: &Path,
@@ -219,6 +237,17 @@ impl PersonEngine {
         threads: usize,
         memory_mb: u64,
         variant: DetectorVariant,
+    ) -> Result<Self, String> {
+        Self::load_with_pose_policy(repo, device, threads, memory_mb, variant, true)
+    }
+
+    fn load_with_pose_policy(
+        repo: &Path,
+        device: Device,
+        threads: usize,
+        memory_mb: u64,
+        variant: DetectorVariant,
+        with_pose: bool,
     ) -> Result<Self, String> {
         if !(1..=128).contains(&threads) || memory_mb > 131072 {
             return Err("Invalid person inference resource settings".into());
@@ -297,7 +326,11 @@ impl PersonEngine {
                 variant.file()
             ));
         }
-        let pose = PoseEngine::load(repo, device, threads, memory_mb)?;
+        let pose = if with_pose {
+            Some(PoseEngine::load(repo, device, threads, memory_mb)?)
+        } else {
+            None
+        };
         Ok(Self {
             detector,
             pose,
@@ -407,7 +440,11 @@ impl PersonEngine {
         }
         let proposals = decode_rfdetr_medium(boxes, logits)?;
         drop(outputs);
-        self.collect_observations(rgb, proposals)
+        if self.pose.is_some() {
+            self.collect_observations(rgb, proposals)
+        } else {
+            Ok(rfdetr_detector_observations(proposals))
+        }
     }
 
     fn detect_prepared(
@@ -472,9 +509,6 @@ impl PersonEngine {
         mut proposals: Vec<(f32, [f64; 4])>,
     ) -> Result<Vec<PersonObservation>, String> {
         proposals.sort_by(|a, b| b.0.total_cmp(&a.0));
-        // RF-DETR's set-based head already gives one query per proposal.
-        // Preserve its candidate rectangles here: additional RTMDet-style
-        // IoU NMS fragmented the native RF-DETR benchmark.
         let mut distinct: Vec<(f32, [f64; 4])> = Vec::new();
         for candidate in proposals {
             if self.variant == DetectorVariant::RfDetrMedium
@@ -502,20 +536,22 @@ impl PersonEngine {
                 })
                 .collect();
             let crops: Vec<_> = valid.iter().map(|(_, crop)| *crop).collect();
-            let poses = match self.pose.infer_batch(rgb, &crops) {
+            let pose_result = self
+                .pose
+                .as_mut()
+                .ok_or("Person engine missing requested pose model")?
+                .infer_batch(rgb, &crops);
+            let poses = match pose_result {
                 Ok(poses) => poses,
-                Err(_) if self.variant == DetectorVariant::RfDetrMedium => {
-                    // Keep RF-DETR's object observations when pose inference
-                    // fails; unknown joints must not synthesize body events.
-                    vec![
-                        [Keypoint {
-                            x: 0.0,
-                            y: 0.0,
-                            score: 0.0
-                        }; KPT_COUNT];
-                        crops.len()
-                    ]
-                }
+                Err(_) if self.variant == DetectorVariant::RfDetrMedium => vec![
+                    [Keypoint {
+                        x: 0.0,
+                        y: 0.0,
+                        score: 0.0,
+                    };
+                        KPT_COUNT];
+                    crops.len()
+                ],
                 Err(error) => return Err(error),
             };
             for ((det_score, crop), keypoints) in valid.into_iter().zip(poses) {
@@ -535,8 +571,6 @@ impl PersonEngine {
                         .flatten()
                 });
                 let (bbox, pose_score) = match (self.variant, skeleton) {
-                    // Use native detector boxes for continuity. Pose keypoints
-                    // remain optional evidence, not a visibility requirement.
                     (DetectorVariant::RfDetrMedium, confirmed) => {
                         (crop, confirmed.map_or(0.0, |(_, score)| score))
                     }
@@ -553,8 +587,6 @@ impl PersonEngine {
                 let observation = PersonObservation {
                     bbox,
                     score: if self.variant == DetectorVariant::RfDetrMedium {
-                        // A valid RF-DETR rectangle must not disappear merely
-                        // because RTMPose found no convincing joints.
                         det_score.max(pose_score).clamp(0.0, 1.0)
                     } else {
                         (0.35 * det_score + 0.65 * pose_score).clamp(0.0, 1.0)
@@ -580,6 +612,27 @@ impl PersonEngine {
         }
         Ok(results)
     }
+}
+
+fn rfdetr_detector_observations(mut candidates: Vec<(f32, [f64; 4])>) -> Vec<PersonObservation> {
+    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+    candidates
+        .into_iter()
+        .filter(|(score, bbox)| {
+            score.is_finite()
+                && *score >= RFDETR_MIN_SCORE
+                && bbox.iter().all(|value| value.is_finite())
+                && (bbox[2] - bbox[0]) * W as f64 >= 8.0
+                && (bbox[3] - bbox[1]) * H as f64 >= 20.0
+        })
+        .take(MAX_PERSONS)
+        .map(|(score, bbox)| PersonObservation {
+            bbox,
+            score,
+            head: None,
+            keypoints: [[0.0; 3]; KPT_COUNT],
+        })
+        .collect()
 }
 
 /// Decode the vetted RF-DETR Medium sparse COCO head: 300 cxcywh boxes
@@ -717,6 +770,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![2]
         );
+    }
+
+    #[test]
+    fn rfdetr_full_gpu_evidence_defers_pose_while_other_entrypoints_keep_it() {
+        assert!(!DetectorVariant::RfDetrMedium.needs_pose_in_gpu_evidence());
+        assert!(DetectorVariant::RtmDetNano.needs_pose_in_gpu_evidence());
+    }
+
+    #[test]
+    fn rfdetr_detection_returns_boxes_without_recomputing_or_inventing_pose() {
+        let primary = [0.1, 0.1, 0.3, 0.7];
+        let observations = rfdetr_detector_observations(vec![
+            (0.4, [0.5, 0.5, 0.505, 0.6]),
+            (0.5, [0.4, 0.2, 0.6, 0.9]),
+            (0.9, primary),
+            (f32::NAN, primary),
+        ]);
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].bbox, primary);
+        assert_eq!(observations[0].score, 0.9);
+        for observation in &observations {
+            assert!(observation.head.is_none());
+            assert_eq!(observation.keypoints, [[0.0; 3]; KPT_COUNT]);
+        }
     }
 
     #[test]
@@ -873,7 +950,7 @@ mod tests {
                     if !(0.37..=0.52).contains(&cx) {
                         continue;
                     }
-                    let pose = engine.pose.infer(&rgb, bb).unwrap();
+                    let pose = engine.pose.as_mut().unwrap().infer(&rgb, bb).unwrap();
                     let confirmed = skeleton_box(&pose);
                     let strong = pose
                         .iter()

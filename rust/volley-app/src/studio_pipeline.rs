@@ -880,13 +880,13 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
 }
 const GPU_MODEL_STACK: &str = "vballnet_rtmdet_rtmpose_tiled_coco17_3hz_pose_boxes_v6";
 const RFDETR_GPU_MODEL_STACK: &str =
-    "vballnet_rfdetr_medium_18250b5a_rtmpose_detboxes_coco17_3hz_v1";
+    "vballnet_rfdetr_medium_18250b5a_detboxes_pose_deferred_3hz_v2";
 
 /// The GPU-evidence cache must not be shared by different detector weights
 /// or detector-to-pose box policies.
 fn person_detector_label() -> &'static str {
     match volley_inference::person::DetectorVariant::from_env() {
-        Ok(volley_inference::person::DetectorVariant::RfDetrMedium) => "RF-DETR Medium + RTMPose",
+        Ok(volley_inference::person::DetectorVariant::RfDetrMedium) => "RF-DETR Medium",
         Ok(volley_inference::person::DetectorVariant::RtmDetNano) => "RTMDet + RTMPose",
         Err(_) => "Детектор игроков + RTMPose",
     }
@@ -1390,7 +1390,10 @@ async fn pipeline(
                 path,
                 "Первичный анализ",
                 "info",
-                "Совпадающего GPU-профиля нет, VBallNet и RTMDet + RTMPose",
+                &format!(
+                    "Совпадающего GPU-профиля нет, VBallNet и {}",
+                    person_detector_label()
+                ),
             )?;
             let ball = gpu(
                 app,
@@ -1422,12 +1425,7 @@ async fn pipeline(
                 return Err("cancelled".into());
             }
 
-            progress(
-                path,
-                status,
-                "Постобработка · VBallNet и скелеты игроков",
-                82.0,
-            )?;
+            progress(path, status, "Объединение · VBallNet и рамки игроков", 82.0)?;
             log_native(
                 path,
                 "Объединение GPU",
@@ -2005,7 +2003,10 @@ fn stage_aware_remaining(current: &Value, history: &Value, now: u64) -> Option<u
         Some(8.0)
     } else if name == "GPU · VballNet" {
         Some(44.0)
-    } else if name == "GPU · RTMDet + RTMPose" || name == "GPU · RF-DETR Medium + RTMPose" {
+    } else if name == "GPU · RTMDet + RTMPose"
+        || name == "GPU · RF-DETR Medium + RTMPose"
+        || name == "GPU · RF-DETR Medium"
+    {
         Some(80.0)
     } else if name == "GPU · Интерполяция рамок" {
         Some(82.4)
