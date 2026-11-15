@@ -1,6 +1,6 @@
 //! Offline detector-swap experiment, not part of running Studio:
-//! SAM 3.1 masks -> person boxes -> RTMPose -> existing Rust tracker.
-//! SAM's native IDs are deliberately NOT used for association here.
+//! Any detector boxes (SAM 3.1 / RF-DETR) -> RTMPose -> existing Rust tracker.
+//! Source proposal IDs are deliberately NOT used for association here.
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -18,12 +18,12 @@ use volley_core::{
 use volley_inference::{person::skeleton_box, pose::PoseEngine, Device};
 
 #[derive(Deserialize)]
-struct SamFrame {
+struct ProposalFrame {
     frame: u64,
-    tracks: Vec<SamTrack>,
+    tracks: Vec<Proposal>,
 }
 #[derive(Deserialize)]
-struct SamTrack {
+struct Proposal {
     id: u64,
     bbox: [f64; 4],
 }
@@ -46,21 +46,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .next()
         .ok_or("need source repo directory with model weights")?;
     let video = args.next().ok_or("need exact sample MP4")?;
-    let sam_path = args.next().ok_or("need SAM native track output JSONL")?;
+    let proposals_path = args.next().ok_or("need detector proposals JSONL")?;
     let output = args.next().ok_or("need output JSONL")?;
     let checksum = fingerprint(Path::new(&video))?;
-    let upstream = Path::new(&sam_path).with_extension("stats.json");
+    let upstream = Path::new(&proposals_path).with_extension("stats.json");
     let mut upstream_seconds = None;
+    let mut upstream_model = "unknown_detector".to_owned();
     if upstream.is_file() {
         let meta: serde_json::Value = serde_json::from_reader(File::open(&upstream)?)?;
         if meta["video_sha256"].as_str() != Some(checksum.as_str()) {
-            return Err("SAM JSONL metadata video hash differs from current video".into());
+            return Err("Detector JSONL metadata video hash differs from current video".into());
         }
         upstream_seconds = meta["inference_seconds"].as_f64();
+        upstream_model = meta["model"]
+            .as_str()
+            .unwrap_or("unknown_detector")
+            .to_owned();
     }
     let mut pose = PoseEngine::load(Path::new(&repo), Device::Cuda, 8, 0)?;
     let mut tracker = ProvisionalTracker::new(TrackingOptions::default())?;
-    let mut sam_frames = BufReader::new(File::open(&sam_path)?).lines();
+    let mut proposals_frames = BufReader::new(File::open(&proposals_path)?).lines();
     let mut ffmpeg = Command::new("ffmpeg")
         .args([
             "-hide_banner",
@@ -95,12 +100,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(e.into()),
         }
-        let json = sam_frames
+        let json = proposals_frames
             .next()
-            .ok_or("SAM output ends before video ends")??;
-        let detected: SamFrame = serde_json::from_str(&json)?;
+            .ok_or("Detector output ends before video ends")??;
+        let detected: ProposalFrame = serde_json::from_str(&json)?;
         if detected.frame != count {
-            return Err(format!("SAM frame index mismatch: {} != {count}", detected.frame).into());
+            return Err(format!(
+                "Detector frame index mismatch: {} != {count}",
+                detected.frame
+            )
+            .into());
         }
         let mut candidates = Vec::new();
         for (index, item) in detected.tracks.into_iter().enumerate() {
@@ -134,7 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             // Source ID deliberately ignored: use identical Rust tracker as baseline.
-            let _source_sam_id = item.id;
+            let _source_proposal_id = item.id;
             candidates.push(Candidate {
                 frame_index: count,
                 class_name: "player".to_owned(),
@@ -167,15 +176,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     writer.flush()?;
     drop(reader);
     let exit = ffmpeg.wait()?;
-    if !exit.success() || sam_frames.next().is_some() || count == 0 {
-        return Err("video decoder error or SAM/MP4 frame mismatch".into());
+    if !exit.success() || proposals_frames.next().is_some() || count == 0 {
+        return Err("video decoder error or Detector/MP4 frame mismatch".into());
     }
     let pose_seconds = started.elapsed().as_secs_f64();
     let total_seconds = upstream_seconds.map(|secs| secs + pose_seconds);
     let report = serde_json::json!({
-        "model": "SAM3.1-proposals+RTMPose+ProvisionalTracker",
+        "model": format!("{upstream_model}+RTMPose+ProvisionalTracker"),
         "frames": count, "video_sha256": checksum, "video": video,
-        "source_sam_jsonl": sam_path,
+        "source_proposals_jsonl": proposals_path,
         "sam_proposals": proposals,
         "pose_without_confident_skeleton": missing_skeleton,
         "pose_errors": pose_errors,

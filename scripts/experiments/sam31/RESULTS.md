@@ -30,7 +30,7 @@ These are unsupervised diagnostics, NOT proven player recall, precision or ident
 
 - scripts/experiments/sam31/run_sam31.py: official SAM 3.1 predictor wrapper, syntax verified, not executed because checkpoint is gated
 - rust/volley-app/examples/bench_person_tracks.rs: Rust baseline, release compiled, real CUDA inference succeeded
-- rust/volley-app/examples/bench_sam_as_detector.rs: SAM bbox -> RTMPose -> same Rust tracking, release compiled. Compatibility tested on 180 frames using COPIED BASELINE BOXES, NOT actual SAM output.
+- rust/volley-app/examples/bench_detector_swap.rs: SAM bbox -> RTMPose -> same Rust tracking, release compiled. Compatibility tested on 180 frames using COPIED BASELINE BOXES, NOT actual SAM output.
 - scripts/experiments/sam31/compare_tracking.py: frame-level diagnostics, three unit tests pass
 
 The mock adapter smoke test needed 4.948 seconds for 732 RTMPose candidates, 180 frames. This is NOT SAM model time or SAM speed, so it is not reported in the comparison table.

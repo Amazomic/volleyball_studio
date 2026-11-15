@@ -52,7 +52,7 @@ The additional experimental variant uses SAM 3.1 person proposals INSTEAD OF RTM
 
     # Source same ONNX Runtime CUDA environment used in normal Studio.
     source "$source_repo/scripts/setup_rust_ort_cuda.sh" check
-    ~/.cargo/bin/cargo run --manifest-path "$repo/rust/Cargo.toml" -p volley-app --release --offline --example bench_sam_as_detector -- "$source_repo" /tmp/volley-sam31/sample_640x360.mp4 /tmp/volley-sam31/sam31.jsonl /tmp/volley-sam31/sam_pose.jsonl
+    ~/.cargo/bin/cargo run --manifest-path "$repo/rust/Cargo.toml" -p volley-app --release --offline --example bench_detector_swap -- "$source_repo" /tmp/volley-sam31/sample_640x360.mp4 /tmp/volley-sam31/sam31.jsonl /tmp/volley-sam31/sam_pose.jsonl
 
     python3 "$repo/scripts/experiments/sam31/compare_tracking.py" --baseline /tmp/volley-sam31/base.jsonl --sam31 /tmp/volley-sam31/sam_pose.jsonl --expected-persons 4
 
@@ -63,3 +63,41 @@ For real model inference, obtain approval and sign in to Hugging Face on the hos
 There must be an approved token in the WSL environment where SAM is run; HTTP 401 means weights are not available. Do not share token values. Results from a mock bbox adapter cannot be used as SAM performance figures.
 
 Results to date: scripts/experiments/sam31/RESULTS.md
+
+
+## RF-DETR Small and Medium (NO gated weights)
+
+Both use Roboflow's Apache-2.0 weights, automatically downloaded on first run. Unlike SAM 3.1 they provide person detections, not stable IDs. Run these proposals through native RTMPose and Rust ProvisionalTracker to measure continuity and unique IDs.
+
+All paths below are in WSL:
+
+    repo=/mnt/c/Users/amazomic/AppData/Local/SentinelX/workspace/volley-sam31-experiment
+    source_repo=/mnt/c/Users/amazomic/Desktop/github/fast-volleyball-tracking-inference
+    video=/tmp/volley-sam31/sample_640x360.mp4
+
+The experiment's isolated Python environment is /tmp/volley-rfdetr-venv, created with:
+
+    ~/.local/bin/uv venv --python 3.12 /tmp/volley-rfdetr-venv
+    ~/.local/bin/uv pip install --python /tmp/volley-rfdetr-venv/bin/python --torch-backend auto rfdetr opencv-python-headless
+
+Run sequentially, not together (GPU interference):
+
+    /tmp/volley-rfdetr-venv/bin/python "$repo/scripts/experiments/sam31/run_rfdetr.py" --model small --video "$video" --output /tmp/volley-sam31/rfdetr_small.jsonl
+    /tmp/volley-rfdetr-venv/bin/python "$repo/scripts/experiments/sam31/run_rfdetr.py" --model medium --video "$video" --output /tmp/volley-sam31/rfdetr_medium.jsonl
+
+Run the SAME pose+tracker as baseline:
+
+    source "$source_repo/scripts/setup_rust_ort_cuda.sh" check
+    export CARGO_TARGET_DIR=/tmp/volley-sam31-build
+    ~/.cargo/bin/cargo run --manifest-path "$repo/rust/Cargo.toml" -p volley-app --release --offline --example bench_detector_swap -- "$source_repo" "$video" /tmp/volley-sam31/rfdetr_small.jsonl /tmp/volley-sam31/rfdetr_small_pose.jsonl
+    ~/.cargo/bin/cargo run --manifest-path "$repo/rust/Cargo.toml" -p volley-app --release --offline --example bench_detector_swap -- "$source_repo" "$video" /tmp/volley-sam31/rfdetr_medium.jsonl /tmp/volley-sam31/rfdetr_medium_pose.jsonl
+
+Compare all outputs:
+
+    python3 "$repo/scripts/experiments/sam31/compare_variants.py" \
+      --baseline /tmp/volley-sam31/base.jsonl \
+      --candidate RF-DETR-Small=/tmp/volley-sam31/rfdetr_small_pose.jsonl \
+      --candidate RF-DETR-Medium=/tmp/volley-sam31/rfdetr_medium_pose.jsonl \
+      --output /tmp/volley-sam31/all_models.json
+
+Interpretation: raw RF-DETR id is only a per-frame proposal index, not an athlete ID. The final file's Rust tracker IDs are counted. RF-DETR keeps detector boxes even when RTMPose skeleton is incomplete; the current baseline drops low-quality skeleton boxes. This is a combined detector/pose-gating comparison, not strictly one-variable. Accurate ID-switch rate/recall needs manual annotations.
