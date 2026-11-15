@@ -9,7 +9,7 @@ assert.ok(start>=0&&end>start);
 const calls=[],messages=[];
 const state={project:"p",video:"match.mp4",replay:"r",rallyRun:"run",sourceSha:"a".repeat(64),
   busy:false,rosterBusy:false,projectPlayerIds:new Set(["player"]),photoIndices:new Map([[7,2]])};
-const context={state,edit:async(action,ids,player)=>{calls.push({action,ids,player});return true;},
+const context={state,unlock:()=>{},edit:async(action,ids,player)=>{calls.push({action,ids,player});return true;},
   post:async(url,body)=>{calls.push({url,body});return {revision:"rev"};},
   note:(message,error)=>messages.push({message,error}),
   window:{dispatchEvent(){}},Event:class {}};
