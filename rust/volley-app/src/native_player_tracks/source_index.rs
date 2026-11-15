@@ -143,16 +143,36 @@ fn observe_track(
     }
     record.last = frame_idx;
     record.observed += 1;
-    if record.photo_samples.is_empty() || frame_idx.is_multiple_of(6) {
-        let sample = PhotoSample {
-            frame: frame_idx,
-            bbox: tracked.detection.bbox_xyxy_norm,
-        };
-        if record.photo_samples.len() < 12 {
-            record.photo_samples.push(sample);
-        } else {
-            let slot = (frame_idx / 6 % 12) as usize;
-            record.photo_samples[slot] = sample;
+    // Keep the first and latest real observations, plus a bounded
+    // deterministic reservoir of intermediate crops. A rotating 12-slot
+    // buffer only represented the *end* of long tracks, making three temporal
+    // samples falsely appear to come from different parts of a track.
+    let sample = PhotoSample {
+        frame: frame_idx,
+        bbox: tracked.detection.bbox_xyxy_norm,
+    };
+    if record.photo_samples.is_empty() {
+        record.photo_samples.push(sample.clone());
+        record.photo_samples.push(sample);
+    } else {
+        record.photo_samples[1] = sample.clone();
+        if frame_idx.is_multiple_of(6) {
+            const INTERMEDIATE_LIMIT: usize = 13;
+            if record.photo_samples.len() < INTERMEDIATE_LIMIT + 2 {
+                record.photo_samples.push(sample);
+            } else {
+                // Reservoir replacement keeps early/middle/late observations
+                // eligible without growing memory with video duration.
+                let sampled_count = (record.observed / 6).max(INTERMEDIATE_LIMIT as u64);
+                let hash = frame_idx
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    .rotate_left(17)
+                    ^ tracked.track_id.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                let slot = (hash % sampled_count) as usize;
+                if slot < INTERMEDIATE_LIMIT {
+                    record.photo_samples[slot + 2] = sample;
+                }
+            }
         }
     }
     if tracked.detection.score > record.best_score {
