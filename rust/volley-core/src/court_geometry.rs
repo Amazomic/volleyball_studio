@@ -33,8 +33,12 @@ impl CourtContactEvidence {
             && self.y_m.abs() <= COURT_WIDTH_M / 2.0 + ON_COURT_WIDTH_MARGIN_M + 1e-6
             // Side is median-stabilized across each provisional track.
             && self.near_net == (self.x_m.abs() <= BLOCK_NEAR_NET_M)
-            && self.in_serve_zone
+            // Historical CPU Touch snapshots used 1.2 m of inside-line
+            // tolerance. Keep them readable; new estimates use 0.35 m.
+            && (self.in_serve_zone
                 == (self.x_m.abs() >= COURT_LENGTH_M / 2.0 - SERVE_ZONE_MARGIN_M)
+                || (self.in_serve_zone
+                    && self.x_m.abs() >= COURT_LENGTH_M / 2.0 - 1.2))
     }
 }
 
@@ -225,7 +229,10 @@ mod tests {
         assert_eq!(server.side, CourtSide::Near);
         assert!(server.in_serve_zone);
         assert!(!server.near_net);
-        assert!(!h.evidence_for_feet([0.125, 0.5]).unwrap().in_serve_zone);
+        let mut legacy = h.evidence_for_feet([0.125, 0.5]).unwrap();
+        assert!(!legacy.in_serve_zone);
+        legacy.in_serve_zone = true;
+        assert!(legacy.valid()); // Saved snapshots from the previous serve-zone threshold.
         assert!(h.evidence_for_feet([-0.08, 0.5]).unwrap().in_serve_zone); // 4m behind end line
         assert!(h.evidence_for_feet([0.98, 0.5]).is_some()); // 1.8 m outside end line
         assert!(h.evidence_for_feet([1.3, 0.5]).is_none());
