@@ -366,30 +366,28 @@
         <section id="studio-analysis-view" class="hidden tab-workspace" aria-labelledby="studio-analysis-heading">
           <p id="studio-analysis-heading" class="eyebrow">02 / ПОЛНЫЙ ЦИКЛ</p>
           <div class="analysis-profile-grid">
-            <section class="analysis-profile-card" aria-labelledby="studio-primary-heading">
+            <section class="analysis-profile-card analysis-primary" aria-labelledby="studio-primary-heading">
               <div class="analysis-profile-heading">
                 <span class="analysis-profile-number">01</span>
-                <div><h2 id="studio-primary-heading">Первичный анализ</h2>
-                  <p>VBallNet · мяч; RTMDet + RTMPose · игроки и скелеты.</p></div>
+                <div class="analysis-primary-title"><h2 id="studio-primary-heading">Первичный анализ</h2>
+                  <button class="analysis-help" type="button" aria-label="О первичном анализе" aria-describedby="studio-primary-help">i<span id="studio-primary-help" class="analysis-tooltip" role="tooltip">VBallNet определяет мяч. <span id="studio-primary-person-model">Детектор игроков + RTMPose</span> определяет игроков и скелеты. Результат сохраняется для повторной постобработки.</span></button></div>
                 <button id="studio-analysis-gpu-only" class="primary analysis-stage-launch" type="button" title="Запустить только GPU и создать отдельную версию первичного анализа">▶ Начать анализ</button>
               </div>
               <div class="analysis-profile-fields analysis-profile-core">
                 <div class="analysis-profile-source">
-                                  <label class="field-label" for="studio-analysis-video">Исходное видео нового анализа</label>
+                                  <label class="field-label" for="studio-analysis-video">Исходное видео</label>
                                   <select id="studio-analysis-video"><option value="">Выберите проект</option></select>
                                 </div>
-                <div><label class="field-label" for="studio-gpu-stride">Шаг окон, кадров</label>
+                <div><div class="analysis-field-heading"><label class="field-label" for="studio-gpu-stride">Шаг анализа мяча</label><button class="analysis-help" type="button" aria-label="О шаге анализа мяча" aria-describedby="studio-ball-step-help">i<span id="studio-ball-step-help" class="analysis-tooltip" role="tooltip">Шаг окон VBallNet в кадрах: от 1 до 9. Меньший шаг увеличивает перекрытие окон и время анализа.</span></button></div>
                                   <input id="studio-gpu-stride" type="number" min="1" max="9" step="1" value="9" data-default="9"></div>
                 <div>
-                  <label class="field-label" for="studio-gpu-person-stride">RF-DETR + RTMPose-M · определять каждый N-й кадр</label>
+                  <div class="analysis-field-heading"><label class="field-label" for="studio-gpu-person-stride">Игроки и позы · шаг, кадров</label><button class="analysis-help" type="button" aria-label="О частоте определения игроков и поз" aria-describedby="studio-person-step-help">i<span id="studio-person-step-help" class="analysis-tooltip" role="tooltip">Детектор игроков и RTMPose работают на одних кадрах, по реальным рамкам детектора. Промежуточные кадры не передаются в эти нейросети.<span id="studio-gpu-person-rate" class="analysis-tooltip-rate" role="status" aria-live="polite">Видео: 30 кадров в секунду (30 FPS). Каждый 10-й кадр → 3 раза/с.</span></span></button></div>
                   <input id="studio-gpu-person-stride" type="number" min="1" max="30" step="1" value="10" data-default="10" aria-describedby="studio-gpu-person-rate">
-                  <p id="studio-gpu-person-rate" class="panel-note" role="status" aria-live="polite">Видео: 30 кадров в секунду (30 FPS). Каждый 10-й кадр → 3 раза/с.</p>
                 </div>
-                <p class="panel-note">Игроки и позы определяются на одних и тех же кадрах, по реальным рамкам детектора. Промежуточные кадры не передаются в эти нейросети.</p>
-                <div class="analysis-profile-toggle"><label><input id="studio-gpu-interpolate-pose" type="checkbox" checked data-default="1"> Интерполяция точек позы в предпросмотре</label></div>
+                <div class="analysis-profile-toggle analysis-primary-interpolation"><label><input id="studio-gpu-interpolate-pose" type="checkbox" checked data-default="1"> Плавные скелеты в предпросмотре</label><button class="analysis-help" type="button" aria-label="Об интерполяции поз" aria-describedby="studio-pose-interpolation-help">i<span id="studio-pose-interpolation-help" class="analysis-tooltip" role="tooltip">Интерполяция точек позы между измерениями делает движение скелетов плавнее в предпросмотре. Дополнительный запуск нейросети не требуется.</span></button></div>
               </div>
               <details class="analysis-profile-advanced">
-                <summary>Настройки GPU · дополнительно</summary>
+                <summary>Дополнительные настройки</summary>
                 <div class="analysis-profile-fields">
                   <div><label class="field-label" for="studio-gpu-pose-enabled">RTMPose-M · анализ поз игроков</label>
                                     <select id="studio-gpu-pose-enabled" data-default="1"><option value="1">Включён</option><option value="0">Выключен</option></select></div>
