@@ -989,10 +989,20 @@
   const autoAssignSimilar=async()=>{
     if(!reviewReady()||state.busy||!state.writable||!state.comparisonIds.size)return;
     const scope=reviewScope(),token=state.token;
+    const algorithm=document.getElementById("studio-post-identity-algorithm")?.value||"three_sample_mean";
+    const threshold_percent=Number(document.getElementById("studio-post-identity-threshold")?.value??35);
+    if(algorithm==="disabled"){
+      reviewNote("Автопривязка выключена в параметрах постобработки.",true);return;
+    }
+    if(!Number.isInteger(threshold_percent)||threshold_percent<1||threshold_percent>99){
+      reviewNote("Недопустимый порог сходства игроков.",true);return;
+    }
     state.busy=true;unlock();reidUnlock();
     galleryStatus.textContent="Сопоставляем похожие ID с фотографиями игроков…";
     try{
-      const result=await post("/api/players/native/reid-review",{...scope,action:"auto_assign"});
+      const result=await post("/api/players/native/reid-review",{
+        ...scope,action:"auto_assign",algorithm,threshold_percent
+      });
       if(token!==state.token||scope.replay_id!==state.replay)return;
       if(!Number.isSafeInteger(result.automatic_count)||result.automatic_count<0 ||
          !result.automatic_assignments||typeof result.automatic_assignments!=="object")
