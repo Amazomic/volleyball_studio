@@ -428,6 +428,21 @@
                 <div><label class="field-label" for="studio-post-max-gap">Восстановление Track ID, кадров (90 = 3 сек)</label><input id="studio-post-max-gap" type="number" min="90" max="180" step="1" value="90" data-default="90"></div>
                 <div><label class="field-label" for="studio-post-min-track-frames">Мин. кадров для подтверждения ID</label><input id="studio-post-min-track-frames" type="number" min="6" max="90" step="1" value="12" data-default="12" title="ID с меньшим числом реальных обнаружений удаляется из CPU-результата"></div>
               </div>
+              <div class="analysis-profile-subtitle">Автопривязка Track ID к игрокам</div>
+              <div class="analysis-profile-fields">
+                <div>
+                  <label class="field-label" for="studio-post-identity-algorithm">Алгоритм сопоставления фотографий</label>
+                  <select id="studio-post-identity-algorithm" data-default="three_sample_mean">
+                    <option value="three_sample_mean">3 кадра из разных частей трека — среднее ReID</option>
+                    <option value="single_best">1 лучший кадр (быстрее)</option>
+                    <option value="disabled">Выключено (только вручную)</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="studio-post-identity-threshold">Мин. сходство с игроком, %</label>
+                  <input id="studio-post-identity-threshold" type="number" min="1" max="99" step="1" value="35" data-default="35" title="Косинусное сходство, не вероятность идентичности. Ниже порога ID остаётся неподтверждённым.">
+                </div>
+              </div>
               <div class="analysis-profile-subtitle">Касания мяча</div>
               <div class="analysis-profile-fields">
                 <div><label class="field-label" for="studio-post-touch-algorithm">Алгоритм касаний</label><select id="studio-post-touch-algorithm" data-default="legacy"><option value="pose_motion">Строгий: траектория + точки тела</option><option value="legacy" selected>VBallNet + RTMPose: контакты и изломы ±0,1 с</option></select></div>
@@ -504,7 +519,7 @@
           <section id="studio-native-track-panel" class="native-track-panel" aria-labelledby="studio-native-track-title">
             <p class="eyebrow">04 / НАТИВНЫЙ CPU ТРЕКИНГ</p>
             <h2 id="studio-native-track-title">Ручная привязка Track ID</h2>
-            <p class="panel-note">ID предварительные. Привязка к игроку выполняется вручную для выбранной CPU-версии. Фото доступно для предпросмотра; ReID-группы требуют проверки, без автоматической идентификации.</p>
+            <p class="panel-note">Track ID предварительные. При CPU-постобработке работает автопривязка по фотографиям; недостаточное сходство и конфликты остаются неподтверждёнными. Ручная привязка имеет приоритет.</p>
             <div class="track-controls track-controls-header">
               <div><label class="field-label">Источник из верхней цепочки</label>
                 <p id="studio-track-source" class="panel-note">Выберите анализ и постобработку в шапке.</p></div>
