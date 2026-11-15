@@ -1,11 +1,11 @@
 # RF-DETR single-pose GPU run coordination
 - Run ID: 20261115-rfdetr-single-pose
 - Coordinator and integrator: current Studio maintainer session (single writer)
-- Revision: 3
+- Revision: 4
 - Base SHA: eda3a1a4c2b950a1b2f1b7c9637939721f491cdc
 - Branch: codex/20261115-rfdetr/single-pose
 - Worktree: C:\Users\amazomic\Desktop\github\fast-volleyball-tracking-inference\.studio-runtime\worktrees\rfdetr-single-pose
-- Task: single-pose, status accepted, grant epoch 1, no parallel writers
+- Task: single-pose, status integrated, grant epoch 1, no parallel writers
 - Exclusive write paths: rust/volley-inference/src/person.rs, rust/volley-app/src/inference_full.rs, rust/volley-app/src/studio_pipeline.rs, docs/agent-runs/20261115-rfdetr-single-pose/coordination.md, docs/agent-runs/20261115-rfdetr-single-pose/tasks/single-pose.md, docs/RUST_MIGRATION.md
 - Contract: RF-DETR raw evidence remains detector boxes only; pose evidence is generated exclusively by pose_inference::process after box interpolation; RTMDet remains pose-confirmed.
 - Cache: bump RF-DETR GPU stack and person-pipeline versions to prevent reusing different evidence.
@@ -19,3 +19,6 @@
 
 - Accepted code commit: 27d3ee6; tests ran against that tree (same three Rust files).
 - Ready for sequential integration into rust; keep the user's four uncommitted files intact.
+
+- Integration commits on rust: d2d4026 (GPU code + journal), c0d738a (verified handoff); pushed to origin/rust.
+- Studio application: complete. Release rebuild passed, persistent WSL detached instance PID 251619, HTTP 200 on /studio, rfdetr-medium selected, active_jobs=[]; four unrelated dirty files preserved.

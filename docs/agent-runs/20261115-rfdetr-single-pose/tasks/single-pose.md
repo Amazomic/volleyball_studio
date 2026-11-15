@@ -8,9 +8,11 @@
 - Output: RF-DETR detection-only PersonObservation with authoritative box, no invented head/joints; interpolation then standalone pose stage
 - Preserved: RTMDet uses RTMPose in detection to confirm players; original GPU caches immutable; CPU replay uses same fusion contract
 - Tests: cargo format, compile, rfdetr_detection_returns_boxes_without_recomputing_or_inventing_pose, and pipeline regression tests
-- Status: accepted; code commit 27d3ee6
+- Status: integrated and applied; source code commit 27d3ee6, rust integration d2d4026
 
 - Verification complete: WSL offline volley-inference RF-DETR 4/4; volley-app studio_pipeline 5/5; preview detector 1/1; compile volley-app PASS; Node history/analysis selection PASS; rustfmt selected files PASS.
 - Performance: NOT MEASURED. Native match GPU tests: not run. Known unrelated baseline UI test failure documented in coordination log.
 
 - Code commit SHA: 27d3ee6. Git diff --check and changed-file rustfmt check passed. Integrate into rust with cherry-pick, preserve user UI changes.
+
+- Final application: restart via scripts/volley-rust.sh in safe stop + detach mode; HTTP 200, PID 251619, build profile release, rfdetr-medium, no active jobs. GPU quality/performance evaluation remains NOT MEASURED.
