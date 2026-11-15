@@ -486,9 +486,6 @@
       select.append(option);
     }
     if(candidates.length)select.value=candidates[0].playerId;
-    const similarity=node("small","track-match-score",candidates.length?
-      "Лучшее сходство: "+candidates[0].name+" · "+(candidates[0].score*100).toFixed(1)+"%":
-      "Сходство не рассчитано");
     const link=node("button","primary","Добавить игроку");
     link.type="button";
     const updateLink=()=>updateCardLink(controls);
@@ -496,7 +493,7 @@
     link.addEventListener("click",()=>bindSelected(ids,select.value));
     controls.append(select,link);
     updateLink();
-    panel.append(similarity,controls);
+    panel.append(controls);
     card.append(panel);
   };
   const renderRows=()=>{
