@@ -33,6 +33,11 @@ const MAX_EVIDENCE: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_PREVIEW: usize = 80;
 const MAX_EVENTS_PER_CARD: usize = 48;
 const MAX_RALLIES: usize = 200_000;
+const DUPLICATE_TRACK_FRAMES: u64 = 4;
+
+fn adjacent_same_track(last: Option<(u64, u64)>, track_id: u64, frame: u64) -> bool {
+    last.is_some_and(|(id, previous)| id == track_id && frame.saturating_sub(previous) <= DUPLICATE_TRACK_FRAMES)
+}
 
 pub(crate) fn retain_rally_touch(
     last: &mut BTreeMap<u64, u64>,
@@ -41,9 +46,7 @@ pub(crate) fn retain_rally_touch(
     pose_verified: bool,
 ) -> bool {
     if !pose_verified
-        && last
-            .get(&track)
-            .is_some_and(|p| frame.saturating_sub(*p) <= 4)
+        && adjacent_same_track(last.get(&track).map(|&at| (track, at)), track, frame)
     {
         return false;
     }
@@ -64,6 +67,13 @@ pub struct PreviewQuery {
     pub gold_filter: String,
     #[serde(default = "default_sort_by")]
     pub sort_by: String,
+}
+#[cfg(test)]
+#[test]
+fn second_strike_by_same_player_is_not_a_duplicate_when_time_separated() {
+    assert!(adjacent_same_track(Some((3, 100)), 3, 104));
+    assert!(!adjacent_same_track(Some((3, 100)), 3, 130));
+    assert!(!adjacent_same_track(Some((3, 100)), 4, 103));
 }
 fn default_gold_filter() -> String {
     "all".into()
@@ -657,7 +667,7 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
         let mut contacts = BoundedReader::open(&run.touch_file)?;
         let mut touch_frames = Vec::<u64>::new();
         let mut raw_touch_count = 0u64;
-        let mut last_attributed = BTreeMap::<u64, u64>::new();
+        let mut last_attributed = vec![BTreeMap::<u64, u64>::new(); intervals.len()];
 
         let mut estimated_actions = Vec::<Value>::new();
         // Complete postprocessing result, including physical Touch candidates
@@ -696,7 +706,7 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
             let pose_verified = event.body_contact_supported && event.contact_landmark.is_some();
             let touch_attributed = in_rally
                 && retain_rally_touch(
-                    &mut last_attributed,
+                    &mut last_attributed[rally_index],
                     event.frame_index,
                     track_id,
                     pose_verified,

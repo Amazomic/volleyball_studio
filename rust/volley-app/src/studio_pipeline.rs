@@ -843,12 +843,12 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
         // The new strict body/ball intersection must never reuse a saved
         // PoseMotion v1 run just because its sliders happen to match.
         && (match request.post.touches.algorithm {
-            TouchAlgorithm::PoseMotion => touches["method"] == "vballnet_trajectory_body_contact_v7",
-            TouchAlgorithm::Legacy => touches["method"] == "vballnet_gravity_player_geometry_pose_contact_v7",
+            TouchAlgorithm::PoseMotion => touches["method"] == "vballnet_trajectory_body_contact_v8",
+            TouchAlgorithm::Legacy => touches["method"] == "vballnet_gravity_player_geometry_pose_contact_v8",
         })
         && rallies["schema"] == "volley-native-cpu-rally-proposals/1"
         && rallies["state"] == "provisional_rally_segments"
-        && rallies["court_contact_context_version"] == "python_serve_toss_possession_v1"
+        && rallies["court_contact_context_version"] == "python_serve_toss_possession_v2"
         && rallies["ground_boundary_version"] == "trajectory_court_player_v2"
         && rallies["rally_run_id"] == rally
         && rallies["source_replay_id"] == replay
@@ -2321,7 +2321,7 @@ mod branching_tests {
             "rally_candidates.jsonl",
             &json!({
                 "schema":"volley-native-cpu-rally-proposals/1","state":"provisional_rally_segments","rally_run_id":rally,
-                "court_contact_context_version":"python_serve_toss_possession_v1",
+                "court_contact_context_version":"python_serve_toss_possession_v2",
                 "ground_boundary_version":"trajectory_court_player_v2",
                 "project_id":request.project_id,"video":request.video,
                 "source_replay_id":replay,"source_touch_id":touch,"sha256":sha

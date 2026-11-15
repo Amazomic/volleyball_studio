@@ -994,7 +994,7 @@ pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, Api
             "court_context_enabled":court_calibration.is_some(),
             "motion_supported_proposals_before_dedup":raw,
             "touch_candidates":events,
-            "method":if settings.algorithm == TouchAlgorithm::PoseMotion { "vballnet_trajectory_body_contact_v7" } else { "vballnet_gravity_player_geometry_pose_contact_v7" },
+            "method":if settings.algorithm == TouchAlgorithm::PoseMotion { "vballnet_trajectory_body_contact_v8" } else { "vballnet_gravity_player_geometry_pose_contact_v8" },
             "pose_classification_requested":pose_requested,
             "human_training_example_count":training_examples.len(),
             "human_training_touch_sha256":training_sha,

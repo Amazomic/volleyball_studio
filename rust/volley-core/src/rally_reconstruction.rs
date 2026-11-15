@@ -224,8 +224,10 @@ impl RallySegmenter {
         let Some(id) = touch.provisional_track_id else {
             return Ok(false);
         };
-        if active.last_touch_track_id == Some(id) {
-            // Repeated physical proposals for one player count as one Touch.
+        if active.last_touch_track_id == Some(id)
+            && active.last_touch.is_some_and(|last| frame.saturating_sub(last) <= 6)
+        {
+            // Deduplicate adjacent motion peaks, not separate toss/serve impacts.
             return Ok(false);
         }
         if active.ids.len() > 512 {
@@ -670,7 +672,7 @@ mod tests {
         assert!(stats.ended_on_touch_gap >= 1);
     }
     #[test]
-    fn four_seconds_without_a_different_player_ends_rally_even_if_ball_visible() {
+    fn four_seconds_without_any_touch_ends_rally_even_if_ball_visible() {
         let mut config = RallySettings::default();
         config.max_without_touch_frames = 900; // old saved profile cannot extend beyond 4s
         let mut segment = RallySegmenter::new(config, 640, 360).unwrap();
@@ -702,7 +704,7 @@ mod tests {
             results.push(rally);
         }
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].motion_supported_touch_proposals, 2);
+        assert_eq!(results[0].motion_supported_touch_proposals, 4);
         assert_eq!(results[0].end_reason, "touchless_timeout");
         assert!(results[0].detected_end_frame <= 170);
     }
@@ -762,7 +764,7 @@ mod tests {
                 b(80.0 + (frame % 145) as f64 * 2.0)
             };
             let contact = match frame {
-                20 | 60 | 280 => hit_with_id(3).to_vec(),
+                20 | 22 | 60 | 280 => hit_with_id(3).to_vec(),
                 100 => hit_with_id(4).to_vec(),
                 310 => hit_with_id(5).to_vec(),
                 320 => vec![ContactFrame {
@@ -779,7 +781,7 @@ mod tests {
             rallies.push(rally);
         }
         assert_eq!(rallies.len(), 2);
-        assert_eq!(rallies[0].motion_supported_touch_proposals, 2);
+        assert_eq!(rallies[0].motion_supported_touch_proposals, 3);
         assert_eq!(rallies[1].motion_supported_touch_proposals, 2);
         assert_eq!(rallies[0].unidentified_contacts, 0);
         assert_eq!(rallies[1].unidentified_contacts, 0);
