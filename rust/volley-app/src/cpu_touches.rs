@@ -713,7 +713,7 @@ pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, Api
             "court_context_enabled":court_calibration.is_some(),
             "motion_supported_proposals_before_dedup":raw,
             "touch_candidates":events,
-            "method":if settings.algorithm == TouchAlgorithm::PoseMotion { "vballnet_trajectory_body_contact_v7" } else { "vballnet_gravity_player_geometry_pose_contact_v7" },
+            "method":if settings.algorithm == TouchAlgorithm::PoseMotion { "vballnet_trajectory_body_contact_v8" } else { "vballnet_gravity_player_geometry_pose_contact_v8" },
             "pose_classification_requested":req.pose_classification || settings.require_pose || settings.algorithm == TouchAlgorithm::PoseMotion,
             "pose_source_fusion_id": if req.pose_classification || settings.require_pose || settings.algorithm == TouchAlgorithm::PoseMotion {json!(fusion_id)} else {Value::Null},
             "pose_source":pose_info.as_ref().map(|(id, sha, stride)| json!({"pose_run_id":id,"sha256":sha,"stride":stride})),
