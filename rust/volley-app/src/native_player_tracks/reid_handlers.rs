@@ -721,7 +721,12 @@ pub async fn reid_review(
         IdentityProfile { algorithm: req.algorithm, threshold_percent: req.threshold_percent }
             .validate().map_err(storage::bad_request)?;
         if req.algorithm == IdentityAlgorithm::Disabled {
-            return Err(storage::bad_request("Automatic assignment is disabled in this profile"));
+            let result = tokio::task::spawn_blocking(move || {
+                disable_automatic_photo_links(&state, &req)
+            })
+            .await
+            .map_err(|e| storage::internal(format!("Disable automatic identity: {e}")))??;
+            return Ok(Json(result));
         }
         let comparison =
             super::photo_comparison::compare(state.clone(), headers, req.clone()).await?;
