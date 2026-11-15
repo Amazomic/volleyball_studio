@@ -65,6 +65,27 @@ fn speed_gain(contact: ContactEvidence) -> f64 {
     contact.speed_after_px_frame / contact.speed_before_px_frame.max(0.1)
 }
 
+fn likely_first_serve(contact: ContactEvidence) -> bool {
+    contact.track_id.is_some()
+        && contact.side.is_some()
+        && contact.in_serve_zone
+        && speed_gain(contact) >= SERVE_MIN_SPEED_GAIN
+}
+
+fn stronger_second_strike(first: ContactEvidence, second: ContactEvidence) -> bool {
+    first.track_id.is_some()
+        && first.track_id == second.track_id
+        && first.side.is_some()
+        && first.side == second.side
+        && first.in_serve_zone
+        && second.in_serve_zone
+        && second.frame > first.frame
+        && (8..=TOSS_MAX_FRAMES).contains(&(second.frame - first.frame))
+        && speed_gain(second) >= SERVE_MIN_SPEED_GAIN
+        && second.velocity_residual_px_frame > first.velocity_residual_px_frame * 1.5
+        && second.speed_after_px_frame > first.speed_after_px_frame
+}
+
 fn plausible_toss(first: ContactEvidence, second: ContactEvidence, ball: &[BallSample]) -> bool {
     if first.track_id.is_none()
         || first.track_id != second.track_id
@@ -110,19 +131,36 @@ fn plausible_toss(first: ContactEvidence, second: ContactEvidence, ball: &[BallS
 /// every raw event; toss suppression is only a context flag for the preview.
 #[must_use]
 pub fn analyze(contacts: &[ContactEvidence], ball: &[BallSample]) -> RallyContext {
-    let mut serve = contacts.iter().position(|contact| {
+    // A serve is an opening action. Never turn an arbitrary late end-line
+    // contact into another serve. A jump serve may land just inside the line:
+    // its court-aware CPU Touch prediction already contains takeoff evidence.
+    let mut serve = contacts.iter().take(2).position(|contact| {
         contact.kind == Some(ActionKind::Serve)
             && contact.track_id.is_some()
-            && contact.in_serve_zone
             && contact.side.is_some()
     });
     let mut suppressed = vec![false; contacts.len()];
 
-    // Python merge_serve_toss applies to the first two physical contacts in
-    // a rally only. Do not merge an arbitrary later back-row pass into serve.
-    if contacts.len() >= 2 && plausible_toss(contacts[0], contacts[1], ball) {
+    // Use observed toss/strike evidence when possible. A stronger second
+    // same-server impact is also useful when the apex is partly occluded.
+    if contacts.len() >= 2
+        && (plausible_toss(contacts[0], contacts[1], ball)
+            || stronger_second_strike(contacts[0], contacts[1]))
+    {
         serve = Some(1);
         suppressed[0] = true;
+    } else if serve == Some(1)
+        && contacts[0].track_id.is_some()
+        && contacts[0].track_id == contacts[1].track_id
+        && contacts[0].side == contacts[1].side
+        && contacts[1].frame > contacts[0].frame
+        && contacts[1].frame - contacts[0].frame <= TOSS_MAX_FRAMES
+    {
+        // The classified strike is the second contact; the earlier one is a toss.
+        suppressed[0] = true;
+    }
+    if serve.is_none() && contacts.first().copied().is_some_and(likely_first_serve) {
+        serve = Some(0);
     }
     if let Some(index) = serve {
         let server = contacts[index].track_id;
@@ -236,7 +274,7 @@ pub fn analyze(contacts: &[ContactEvidence], ball: &[BallSample]) -> RallyContex
         });
     }
     RallyContext {
-        method: "python_serve_toss_possession_v1",
+        method: "python_serve_toss_possession_v2",
         serve_frame,
         serve_track_id,
         serving_side,
@@ -301,7 +339,8 @@ mod tests {
 
     #[test]
     fn does_not_merge_without_apex_or_matching_id_or_zone() {
-        let first = contact(100, 5, CourtSide::Near);
+        let mut first = contact(100, 5, CourtSide::Near);
+        first.speed_after_px_frame = first.speed_before_px_frame; // Not a serve strike.
         let other = contact(140, 9, CourtSide::Far);
         let flat = (101..140)
             .map(|frame| BallSample {
@@ -359,4 +398,42 @@ mod tests {
         assert_eq!(summary.max_same_side_touches, 0);
         assert_eq!(summary.events[0].estimated_kind, None);
     }
+    #[test]
+    fn first_source_backed_contact_behind_end_line_is_provisional_serve() {
+        let first = contact(100, 5, CourtSide::Near);
+        let receiver = contact(125, 8, CourtSide::Far);
+        let result = analyze(&[first, receiver], &[]);
+        assert_eq!(result.serve_frame, Some(100));
+        assert_eq!(result.events[0].estimated_kind, Some(ActionKind::Serve));
+        assert_eq!(result.events[1].phase, "reception");
+    }
+
+    #[test]
+    fn absent_apex_still_recovers_stronger_strike_of_same_server() {
+        let toss = contact(100, 5, CourtSide::Near);
+        let mut strike = contact(131, 5, CourtSide::Near);
+        strike.velocity_residual_px_frame = 18.0;
+        strike.speed_after_px_frame = 16.0;
+        let result = analyze(&[toss, strike, contact(170, 8, CourtSide::Far)], &[]);
+        assert_eq!(result.serve_frame, Some(131));
+        assert!(result.events[0].ignored_serve_toss);
+        assert_eq!(result.events[1].estimated_kind, Some(ActionKind::Serve));
+    }
+
+    #[test]
+    fn inside_court_attack_is_not_relabelled_as_serve() {
+        let mut first = contact(100, 5, CourtSide::Near);
+        first.in_serve_zone = false;
+        assert_eq!(analyze(&[first], &[]).serve_frame, None);
+    }
+
+    #[test]
+    fn predicted_jump_serve_retains_takeoff_evidence_when_impact_is_inside() {
+        let mut first = contact(100, 5, CourtSide::Near);
+        first.in_serve_zone = false;
+        first.kind = Some(ActionKind::Serve);
+        let result = analyze(&[first], &[]);
+        assert_eq!(result.serve_frame, Some(100));
+    }
+
 }
