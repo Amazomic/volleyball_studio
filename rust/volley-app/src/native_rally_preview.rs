@@ -33,6 +33,11 @@ const MAX_EVIDENCE: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_PREVIEW: usize = 80;
 const MAX_EVENTS_PER_CARD: usize = 48;
 const MAX_RALLIES: usize = 200_000;
+const DUPLICATE_TRACK_FRAMES: u64 = 6;
+
+fn adjacent_same_track(last: Option<(u64, u64)>, track_id: u64, frame: u64) -> bool {
+    last.is_some_and(|(id, previous)| id == track_id && frame.saturating_sub(previous) <= DUPLICATE_TRACK_FRAMES)
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +52,13 @@ pub struct PreviewQuery {
     pub gold_filter: String,
     #[serde(default = "default_sort_by")]
     pub sort_by: String,
+}
+#[cfg(test)]
+#[test]
+fn second_strike_by_same_player_is_not_a_duplicate_when_time_separated() {
+    assert!(adjacent_same_track(Some((3, 100)), 3, 104));
+    assert!(!adjacent_same_track(Some((3, 100)), 3, 130));
+    assert!(!adjacent_same_track(Some((3, 100)), 4, 103));
 }
 fn default_gold_filter() -> String {
     "all".into()
@@ -622,7 +634,7 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
         let mut contacts = BoundedReader::open(&run.touch_file)?;
         let mut touch_frames = Vec::<u64>::new();
         let mut raw_touch_count = 0u64;
-        let mut last_track_per_rally = vec![None::<u64>; intervals.len()];
+        let mut last_track_per_rally = vec![None::<(u64, u64)>; intervals.len()];
         let mut estimated_actions = Vec::<Value>::new();
         // Complete postprocessing result, including physical Touch candidates
         // whose action type could not be classified. Never mix with GPU boxes.
@@ -656,10 +668,10 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
                 .get(rally_index)
                 .is_some_and(|interval| interval.start <= event.frame_index)
             {
-                if last_track_per_rally[rally_index] == Some(track_id) {
+                if adjacent_same_track(last_track_per_rally[rally_index], track_id, event.frame_index) {
                     continue;
                 }
-                last_track_per_rally[rally_index] = Some(track_id);
+                last_track_per_rally[rally_index] = Some((track_id, event.frame_index));
             }
             touch_frames.push(event.frame_index);
             let predicted_kind = if let Some((_, _, kind)) = contextual {
@@ -794,7 +806,7 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
     let mut contacts = BoundedReader::open(&run.touch_file)?;
     let mut prior = None;
     let mut count = 0u64;
-    let mut last_track_per_card = vec![None::<u64>; cards.len()];
+    let mut last_track_per_card = vec![None::<(u64, u64)>; cards.len()];
     while let Some(bytes) = contacts.line()? {
         let event: NativeMotion = serde_json::from_slice(&bytes)
             .map_err(|e| format!("Invalid native Touch evidence row: {e}"))?;
@@ -844,10 +856,10 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
                 row["ignored_serve_toss_count"] = json!(suppressed + 1);
                 continue;
             }
-            if last_track_per_card[idx] == Some(track_id) {
+            if adjacent_same_track(last_track_per_card[idx], track_id, event.frame_index) {
                 continue;
             }
-            last_track_per_card[idx] = Some(track_id);
+            last_track_per_card[idx] = Some((track_id, event.frame_index));
             let prev = row["motion_event_count"].as_u64().unwrap_or(0);
             row["motion_event_count"] = json!(prev + 1);
             let resolved_kind = if let Some(ref resolved) = context {
