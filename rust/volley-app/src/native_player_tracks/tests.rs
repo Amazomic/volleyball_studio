@@ -388,9 +388,9 @@ fn photo_reference_matches_skip_assigned_excluded_and_overlapping_tracks() {
     let mut vector = vec![0.0; 256];
     vector[0] = 1.0;
     let vectors = [
-        (7, vector.clone()),
-        (8, vector.clone()),
-        (9, vector.clone()),
+        (7, vec![vector.clone()]),
+        (8, vec![vector.clone()]),
+        (9, vec![vector.clone()]),
     ]
     .into();
     let references = vec![PhotoReference {
@@ -401,14 +401,14 @@ fn photo_reference_matches_skip_assigned_excluded_and_overlapping_tracks() {
         replay_id: ctx.replay_id.clone(),
         track_id: 7,
     }];
-    let result = photo_match_candidates(&ctx, &identity, &vectors, &references).unwrap();
+    let result = photo_match_candidates(&ctx, &identity, &vectors, &references, 1).unwrap();
     assert_eq!(result["8"][0]["cosine_similarity"], 1.0);
     assert!(result.get("7").is_none());
     assert!(result.get("9").is_none());
     ctx.tracks.get_mut(&8).unwrap().first = 10;
     ctx.tracks.get_mut(&8).unwrap().visible_spans = vec![(10, 30)];
     assert_eq!(
-        photo_match_candidates(&ctx, &identity, &vectors, &references).unwrap(),
+        photo_match_candidates(&ctx, &identity, &vectors, &references, 1).unwrap(),
         json!({})
     );
     fs::remove_dir_all(root).unwrap();
@@ -1147,6 +1147,7 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
                     rally_run_id: None,
                     track_ids: vec![7],
                     transient: false,
+                    sample_count: 1,
                     expected_source_sha256: source_sha.clone(),
                 }),
             )
@@ -1177,6 +1178,7 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
                     rally_run_id: None,
                     track_ids: vec![7],
                     transient: false,
+                    sample_count: 1,
                     expected_source_sha256: source_sha.clone(),
                 }),
             )
@@ -1203,6 +1205,7 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
                     rally_run_id: None,
                     track_ids: vec![7],
                     transient: false,
+                    sample_count: 1,
                     expected_source_sha256: "0".repeat(64),
                 })
             )
