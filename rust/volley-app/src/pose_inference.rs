@@ -2,6 +2,7 @@
 //! Uses the prepared video and selected GPU fusion, never CPU Track IDs.
 mod box_interpolation;
 use crate::{inference_stream, preparation, projects, AppState};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -103,6 +104,30 @@ fn boxes(frame: &Value) -> Vec<[f64; 4]> {
     unique
 }
 
+/// Still-image sampling uses discrete video frames; video mode infers every
+/// frame. Both modes use the same RTMPose-M model, not a separate video model.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PoseInputMode {
+    #[default]
+    Photo,
+    Video,
+}
+impl PoseInputMode {
+    pub(crate) const fn effective_stride(self, photo_stride: usize) -> usize {
+        match self {
+            Self::Photo => photo_stride,
+            Self::Video => 1,
+        }
+    }
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Photo => "photo",
+            Self::Video => "video",
+        }
+    }
+}
+
 /// Probe the selected fusion and run ONNX using one persistent CUDA session.
 /// In-progress output is never exposed; returns an immutable manifest after sync.
 #[expect(clippy::too_many_arguments)]
@@ -111,7 +136,8 @@ pub fn process(
     project_id: &str,
     video: &str,
     fusion_id: &str,
-    stride: usize,
+    mode: PoseInputMode,
+    photo_stride: usize,
     memory_mb: u64,
     threads: usize,
     interpolate_players: bool,
@@ -122,9 +148,10 @@ pub fn process(
     if !app.writes_enabled {
         return Err("Pose analysis requires writable isolated studio storage".into());
     }
-    if !(1..=9).contains(&stride) {
-        return Err("RTMPose stride must be between 1 and 9".into());
+    if !(1..=30).contains(&photo_stride) {
+        return Err("RTMPose photo sampling stride must be between 1 and 30 frames".into());
     }
+    let stride = mode.effective_stride(photo_stride);
     if !volley_core::contracts::job_id(fusion_id) {
         return Err("Invalid GPU fusion identifier".into());
     }
@@ -322,7 +349,8 @@ pub fn process(
             "schema":"volley-native-gpu-pose/1","state":"pose_evidence_complete",
             "pose_run_id":run_id, "fusion_id":fusion_id,
             "project_id":project_id, "video":video, "fps":30,
-            "stride":stride, "decoded_frames":decode.decoded_frames,
+            "stride":stride, "pose_mode":mode.name(), "photo_stride":photo_stride,
+            "decoded_frames":decode.decoded_frames,
             "sampled_frames":samples, "player_poses":players,
             "model":"RTMPose-M-Body7","model_sha256":hash,
             "source_fusion_sha256":manifest["sha256"], "source_identity":manifest["source_identity"],

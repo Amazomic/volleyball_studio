@@ -299,8 +299,8 @@ pub fn decode_full_video(
     cancelled: &AtomicBool,
     mut consume: impl FnMut(RawWindow) -> Result<(), String>,
 ) -> Result<DecodeSummary, String> {
-    if !(1..=CLIP_FRAMES).contains(&stride) {
-        return Err("Full-video decode stride must be between 1 and 9".into());
+    if !(1..=crate::frame_windows::MAX_FULL_VIDEO_STRIDE).contains(&stride) {
+        return Err("Full-video decode stride must be between 1 and 30".into());
     }
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());

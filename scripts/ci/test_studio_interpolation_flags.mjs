@@ -19,6 +19,7 @@ const values={
 };
 const boxes={
   "studio-gpu-pose-enabled":{value:"1"},
+  "studio-gpu-pose-mode":{value:"photo"},
   "studio-gpu-interpolate-players":{type:"checkbox",checked:true,dataset:{default:"1"},id:"studio-gpu-interpolate-players",checkValidity:()=>true},
   "studio-gpu-interpolate-pose":{type:"checkbox",checked:true,dataset:{default:"1"},id:"studio-gpu-interpolate-pose",checkValidity:()=>true}
 };

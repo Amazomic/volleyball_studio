@@ -387,7 +387,10 @@ pub struct GpuProfile {
     cpu_threads: usize,
     /// Run independent RTMPose GPU pose evidence for this fusion.
     pose_enabled: bool,
-    /// Inter-frame stride for pose, independent from nine-frame Vball/RAVEL windows.
+    /// RTMPose reads selected still frames or every video frame.
+    #[serde(default)]
+    pose_mode: crate::pose_inference::PoseInputMode,
+    /// Sampling interval for photo mode, measured in video frames at 30 FPS.
     pose_stride: usize,
     #[serde(default = "default_interpolation_enabled")]
     interpolate_players: bool,
@@ -404,6 +407,7 @@ impl Default for GpuProfile {
             gpu_memory_limit_mb: 0,
             cpu_threads: 8,
             pose_enabled: true,
+            pose_mode: crate::pose_inference::PoseInputMode::Photo,
             pose_stride: 3,
             interpolate_players: true,
             interpolate_pose: true,
@@ -762,7 +766,12 @@ fn gpu_lineage_valid(
             || pose["pose_run_id"] != pose_id
             || pose["fusion_id"] != fusion_id
             || pose["model_sha256"] != volley_inference::pose::MODEL_SHA256
-            || pose["stride"] != request.gpu.pose_stride
+            || pose["stride"]
+                != request
+                    .gpu
+                    .pose_mode
+                    .effective_stride(request.gpu.pose_stride)
+            || pose["pose_mode"].as_str().unwrap_or("photo") != request.gpu.pose_mode.name()
             || pose["interpolate_players"].as_bool().unwrap_or(true)
                 != request.gpu.interpolate_players
             || pose["interpolate_pose"].as_bool().unwrap_or(true) != request.gpu.interpolate_pose
@@ -1473,7 +1482,10 @@ async fn pipeline(
             path,
             "GPU · RTMPose-M",
             "pose_inference::process",
-            json!({"fusion_id":fusion_id,"model":"RTMPose-M-Body7","stride":request.gpu.pose_stride,
+            json!({"fusion_id":fusion_id,"model":"RTMPose-M-Body7",
+                    "pose_mode":request.gpu.pose_mode.name(),
+                    "stride":request.gpu.pose_mode.effective_stride(request.gpu.pose_stride),
+                    "photo_stride":request.gpu.pose_stride,
                     "threads":request.gpu.cpu_threads,"gpu_memory_limit_mb":request.gpu.gpu_memory_limit_mb,
                     "interpolate_players":request.gpu.interpolate_players,"interpolate_pose":request.gpu.interpolate_pose}),
         )?;
@@ -1488,6 +1500,7 @@ async fn pipeline(
                 &request.project_id,
                 &request.video,
                 &fusion_id,
+                request.gpu.pose_mode,
                 request.gpu.pose_stride,
                 request.gpu.gpu_memory_limit_mb,
                 request.gpu.cpu_threads,
@@ -1827,7 +1840,7 @@ pub async fn start(
     if !(1..=9).contains(&request.gpu.stride)
         || !(1..=128).contains(&request.gpu.cpu_threads)
         || request.gpu.gpu_memory_limit_mb > 131072
-        || !(1..=9).contains(&request.gpu.pose_stride)
+        || !(1..=30).contains(&request.gpu.pose_stride)
     {
         return Err(storage::bad_request(
             "GPU-профиль вне допустимых диапазонов",
@@ -2205,6 +2218,11 @@ mod tests {
         .unwrap();
         assert!(original.interpolate_players);
         assert!(original.interpolate_pose);
+        assert_eq!(
+            original.pose_mode,
+            crate::pose_inference::PoseInputMode::Photo
+        );
+        assert_eq!(original.pose_mode.effective_stride(original.pose_stride), 3);
         let changed: GpuProfile = serde_json::from_value(json!({
             "interpolate_players":false,"interpolate_pose":true
         }))
@@ -2218,6 +2236,25 @@ mod tests {
         assert!(other.interpolate_players);
         assert!(!other.interpolate_pose);
         assert_ne!(json!(other), json!(changed));
+    }
+
+    #[test]
+    fn gpu_pose_mode_distinguishes_video_from_sampled_photos() {
+        use crate::pose_inference::PoseInputMode;
+        let video: GpuProfile = serde_json::from_value(json!({
+            "pose_mode":"video", "pose_stride":30
+        }))
+        .unwrap();
+        assert_eq!(video.pose_mode, PoseInputMode::Video);
+        assert_eq!(video.pose_mode.effective_stride(video.pose_stride), 1);
+        let photos: GpuProfile = serde_json::from_value(json!({
+            "pose_mode":"photo", "pose_stride":10
+        }))
+        .unwrap();
+        assert_eq!(photos.pose_mode, PoseInputMode::Photo);
+        assert_eq!(photos.pose_mode.effective_stride(photos.pose_stride), 10);
+        assert!(serde_json::from_value::<GpuProfile>(json!({"pose_mode":"unknown"})).is_err());
+        assert_eq!(serde_json::to_value(video).unwrap()["pose_mode"], "video");
     }
 
     #[test]

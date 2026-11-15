@@ -113,7 +113,7 @@ fn pose_run(
         else {
             return Err("Invalid RTMPose SHA-256 in source manifest".into());
         };
-        let Some(stride) = manifest["stride"].as_u64().filter(|s| (1..=9).contains(s)) else {
+        let Some(stride) = manifest["stride"].as_u64().filter(|s| (1..=30).contains(s)) else {
             return Err("Invalid RTMPose sample stride".into());
         };
         let path = folder.join("poses.jsonl");
@@ -692,6 +692,57 @@ pub(crate) fn enrich_continuous(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn photo_stride_thirty_is_supported_by_pose_preview_and_cpu_source() {
+        let root = std::env::temp_dir().join(format!("volley-stride30-{}", uuid::Uuid::new_v4()));
+        let fusion = "a".repeat(32);
+        let run = "b".repeat(32);
+        let fusion_dir = root.join("native_gpu_fusions").join(&fusion);
+        let pose_dir = root.join("native_gpu_pose_runs").join(&run);
+        fs::create_dir_all(&fusion_dir).unwrap();
+        fs::create_dir_all(&pose_dir).unwrap();
+        let source_sha = "c".repeat(64);
+        let identity = json!({"bytes":123,"mtime_ns":456});
+        fs::write(
+            fusion_dir.join("manifest.json"),
+            serde_json::to_vec(&json!({
+                "schema":"volley-native-gpu-fusion/1", "fusion_id":fusion,
+                "project_id":"project","video":"match.mp4",
+                "source_identity":identity,"sha256":source_sha
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut raw = Vec::new();
+        for frame in [0, 30] {
+            raw.extend(serde_json::to_vec(&json!({"frame":frame,"players":[]})).unwrap());
+            raw.push(b'\n');
+        }
+        fs::write(pose_dir.join("poses.jsonl"), &raw).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&raw));
+        let mut manifest = json!({
+            "schema":"volley-native-gpu-pose/1","state":"pose_evidence_complete",
+            "pose_run_id":run,"fusion_id":fusion,"project_id":"project",
+            "video":"match.mp4","source_identity":identity,
+            "source_fusion_sha256":source_sha,"model_sha256":MODEL_SHA256,
+            "file":"poses.jsonl","sha256":sha,"stride":30,"pose_mode":"photo"
+        });
+        fs::write(
+            pose_dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(source_info(&root, &fusion).unwrap().unwrap().2, 30);
+        manifest["stride"] = json!(31);
+        fs::write(
+            pose_dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(source_info(&root, &fusion).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn raw_pose_interpolation_is_visual_only_and_leaves_original_samples_unchanged() {

@@ -7,6 +7,8 @@ use std::{
 };
 
 pub const CLIP_FRAMES: usize = 9;
+/// Pose inference may sample still frames up to one second apart.
+pub const MAX_FULL_VIDEO_STRIDE: usize = 30;
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_FRAMES: u64 = 48 * 3600 * 30;
 
@@ -30,7 +32,7 @@ pub struct FrameWindows<R: Read> {
 impl<R: Read> FrameWindows<R> {
     pub fn new(source: R, frame_bytes: usize, stride: usize) -> io::Result<Self> {
         if !(1..=MAX_FRAME_BYTES).contains(&frame_bytes)
-            || !(1..=CLIP_FRAMES).contains(&stride)
+            || !(1..=MAX_FULL_VIDEO_STRIDE).contains(&stride)
             || frame_bytes.checked_mul(CLIP_FRAMES).is_none()
         {
             return Err(io::Error::new(
@@ -84,8 +86,17 @@ impl<R: Read> FrameWindows<R> {
             return Ok(None);
         }
         if self.emitted {
-            for _ in 0..self.stride {
+            // Photo mode can sample farther apart than the 9-frame context.
+            // Discard the current window and consume skipped source frames
+            // before constructing the next window, preserving frame indices.
+            for _ in 0..self.stride.min(CLIP_FRAMES) {
                 self.queue.pop_front();
+            }
+            for _ in CLIP_FRAMES..self.stride {
+                if self.read_frame()?.is_none() {
+                    self.eof = true;
+                    return Ok(None);
+                }
             }
             self.next_start += self.stride as u64;
         }
@@ -187,7 +198,25 @@ mod tests {
         let mut short = FrameWindows::new(Cursor::new(vec![0u8; 8]), 1, 1).unwrap();
         assert!(short.next_window().unwrap().is_none());
         assert!(FrameWindows::new(Cursor::new(vec![0u8; 8]), 0, 1).is_err());
-        assert!(FrameWindows::new(Cursor::new(vec![0u8; 8]), 1, 10).is_err());
+        assert!(FrameWindows::new(Cursor::new(vec![0u8; 8]), 1, 31).is_err());
+    }
+
+    #[test]
+    fn sparse_full_video_stride_skips_actual_frames_without_index_drift() {
+        let bytes: Vec<u8> = (0..75).collect();
+        let mut windows = FrameWindows::new(Cursor::new(bytes), 1, 30).unwrap();
+        for start in [0, 30, 60] {
+            let next = windows.next_window().unwrap().unwrap();
+            assert_eq!(next.first_frame, start);
+            assert_eq!(
+                next.data,
+                (start..start + 9)
+                    .map(|value| value as u8)
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(windows.next_window().unwrap().is_none());
+        assert_eq!(windows.decoded_frames(), 75);
     }
 
     #[test]
