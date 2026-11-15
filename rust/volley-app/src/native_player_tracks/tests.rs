@@ -1369,7 +1369,11 @@ fn three_sample_similarity_uses_mean_of_best_reference_per_frame() {
     let score = ranked[0]["cosine_similarity"].as_f64().unwrap();
     assert!((score - 0.8).abs() < 0.00001);
     assert_eq!(ranked[0]["samples_used"], 3);
-    assert_eq!(ranked[0]["sample_similarities"], json!([1.0, 0.8, 0.6]));
+    let sample_scores = ranked[0]["sample_similarities"].as_array().unwrap();
+    assert_eq!(sample_scores.len(), 3);
+    for (actual, expected) in sample_scores.iter().zip([1.0, 0.8, 0.6]) {
+        assert!((actual.as_f64().unwrap() - expected).abs() < 0.00001);
+    }
     let mut doc = base_document(&ctx);
     doc["automatic_identity_evidence"] = json!({"threshold":0.81});
     assert!(choose_automatic_photo_links(&ctx, &doc, &matches).unwrap().is_empty());
