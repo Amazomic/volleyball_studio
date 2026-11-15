@@ -851,7 +851,7 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
     track["schema"] == "volley-native-cpu-tracking/1"
         && track["state"] == "provisional_tracklets_rebuilt"
         && track["interpolated_positions_version"] == (if saved["profile"]["gpu"]["interpolate_players"].as_bool().unwrap_or(true) {
-            "bounded_same_track_3s_v1"
+            "bounded_same_track_3s_v2"
         } else {
             "disabled_v1"
         })
@@ -2390,7 +2390,7 @@ mod branching_tests {
                 "schema":"volley-native-cpu-tracking/1","state":"provisional_tracklets_rebuilt","replay_id":replay,
                 "project_id":request.project_id,"video":request.video,
                 "source_fusion_id":analysis,"ball_selection_policy":"vballnet_only_v1",
-                "interpolated_positions_version":"bounded_same_track_3s_v1","sha256":sha
+                "interpolated_positions_version":"bounded_same_track_3s_v2","sha256":sha
             }),
         );
         emit(

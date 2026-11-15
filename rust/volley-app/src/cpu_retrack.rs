@@ -283,7 +283,7 @@ fn fill_confirmed_track_gaps(
                     let drift = (ca[0] - cb[0]).hypot(ca[1] - cb[1]);
                     if aw.min(bw) >= 0.005
                         && ah.min(bh) >= 0.02
-                        && aw.max(bw) / aw.min(bw) <= 1.8
+                        && aw.max(bw) / aw.min(bw) <= if duration <= 30 { 3.0 } else { 1.8 }
                         && ah.max(bh) / ah.min(bh) <= 1.8
                         && drift <= (0.035 + (duration - 1) as f64 * 0.003).min(0.15)
                         // The missing ID may have been replaced by another
@@ -701,7 +701,7 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
         let record = json!({
             "schema":"volley-native-cpu-tracking/1",
             "state":"provisional_tracklets_rebuilt",
-            "interpolated_positions_version":if req.interpolate_players {"bounded_same_track_3s_v1"} else {"disabled_v1"},
+            "interpolated_positions_version":if req.interpolate_players {"bounded_same_track_3s_v2"} else {"disabled_v1"},
             "interpolate_players":req.interpolate_players,
             "project_id":req.project_id,
             "video":req.video,
@@ -887,6 +887,45 @@ mod tests {
         assert!(!root.join("bad.unconfirmed").exists());
         fs::remove_dir_all(&root).unwrap();
     }
+    #[test]
+    fn short_gaps_survive_temporary_bbox_width_changes_at_10_seconds() {
+        let root = std::env::temp_dir().join(format!("volley-width-gap-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("tracked.jsonl");
+        let mut bytes = Vec::new();
+        for frame in 0..21_u64 {
+            let bbox = match frame {
+                0 => Some([0.394, 0.470, 0.414, 0.619]),
+                10 => Some([0.367, 0.477, 0.420, 0.609]),
+                20 => Some([0.374, 0.471, 0.392, 0.599]),
+                _ => None,
+            };
+            let tracks = bbox
+                .into_iter()
+                .map(|bbox| {
+                    let mut detection = example(frame, 0.4, 0);
+                    detection.bbox_xyxy_norm = bbox;
+                    detection.score = 0.6;
+                    json!({"track_id":4,"detection":detection,"is_verified_athlete":false})
+                })
+                .collect::<Vec<_>>();
+            bytes.extend(
+                serde_json::to_vec(&json!({"frame_index":frame,"tracked_players":tracks})).unwrap(),
+            );
+            bytes.push(b'\n');
+        }
+        fs::write(&source, &bytes).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let (_, inferred) = fill_confirmed_track_gaps(&source, &sha, 21).unwrap();
+        assert_eq!(inferred, 18);
+        let rows = fs::read_to_string(&source).unwrap();
+        for line in rows.lines() {
+            let row: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(row["tracked_players"].as_array().unwrap().len(), 1);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn real_player_detection_blocks_duplicate_interpolated_id() {
         let root = std::env::temp_dir().join(format!("volley-duplicate-gap-{}", Uuid::new_v4()));
