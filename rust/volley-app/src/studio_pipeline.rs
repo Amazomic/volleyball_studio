@@ -742,10 +742,22 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
         && rallies["video"] == request.video
 }
 const GPU_MODEL_STACK: &str = "vballnet_rtmdet_rtmpose_tiled_coco17_batch8_v4";
+const RFDETR_GPU_MODEL_STACK: &str =
+    "vballnet_rfdetr_medium_18250b5a_rtmpose_detboxes_coco17_v1";
+
+/// The GPU-evidence cache must not be shared by different detector weights
+/// or detector-to-pose box policies.
+fn requested_gpu_model_stack() -> &'static str {
+    match volley_inference::person::DetectorVariant::from_env() {
+        Ok(volley_inference::person::DetectorVariant::RfDetrMedium) => RFDETR_GPU_MODEL_STACK,
+        Ok(volley_inference::person::DetectorVariant::RtmDetNano) => GPU_MODEL_STACK,
+        Err(_) => "invalid_person_detector_selection_no_gpu_cache_reuse",
+    }
+}
 
 fn compatible_version(saved: &Value, request: &StartRequest, identity: &Value) -> bool {
     saved["schema"] == SCHEMA
-        && saved["gpu_model_stack"] == GPU_MODEL_STACK
+        && saved["gpu_model_stack"] == requested_gpu_model_stack()
         && saved["project_id"] == request.project_id
         && saved["video"] == request.video
         && saved["profile"]["gpu"] == serde_json::to_value(&request.gpu).unwrap_or(Value::Null)
@@ -1733,7 +1745,7 @@ pub async fn start(
         "profile":{"gpu":request.gpu,"post":request.post},
         "mode":request.mode,"source_analysis_id":request.source_analysis_id,
         "client_request_id":request.client_request_id,
-        "gpu_model_stack":GPU_MODEL_STACK,
+        "gpu_model_stack":requested_gpu_model_stack(),
         "gpu_jobs":{},"cpu_runs":{},"analysis_id":null,
         "postprocessing_id":null,"current_gpu_job_id":null,
         "source_identity":null,"gpu_reused":false,"result_reused":false,
@@ -2037,7 +2049,7 @@ mod branching_tests {
         let saved = json!({
             "schema":SCHEMA,"project_id":request.project_id,"video":request.video,
             "status":"complete","pipeline_complete":true,"source_identity":identity,
-            "gpu_model_stack":GPU_MODEL_STACK,
+            "gpu_model_stack":requested_gpu_model_stack(),
             "profile":{"gpu":request.gpu,"post":request.post},
             "gpu_jobs":{"ball":gpu_ball,"players":gpu_players},
             "analysis_id":analysis,"cpu_runs":{"tracking":replay,"touches":touch,"rallies":rally},

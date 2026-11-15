@@ -378,7 +378,14 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
         "project_id":context.project_id,
         "video":context.video,
         "model":context.config.model,
-        "person_pipeline":if context.config.model == ModelKind::Players { Some("rtmdet_nano_tiled_rtmpose_m_coco17_batch8_v4") } else { None },
+        "person_pipeline":if context.config.model == ModelKind::Players {
+            Some(match volley_inference::person::DetectorVariant::from_env()? {
+                volley_inference::person::DetectorVariant::RtmDetNano =>
+                    "rtmdet_nano_tiled_rtmpose_m_coco17_batch8_v4",
+                volley_inference::person::DetectorVariant::RfDetrMedium =>
+                    "rfdetr_medium_18250b5a_rtmpose_m_detector_boxes_v1",
+            })
+        } else { None },
         "provider":context.config.device,
         "source_identity":{"bytes":before.0,"mtime_ns":before.1},
         "fps":30,

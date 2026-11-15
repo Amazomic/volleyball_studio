@@ -102,3 +102,6 @@ node_modules/
 
 # Official pretrained pose weights: install locally, do not commit 54 MB binaries.
 models/RTMPose-M-Body7.onnx
+
+# Opt-in experimental RF-DETR Medium weights (116 MiB, verified SHA-256).
+models/rf-detr-medium.onnx
