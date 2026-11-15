@@ -376,6 +376,31 @@ fn emit_record(
     Ok(())
 }
 
+fn select_pending_touch(
+    pending: &mut Option<PhysicalTouchCandidate>,
+    event: PhysicalTouchCandidate,
+    separation: u64,
+) -> Option<PhysicalTouchCandidate> {
+    if let Some(last) = pending {
+        if event.is_motion_echo_of(last) {
+            return None;
+        }
+        if last.is_motion_echo_of(&event) {
+            *pending = Some(event);
+            return None;
+        }
+        if event.frame_index.saturating_sub(last.frame_index) <= separation {
+            if (event.body_contact_supported, event.probability)
+                > (last.body_contact_supported, last.probability)
+            {
+                *pending = Some(event);
+            }
+            return None;
+        }
+    }
+    pending.replace(event)
+}
+
 /// RTMPose is read from the same saved GPU fusion as the selected CPU replay.
 /// A single-frame pose overlap cannot promote a candidate to a real Touch:
 /// require same-Track-ID body intersection before/at/after a motion-gated hit.
@@ -770,21 +795,10 @@ fn detect_stream_with_pose(
                     continue;
                 }
                 motion_candidates += 1;
-                if let Some(ref last) = pending {
-                    if event.frame_index.saturating_sub(last.frame_index) <= separation {
-                        if (event.body_contact_supported, event.probability)
-                            > (last.body_contact_supported, last.probability)
-                        {
-                            pending = Some(event);
-                        }
-                        continue;
-                    }
-                }
-                if let Some(last) = pending.take() {
+                if let Some(last) = select_pending_touch(&mut pending, event, separation) {
                     emit_record(&mut writer, &mut output_hash, &last)?;
                     emitted += 1;
                 }
-                pending = Some(event);
             }
             Ok(())
         };
@@ -1003,7 +1017,7 @@ pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, Api
             "court_context_enabled":court_calibration.is_some(),
             "motion_supported_proposals_before_dedup":raw,
             "touch_candidates":events,
-            "method":if settings.algorithm == TouchAlgorithm::PoseMotion { "vballnet_trajectory_body_contact_v8" } else { "vballnet_gravity_player_geometry_pose_contact_v8" },
+            "method":if settings.algorithm == TouchAlgorithm::PoseMotion { "vballnet_trajectory_body_contact_v9" } else { "vballnet_gravity_player_geometry_pose_contact_v9" },
             "pose_classification_requested":pose_requested,
             "human_training_example_count":training_examples.len(),
             "human_training_touch_sha256":training_sha,
@@ -1081,6 +1095,99 @@ pub async fn status(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn recorded_rebound_and_departure(frame: u64) -> [PhysicalTouchCandidate; 2] {
+        let impact = PhysicalTouchCandidate {
+            frame_index: frame,
+            provisional_track_id: Some(6),
+            probability: 0.73045,
+            ball_x_px: 496.25,
+            ball_y_px: 350.0,
+            motion_frame_index: frame,
+            direction_change_deg: 164.05,
+            speed_before_px_frame: 15.0,
+            speed_after_px_frame: 18.20,
+            velocity_residual_px_frame: 32.88,
+            technique: "unknown_touch",
+            action_prediction: None,
+            court: None,
+            physical_motion_supported: true,
+            body_contact_supported: true,
+            contact_landmark: None,
+            contact_pose_sample_frame: None,
+            ball_occluded_at_contact: true,
+            inferred_body_reach_supported: false,
+            athlete_identity_verified: false,
+        };
+        let departure = PhysicalTouchCandidate {
+            frame_index: frame + 4,
+            provisional_track_id: Some(4),
+            probability: 0.62499,
+            ball_x_px: 515.0,
+            ball_y_px: 282.5,
+            motion_frame_index: frame + 4,
+            direction_change_deg: 6.71,
+            speed_before_px_frame: 7.40,
+            speed_after_px_frame: 16.93,
+            velocity_residual_px_frame: 14.36,
+            body_contact_supported: false,
+            ball_occluded_at_contact: false,
+            ..impact.clone()
+        };
+        [impact, departure]
+    }
+
+    #[test]
+    fn stream_selector_discards_departure_echo_from_different_track() {
+        let [impact, departure] = recorded_rebound_and_departure(235);
+        let mut pending = Some(impact);
+        assert!(select_pending_touch(&mut pending, departure, 3).is_none());
+        assert_eq!(pending.unwrap().frame_index, 235);
+    }
+
+    #[test]
+    fn stream_selector_discards_departure_echo_across_block_boundary() {
+        let [impact, departure] = recorded_rebound_and_departure(CHUNK as u64 - 1);
+        let mut pending = Some(impact);
+        assert!(select_pending_touch(&mut pending, departure, 3).is_none());
+        assert_eq!(pending.unwrap().frame_index, CHUNK as u64 - 1);
+    }
+
+    #[test]
+    fn stream_selector_replaces_approach_echo_with_later_rebound() {
+        let [mut impact, mut approach] = recorded_rebound_and_departure(235);
+        impact.frame_index = 243;
+        impact.motion_frame_index = 243;
+        approach.frame_index = 239;
+        approach.motion_frame_index = 239;
+        let mut pending = Some(approach);
+        assert!(select_pending_touch(&mut pending, impact, 3).is_none());
+        assert_eq!(pending.unwrap().frame_index, 243);
+    }
+
+    #[test]
+    fn stream_selector_keeps_independent_body_contact_after_rebound() {
+        let [impact, mut second] = recorded_rebound_and_departure(235);
+        second.body_contact_supported = true;
+        let mut pending = Some(impact);
+        let emitted = select_pending_touch(&mut pending, second, 3).unwrap();
+        assert_eq!(
+            (emitted.frame_index, pending.unwrap().frame_index),
+            (235, 239)
+        );
+    }
+
+    #[test]
+    fn stream_selector_keeps_separate_turn_after_rebound() {
+        let [impact, mut second] = recorded_rebound_and_departure(235);
+        second.direction_change_deg = 80.0;
+        let mut pending = Some(impact);
+        let emitted = select_pending_touch(&mut pending, second, 3).unwrap();
+        assert_eq!(
+            (emitted.frame_index, pending.unwrap().frame_index),
+            (235, 239)
+        );
+    }
 
     /// Optional read-only quality gate for the 25-second new2 pilot replay.
     #[test]
@@ -1519,6 +1626,44 @@ mod tests {
 #[cfg(test)]
 mod local_tuning_diagnostic {
     use super::*;
+
+    #[test]
+    #[ignore = "requires VOLLEY_TOUCH_ECHO_FIXTURE with isolated replay and pose evidence"]
+    fn recorded_rebound_at_7_8s_has_no_departure_echo() {
+        let root = std::path::PathBuf::from(std::env::var("VOLLEY_TOUCH_ECHO_FIXTURE").unwrap());
+        let source = root.join("tracked_frames.jsonl");
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(root.join("touch_manifest.json")).unwrap()).unwrap();
+        let settings: TouchSettings = serde_json::from_value(manifest["settings"].clone()).unwrap();
+        let fusion = manifest["pose_source_fusion_id"].as_str().unwrap();
+        let output = root.join(format!("touches-{}.jsonl", Uuid::new_v4()));
+        detect_stream_with_pose(
+            &source,
+            &output,
+            manifest["source_replay_sha256"].as_str().unwrap(),
+            manifest["frames"].as_u64().unwrap(),
+            1280,
+            720,
+            settings,
+            true,
+            Some((&root, fusion)),
+            None,
+            &[],
+        )
+        .unwrap();
+        let events: Vec<Value> = fs::read_to_string(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|event: &Value| (232..=242).contains(&event["frame_index"].as_u64().unwrap()))
+            .collect();
+        assert_eq!(
+            events.len(),
+            1,
+            "one recorded rebound must produce one event: {events:?}"
+        );
+        assert_eq!(events[0]["frame_index"], 235);
+    }
 
     #[test]
     #[ignore = "Use VOLLEY_TOUCH_REPLAY for isolated analysis; never writes production"]

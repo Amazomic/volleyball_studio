@@ -162,6 +162,20 @@ pub struct PhysicalTouchCandidate {
     pub inferred_body_reach_supported: bool,
     pub athlete_identity_verified: bool,
 }
+
+impl PhysicalTouchCandidate {
+    pub fn is_motion_echo_of(&self, impact: &Self) -> bool {
+        let window = crate::motion::TOUCH_MOTION_CONFIG.velocity_window as u64;
+        self.physical_motion_supported
+            && impact.physical_motion_supported
+            && !self.body_contact_supported
+            && self.direction_change_deg < 25.0
+            && impact.direction_change_deg >= 75.0
+            && self.velocity_residual_px_frame < impact.velocity_residual_px_frame
+            && self.frame_index.abs_diff(impact.frame_index) <= window
+            && self.motion_frame_index.abs_diff(impact.motion_frame_index) <= window
+    }
+}
 fn valid_bbox(b: [f64; 4]) -> bool {
     b.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) && b[2] > b[0] && b[3] > b[1]
 }
@@ -384,6 +398,76 @@ pub fn evaluate_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recorded_motion_event(frame: u64, angle: f64, residual: f64) -> PhysicalTouchCandidate {
+        PhysicalTouchCandidate {
+            frame_index: frame,
+            provisional_track_id: Some(if frame == 235 { 6 } else { 4 }),
+            probability: 0.7,
+            ball_x_px: 500.0,
+            ball_y_px: 300.0,
+            motion_frame_index: frame,
+            direction_change_deg: angle,
+            speed_before_px_frame: 7.4,
+            speed_after_px_frame: 16.9,
+            velocity_residual_px_frame: residual,
+            technique: "unknown_touch",
+            action_prediction: None,
+            court: None,
+            physical_motion_supported: true,
+            body_contact_supported: false,
+            contact_landmark: None,
+            contact_pose_sample_frame: None,
+            ball_occluded_at_contact: false,
+            inferred_body_reach_supported: false,
+            athlete_identity_verified: false,
+        }
+    }
+
+    #[test]
+    fn departure_acceleration_is_echo_of_nearby_rebound_despite_different_track_ids() {
+        let impact = recorded_motion_event(235, 164.05, 32.88);
+        let departure = recorded_motion_event(239, 6.71, 14.36);
+        assert!(departure.is_motion_echo_of(&impact));
+    }
+
+    #[test]
+    fn approach_acceleration_is_echo_of_later_rebound() {
+        let impact = recorded_motion_event(243, 164.05, 32.88);
+        let approach = recorded_motion_event(239, 6.71, 14.36);
+        assert!(approach.is_motion_echo_of(&impact));
+    }
+
+    #[test]
+    fn independently_body_supported_contact_is_not_motion_echo() {
+        let impact = recorded_motion_event(235, 164.05, 32.88);
+        let mut second = recorded_motion_event(239, 6.71, 14.36);
+        second.body_contact_supported = true;
+        assert!(!second.is_motion_echo_of(&impact));
+    }
+
+    #[test]
+    fn separate_direction_break_is_not_motion_echo() {
+        let impact = recorded_motion_event(235, 164.05, 32.88);
+        let second = recorded_motion_event(239, 80.0, 14.36);
+        assert!(!second.is_motion_echo_of(&impact));
+    }
+
+    #[test]
+    fn small_turn_outside_rebound_fitting_window_is_not_motion_echo() {
+        let impact = recorded_motion_event(235, 164.05, 32.88);
+        let second = recorded_motion_event(241, 6.71, 14.36);
+        assert!(!second.is_motion_echo_of(&impact));
+    }
+
+    #[test]
+    fn distant_motion_anchor_is_not_suppressed_by_nearby_contact_frame() {
+        let impact = recorded_motion_event(235, 164.05, 32.88);
+        let mut second = recorded_motion_event(239, 6.71, 14.36);
+        second.motion_frame_index = 241;
+        assert!(!second.is_motion_echo_of(&impact));
+    }
+
     #[test]
     fn pose_motion_finds_change_with_moving_wrist_and_rejects_missing_motion() {
         let mut frames = scenario(true, true, false);

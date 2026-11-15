@@ -867,8 +867,8 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
         // The new strict body/ball intersection must never reuse a saved
         // PoseMotion v1 run just because its sliders happen to match.
         && (match request.post.touches.algorithm {
-            TouchAlgorithm::PoseMotion => touches["method"] == "vballnet_trajectory_body_contact_v8",
-            TouchAlgorithm::Legacy => touches["method"] == "vballnet_gravity_player_geometry_pose_contact_v8",
+            TouchAlgorithm::PoseMotion => touches["method"] == "vballnet_trajectory_body_contact_v9",
+            TouchAlgorithm::Legacy => touches["method"] == "vballnet_gravity_player_geometry_pose_contact_v9",
         })
         && rallies["schema"] == "volley-native-cpu-rally-proposals/1"
         && rallies["state"] == "provisional_rally_segments"
