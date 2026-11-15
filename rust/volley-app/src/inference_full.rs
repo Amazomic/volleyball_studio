@@ -94,6 +94,9 @@ pub struct StartRequest {
     model: ModelKind,
     #[serde(default = "default_stride")]
     stride: usize,
+    /// One shared detector/RTMPose sampling period over the prepared 30 FPS timeline.
+    #[serde(default = "default_person_stride")]
+    person_stride: usize,
     #[serde(default = "default_device")]
     device: Device,
     #[serde(default)]
@@ -105,6 +108,9 @@ pub struct StartRequest {
 }
 fn default_stride() -> usize {
     9
+}
+fn default_person_stride() -> usize {
+    volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES
 }
 fn default_device() -> Device {
     Device::Cuda
@@ -263,6 +269,7 @@ struct JobContext {
     duration_sec: f64,
     config: Config,
     stride: usize,
+    person_stride: usize,
     folder: PathBuf,
     repo: PathBuf,
     status: Arc<StdMutex<JobStatus>>,
@@ -321,12 +328,12 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
             }
             let records = if let Some(engine) = person_engine.as_mut() {
                 let mut detections = Vec::new();
-                // 30 FPS evidence timeline, but only three real player/model
-                // observations per second. Never label interpolated frames as ONNX.
+                // Sample real detector observations every configured N video
+                // frames (30 FPS source). Intermediate frames have no ONNX boxes.
                 engine.detect_frames_sampled(
                     &window.data,
                     window.first_frame,
-                    volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES as u64,
+                    context.person_stride as u64,
                     |offset, poses| {
                         if context.cancelled.load(Ordering::Acquire) {
                             return Err("cancelled".into());
@@ -393,13 +400,13 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
         "person_pipeline":if context.config.model == ModelKind::Players {
             Some(match volley_inference::person::DetectorVariant::from_env()? {
                 volley_inference::person::DetectorVariant::RtmDetNano =>
-                    "rtmdet_nano_tiled_rtmpose_m_coco17_3hz_v5",
+                    "rtmdet_nano_tiled_rtmpose_m_coco17_sampled_v6",
                 volley_inference::person::DetectorVariant::RfDetrMedium =>
-                    "rfdetr_medium_18250b5a_detector_boxes_pose_deferred_3hz_v2",
+                    "rfdetr_medium_18250b5a_detector_boxes_pose_deferred_sampled_v3",
             })
         } else { None },
         "person_sampling_period_frames":if context.config.model == ModelKind::Players {
-            volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES
+            context.person_stride
         } else { 1 },
         "provider":context.config.device,
         "source_identity":{"bytes":before.0,"mtime_ns":before.1},
@@ -495,6 +502,11 @@ pub async fn start(
     if !(MIN_STRIDE..=MAX_STRIDE).contains(&request.stride) {
         return Err(storage::bad_request("Шаг кадров должен быть от 1 до 9"));
     }
+    if !(1..=30).contains(&request.person_stride) {
+        return Err(storage::bad_request(
+            "Шаг обнаружения игроков и поз должен быть от 1 до 30 кадров",
+        ));
+    }
     let config = Config {
         model: request.model,
         device: request.device,
@@ -551,6 +563,7 @@ pub async fn start(
         duration_sec: plan.duration_sec,
         config,
         stride: request.stride,
+        person_stride: request.person_stride,
         folder,
         repo: state.repository_root.clone(),
         status: status.clone(),
@@ -684,6 +697,21 @@ pub async fn cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sampled_person_request_defaults_to_ten_and_accepts_one_through_thirty() {
+        let request = serde_json::json!({
+            "project_id":"abc123def456","video":"match.mp4","model":"players"
+        });
+        let parsed: StartRequest = serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(parsed.person_stride, 10);
+        for step in [1, 2, 3, 5, 10, 30] {
+            let mut sample = request.clone();
+            sample["person_stride"] = json!(step);
+            let parsed: StartRequest = serde_json::from_value(sample).unwrap();
+            assert_eq!(parsed.person_stride, step);
+        }
+    }
 
     #[test]
     fn long_cuda_errors_name_model_and_exact_window() {
@@ -828,6 +856,7 @@ mod tests {
             video: video.into(),
             model: ModelKind::Players,
             stride: 9,
+            person_stride: default_person_stride(),
             device: Device::Cpu,
             gpu_device_id: 0,
             gpu_memory_limit_mb: 0,
@@ -954,6 +983,7 @@ mod tests {
                 video: video.into(),
                 model,
                 stride: 9,
+                person_stride: default_person_stride(),
                 device,
                 gpu_device_id: 0,
                 gpu_memory_limit_mb: 0,

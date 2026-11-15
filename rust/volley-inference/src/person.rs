@@ -774,6 +774,20 @@ mod tests {
     }
 
     #[test]
+    fn custom_sampling_intervals_remain_global_across_nine_frame_windows() {
+        for step in [1u64, 2, 3, 5, 7, 10, 30] {
+            let expected = (0..90)
+                .filter(|frame| frame % step == 0)
+                .collect::<Vec<_>>();
+            let sampled = (0..10)
+                .flat_map(|window| (0..9).map(move |offset| window * 9 + offset))
+                .filter(|&frame| is_observation_frame(frame, step))
+                .collect::<Vec<_>>();
+            assert_eq!(sampled, expected, "sampling step {step}");
+        }
+    }
+
+    #[test]
     fn rfdetr_full_gpu_evidence_defers_pose_while_other_entrypoints_keep_it() {
         assert!(!DetectorVariant::RfDetrMedium.needs_pose_in_gpu_evidence());
         assert!(DetectorVariant::RtmDetNano.needs_pose_in_gpu_evidence());

@@ -184,8 +184,8 @@ pub fn process(
     }
     let stride = manifest["player_sampling_period_frames"]
         .as_u64()
-        .filter(|&n| n == volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES as u64)
-        .ok_or("RTMPose requires the verified RF-DETR 10-frame detector sampling period")?
+        .filter(|n| (1..=30).contains(n))
+        .ok_or("RTMPose requires a verified shared 1..30-frame detector sampling period")?
         as usize;
     let plan = preparation::plan_for(app, project_id, video).map_err(|e| format!("{e:?}"))?;
     let prepared = plan.ready_path().ok_or("Prepared pose video missing")?;
@@ -337,6 +337,22 @@ pub fn process(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pose_samples_follow_any_verified_detector_period() {
+        for step in [1usize, 2, 3, 5, 10, 30] {
+            let frame = (step * 4) as u64;
+            let row = json!({
+                "frame_index":frame,
+                "player_candidates":[{
+                    "class_name":"player","score":0.8,
+                    "bbox_xyxy_norm":[0.1,0.2,0.3,0.8]
+                }]
+            });
+            assert_eq!(sampled_boxes(&row, frame, step).unwrap().len(), 1);
+            assert!(sampled_boxes(&row, frame + 1, step).is_err() || step == 1);
+        }
+    }
+
     #[test]
     fn pose_boxes_are_aligned_to_detector_and_never_synthesized() {
         let row = json!({"frame_index":20,"player_candidates":[

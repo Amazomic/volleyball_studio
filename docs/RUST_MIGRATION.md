@@ -1772,3 +1772,10 @@ Studio показывает кнопку перехода между debug и re
 - Файлы: `rust/volley-app/src/native_preview_overlay.rs`, `rust/volley-app/static/studio.js`, `scripts/ci/test_studio_pose_rally_visibility.mjs`.
 - Проверки: `cargo check --offline --locked -p volley-app`, тест `native_preview_overlay::tests::overlays_hide_players_outside_plays_and_keep_inside_player_ids`, `node --check`, новый JS-регрессионный тест.
 - Дополнительный тест `scripts/ci/test_studio_raw_gpu_preview.mjs` по-прежнему падает на ранее известном сценарии (`Current fusion loads normally`, 0 !== 1); он не менялся в этой задаче.
+
+### 2026-11-16 — Настраиваемая частота RF-DETR и RTMPose (1–30 кадров)
+
+- В «Первичный анализ» добавлен общий шаг определения игроков и поз (1–30 кадров; по умолчанию 10). Подписано, что подготовленное видео имеет 30 FPS, и динамически показывается частота нейросетевых измерений (например, 10 → 3 раза/с, 1 → 30 раз/с, 30 → 1 раз/с).
+- Один параметр `pose_stride` в сохранённом GPU-профиле управляет RF-DETR (либо выбранным детектором игроков) и последующим RTMPose на тех же кадрах. Нативный GPU-запуск передаёт `person_stride`, а его manifest, fusion и RTMPose сохраняют/проверяют фактический период. Внесена проверка соответствия периода при повторном использовании GPU-кэша. Историческое имя поля оставлено для обратной совместимости.
+- Проверки/владельцы: `rust/volley-app/static/studio.html`, `studio_tabs.js`, `rust/volley-app/src/studio_pipeline.rs`, `inference_full.rs`, `pose_inference.rs`, `rust/volley-inference/src/person.rs`. JS-тесты: `scripts/ci/test_studio_pose_modes.mjs` и `test_studio_interpolation_flags.mjs`.
+- Изменение не запускает анализ автоматически и не редактирует существующие пользовательские проекты. Реальный сравнительный GPU-прогон разных частот и влияние на качество по матчам в рамках этой задачи не выполнялись.

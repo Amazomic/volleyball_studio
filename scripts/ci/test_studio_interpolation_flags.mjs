@@ -15,6 +15,7 @@ const slice=(begin,end)=>{
 };
 const values={
   "studio-gpu-stride":9,"studio-gpu-memory":0,"studio-gpu-threads":8,
+  "studio-gpu-person-stride":10,
 };
 const boxes={
   "studio-gpu-pose-enabled":{value:"1"},

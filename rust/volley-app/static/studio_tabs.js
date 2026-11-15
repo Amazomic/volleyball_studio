@@ -187,13 +187,29 @@
     }
     return value;
   };
+  const refreshPersonSamplingRate=()=>{
+    const step=Number($("studio-gpu-person-stride").value);
+    const rate=$("studio-gpu-person-rate");
+    if(!Number.isSafeInteger(step)||step<1||step>30){
+      rate.textContent="Видео: 30 кадров в секунду (30 FPS). Укажите шаг от 1 до 30.";
+      return;
+    }
+    const frequency=30/step;
+    const count=frequency.toLocaleString("ru-RU",{maximumFractionDigits:2});
+    const form=Number.isInteger(frequency)&&frequency%100>=11&&frequency%100<=14?"раз":
+      Number.isInteger(frequency)&&frequency%10===1?"раз":
+      Number.isInteger(frequency)&&frequency%10>=2&&frequency%10<=4?"раза":
+      Number.isInteger(frequency)?"раз":"раза";
+    rate.textContent="Видео: 30 кадров в секунду (30 FPS). Каждый "+step+
+      "-й кадр → "+count+" "+form+"/с.";
+  };
   const gpuProfile=()=>({
       stride:inputValue("studio-gpu-stride"),
       gpu_memory_limit_mb:inputValue("studio-gpu-memory"),
       cpu_threads:inputValue("studio-gpu-threads"),
       pose_enabled:$("studio-gpu-pose-enabled").value==="1",
       pose_mode:"photo",
-      pose_stride:10,
+      pose_stride:inputValue("studio-gpu-person-stride"),
       interpolate_players:$("studio-gpu-interpolate-players").checked,
       interpolate_pose:$("studio-gpu-interpolate-pose").checked
   });
@@ -273,6 +289,7 @@
     }catch{return "";}
   };
   const updateProfile=()=>{
+    refreshPersonSamplingRate();
     let gpuValid=true,postValid=true,invalid="";
     try{gpuProfile();}catch(e){gpuValid=false;invalid=String(e.message||e);}
     try{postProfile();}catch(e){postValid=false;invalid=String(e.message||e);}

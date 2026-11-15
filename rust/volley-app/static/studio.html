@@ -380,7 +380,12 @@
                                 </div>
                 <div><label class="field-label" for="studio-gpu-stride">Шаг окон, кадров</label>
                                   <input id="studio-gpu-stride" type="number" min="1" max="9" step="1" value="9" data-default="9"></div>
-                <p class="panel-note">RF-DETR и RTMPose-M синхронизированы: каждые 10 кадров (3 раза/с). В первичном анализе используются только обнаруженные рамки.</p>
+                <div>
+                  <label class="field-label" for="studio-gpu-person-stride">RF-DETR + RTMPose-M · определять каждый N-й кадр</label>
+                  <input id="studio-gpu-person-stride" type="number" min="1" max="30" step="1" value="10" data-default="10" aria-describedby="studio-gpu-person-rate">
+                  <p id="studio-gpu-person-rate" class="panel-note" role="status" aria-live="polite">Видео: 30 кадров в секунду (30 FPS). Каждый 10-й кадр → 3 раза/с.</p>
+                </div>
+                <p class="panel-note">Игроки и позы определяются на одних и тех же кадрах, по реальным рамкам детектора. Промежуточные кадры не передаются в эти нейросети.</p>
                 <div class="analysis-profile-toggle"><label><input id="studio-gpu-interpolate-pose" type="checkbox" checked data-default="1"> Интерполяция точек позы в предпросмотре</label></div>
               </div>
               <details class="analysis-profile-advanced">

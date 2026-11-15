@@ -390,7 +390,8 @@ pub struct GpuProfile {
     /// RTMPose reads selected still frames or every video frame.
     #[serde(default)]
     pose_mode: crate::pose_inference::PoseInputMode,
-    /// Sampling interval for photo mode, measured in video frames at 30 FPS.
+    /// Shared sampling interval for person detection and RTMPose at 30 FPS.
+    /// The historical API name pose_stride is retained for saved profiles.
     pose_stride: usize,
     #[serde(default = "default_interpolation_enabled")]
     interpolate_players: bool,
@@ -730,6 +731,7 @@ fn gpu_lineage_valid(
         || fusion["source_identity"] != *identity
         || fusion["sources"]["vballnet"]["job_id"] != ball_id
         || fusion["sources"]["person_pose"]["job_id"] != players_id
+        || fusion["player_sampling_period_frames"] != request.gpu.pose_stride
     {
         return false;
     }
@@ -748,6 +750,8 @@ fn gpu_lineage_valid(
             model,
         ) || raw["source_identity"] != *identity
             || raw["stride"] != request.gpu.stride
+            || (model == "players"
+                && raw["person_sampling_period_frames"] != request.gpu.pose_stride)
             || raw["sha256"] != fusion["sources"][source]["sha256"]
         {
             return false;
@@ -785,10 +789,9 @@ fn gpu_lineage_valid(
         }
         if saved["gpu_model_stack"] == requested_gpu_model_stack() {
             if pose["box_source_version"] != "detector_observed_sampling_v1"
-                || pose["source_person_sampling_period_frames"]
-                    != volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES
+                || pose["source_person_sampling_period_frames"] != request.gpu.pose_stride
                 || pose["interpolate_players"] != false
-                || pose["stride"] != volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES
+                || pose["stride"] != request.gpu.pose_stride
                 || !pose["crop_plan_file"].is_null()
             {
                 return false;
@@ -878,7 +881,7 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
         && rallies["project_id"] == request.project_id
         && rallies["video"] == request.video
 }
-const GPU_MODEL_STACK: &str = "vballnet_rtmdet_rtmpose_tiled_coco17_3hz_observed_pose_v7";
+const GPU_MODEL_STACK: &str = "vballnet_rtmdet_rtmpose_tiled_coco17_sampled_observed_pose_v8";
 const RFDETR_GPU_MODEL_STACK: &str =
     "vballnet_rfdetr_medium_18250b5a_detboxes_aligned_observed_pose_v3";
 
@@ -1046,6 +1049,10 @@ fn selected_gpu(
     let ball = require_id(&fusion["sources"]["vballnet"], "job_id")?;
     let players = require_id(&fusion["sources"]["person_pose"], "job_id")?;
     let mut stride = None;
+    let player_stride = fusion["player_sampling_period_frames"]
+        .as_u64()
+        .filter(|step| (1..=30).contains(step))
+        .ok_or("Неверный шаг определения игроков в сохранённом GPU-анализе")?;
     for (model, id, source) in [
         ("ball", ball.as_str(), "vballnet"),
         ("players", players.as_str(), "person_pose"),
@@ -1064,6 +1071,7 @@ fn selected_gpu(
             model,
         ) || raw["source_identity"] != *identity
             || raw["sha256"] != fusion["sources"][source]["sha256"]
+            || (model == "players" && raw["person_sampling_period_frames"] != player_stride)
             || stride.is_some_and(|s| s != current_stride)
         {
             return Err("GPU-источник выбранной версии повреждён или не совпадает".into());
@@ -1074,9 +1082,9 @@ fn selected_gpu(
         "analysis_id": analysis_id,
         "gpu_jobs": {"ball":ball,"players":players},
         "id": analysis_id,
-        // Standalone GPU manifests preserve stride, not thread/VRAM settings.
+        // Standalone GPU manifests preserve the player sampling period.
         "profile": {"gpu": {"stride":stride.unwrap_or(9),
-            "gpu_memory_limit_mb":0,"cpu_threads":8}}
+            "pose_stride":player_stride,"gpu_memory_limit_mb":0,"cpu_threads":8}}
     }))
 }
 
@@ -1120,6 +1128,7 @@ async fn gpu(
         "device": "cuda",
         "gpu_device_id": 0,
         "stride": request.gpu.stride,
+        "person_stride": request.gpu.pose_stride,
         "gpu_memory_limit_mb": request.gpu.gpu_memory_limit_mb,
         "cpu_threads": request.gpu.cpu_threads
     });
@@ -1478,7 +1487,7 @@ async fn pipeline(
             "GPU · RTMPose-M",
             "pose_inference::process",
             json!({"fusion_id":fusion_id,"model":"RTMPose-M-Body7",
-                    "stride":volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES,
+                    "stride":request.gpu.pose_stride,
                     "box_source":"observed_detector_only",
                     "threads":request.gpu.cpu_threads,
                     "gpu_memory_limit_mb":request.gpu.gpu_memory_limit_mb,
@@ -1835,12 +1844,10 @@ pub async fn start(
         ));
     }
     if request.mode.allows_gpu_execution()
-        && request.gpu.pose_enabled
-        && (request.gpu.pose_mode != crate::pose_inference::PoseInputMode::Photo
-            || request.gpu.pose_stride != volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES)
+        && request.gpu.pose_mode != crate::pose_inference::PoseInputMode::Photo
     {
         return Err(storage::bad_request(
-            "RTMPose должен использовать те же кадры, что RF-DETR: шаг 10 (3 раза/с)",
+            "Рамки игроков и RTMPose должны использовать общий шаг кадров",
         ));
     }
     request
@@ -2245,6 +2252,30 @@ mod tests {
             crate::pose_inference::PoseInputMode::Photo
         );
         assert!(profile.interpolate_players);
+    }
+
+    #[test]
+    fn shared_player_pose_stride_changes_gpu_cache_identity() {
+        let identity = json!({"bytes":1234,"mtime_ns":5678});
+        let mut request: StartRequest = serde_json::from_value(json!({
+            "project_id":"abc123def456","video":"match.mp4"
+        }))
+        .unwrap();
+        let saved = json!({
+            "schema":SCHEMA,
+            "gpu_model_stack":requested_gpu_model_stack(),
+            "project_id":request.project_id,
+            "video":request.video,
+            "profile":{"gpu":request.gpu},
+            "source_identity":identity
+        });
+        assert!(compatible_version(&saved, &request, &identity));
+        for step in [1, 2, 3, 5, 9, 30] {
+            request.gpu.pose_stride = step;
+            assert!(!compatible_version(&saved, &request, &identity));
+        }
+        request.gpu.pose_stride = 10;
+        assert!(compatible_version(&saved, &request, &identity));
     }
 
     #[test]
