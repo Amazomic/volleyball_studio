@@ -34,7 +34,7 @@ pub(super) fn tracks_co_visible(a: &Aggregate, b: &Aggregate) -> bool {
     let threshold = doc["automatic_identity_evidence"]["threshold"]
         .as_f64()
         .filter(|value| (0.0..=1.0).contains(value))
-        .unwrap_or(0.30); // Compatibility for old persisted assignment data.
+        .unwrap_or(0.35); // New settings default to 35%.
     // Evaluate strongest evidence first. An athlete can have many tracklets,
     // but not two co-visible tracklets with distinct positions.
     let mut candidates = Vec::<(f64, u64, String)>::new();
@@ -285,7 +285,7 @@ pub(super) fn filtered_page(
     let threshold = doc["automatic_identity_evidence"]["threshold"]
         .as_f64()
         .filter(|value| (0.0..=1.0).contains(value))
-        .unwrap_or(0.30);
+        .unwrap_or(0.35);
     let unresolved_match_ids: BTreeSet<u64> = ctx.tracks.iter().filter(|(id, candidate)| {
         if owners.contains_key(id) { return false; }
         let Some(rows) = doc["automatic_identity_evidence"]["matches"][id.to_string()].as_array()
