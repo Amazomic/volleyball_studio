@@ -75,7 +75,7 @@ All paths below are in WSL:
     source_repo=/mnt/c/Users/amazomic/Desktop/github/fast-volleyball-tracking-inference
     video=/tmp/volley-sam31/sample_640x360.mp4
 
-The experiment's isolated Python environment is /tmp/volley-rfdetr-venv, created with:
+Optional heavyweight PyTorch alternative (NOT used by the default ONNX runner): isolated environment /tmp/volley-rfdetr-venv, created with:
 
     ~/.local/bin/uv venv --python 3.12 /tmp/volley-rfdetr-venv
     ~/.local/bin/uv pip install --python /tmp/volley-rfdetr-venv/bin/python --torch-backend auto rfdetr opencv-python-headless
@@ -107,3 +107,26 @@ One-command runner after installation (launch in WSL, never runs inside Studio):
     bash "$repo/scripts/experiments/sam31/run_all_rfdetr.sh"
 
 The runner reuses the existing 180-frame RTMDet baseline when present and writes the aggregate report to /tmp/volley-sam31/rfdetr_comparison.json.
+
+
+### Preferred lightweight ONNX Runtime benchmark (no PyTorch)
+
+RF-DETR Small (114 MB) and Medium (121 MB) public COCO ONNX exports hosted by PierreMarieCurie/rf-detr-onnx. Both originated from Roboflow RF-DETR (older rfdetr 1.3.0 exports). Treat the hosted model files as **third-party experimental artifacts**, record SHA-256, and verify ONNX input/output contracts before comparing. No gated-model approval.
+
+Model artifacts:
+- https://huggingface.co/PierreMarieCurie/rf-detr-onnx/resolve/main/rf-detr-small.onnx
+- https://huggingface.co/PierreMarieCurie/rf-detr-onnx/resolve/main/rf-detr-medium.onnx
+
+WSL lightweight dependencies (one-time in isolated environment):
+
+    ~/.local/bin/uv venv --python 3.12 /tmp/volley-onnx-venv
+    ~/.local/bin/uv pip install --python /tmp/volley-onnx-venv/bin/python onnxruntime-gpu==1.22.0 opencv-python-headless numpy
+
+Files stored at /tmp/volley-sam31/rfdetr-small.onnx and rfdetr-medium.onnx; model source and SHA-256 included in benchmark metadata.
+
+    repo=/mnt/c/Users/amazomic/AppData/Local/SentinelX/workspace/volley-sam31-experiment
+    bash "$repo/scripts/experiments/sam31/run_all_rfdetr.sh"
+
+The one-command runner now uses run_rfdetr_onnx.py by default, requiring CUDAExecutionProvider and excluding session initialization time. The older run_rfdetr.py PyTorch script is an optional fallback, not required. It writes a comparison of tracking FPS and gaps for both models and baseline. RF-DETR ONNX outputs are normalized cxcywh and sparse COCO logits (person index 1); preprocessing uses direct square resize and ImageNet mean/std, no letterbox.
+
+Results and logs: /tmp/volley-sam31/rfdetr_comparison.json.

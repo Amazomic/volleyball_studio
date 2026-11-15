@@ -1,0 +1,61 @@
+{
+  "video_sha256": "8f31e060717e9ff03750fb7200804ac63e1bf5378c5abdbe8dd9f72e378bdb6c",
+  "frames": 180,
+  "warning": "Provisional IDs only, no manual athlete ground truth; a smaller ID count is not proof of better identity tracking.",
+  "results": {
+    "RTMDet-Nano + RTMPose + Rust": {
+      "frames": 180,
+      "all_provisional_ids": 8,
+      "ids_at_least_min_observations": 6,
+      "min_observations": 12,
+      "total_observed_boxes": 732,
+      "mean_boxes_per_frame": 4.067,
+      "frames_with_at_least_expected_people": 139,
+      "expected_people": 4,
+      "all_people_absent_frames": 0,
+      "longest_no_person_streak": 0,
+      "track_gap_events": 30,
+      "track_missing_frames_inside_lifespan": 221,
+      "longest_track_gap_frames": 72,
+      "fps": 10.988544695684894,
+      "peak_vram_mb": null,
+      "source_model": "RTMDet-Nano+RTMPose+ProvisionalTracker"
+    },
+    "RF-DETR-Small": {
+      "frames": 180,
+      "all_provisional_ids": 12,
+      "ids_at_least_min_observations": 10,
+      "min_observations": 12,
+      "total_observed_boxes": 1289,
+      "mean_boxes_per_frame": 7.161,
+      "frames_with_at_least_expected_people": 180,
+      "expected_people": 4,
+      "all_people_absent_frames": 0,
+      "longest_no_person_streak": 0,
+      "track_gap_events": 24,
+      "track_missing_frames_inside_lifespan": 315,
+      "longest_track_gap_frames": 56,
+      "fps": 14.774712066785282,
+      "peak_vram_mb": null,
+      "source_model": "rfdetr_small_onnx+RTMPose+ProvisionalTracker"
+    },
+    "RF-DETR-Medium": {
+      "frames": 180,
+      "all_provisional_ids": 13,
+      "ids_at_least_min_observations": 10,
+      "min_observations": 12,
+      "total_observed_boxes": 1237,
+      "mean_boxes_per_frame": 6.872,
+      "frames_with_at_least_expected_people": 180,
+      "expected_people": 4,
+      "all_people_absent_frames": 0,
+      "longest_no_person_streak": 0,
+      "track_gap_events": 4,
+      "track_missing_frames_inside_lifespan": 14,
+      "longest_track_gap_frames": 9,
+      "fps": 15.81219938078779,
+      "peak_vram_mb": null,
+      "source_model": "rfdetr_medium_onnx+RTMPose+ProvisionalTracker"
+    }
+  }
+}
