@@ -102,7 +102,7 @@ const options=(target,rows,key,label)=>{
   target.value="";
 };
 const context={s,ui:{analysis,run:cpu,video:{currentTime:0}},overlay:{raw:false},
-  ensurePreviewVideo(){},setOverlaySource(){},prefetchOverlayAtFrame(){},fps:()=>30,rawFusion:()=>null,
+  ensurePreviewVideo(){},setOverlaySource(){},updateRawDetectorLabel(){},prefetchOverlayAtFrame(){},fps:()=>30,rawFusion:()=>null,
   window:{VolleyballUi:{ready:Promise.resolve()},
     VolleyStudioChain:{stamp:()=>"",build:()=>refreshed},
     dispatchEvent:()=>counters.events++},
@@ -133,4 +133,78 @@ await context.loadChain("", "", false);
 assert.ok(counters.reset>0,"Active GPU deletion should reset old preview");
 assert.equal(s.analysis,primaryB);
 assert.equal(s.run,runB);
-console.log("PASS: version buttons and unrelated deletion preserve selected GPU, CPU and preview.");
+// A project may have several GPU versions across multiple videos. The latest
+// real source wins when no valid explicit selection exists, regardless of order.
+const choices=chain([primaryA,primaryB],{
+  [primaryA]:[run(runA)],[primaryB]:[run(runB)]
+});
+choices.choices[0].created_at=100;
+choices.choices[1].created_at=300;
+context.window.VolleyStudioChain.build=()=>choices;
+await context.loadChain("", "", false);
+assert.equal(s.analysis,primaryB,"Most recently created GPU analysis must be selected");
+assert.equal(analysis.value,primaryB);
+await context.loadChain(primaryA,runA,false);
+assert.equal(s.analysis,primaryA,"A valid manually chosen GPU analysis must be retained");
+assert.equal(s.run,runA);
+
+// Deleting the selected newest source falls back to the previous creation.
+context.window.VolleyStudioChain.build=()=>chain([primaryA],{[primaryA]:[run(runA)]});
+await context.loadChain("", "", false);
+assert.equal(s.analysis,primaryA);
+assert.equal(s.run,runA);
+context.window.VolleyStudioChain.build=()=>chain([],{});
+await context.loadChain("", "", false);
+assert.equal(s.analysis,"","An empty project must not invent a GPU source");
+assert.equal(analysis.disabled,true,"No primary analyses must disable the selector");
+assert.equal(cpu.disabled,true,"No primary analysis means no CPU snapshots");
+
+// A populated primary selector must not allow a user to clear it to blank.
+const optionContext={
+  make:(tag,cls,label)=>({tag,value:"",textContent:label}),
+  wipe:select=>{select.children=[];}
+};
+runInNewContext(slice("  const options=(select,rows","  // The linked source chain")+
+  "\nthis.options=options;",optionContext);
+const picker={children:[],append(child){this.children.push(child);}};
+optionContext.options(picker,[choice(primaryA)],"value",x=>x.label,"Выберите",false);
+assert.deepEqual(picker.children.map(x=>x.value),[primaryA]);
+optionContext.options(picker,[],"value",x=>x.label,"Нет GPU-анализов",false);
+assert.equal(picker.children.length,1);
+assert.equal(picker.children[0].value,"");
+
+// A completed pipeline selects the exact newly created fusion, not another
+// version chosen by a fallback during the metadata refresh.
+const completeHandlers=new Map();
+const completeState={project:"abc",analysis:primaryA,chain:chain([primaryA,primaryB],{})};
+const completeUi={analysis:{value:primaryA}};
+let chainLoaded=0;
+const completeContext={
+  window:{addEventListener:(name,callback)=>completeHandlers.set(name,callback)},
+  s:completeState,ui:completeUi,invalidateCatalog(){},
+  loadChain:async()=>{chainLoaded++;},setAnalysis:async()=>{completeState.analysis=completeUi.analysis.value;},
+  failed:error=>{throw error;}
+};
+runInNewContext(slice("  // One authoritative place to select the new GPU -> CPU lineage:",
+  "  window.addEventListener(\"volley:open-legacy-project\"") ,completeContext);
+await completeHandlers.get("volley:pipeline-complete")({
+  detail:{project_id:"abc",video:"match.mp4",analysis_id:"b",postprocessing_id:null}
+});
+assert.equal(chainLoaded,1);
+assert.equal(completeState.analysis,primaryB);
+
+// Deleting the last GPU chain must trigger the analysis button state update.
+const tabSource=readFileSync(new URL("../../rust/volley-app/static/studio_tabs.js",import.meta.url),"utf8");
+const start=tabSource.indexOf('  window.addEventListener("volley:chain-change"');
+const end=tabSource.indexOf('  ui.project.addEventListener("change"',start);
+assert.ok(start>=0&&end>start);
+let updates=0,chainHandler;
+runInNewContext(tabSource.slice(start,end),{
+  window:{addEventListener:(_,handler)=>{chainHandler=handler;}},
+  state:{tab:"analysis"},projectId:()=>"abc",
+  ui:{video:{options:[],value:""}},updateProfile:()=>{updates++;}
+});
+chainHandler({detail:{project_id:"abc",video:""}});
+assert.equal(updates,1,"Removing all analyses must update postprocess availability");
+
+console.log("PASS: primary analysis selection, completion, deletion and empty-state guards.");
