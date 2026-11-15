@@ -404,6 +404,7 @@ pub struct PostProfile {
     tracking: TrackingOptions,
     touches: TouchSettings,
     rallies: RallySettings,
+    identity: crate::native_player_tracks::IdentityProfile,
     #[serde(default = "default_pose_classification")]
     pose_classification: bool,
 }
@@ -416,6 +417,7 @@ impl Default for PostProfile {
             tracking: TrackingOptions::default(),
             touches: TouchSettings::default(),
             rallies: RallySettings::default(),
+            identity: crate::native_player_tracks::IdentityProfile::default(),
             pose_classification: true,
         }
     }
@@ -1487,7 +1489,8 @@ async fn pipeline(
             action: "auto_assign".into(),
             track_ids: Vec::new(),
             expected_revision: None,
-            threshold_percent: 30,
+            threshold_percent: request.post.identity.threshold_percent,
+            algorithm: request.post.identity.algorithm,
         }),
     )
     .await;
@@ -1515,6 +1518,11 @@ async fn pipeline(
         .ok_or("Некорректный результат привязки")?;
     status["automatic_identity_complete"] = json!(remaining.is_empty());
     save(path, status)?;
+    if identities["disabled"] == true {
+        log_event(path, "Игроки", "info",
+            "Автопривязка отключена настройками CPU-постобработки")?;
+        return Ok(());
+    }
     if !remaining.is_empty() {
         // Identity labels are suggestions, not a prerequisite for physical
         // tracking, Touch detection or rally reconstruction.
@@ -1523,9 +1531,10 @@ async fn pipeline(
             "Игроки",
             "warning",
             &format!(
-                "Автопривязка: назначено {} ID, без совпадения {} ID (первые 12: {:?}). Неназначенные ID требуют проверки: отсутствуют признаки, сходство не выше 30%, либо все подходящие владельцы конфликтуют с уже видимыми треками.",
+                "Автопривязка: назначено {} ID, неподтверждено {} ID (первые 12: {:?}). Требуют проверки: недостаточно трёх разных кадров, сходство ниже {}%, нет эталонов либо конфликт одновременного присутствия.",
                 identities["automatic_count"],remaining.len(),
-                remaining.iter().take(12).collect::<Vec<_>>()
+                remaining.iter().take(12).collect::<Vec<_>>(),
+                request.post.identity.threshold_percent
             ),
         )?;
     } else {
@@ -1681,6 +1690,7 @@ pub async fn start(
         .rallies
         .validate()
         .map_err(storage::bad_request)?;
+    request.post.identity.validate().map_err(storage::bad_request)?;
     projects::existing_project(&state, &request.project_id)?;
     let _plan =
         preparation::plan_for_async(state.clone(), &request.project_id, &request.video).await?;
