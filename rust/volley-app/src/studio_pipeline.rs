@@ -1924,6 +1924,9 @@ mod tests {
         assert_eq!(profile.post.tracking.max_gap_frames, 90);
         assert_eq!(profile.post.touches.threshold, 0.48);
         assert_eq!(profile.post.rallies.min_rally_frames, 45);
+        assert_eq!(profile.post.identity.threshold_percent, 35);
+        assert_eq!(profile.post.identity.algorithm,
+            crate::native_player_tracks::IdentityAlgorithm::ThreeSampleMean);
         assert!(profile.post.tracking.validate().is_ok());
         assert!(profile.post.touches.validate().is_ok());
         assert!(profile.post.rallies.validate().is_ok());
