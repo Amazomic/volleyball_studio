@@ -83,3 +83,52 @@ impl CourtHistory {
         Some(rally_contact_context::analyze(&events, &ball))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use volley_core::{action_prediction::ActionKind, court_geometry::CourtSide};
+
+    #[test]
+    fn preserves_same_server_toss_and_strike_for_rally_context() {
+        let mut history = CourtHistory::default();
+        for (frame, speed, residual) in [(100, 8.0, 7.0), (130, 16.0, 18.0)] {
+            history.push_touch(ContactEvidence {
+                frame,
+                track_id: Some(7),
+                side: Some(CourtSide::Near),
+                in_serve_zone: true,
+                kind: Some(ActionKind::Attack),
+                ball_y_px: 250.0,
+                speed_before_px_frame: 2.0,
+                speed_after_px_frame: speed,
+                velocity_residual_px_frame: residual,
+            });
+        }
+        let proposal = RallyProposal {
+            detected_start_frame: 90,
+            detected_end_frame: 170,
+            duration_sec: 2.7,
+            ball_observations: 60,
+            ball_coverage: 0.74,
+            motion_supported_touch_proposals: 2,
+            first_touch_frame: 100,
+            last_touch_frame: 130,
+            max_touch_probability: 0.9,
+            provisional_track_ids: vec![7],
+            unidentified_contacts: 0,
+            classification: "provisional_rally",
+            method: "test",
+            authoritative_rally: false,
+            athlete_identities_verified: false,
+            serve_verified: false,
+            suggested_context_before_frames: 45,
+            suggested_context_after_frames: 45,
+            end_reason: "test",
+        };
+        let context = history.for_rally(&proposal).expect("court evidence");
+        assert_eq!(context.events.len(), 2);
+        assert_eq!(context.serve_frame, Some(130));
+        assert!(context.events[0].ignored_serve_toss);
+    }
+}
