@@ -2031,7 +2031,7 @@ mod branching_tests {
             &json!({
                 "schema":"volley-native-cpu-touch-proposals/1","state":"motion_gated_touch_proposals","touch_id":touch,
                 "project_id":request.project_id,"video":request.video,
-                "source_replay_id":replay,"method":"vballnet_gravity_player_geometry_v6","sha256":sha
+                "source_replay_id":replay,"method":"vballnet_gravity_player_geometry_pose_contact_v8","sha256":sha
             }),
         );
         emit(
