@@ -44,6 +44,33 @@ fn spaced_photo_samples(track: &Aggregate) -> Vec<PhotoSample> {
     selected
 }
 
+#[cfg(test)]
+mod sample_tests {
+    use super::*;
+
+    #[test]
+    fn samples_cover_first_middle_and_last_thirds_without_duplicates() {
+        let photo_samples = [0, 16, 33, 49, 71, 86, 95]
+            .into_iter()
+            .map(|frame| PhotoSample { frame, bbox: [0.1, 0.2, 0.6, 0.8] })
+            .collect();
+        let track = Aggregate {
+            first: 0, last: 95, photo_samples, ..Aggregate::default()
+        };
+        let samples = spaced_photo_samples(&track);
+        assert_eq!(samples.iter().map(|sample| sample.frame).collect::<Vec<_>>(),
+            vec![16, 49, 86]);
+        let shortened = Aggregate {
+            first: 0, last: 95,
+            photo_samples: vec![
+                PhotoSample { frame: 0, bbox: [0.1, 0.2, 0.6, 0.8] },
+                PhotoSample { frame: 95, bbox: [0.1, 0.2, 0.6, 0.8] },
+            ], ..Aggregate::default()
+        };
+        assert_eq!(spaced_photo_samples(&shortened).len(), 2);
+    }
+}
+
 pub async fn embeddings(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
