@@ -175,6 +175,10 @@ impl OriginalClip {
             "-frames:v".into(),
             receipt.frames.to_string(),
         ];
+        if hardware {
+            let input = args.iter().position(|arg| arg == "-i").unwrap_or(0);
+            args.splice(input..input, ["-hwaccel".into(), "auto".into()]);
+        }
         args.extend(encode_flags(hardware));
         args.extend([
             "-movflags".into(),
@@ -421,6 +425,9 @@ pub fn compose_args_for_layout(
         ]);
     } else {
         for clip in clips {
+            if hardware {
+                args.extend(["-hwaccel".into(), "auto".into()]);
+            }
             args.extend(["-i".into(), clip.to_string_lossy().into_owned()]);
         }
         let mut filters = Vec::new();
@@ -536,6 +543,9 @@ pub fn compose_follow_args(
         "-y".into(),
     ];
     for path in clips {
+        if hardware {
+            args.extend(["-hwaccel".into(), "auto".into()]);
+        }
         args.extend(["-i".into(), path.to_string_lossy().into_owned()]);
     }
     let mut filters = Vec::new();

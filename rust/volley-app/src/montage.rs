@@ -30,9 +30,9 @@ use uuid::Uuid;
 use volley_media::{
     montage::{
         can_stream_copy, compose_args_for_layout, compose_follow_args, concat_playlist,
-        native_clip_format, output_profile_for_layout, soundtrack_args, soundtrack_is_audio,
-        verify_mp4_quality, verify_original_segment, CameraPoint, OriginalClip, SelectedClip,
-        VideoLayout,
+        encode_flags, native_clip_format, output_profile_for_layout, soundtrack_args,
+        soundtrack_is_audio, verify_mp4_quality, verify_original_segment, CameraPoint,
+        OriginalClip, SelectedClip, VideoLayout,
     },
     probe,
 };
@@ -544,7 +544,7 @@ async fn encode_with_fallback(
     stage: &str,
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let use_gpu = encoder != "cpu" && (encoder == "gpu" || duration >= 7.0);
+    let use_gpu = encoder != "cpu";
     if use_gpu {
         let result = run_ffmpeg(primary(true), duration, status, index, stage, cancel).await;
         match result {
@@ -663,17 +663,19 @@ async fn render(plan: Planned, status: Arc<Mutex<JobStatus>>, mut cancel: watch:
                 "drawtext=fontfile='{}':textfile='{}':fontcolor=white:fontsize={}:line_spacing=12:x=(w-text_w)/2:y=(h-text_h)/2",
                 font_path, filter_path, font_size
             );
-            let card_args = vec![
+            let card_args = |hardware| {
+                let mut args = vec![
                 "-nostdin".into(), "-hide_banner".into(), "-loglevel".into(), "error".into(),
                 "-y".into(), "-f".into(), "lavfi".into(), "-i".into(),
                 format!("color=c=0x111827:s={}x{}:r={:.8}:d=5", final_profile.0, final_profile.1, final_profile.2),
-                "-vf".into(), filter,
+                "-vf".into(), filter.clone(),
                 "-frames:v".into(), format!("{}", (final_profile.2 * 5.0).round() as u64),
-                "-c:v".into(), "libx264".into(), "-crf".into(), "15".into(),
-                "-pix_fmt".into(), "yuv420p".into(), "-movflags".into(), "+faststart".into(),
-                card.to_string_lossy().into_owned()
-            ];
-            run_ffmpeg(card_args, 5.0, &status, paths.len(), "Статистика матча", &mut cancel).await?;
+                ];
+                args.extend(encode_flags(hardware));
+                args.extend(["-movflags".into(), "+faststart".into(), card.to_string_lossy().into_owned()]);
+                args
+            };
+            encode_with_fallback(card_args, 5.0, &plan.encoder, &status, paths.len(), "Статистика матча", &mut cancel).await?;
             let check_card = card.clone();
             let card_format = tokio::task::spawn_blocking(move || {
                 validate_rendered(&check_card, 5.0)?;
@@ -1442,5 +1444,40 @@ mod highlight_cancellation_tests {
             .expect("FFmpeg worker panic");
         assert_eq!(result.unwrap_err(), "cancelled");
         fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn auto_encoder_attempts_gpu_even_for_subsecond_clips() {
+        let seen = std::sync::Mutex::new(Vec::new());
+        let status = fixture_status();
+        let (_tx, mut rx) = watch::channel(false);
+        encode_with_fallback(
+            |gpu| {
+                seen.lock().unwrap().push(gpu);
+                vec![
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=s=64x64:r=30:d=0.1",
+                    "-f",
+                    "null",
+                    "-",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect()
+            },
+            0.1,
+            "auto",
+            &status,
+            0,
+            "test",
+            &mut rx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![true]);
     }
 }

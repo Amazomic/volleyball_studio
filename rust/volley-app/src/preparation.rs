@@ -476,8 +476,24 @@ async fn wait_or_cancel(cancel: &mut watch::Receiver<bool>, duration: Duration) 
 /// publish the same content-addressed output concurrently.
 async fn run_one(
     plan: &PreparationPlan,
+    cancel: watch::Receiver<bool>,
+    progress: &Arc<Mutex<Progress>>,
+) -> Result<(), String> {
+    match run_one_attempt(plan, cancel.clone(), progress, true).await {
+        Ok(()) => Ok(()),
+        Err(error) if error == "cancelled" || *cancel.borrow() => Err("cancelled".into()),
+        Err(error) => {
+            eprintln!("NVENC preparation failed; retrying software: {error}");
+            run_one_attempt(plan, cancel, progress, false).await
+        }
+    }
+}
+
+async fn run_one_attempt(
+    plan: &PreparationPlan,
     mut cancel: watch::Receiver<bool>,
     progress: &Arc<Mutex<Progress>>,
+    hardware: bool,
 ) -> Result<(), String> {
     if plan.already_analysis_ready {
         if *cancel.borrow() {
@@ -526,16 +542,19 @@ async fn run_one(
         return Err("cancelled".into());
     }
 
-    manifest_write(plan, "preparing", 0.0, "").map_err(|error| format!("{error:?}"))?;
-    update(progress, "preparing", 0.0, "").await;
+    let initial = progress.lock().await.progress.clamp(0.0, 99.0);
+    manifest_write(plan, "preparing", initial, "").map_err(|error| format!("{error:?}"))?;
+    update(progress, "preparing", initial, "").await;
     let partial = plan.output.with_file_name(format!(
         "{}.{}.partial.mp4",
         cache_id(&plan.identity),
         Uuid::new_v4().simple()
     ));
-    let logfile = plan.output.with_extension("ffmpeg.log");
+    let logfile = plan
+        .output
+        .with_extension(if hardware { "nvenc.log" } else { "ffmpeg.log" });
     let stderr = File::create(&logfile).map_err(|error| format!("FFmpeg log: {error}"))?;
-    let args = plan.ffmpeg_arguments(&partial);
+    let args = plan.ffmpeg_arguments_with_hardware(&partial, hardware);
     {
         let mut current = progress.lock().await;
         current.process_argv = Some(
@@ -565,7 +584,7 @@ async fn run_one(
                         Ok(Some(line)) => {
                             if let Some(percent) = percent_from_ffmpeg(&line, plan.duration_sec) {
                                 if last_write.elapsed() >= Duration::from_millis(600) {
-                                    let rounded = (percent * 10.0).round()/10.0;
+                                    let rounded = ((percent * 10.0).round()/10.0).max(progress.lock().await.progress);
                                     update(progress, "preparing", rounded, "").await;
                                     let _ = manifest_write(plan, "preparing", rounded, "");
                                     last_write = Instant::now();
@@ -1209,5 +1228,87 @@ mod tests {
             Some(99.5)
         );
         assert_eq!(percent_from_ffmpeg("out_time=nope", 30.0), None);
+    }
+    #[tokio::test]
+    async fn nvenc_rejection_retries_cpu_and_publishes_verified_cache() {
+        use super::*;
+        if std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("volley-prep-gpu-fallback-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.mp4");
+        assert!(std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=160x160:r=25:d=0.5",
+                "-c:v",
+                "libx264",
+                "-y"
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let original = fs::read(&source).unwrap();
+        let plan = PreparationPlan::new(&source, &root, Some(2)).unwrap();
+        let (_tx, rx) = watch::channel(false);
+        let progress = Arc::new(Mutex::new(Progress::queued()));
+        run_one(&plan, rx, &progress).await.unwrap();
+        let argv = progress.lock().await.process_argv.clone().unwrap();
+        let position = argv.iter().position(|arg| arg == "-c:v").unwrap();
+        assert_eq!(argv[position + 1], "libx264");
+        assert_eq!(plan.reused(), Some(PreparationReuse::Cached));
+        assert!(plan.output.with_extension("nvenc.log").is_file());
+        assert_eq!(fs::read(&source).unwrap(), original);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires NVIDIA NVENC"]
+    async fn preparation_default_uses_real_nvenc_and_preserves_source() {
+        use super::*;
+        let root = std::env::temp_dir().join(format!("volley-prep-gpu-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.mp4");
+        assert!(std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=320x180:r=25:d=0.5",
+                "-c:v",
+                "libx264",
+                "-y"
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let original = fs::read(&source).unwrap();
+        let plan = PreparationPlan::new(&source, &root, Some(256)).unwrap();
+        let (_tx, rx) = watch::channel(false);
+        let progress = Arc::new(Mutex::new(Progress::queued()));
+        run_one(&plan, rx, &progress).await.unwrap();
+        let argv = progress.lock().await.process_argv.clone().unwrap();
+        let position = argv.iter().position(|arg| arg == "-c:v").unwrap();
+        assert_eq!(argv[position + 1], "h264_nvenc");
+        assert_eq!(plan.reused(), Some(PreparationReuse::Cached));
+        let info = volley_media::probe(&plan.output).unwrap();
+        assert_eq!(info.width, 256);
+        assert!((info.fps.unwrap() - 30.0).abs() < 0.01);
+        assert_eq!(fs::read(&source).unwrap(), original);
+        fs::remove_dir_all(root).unwrap();
     }
 }

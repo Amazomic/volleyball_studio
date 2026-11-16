@@ -452,3 +452,33 @@ fn camera_filter_rejects_untrusted_or_out_of_order_ball_points() {
     assert!(compose_follow_args(&paths, &format, &out_of_bounds, 1.5, &output, false).is_err());
     assert!(compose_follow_args(&paths, &format, &out_of_bounds, 3.0, &output, false).is_err());
 }
+
+#[test]
+#[ignore = "requires NVIDIA NVENC"]
+fn gpu_export_preserves_dimensions_fps_and_originals() {
+    let root = temp_root();
+    let original = source(&root, "gpu-source.mp4", 640, 360, 30);
+    let original_bytes = fs::read(&original).unwrap();
+    let clip = OriginalClip::from_analysis(&original, 0, 11, 0.0).unwrap();
+    let target = root.join("clip.mp4");
+    command("ffmpeg", &clip.extract_args(&target, true));
+    let format = native_clip_format(&target).unwrap();
+    verify_original_segment(&clip, &format).unwrap();
+    let vertical = root.join("vertical.mp4");
+    command(
+        "ffmpeg",
+        &compose_args_for_layout(
+            &[target.clone()],
+            &[format.clone()],
+            &vertical,
+            None,
+            true,
+            VideoLayout::Vertical,
+        )
+        .unwrap(),
+    );
+    let profile = output_profile_for_layout(&[format], VideoLayout::Vertical).unwrap();
+    verify_mp4_quality(&vertical, profile, 0.4, false).unwrap();
+    assert_eq!(fs::read(&original).unwrap(), original_bytes);
+    fs::remove_dir_all(root).unwrap();
+}

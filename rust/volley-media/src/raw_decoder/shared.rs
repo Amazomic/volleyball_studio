@@ -292,16 +292,24 @@ pub fn decode_full_video_shared_with_backend_and_tail(
     })
 }
 
-fn shared_decode_command(source: &Path, decision: &DecodeSelection, cpu_threads: usize) -> Command {
-    let prefix = if decision.backend == DecodeBackend::Nvdec {
-        format!(
-            "[0:v]hwdownload,format=nv12,{}fps=30,split=2[ball][players];",
-            decision.rotation_filter
-        )
-    } else {
-        "[0:v]fps=30,split=2[ball][players];".into()
-    };
-    let filters = format!("{prefix}[ball]scale=512:288:flags=bilinear,format=gray[g];[players]scale=640:360:flags=bilinear,format=rgb24[r]");
+pub(super) fn auto_decode_input(
+    source: &Path,
+    cancelled: &AtomicBool,
+) -> Result<(Command, String), String> {
+    let decision = select_decode_backend(source, DecodePreference::Auto, cancelled)?;
+    eprintln!(
+        "Video decoder: {:?}; fallback={}",
+        decision.backend,
+        decision.fallback_reason.as_deref().unwrap_or("none")
+    );
+    Ok(decode_input_command(source, &decision, 0))
+}
+
+fn decode_input_command(
+    source: &Path,
+    decision: &DecodeSelection,
+    cpu_threads: usize,
+) -> (Command, String) {
     let mut command = Command::new("ffmpeg");
     command.args([
         "-hide_banner",
@@ -311,7 +319,7 @@ fn shared_decode_command(source: &Path, decision: &DecodeSelection, cpu_threads:
         "-threads",
         &cpu_threads.to_string(),
     ]);
-    if decision.backend == DecodeBackend::Nvdec {
+    let prefix = if decision.backend == DecodeBackend::Nvdec {
         command.args([
             "-noautorotate",
             "-hwaccel",
@@ -319,8 +327,18 @@ fn shared_decode_command(source: &Path, decision: &DecodeSelection, cpu_threads:
             "-hwaccel_output_format",
             "cuda",
         ]);
-    }
-    command.arg("-i").arg(source).args([
+        format!("hwdownload,format=nv12,{}", decision.rotation_filter)
+    } else {
+        String::new()
+    };
+    command.arg("-i").arg(source);
+    (command, prefix)
+}
+
+fn shared_decode_command(source: &Path, decision: &DecodeSelection, cpu_threads: usize) -> Command {
+    let (mut command, prefix) = decode_input_command(source, decision, cpu_threads);
+    let filters = format!("[0:v]{prefix}fps=30,split=2[ball][players];[ball]scale=512:288:flags=bilinear,format=gray[g];[players]scale=640:360:flags=bilinear,format=rgb24[r]");
+    command.args([
         "-filter_complex_threads",
         &cpu_threads.to_string(),
         "-filter_complex",

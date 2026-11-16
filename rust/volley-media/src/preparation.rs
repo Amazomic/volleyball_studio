@@ -478,41 +478,53 @@ impl PreparationPlan {
         }
     }
 
-    /// Matches original Python FFmpeg video preparation settings.
     pub fn ffmpeg_arguments(&self, partial: &Path) -> Vec<String> {
-        ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"]
-            .iter()
-            .map(|v| (*v).to_owned())
-            .chain(std::iter::once(self.source.to_string_lossy().into_owned()))
-            .chain([
-                "-vf".to_owned(),
-                format!("fps=30,scale={}:-2,setsar=1", self.width),
-                "-map".into(),
-                "0:v:0".into(),
-                "-map".into(),
-                "0:a:0?".into(),
-                "-c:a".into(),
-                "aac".into(),
-                "-b:a".into(),
-                "128k".into(),
-                "-c:v".into(),
-                "libx264".into(),
-                "-pix_fmt".into(),
-                "yuv420p".into(),
-                "-preset".into(),
-                "veryfast".into(),
-                "-crf".into(),
-                "20".into(),
-                "-threads".into(),
-                "4".into(),
-                "-movflags".into(),
-                "+faststart".into(),
-                "-progress".into(),
-                "pipe:1".into(),
-                "-nostats".into(),
-                partial.to_string_lossy().into_owned(),
-            ])
-            .collect()
+        self.ffmpeg_arguments_with_hardware(partial, true)
+    }
+
+    pub fn ffmpeg_arguments_with_hardware(&self, partial: &Path, hardware: bool) -> Vec<String> {
+        let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        if hardware {
+            args.extend(["-hwaccel".into(), "auto".into()]);
+        }
+        args.extend([
+            "-i".into(),
+            self.source.to_string_lossy().into_owned(),
+            "-vf".into(),
+            format!("fps=30,scale={}:-2,setsar=1", self.width),
+            "-map".into(),
+            "0:v:0".into(),
+            "-map".into(),
+            "0:a:0?".into(),
+            "-c:a".into(),
+            "aac".into(),
+            "-b:a".into(),
+            "128k".into(),
+        ]);
+        if hardware {
+            args.extend(crate::montage::encode_flags(true));
+        } else {
+            args.extend(
+                [
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "20",
+                    "-threads", "4",
+                ]
+                .into_iter()
+                .map(String::from),
+            );
+        }
+        args.extend([
+            "-movflags".into(),
+            "+faststart".into(),
+            "-progress".into(),
+            "pipe:1".into(),
+            "-nostats".into(),
+            partial.to_string_lossy().into_owned(),
+        ]);
+        args
     }
 }
 
@@ -771,5 +783,29 @@ mod tests {
         let mut other = fp.clone();
         other.width = 1280;
         assert_ne!(cache_id(&fp), cache_id(&other));
+    }
+    #[test]
+    fn preparation_default_requests_gpu_encoding() {
+        let plan = super::PreparationPlan {
+            source: "source.mp4".into(),
+            output: "prepared.mp4".into(),
+            manifest: "prepared.json".into(),
+            identity: super::PreparedIdentity {
+                source: "source.mp4".into(),
+                size: 1,
+                mtime_ns: 1,
+                width: 640,
+                fps: 30,
+                schema: 2,
+            },
+            width: 640,
+            duration_sec: 1.0,
+            already_analysis_ready: false,
+            original_preview_safe: false,
+            original_source: None,
+        };
+        let args = plan.ffmpeg_arguments(std::path::Path::new("partial.mp4"));
+        let encoder = args.iter().position(|arg| arg == "-c:v").unwrap();
+        assert_eq!(args[encoder + 1], "h264_nvenc");
     }
 }

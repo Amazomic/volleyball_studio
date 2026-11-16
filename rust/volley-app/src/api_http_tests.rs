@@ -398,7 +398,7 @@ async fn check_preview_source(rate: u32, original: bool) {
     assert_eq!(plan.width, 1280);
     fs::create_dir_all(plan.output.parent().unwrap()).unwrap();
     let status = std::process::Command::new("ffmpeg")
-        .args(plan.ffmpeg_arguments(&plan.output))
+        .args(plan.ffmpeg_arguments_with_hardware(&plan.output, false))
         .status()
         .unwrap();
     assert!(status.success());

@@ -485,6 +485,47 @@ fn rotated_nvdec_matches_software_pixels() {
             assert_eq!(hardware.backend, DecodeBackend::Nvdec);
             assert_eq!(hardware.decode.decoded_frames, software.decoded_frames);
             assert_eq!(position, expected.len());
+            for pixels in [ModelPixels::BallGray, ModelPixels::PlayersRgb] {
+                let mut count = 0;
+                let decoded = crate::raw_decoder::decode_full_video(
+                    &rotated,
+                    pixels,
+                    9,
+                    &cancelled,
+                    |window| {
+                        let bytes = if matches!(pixels, ModelPixels::BallGray) {
+                            &expected[count].1
+                        } else {
+                            &expected[count].2
+                        };
+                        assert_eq!(window.first_frame, expected[count].0);
+                        assert_eq!(Sha256::digest(&window.data), Sha256::digest(bytes));
+                        count += 1;
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                assert_eq!(decoded.decoded_frames, software.decoded_frames);
+                assert_eq!(count, expected.len());
+                crate::raw_decoder::decode_windows(
+                    &rotated,
+                    pixels,
+                    0,
+                    1,
+                    9,
+                    &cancelled,
+                    |window| {
+                        let bytes = if matches!(pixels, ModelPixels::BallGray) {
+                            &expected[0].1
+                        } else {
+                            &expected[0].2
+                        };
+                        assert_eq!(Sha256::digest(&window.data), Sha256::digest(bytes));
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            }
             eprintln!("{codec} {size} rotation={rotation}: NVDEC pixel parity passed");
             fs::remove_file(rotated).unwrap();
         }

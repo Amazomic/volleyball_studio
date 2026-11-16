@@ -157,6 +157,34 @@ fn checked_total_frames(first: u64, windows: usize, stride: usize) -> Result<usi
     Ok(total)
 }
 
+fn auto_decode_input(source: &Path, cancelled: &AtomicBool) -> Result<(Command, String), String> {
+    #[cfg(unix)]
+    {
+        shared::auto_decode_input(source, cancelled)
+    }
+    #[cfg(not(unix))]
+    {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        let mut command = Command::new("ffmpeg");
+        command
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-threads",
+                "0",
+                "-hwaccel",
+                "auto",
+                "-i",
+            ])
+            .arg(source);
+        Ok((command, String::new()))
+    }
+}
+
 /// The callback is invoked synchronously per 9-frame window, allowing one
 /// persistent ONNX session to consume a stream with bounded memory. A failed
 /// callback or cancellation kills and reaps FFmpeg; no partial result is valid.
@@ -179,25 +207,15 @@ pub fn decode_windows(
     let (w, h, channels, format) = pixels.dimensions();
     let bytes_per_frame = w * h * channels;
     let seek = first_frame as f64 / 30.0;
-    let mut ff = Command::new("ffmpeg");
-    ff.args([
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-nostdin",
-        "-threads",
-        "4",
-    ])
-    .arg("-i")
-    .arg(source)
-    .args(["-ss", &format!("{seek:.6}")])
-    .args(["-map", "0:v:0", "-an", "-sn", "-dn"])
-    .args([
-        "-vf",
-        &format!("fps=30,scale={w}:{h}:flags=bilinear,format={format}"),
-    ])
-    .args(["-frames:v", &total_frames.to_string()])
-    .args(["-pix_fmt", format, "-f", "rawvideo", "pipe:1"]);
+    let (mut ff, prefix) = auto_decode_input(source, cancelled)?;
+    ff.args(["-ss", &format!("{seek:.6}")])
+        .args(["-map", "0:v:0", "-an", "-sn", "-dn"])
+        .args([
+            "-vf",
+            &format!("{prefix}fps=30,scale={w}:{h}:flags=bilinear,format={format}"),
+        ])
+        .args(["-frames:v", &total_frames.to_string()])
+        .args(["-pix_fmt", format, "-f", "rawvideo", "pipe:1"]);
     ff.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -322,23 +340,13 @@ pub fn decode_full_video(
         return Err("Prepared source video is not a file".into());
     }
     let (w, h, channels, format) = pixels.dimensions();
-    let mut ff = Command::new("ffmpeg");
-    ff.args([
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-nostdin",
-        "-threads",
-        "4",
-    ])
-    .arg("-i")
-    .arg(source)
-    .args(["-map", "0:v:0", "-an", "-sn", "-dn"])
-    .args([
-        "-vf",
-        &format!("fps=30,scale={w}:{h}:flags=bilinear,format={format}"),
-    ])
-    .args(["-pix_fmt", format, "-f", "rawvideo", "pipe:1"]);
+    let (mut ff, prefix) = auto_decode_input(source, cancelled)?;
+    ff.args(["-map", "0:v:0", "-an", "-sn", "-dn"])
+        .args([
+            "-vf",
+            &format!("{prefix}fps=30,scale={w}:{h}:flags=bilinear,format={format}"),
+        ])
+        .args(["-pix_fmt", format, "-f", "rawvideo", "pipe:1"]);
     ff.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
