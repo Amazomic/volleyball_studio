@@ -337,7 +337,8 @@
     pickers.set(select,{refresh});refresh();
   };
   // Shared by the analysis tab and header: one fetch, cached across page refreshes.
-  window.VolleyballStudioProjectCatalog=()=>previewCache.load("/api/projects",300000,true);
+  // The project registry is mutable outside this tab: always read its live version.
+  window.VolleyballStudioProjectCatalog=()=>request("/api/projects");
   // Canvas uses saved CPU frame evidence; toggles are local viewing preferences.
   const overlay = {
     canvas:$("studio-video-overlay"),status:$("studio-overlay-status"),
@@ -1725,7 +1726,7 @@
     ui.project.value=rows.some(row=>row.id===preferredProject)?preferredProject:
       rows.some(row=>row.id===prev)?prev:
       rows.some(row=>row.id===stored.project)?stored.project:
-      rows.length===1?rows[0].id:"";
+      rows.length?rows[rows.length-1].id:"";
     refreshPicker(ui.project);
     s.project=ui.project.value;
     const current=rows.find(row=>row.id===s.project);
@@ -2418,6 +2419,25 @@
         document.getElementById("studio-nav-analysis").click();
         message("Проект «"+name+"» создан и выбран.","ok");
       }catch(error){
+        if(error.message==="Проект с таким названием уже существует"){
+          try{
+            invalidateCatalog();
+            const catalog=await window.VolleyballStudioProjectCatalog();
+            const existing=(Array.isArray(catalog.projects)?catalog.projects:[])
+              .find(row=>typeof row.name==="string"&&
+                row.name.toLocaleLowerCase()===name.toLocaleLowerCase());
+            if(existing?.id){
+              ui.projectDialog.close();
+              dialogEpoch++;
+              await projects(existing.id);
+              document.getElementById("studio-nav-analysis").click();
+              message("Проект «"+existing.name+"» уже существует — открыт существующий.","ok");
+              return;
+            }
+          }catch(refreshError){
+            console.warn("Не удалось открыть существующий проект:",refreshError);
+          }
+        }
         alertCreate(error);
       }finally{
         creating=false;uploading=false;
