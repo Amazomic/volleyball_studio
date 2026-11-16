@@ -257,6 +257,131 @@ pub(crate) async fn ready_path_async(plan: &PreparationPlan) -> Result<Option<Pa
         .map_err(|error| format!("Prepared path task: {error}"))
 }
 
+pub(crate) async fn playback_plan_for_async(
+    state: Arc<AppState>,
+    id: &str,
+    video: &str,
+) -> Result<PreparationPlan, ApiError> {
+    let source = plan_for_async(state.clone(), id, video).await?.source;
+    tokio::task::spawn_blocking(move || {
+        let mut plan =
+            PreparationPlan::new(&source, &state.data_root.join("browser-playback-v1"), None)
+                .and_then(PreparationPlan::bind_source)
+                .map_err(storage::bad_request)?;
+        plan.already_analysis_ready = false;
+        Ok(plan)
+    })
+    .await
+    .map_err(|error| storage::internal(format!("Playback plan: {error}")))?
+}
+
+async fn playback_status(state: Arc<AppState>, id: &str, video: &str) -> Result<Value, ApiError> {
+    let plan = playback_plan_for_async(state.clone(), id, video).await?;
+    let key = plan.output.to_string_lossy().into_owned();
+    let ready = ready_path_async(&plan)
+        .await
+        .map_err(storage::internal)?
+        .is_some();
+    let mut status = json!({"state":"missing", "progress":0.0, "project_id":id,
+        "video":video, "media_url":Value::Null});
+    if ready {
+        let query = format!(
+            "project_id={}&video={}&playback=compatible",
+            id,
+            percent_encoding::utf8_percent_encode(video, percent_encoding::NON_ALPHANUMERIC)
+        );
+        status["state"] = json!("ready");
+        status["progress"] = json!(100.0);
+        status["media_url"] = json!(format!("/api/video-media?{query}"));
+    } else if let Some(progress) = state
+        .preparation
+        .jobs
+        .lock()
+        .await
+        .get(&key)
+        .map(|job| job.progress.clone())
+    {
+        let current = progress.lock().await.clone();
+        status["state"] = json!(current.state);
+        status["progress"] = json!(current.progress);
+        status["error"] = json!(current.error);
+    } else if state
+        .preparation
+        .cancelled_projects
+        .lock()
+        .await
+        .contains(id)
+        || projects::project_root(&state)
+            .join(id)
+            .join(".preparation-paused")
+            .is_file()
+    {
+        status["state"] = json!("cancelled");
+    } else if let Some(manifest) = manifest_for(&plan) {
+        status["state"] = match manifest["status"].as_str() {
+            Some("failed" | "cancelled") => manifest["status"].clone(),
+            _ => json!("interrupted"),
+        };
+        status["error"] = manifest["error"].clone();
+    }
+    Ok(status)
+}
+
+async fn report_playback(
+    state: Arc<AppState>,
+    id: &str,
+    video: &str,
+    code: u64,
+) -> Result<Value, ApiError> {
+    let validated = plan_for_async(state.clone(), id, video).await?;
+    if !matches!(code, 3 | 4) {
+        return Ok(json!({"state":"original", "project_id":id, "video":video,
+            "browser_error_code":code, "source_identity":validated.original_source}));
+    }
+    if !state.writes_enabled {
+        return Err(storage::conflict(
+            "Создание копии просмотра недоступно в режиме чтения",
+        ));
+    }
+    let plan = playback_plan_for_async(state.clone(), id, video).await?;
+    let _guard = crate::project_guard::write_guard(&state, id)?;
+    let paused = projects::project_root(&state)
+        .join(id)
+        .join(".preparation-paused")
+        .is_file();
+    if ready_path_async(&plan)
+        .await
+        .map_err(storage::internal)?
+        .is_none()
+        && !state
+            .preparation
+            .cancelled_projects
+            .lock()
+            .await
+            .contains(id)
+        && !paused
+    {
+        let key = plan.output.to_string_lossy().into_owned();
+        let mut jobs = state.preparation.jobs.lock().await;
+        if let Some(job) = jobs.get_mut(&key) {
+            job.subscribed_projects.insert(id.to_owned());
+        } else {
+            let (tx, rx) = watch::channel(false);
+            let progress = Arc::new(Mutex::new(Progress::queued()));
+            jobs.insert(
+                key.clone(),
+                ActiveJob {
+                    subscribed_projects: HashSet::from([id.to_owned()]),
+                    cancel: tx,
+                    progress: progress.clone(),
+                },
+            );
+            tokio::spawn(finished(state.clone(), key, plan, rx, progress));
+        }
+    }
+    playback_status(state.clone(), id, video).await
+}
+
 fn manifest_for(plan: &PreparationPlan) -> Option<Value> {
     storage::read_json(&plan.manifest)
         .ok()
@@ -783,6 +908,15 @@ pub async fn get_preparation(
     Query(query): Query<HashMap<String, String>>,
 ) -> ApiResult<Value> {
     let id = query.get("project_id").cloned().unwrap_or_default();
+    if query
+        .get("purpose")
+        .is_some_and(|value| value == "playback")
+    {
+        let video = query
+            .get("video")
+            .ok_or_else(|| storage::bad_request("Укажите видео"))?;
+        return Ok(Json(playback_status(state, &id, video).await?));
+    }
     if state.writes_enabled {
         enqueue_project(state.clone(), &id, false).await?;
     }
@@ -798,6 +932,15 @@ pub async fn retry_preparation(
     let id = request["project_id"]
         .as_str()
         .ok_or_else(|| storage::bad_request("Укажите проект"))?;
+    if let Some(video) = request["video"].as_str() {
+        let code = request["browser_error_code"]
+            .as_u64()
+            .filter(|code| *code <= 4)
+            .ok_or_else(|| {
+                storage::bad_request("Требуется код результата декодирования браузера 0..4")
+            })?;
+        return Ok(Json(report_playback(state, id, video, code).await?));
+    }
     enqueue_project(state.clone(), id, true).await?;
     Ok(Json(collect_status(state.clone(), id).await?))
 }

@@ -162,30 +162,18 @@ pub async fn video_media(
 ) -> Result<Response<Body>, ApiError> {
     let id = required_query(&query, "project_id")?.to_owned();
     let name = required_query(&query, "video")?.to_owned();
-    let reading = state.clone();
-    // Plan construction (ffprobe) and the first SHA verification of the
-    // prepared MP4 both block; keep them together off the tokio workers.
-    let prepared = tokio::task::spawn_blocking(move || {
-        let plan = preparation::plan_for(&reading, &id, &name)?;
-        if !plan.original_preview_safe {
-            let legacy = volley_media::preparation::PreparationPlan::new(
-                &plan.source,
-                &reading.data_root,
-                None,
-            )
-            .map_err(storage::bad_request)?;
-            let bound = legacy.clone().bind_source().map_err(storage::bad_request)?;
-            for candidate in [bound, legacy] {
-                if candidate.reused() == Some(volley_media::preparation::PreparationReuse::Cached) {
-                    return Ok::<_, ApiError>(Some(candidate.output));
-                }
-            }
-        }
-        Ok::<_, ApiError>(plan.ready_path().map(Path::to_path_buf))
-    })
-    .await
-    .map_err(|error| storage::internal(format!("Video-media plan failed: {error}")))??
-    .ok_or_else(|| storage::conflict("Подготовка видео ещё не завершена"))?;
+    let plan = if query
+        .get("playback")
+        .is_some_and(|value| value == "compatible")
+    {
+        preparation::playback_plan_for_async(state.clone(), &id, &name).await?
+    } else {
+        preparation::plan_for_async(state.clone(), &id, &name).await?
+    };
+    let prepared = preparation::ready_path_async(&plan)
+        .await
+        .map_err(storage::internal)?
+        .ok_or_else(|| storage::conflict("Копия для просмотра ещё не готова"))?;
     serve_mp4(prepared, &headers).await
 }
 

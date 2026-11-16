@@ -461,6 +461,12 @@
     if(stillMeta)fallbackFrames(stillMeta);
     else message("Видео не воспроизводится, не удалось получить данные для покадрового просмотра.",true);
   });
+  window.addEventListener("volley:playback-status",event=>{
+    if(event.detail?.video!==video||!valid())return;
+    const state=event.detail.state;
+    if(state==="queued"||state==="preparing")
+      message("Подготовка совместимой копии для просмотра: "+Math.round(event.detail.progress||0)+"%.");
+  });
   still.addEventListener("load",()=>{
     stillReady=true;stillFetching=false;draw();
     if(stillPlaying)renderStill();
@@ -611,15 +617,9 @@
       // duration/aspect ratio when HTMLVideoElement cannot decode HEVC.
       stillMeta=await api(url("/api/video-info",{video:source})).catch(()=>null);
       if(token!==generation)return;
-      const hevc=stillMeta&&/^(hevc|h265)$/i.test(stillMeta.codec||"");
-      const supported=typeof video.canPlayType!=="function"||
-        video.canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"')==="probably";
-      if(hevc&&!supported)fallbackFrames(stillMeta);
-      else{
-        video.src=url("/api/video-source",{project_id:project,video:source});
-        video.load();
-        message(restored?"Восстановлен несохранённый черновик. Нажмите «Сохранить» для применения.":"Разметка загружена. Видео читается по частям.");
-      }
+      video.src=url("/api/video-source",{project_id:project,video:source});
+      video.load();
+      message(restored?"Восстановлен несохранённый черновик. Нажмите «Сохранить» для применения.":"Разметка загружена. Видео читается по частям.");
       settingsLoaded=true;
       updateClock();draw();
     }catch(error){

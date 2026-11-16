@@ -497,6 +497,8 @@ impl PreparationPlan {
                 "128k".into(),
                 "-c:v".into(),
                 "libx264".into(),
+                "-pix_fmt".into(),
+                "yuv420p".into(),
                 "-preset".into(),
                 "veryfast".into(),
                 "-crf".into(),

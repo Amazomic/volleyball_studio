@@ -107,6 +107,9 @@ vm.runInNewContext(editor,{
 });
 const source="linked_47983479be9b4e6b86d57005b73aca8e.mp4";
 await win.VolleyballEditor.load("6fd50b60022d",source);
+assert.equal(video.hidden,false);
+assert.match(video.src,/\/api\/video-source\?/);
+await video.fire("error");
 await new Promise(resolve=>setTimeout(resolve,160));
 const image=element("studio-analysis-still");
 assert.equal(image.hidden,false);

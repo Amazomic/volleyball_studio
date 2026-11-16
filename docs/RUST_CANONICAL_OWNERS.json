@@ -45,10 +45,15 @@
     "owner": "rust/volley-media/src/preparation.rs",
     "status": "partial",
     "adapters": [
-        "rust/volley-app/src/preparation.rs"
+        "rust/volley-app/src/preparation.rs",
+        "rust/volley-app/static/studio_playback.js"
     ],
     "routes": [],
     "stores": [
+        {
+            "source": "native",
+            "path": "browser-playback-v1/prepared/<metadata_id>-<original_sha256>.mp4"
+        },
         {
             "source": "native",
             "path": "prepared/<metadata_id>-<original_sha256>.mp4"

@@ -203,6 +203,13 @@ async fn original_video_is_ready_without_intermediate_mp4() {
             "lavfi",
             "-i",
             "testsrc2=size=96x64:rate=25:duration=0.6",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=0.6",
+            "-c:a",
+            "aac",
+            "-shortest",
             "-c:v",
             "libx264",
             "-pix_fmt",
@@ -233,6 +240,18 @@ async fn original_video_is_ready_without_intermediate_mp4() {
     let status: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(status["ready"], 1);
     assert_eq!(status["videos"][0]["preparation"], "not_required");
+    for code in [0, 1, 2] {
+        let body = serde_json::json!({
+            "project_id":"123456abcdef", "video":"match.mp4", "browser_error_code":code
+        })
+        .to_string();
+        let (code, body) = server
+            .request("POST", "/api/project-preparation/retry", Some(&body))
+            .await;
+        assert_eq!(code, 200);
+        let result: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(result["state"], "original");
+    }
     let (code, body) = server
         .request(
             "GET",
@@ -243,6 +262,92 @@ async fn original_video_is_ready_without_intermediate_mp4() {
     assert_eq!(code, 200);
     assert_eq!(body, String::from_utf8_lossy(&original));
     assert!(!server.root.join("sandbox/prepared").exists());
+    assert!(!server.root.join("sandbox/browser-playback-v1").exists());
+    let failure = serde_json::json!({
+        "project_id":"123456abcdef", "video":"match.mp4", "browser_error_code":3
+    })
+    .to_string();
+    let (code, _) = server
+        .request(
+            "GET",
+            "/api/video-media?project_id=123456abcdef&video=match.mp4&playback=compatible",
+            None,
+        )
+        .await;
+    assert_eq!(code, 409);
+    let paused = server
+        .root
+        .join("sandbox/projects/123456abcdef/.preparation-paused");
+    fs::write(&paused, b"paused").unwrap();
+    let (code, body) = server
+        .request("POST", "/api/project-preparation/retry", Some(&failure))
+        .await;
+    assert_eq!(code, 200);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["state"],
+        "cancelled"
+    );
+    assert!(!server.root.join("sandbox/browser-playback-v1").exists());
+    fs::remove_file(paused).unwrap();
+    let (code, body) = server
+        .request("POST", "/api/project-preparation/retry", Some(&failure))
+        .await;
+    assert_eq!(code, 200);
+    let first: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(matches!(
+        first["state"].as_str(),
+        Some("queued" | "preparing" | "ready")
+    ));
+    let mut ready = serde_json::Value::Null;
+    for _ in 0..200 {
+        let (code, body) = server
+            .request(
+                "GET",
+                "/api/project-preparation?project_id=123456abcdef&video=match.mp4&purpose=playback",
+                None,
+            )
+            .await;
+        assert_eq!(code, 200);
+        ready = serde_json::from_str(&body).unwrap();
+        if ready["state"] == "ready" {
+            break;
+        }
+        assert_ne!(ready["state"], "failed", "{ready}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(ready["state"], "ready");
+    let media = ready["media_url"].as_str().unwrap();
+    assert!(media.contains("playback=compatible"));
+    let (code, _) = server.request("GET", media, None).await;
+    assert_eq!(code, 200);
+    let cache = server.root.join("sandbox/browser-playback-v1/prepared");
+    let output = fs::read_dir(cache)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "mp4"))
+        .unwrap();
+    let probe = volley_media::ffprobe(&output).unwrap();
+    let streams = probe["streams"].as_array().unwrap();
+    assert!(streams
+        .iter()
+        .any(|s| s["codec_name"] == "h264" && s["pix_fmt"] == "yuv420p"));
+    assert!(streams.iter().any(|s| s["codec_name"] == "aac"));
+    let before = inference_stream::source_stamp(&output).unwrap();
+    let repeated = failure.replace("\"browser_error_code\":3", "\"browser_error_code\":4");
+    let (code, body) = server
+        .request("POST", "/api/project-preparation/retry", Some(&repeated))
+        .await;
+    assert_eq!(code, 200);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["state"],
+        "ready"
+    );
+    assert_eq!(inference_stream::source_stamp(&output).unwrap(), before);
+    let analysis = preparation::plan_for(&server.state, "123456abcdef", "match.mp4").unwrap();
+    assert_eq!(
+        analysis.ready_path(),
+        Some(source.canonicalize().unwrap().as_path())
+    );
     assert_eq!(fs::read(source).unwrap(), original);
     server.close().await;
 }
@@ -253,8 +358,8 @@ async fn preview_serves_compatible_original_instead_of_downscaled_analysis_copy(
 }
 
 #[tokio::test]
-async fn preview_keeps_prepared_copy_for_nonmatching_frame_rate() {
-    check_preview_source(25, false).await;
+async fn preview_prefers_original_until_browser_reports_decode_failure() {
+    check_preview_source(25, true).await;
 }
 
 async fn check_preview_source(rate: u32, original: bool) {

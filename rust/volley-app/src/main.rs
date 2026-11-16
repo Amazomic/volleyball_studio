@@ -104,6 +104,7 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
         .route("/studio/app.js", get(studio_web::js))
         .route("/studio/hash.js", get(studio_web::hash_js))
         .route("/studio/upload.js", get(studio_web::upload_js))
+        .route("/studio/playback.js", get(studio_web::playback_js))
         .route("/studio/editor.js", get(studio_web::editor_js))
         .route("/studio/tasks.js", get(studio_web::tasks_js))
         .route("/studio/overview.js", get(studio_web::overview_js))
