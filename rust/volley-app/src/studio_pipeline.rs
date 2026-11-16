@@ -1100,9 +1100,12 @@ fn shared_primary_requested(
     pose_enabled: bool,
     pose_mode: crate::pose_inference::PoseInputMode,
 ) -> bool {
-    // The existing video-pose profile requires per-frame inference. Do not
-    // reinterpret it as sampled still frames in the experimental joint path.
-    flag == Some("1")
+    // Shared NVDEC (+ verified software fallback) is the production default
+    // for the normal nine-frame GPU pipeline. VOLLEY_SHARED_PRIMARY=0 is
+    // an explicit rollback, preserving old standalone GPU artifacts.
+    // Custom model-window strides and continuous video-pose requests still
+    // use the established individual model path; never silently resample.
+    matches!(flag, None | Some("1") | Some("true"))
         && stride == 9
         && (!pose_enabled || pose_mode == crate::pose_inference::PoseInputMode::Photo)
 }
@@ -1388,8 +1391,8 @@ async fn pipeline(
                     person_detector_label()
                 ),
             )?;
-            // Opt-in only until full-match GPU/evidence/pose parity has been
-            // verified. The legacy pair remains the default and rollback.
+            // Primary shared GPU path has passed real-match evidence/CPU
+            // parity; legacy independent inference remains a rollback.
             #[cfg(unix)]
             let shared = if shared_primary_requested(
                 std::env::var("VOLLEY_SHARED_PRIMARY").ok().as_deref(),
@@ -1407,7 +1410,8 @@ async fn pipeline(
                         "video":request.video,
                         "stride":request.gpu.stride,
                         "person_stride":request.gpu.pose_stride,
-                        "mode":"shared_decoder_experimental",
+                        "mode":"shared_nvdec_primary_v1",
+                        "pose_enabled":request.gpu.pose_enabled,
                     }),
                 )?;
                 let plan = preparation::plan_for_analysis_async(
@@ -2334,15 +2338,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn experimental_shared_decode_never_rewrites_gpu_stride() {
+    fn shared_gpu_is_primary_and_retains_explicit_rollback() {
         use crate::pose_inference::PoseInputMode::{Photo, Video};
-        assert!(!shared_primary_requested(None, 9, true, Photo));
-        assert!(!shared_primary_requested(Some("0"), 9, true, Photo));
-        assert!(!shared_primary_requested(Some("1"), 1, true, Photo));
-        assert!(!shared_primary_requested(Some("1"), 3, true, Photo));
-        assert!(!shared_primary_requested(Some("1"), 9, true, Video));
+        assert!(shared_primary_requested(None, 9, true, Photo));
+        assert!(shared_primary_requested(None, 9, false, Video));
         assert!(shared_primary_requested(Some("1"), 9, true, Photo));
-        assert!(shared_primary_requested(Some("1"), 9, false, Video));
+        assert!(shared_primary_requested(Some("true"), 9, true, Photo));
+        for override_value in ["0", "false", "legacy", "invalid"] {
+            assert!(!shared_primary_requested(
+                Some(override_value),
+                9,
+                true,
+                Photo
+            ));
+        }
+        assert!(!shared_primary_requested(None, 1, true, Photo));
+        assert!(!shared_primary_requested(None, 3, true, Photo));
+        assert!(!shared_primary_requested(None, 9, true, Video));
+        assert!(!shared_primary_requested(Some("1"), 9, true, Video));
     }
     #[test]
     fn progress_records_stage_transitions_for_history() {

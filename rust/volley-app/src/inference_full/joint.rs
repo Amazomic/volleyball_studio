@@ -138,13 +138,10 @@ pub(crate) fn run_joint_pair(
     if !state.writes_enabled || !(1..=30).contains(&person_stride) {
         return Err("Invalid shared GPU job or person sampling interval".into());
     }
-    // The legacy RTMDet option embeds a private pose session for box
-    // qualification; RF-DETR does not. Count that CUDA arena too.
-    let legacy_inline_pose = matches!(
-        volley_inference::person::DetectorVariant::from_env()?,
-        volley_inference::person::DetectorVariant::RtmDetNano,
-    );
-    let session_count = 2u64 + u64::from(legacy_inline_pose) + u64::from(pose_enabled);
+    // RF-DETR Medium is the sole supported person detector; keep its
+    // explicit configuration validation but never revive deleted RTMDet.
+    let _detector = volley_inference::person::DetectorVariant::from_env()?;
+    let session_count = 2u64 + u64::from(pose_enabled);
     if gpu_memory_limit_mb > 0 && gpu_memory_limit_mb < session_count {
         return Err("GPU memory limit too small for shared sessions".into());
     }
