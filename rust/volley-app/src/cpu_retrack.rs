@@ -997,7 +997,7 @@ mod tests {
     }
     #[test]
     fn video_1h19m35s_does_not_interpolate_ghost_id_795_over_real_id_792() {
-        // Observed, not interpolated RTMDet/RTMPose positions from the
+        // Observed, not interpolated player/pose positions from the
         // saved GPU/CPU evidence in mm, frames 143220..143290.
         // The neural detector sees one moving athlete, but the old tracker
         // switched its ID from 795 to 792 and back. The former interpolation

@@ -1,7 +1,7 @@
 # RTMPose in Volley Studio
 
 RTMPose-M Body7 (official ONNX, 256 x 192, 17 COCO joints) runs as an independent CUDA stage
-AFTER VballNet/RAVEL GPU fusion. It operates on saved player proposals and prepared RGB frames.
+AFTER VballNet/RF-DETR GPU fusion. It operates on saved player proposals and prepared RGB frames.
 It stores immutable JSONL evidence under native_gpu_pose_runs/<id>/ with a content digest and
 parent fusion/source identity. No track or verified event is created by pose inference.
 
@@ -13,9 +13,10 @@ Block and serve require verified court and rally context and are not inferred fr
 These are hypotheses, NOT human-confirmed match actions.
 
 Primary GPU flags: pose_enabled=true and pose_stride=6 by default.
-The RTMDet + RTMPose player-observation pass now samples the prepared 30 FPS
-video every 10 frames (3 Hz), aligned to global frame indices across 9-frame
-fusion windows. Empty intervening observations are never called model output.
+The RF-DETR Medium player-detector pass samples the prepared 30 FPS
+video every configured N frames (10 frames by default, 3 Hz), aligned to global
+frame indices across 9-frame fusion windows. RTMPose runs in a separate stage
+on saved detector boxes and does not repeat person detection. Empty intervening observations are never called model output.
 Confirmed CPU Track IDs fill bounded gaps between real anchors for smooth
 playback; preview skeletons interpolate only between unambiguous real poses.
 The separate pose-evidence pass keeps its own stride (6 by default, 5 Hz):

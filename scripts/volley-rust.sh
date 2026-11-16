@@ -155,7 +155,7 @@ doctor(){
   done
   for model in \
     models/VballNetV4c_seq9_grayscale_20260908_213829.onnx \
-    models/RTMDet-Nano-Person.onnx \
+    models/rf-detr-medium.onnx \
     models/RTMPose-M-Body7.onnx \
     models/openvino/person-reidentification-retail-0287.xml;do
     if [[ ! -s "$repo/$model" ]];then

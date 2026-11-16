@@ -11,21 +11,15 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 pub const PERSON_SAMPLE_PERIOD_FRAMES: usize = 10;
-pub const DETECTOR_FILE: &str = "RTMDet-Nano-Person.onnx";
-pub const DETECTOR_SHA256: &str =
-    "b8585adb6d1352796f6e86337e09c3459b830645a7e7192d9381670bea2facbd";
 const W: usize = 640;
 const H: usize = 360;
-const SIDE: usize = 320;
-const MEAN_BGR: [f32; 3] = [103.53, 116.28, 123.675];
-const STD_BGR: [f32; 3] = [57.375, 57.12, 58.395];
 const MAX_PERSONS: usize = 12;
 
 fn is_observation_frame(frame: u64, period: u64) -> bool {
     frame.is_multiple_of(period)
 }
 
-/// Optional native RF-DETR Medium detector. Never loads without explicit selection.
+/// RF-DETR Medium is the sole supported player detector.
 pub const RFDETR_MEDIUM_FILE: &str = "rf-detr-medium.onnx";
 pub const RFDETR_MEDIUM_SHA256: &str =
     "18250b5a3a9552ae117d592f8e8c27fe52438d70c914a77a8913fc45d8f29e69";
@@ -36,81 +30,30 @@ const RFDETR_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DetectorVariant {
-    RtmDetNano,
     RfDetrMedium,
 }
 
 impl DetectorVariant {
     pub fn from_env() -> Result<Self, String> {
         match std::env::var("VOLLEY_PERSON_DETECTOR") {
-            Err(std::env::VarError::NotPresent) => Ok(Self::RtmDetNano),
+            Err(std::env::VarError::NotPresent) => Ok(Self::RfDetrMedium),
             Err(error) => Err(format!("Invalid VOLLEY_PERSON_DETECTOR: {error}")),
-            Ok(value) => match value.as_str() {
-                "rtmdet-nano" => Ok(Self::RtmDetNano),
-                "rfdetr-medium" => Ok(Self::RfDetrMedium),
-                _ => Err(format!(
-                    "Unknown VOLLEY_PERSON_DETECTOR={value:?}; expected rtmdet-nano or rfdetr-medium"
-                )),
-            },
+            Ok(value) if value == "rfdetr-medium" => Ok(Self::RfDetrMedium),
+            Ok(value) => Err(format!(
+                "Unknown VOLLEY_PERSON_DETECTOR={value:?}; expected rfdetr-medium"
+            )),
         }
     }
-
     fn needs_pose_in_gpu_evidence(self) -> bool {
-        self == Self::RtmDetNano
+        false
     }
-
     fn file(self) -> &'static str {
-        match self {
-            Self::RtmDetNano => DETECTOR_FILE,
-            Self::RfDetrMedium => RFDETR_MEDIUM_FILE,
-        }
+        RFDETR_MEDIUM_FILE
     }
-
     fn sha256(self) -> &'static str {
-        match self {
-            Self::RtmDetNano => DETECTOR_SHA256,
-            Self::RfDetrMedium => RFDETR_MEDIUM_SHA256,
-        }
+        RFDETR_MEDIUM_SHA256
     }
 }
-
-/// The global view is downsampled 2x, but far-court tiles preserve the
-/// original 640x360 pixels for small athletes behind the net.
-#[derive(Clone, Copy, Debug)]
-struct DetectorView {
-    left: usize,
-    top: usize,
-    width: usize,
-    height: usize,
-}
-const VIEWS: [DetectorView; 4] = [
-    DetectorView {
-        left: 0,
-        top: 0,
-        width: W,
-        height: H,
-    },
-    DetectorView {
-        left: 0,
-        top: 55,
-        width: W / 2,
-        height: 245,
-    },
-    DetectorView {
-        left: W / 2,
-        top: 55,
-        width: W / 2,
-        height: 245,
-    },
-    // The central view crosses the former left/right seam. It preserves
-    // small, occluded far-court players without cutting the torso in half.
-    DetectorView {
-        left: W / 4,
-        top: 40,
-        width: W / 2,
-        height: 245,
-    },
-];
 
 #[derive(Clone, Debug)]
 pub struct PersonObservation {
@@ -172,31 +115,9 @@ fn skeleton_box_with_threshold(
     Some((bounds, confidence / selected.len() as f32))
 }
 
-fn overlap(a: [f64; 4], b: [f64; 4]) -> f64 {
-    let w = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
-    let h = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
-    let area = |b: [f64; 4]| (b[2] - b[0]) * (b[3] - b[1]);
-    (w * h) / (area(a) + area(b) - w * h).max(1e-10)
-}
-
-/// Overlapping viewports can predict the same athlete with a truncated
-/// lower body. Suppress nested skeletal boxes even if their IoU is low.
-fn same_person_box(a: [f64; 4], b: [f64; 4]) -> bool {
-    if overlap(a, b) > 0.58 {
-        return true;
-    }
-    let iw = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
-    let ih = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
-    let area = |r: [f64; 4]| (r[2] - r[0]) * (r[3] - r[1]);
-    let contained = iw * ih / area(a).min(area(b)).max(1e-9);
-    let horizontal = ((a[0] + a[2]) - (b[0] + b[2])).abs() * 0.5;
-    contained > 0.89 && horizontal < 0.022 && (a[1] - b[1]).abs() < 0.05
-}
-
 pub struct PersonEngine {
     detector: Session,
     pose: Option<PoseEngine>,
-    variant: DetectorVariant,
 }
 impl PersonEngine {
     pub fn load(
@@ -231,7 +152,7 @@ impl PersonEngine {
         )
     }
 
-    /// Explicit selection for controlled experiments; default RTMDet remains unchanged.
+    /// Explicit detector selection for tests and the CPU preview path.
     pub fn load_with_detector(
         repo: &Path,
         device: Device,
@@ -263,11 +184,7 @@ impl PersonEngine {
             .map_err(|e| format!("Person detector {} not installed: {e}", variant.file()))?;
         if !path.starts_with(&models)
             || !path.is_file()
-            || path.metadata().map_err(|e| e.to_string())?.len()
-                > match variant {
-                    DetectorVariant::RtmDetNano => 32 * 1024 * 1024,
-                    DetectorVariant::RfDetrMedium => 256 * 1024 * 1024,
-                }
+            || path.metadata().map_err(|e| e.to_string())?.len() > 256 * 1024 * 1024
         {
             return Err(format!(
                 "Invalid person detector path or size: {}",
@@ -276,7 +193,7 @@ impl PersonEngine {
         }
         let fingerprint = format!(
             "{:x}",
-            Sha256::digest(std::fs::read(&path).map_err(|e| format!("RTMDet model read: {e}"))?)
+            Sha256::digest(std::fs::read(&path).map_err(|e| format!("RF-DETR model read: {e}"))?)
         );
         if fingerprint != variant.sha256() {
             return Err(format!(
@@ -291,7 +208,7 @@ impl PersonEngine {
             .commit()
             .map_err(|e| format!("ONNX Runtime init: {e}"))?;
         let mut builder = Session::builder()
-            .map_err(|e| format!("RTMDet session builder: {e}"))?
+            .map_err(|e| format!("RF-DETR session builder: {e}"))?
             .with_intra_threads(threads)
             .map_err(|e| e.to_string())?;
         if device == Device::Cuda {
@@ -300,11 +217,11 @@ impl PersonEngine {
                 cuda = cuda.with_memory_limit((memory_mb * 1024 * 1024) as usize);
             }
             if !cuda.is_available().map_err(|e| e.to_string())? {
-                return Err("RTMDet CUDA unavailable".into());
+                return Err("RF-DETR CUDA unavailable".into());
             }
             builder = builder
                 .with_execution_providers([cuda.build().error_on_failure()])
-                .map_err(|e| format!("RTMDet CUDA: {e}"))?;
+                .map_err(|e| format!("RF-DETR CUDA: {e}"))?;
         } else {
             builder = builder
                 .with_execution_providers([CPUExecutionProvider::default().build()])
@@ -313,10 +230,7 @@ impl PersonEngine {
         let detector = builder
             .commit_from_file(path)
             .map_err(|e| format!("Open person detector: {e}"))?;
-        let required_outputs: &[&str] = match variant {
-            DetectorVariant::RtmDetNano => &["dets", "labels"],
-            DetectorVariant::RfDetrMedium => &["pred_boxes", "pred_logits"],
-        };
+        let required_outputs: &[&str] = &["pred_boxes", "pred_logits"];
         if !detector.inputs.iter().any(|i| i.name == "input")
             || required_outputs
                 .iter()
@@ -332,18 +246,11 @@ impl PersonEngine {
         } else {
             None
         };
-        Ok(Self {
-            detector,
-            pose,
-            variant,
-        })
+        Ok(Self { detector, pose })
     }
 
     pub fn detect(&mut self, rgb: &[u8]) -> Result<Vec<PersonObservation>, String> {
-        match self.variant {
-            DetectorVariant::RtmDetNano => self.detect_prepared(rgb, prepare_views(rgb)?),
-            DetectorVariant::RfDetrMedium => self.detect_rfdetr_medium(rgb),
-        }
+        self.detect_rfdetr_medium(rgb)
     }
 
     pub fn detect_frames(
@@ -355,27 +262,10 @@ impl PersonEngine {
         if frames.is_empty() || !frames.len().is_multiple_of(frame_bytes) {
             return Err("Person detector expects complete RGB24 frames".into());
         }
-        if self.variant == DetectorVariant::RfDetrMedium {
-            for (index, frame) in frames.chunks_exact(frame_bytes).enumerate() {
-                consume(index, self.detect_rfdetr_medium(frame)?)?;
-            }
-            return Ok(());
+        for (index, frame) in frames.chunks_exact(frame_bytes).enumerate() {
+            consume(index, self.detect_rfdetr_medium(frame)?)?;
         }
-        std::thread::scope(|scope| {
-            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-            scope.spawn(move || {
-                for frame in frames.chunks_exact(frame_bytes) {
-                    if sender.send(prepare_views(frame)).is_err() {
-                        break;
-                    }
-                }
-            });
-            for (index, frame) in frames.chunks_exact(frame_bytes).enumerate() {
-                let prepared = receiver.recv().map_err(|_| "RTMDet preparation failed")??;
-                consume(index, self.detect_prepared(frame, prepared)?)?;
-            }
-            Ok(())
-        })
+        Ok(())
     }
 
     /// Run the expensive detector and pose model only on global frame anchors.
@@ -448,62 +338,6 @@ impl PersonEngine {
         }
     }
 
-    fn detect_prepared(
-        &mut self,
-        rgb: &[u8],
-        inputs: [Vec<f32>; 4],
-    ) -> Result<Vec<PersonObservation>, String> {
-        let mut proposals = Vec::new();
-        for (view, input) in VIEWS.into_iter().zip(inputs) {
-            let ratio = SIDE as f64 / view.width as f64;
-            let tensor = Tensor::from_array((vec![1_i64, 3, SIDE as i64, SIDE as i64], input))
-                .map_err(|e| format!("RTMDet tensor: {e}"))?;
-            let outputs = self
-                .detector
-                .run(ort::inputs!["input" => tensor])
-                .map_err(|e| format!("RTMDet inference: {e}"))?;
-            let (ds, dets) = outputs
-                .get("dets")
-                .ok_or("RTMDet dets missing")?
-                .try_extract_tensor::<f32>()
-                .map_err(|e| e.to_string())?;
-            let (ls, labels) = outputs
-                .get("labels")
-                .ok_or("RTMDet labels missing")?
-                .try_extract_tensor::<i64>()
-                .map_err(|e| e.to_string())?;
-            if ds.len() != 3
-                || ds[0] != 1
-                || ds[2] != 5
-                || ls.len() != 2
-                || ls[0] != 1
-                || ls[1] != ds[1]
-            {
-                return Err(format!(
-                    "RTMDet output tensor shape mismatch: {ds:?}/{ls:?}"
-                ));
-            }
-            for (row, &label) in dets.chunks_exact(5).zip(labels.iter()) {
-                let min_detector_score = if view.width == W { 0.24 } else { 0.12 };
-                if label != 0 || !row.iter().all(|v| v.is_finite()) || row[4] < min_detector_score {
-                    continue;
-                }
-                let bb = [
-                    (row[0] as f64 / ratio + view.left as f64) / W as f64,
-                    (row[1] as f64 / ratio + view.top as f64) / H as f64,
-                    (row[2] as f64 / ratio + view.left as f64) / W as f64,
-                    (row[3] as f64 / ratio + view.top as f64) / H as f64,
-                ]
-                .map(|v| v.clamp(0.0, 1.0));
-                if (bb[2] - bb[0]) * (W as f64) < 8.0 || (bb[3] - bb[1]) * (H as f64) < 20.0 {
-                    continue;
-                }
-                proposals.push((row[4], bb));
-            }
-        }
-        self.collect_observations(rgb, proposals)
-    }
-
     fn collect_observations(
         &mut self,
         rgb: &[u8],
@@ -512,13 +346,7 @@ impl PersonEngine {
         proposals.sort_by(|a, b| b.0.total_cmp(&a.0));
         let mut distinct: Vec<(f32, [f64; 4])> = Vec::new();
         for candidate in proposals {
-            if self.variant == DetectorVariant::RfDetrMedium
-                || distinct
-                    .iter()
-                    .all(|old| overlap(old.1, candidate.1) < 0.58)
-            {
-                distinct.push(candidate);
-            }
+            distinct.push(candidate);
             if distinct.len() >= MAX_PERSONS * 3 {
                 break;
             }
@@ -544,16 +372,14 @@ impl PersonEngine {
                 .infer_batch(rgb, &crops);
             let poses = match pose_result {
                 Ok(poses) => poses,
-                Err(_) if self.variant == DetectorVariant::RfDetrMedium => vec![
+                Err(_) => vec![
                     [Keypoint {
                         x: 0.0,
                         y: 0.0,
                         score: 0.0,
-                    };
-                        KPT_COUNT];
+                    }; KPT_COUNT];
                     crops.len()
                 ],
-                Err(error) => return Err(error),
             };
             for ((det_score, crop), keypoints) in valid.into_iter().zip(poses) {
                 if results.len() == MAX_PERSONS {
@@ -571,13 +397,8 @@ impl PersonEngine {
                         .then(|| skeleton_box_with_threshold(&keypoints, 0.28, 9))
                         .flatten()
                 });
-                let (bbox, pose_score) = match (self.variant, skeleton) {
-                    (DetectorVariant::RfDetrMedium, confirmed) => {
-                        (crop, confirmed.map_or(0.0, |(_, score)| score))
-                    }
-                    (DetectorVariant::RtmDetNano, Some(confirmed)) => confirmed,
-                    (DetectorVariant::RtmDetNano, None) => continue,
-                };
+                let bbox = crop;
+                let pose_score = skeleton.map_or(0.0, |(_, score)| score);
                 // Very-low detector confidence is valid only with strong evidence
                 // from a coherent pose; never admit a weak silhouette alone.
                 if det_score < 0.24 && pose_score < 0.49 {
@@ -587,28 +408,12 @@ impl PersonEngine {
                     .then_some([keypoints[0].x as f64, keypoints[0].y as f64]);
                 let observation = PersonObservation {
                     bbox,
-                    score: if self.variant == DetectorVariant::RfDetrMedium {
-                        det_score.max(pose_score).clamp(0.0, 1.0)
-                    } else {
-                        (0.35 * det_score + 0.65 * pose_score).clamp(0.0, 1.0)
-                    },
+                    score: det_score.max(pose_score).clamp(0.0, 1.0),
                     head,
                     keypoints: keypoints
                         .map(|point| [point.x as f64, point.y as f64, point.score as f64]),
                 };
-                if let Some(previous) = results
-                    .iter_mut()
-                    .filter(|_| self.variant == DetectorVariant::RtmDetNano)
-                    .find(|other| same_person_box(other.bbox, bbox))
-                {
-                    // Keep the more fully observed skeleton, not the first
-                    // detector crop that happened to see the person.
-                    if observation.score > previous.score {
-                        *previous = observation;
-                    }
-                } else {
-                    results.push(observation);
-                }
+                results.push(observation);
             }
         }
         Ok(results)
@@ -707,49 +512,6 @@ fn preprocess_rfdetr_medium(rgb: &[u8]) -> Result<Vec<f32>, String> {
     Ok(output)
 }
 
-pub fn prepare_views(rgb: &[u8]) -> Result<[Vec<f32>; 4], String> {
-    Ok([
-        preprocess_view(rgb, VIEWS[0])?,
-        preprocess_view(rgb, VIEWS[1])?,
-        preprocess_view(rgb, VIEWS[2])?,
-        preprocess_view(rgb, VIEWS[3])?,
-    ])
-}
-
-#[cfg(test)]
-fn preprocess(rgb: &[u8]) -> Result<Vec<f32>, String> {
-    preprocess_view(rgb, VIEWS[0])
-}
-
-fn preprocess_view(rgb: &[u8], view: DetectorView) -> Result<Vec<f32>, String> {
-    if rgb.len() != W * H * 3
-        || view.width == 0
-        || view.left + view.width > W
-        || view.top + view.height > H
-    {
-        return Err("RTMDet expects a valid crop of a 640x360 RGB24 frame".into());
-    }
-    let mut output = vec![0.0_f32; 3 * SIDE * SIDE];
-    let ratio = view.width as f64 / SIDE as f64;
-    let active_height = (view.height as f64 / ratio).round() as usize;
-    for y in 0..SIDE {
-        for x in 0..SIDE {
-            for channel in 0..3 {
-                let pixel = if y < active_height {
-                    let sx = view.left + ((x as f64 + 0.5) * ratio).floor() as usize;
-                    let sy = view.top + ((y as f64 + 0.5) * ratio).floor() as usize;
-                    rgb[(sy.min(H - 1) * W + sx.min(W - 1)) * 3 + (2 - channel)] as f32
-                } else {
-                    114.0
-                };
-                output[channel * SIDE * SIDE + y * SIDE + x] =
-                    (pixel - MEAN_BGR[channel]) / STD_BGR[channel];
-            }
-        }
-    }
-    Ok(output)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -790,7 +552,10 @@ mod tests {
     #[test]
     fn rfdetr_full_gpu_evidence_defers_pose_while_other_entrypoints_keep_it() {
         assert!(!DetectorVariant::RfDetrMedium.needs_pose_in_gpu_evidence());
-        assert!(DetectorVariant::RtmDetNano.needs_pose_in_gpu_evidence());
+        assert_eq!(
+            DetectorVariant::from_env().unwrap_or(DetectorVariant::RfDetrMedium),
+            DetectorVariant::RfDetrMedium
+        );
     }
 
     #[test]
@@ -845,15 +610,6 @@ mod tests {
     }
 
     #[test]
-    fn prepared_views_match_individual_preprocessing() {
-        let rgb: Vec<u8> = (0..W * H * 3).map(|i| (i % 251) as u8).collect();
-        let prepared = prepare_views(&rgb).unwrap();
-        for (view, actual) in VIEWS.into_iter().zip(prepared) {
-            assert_eq!(actual, preprocess_view(&rgb, view).unwrap());
-        }
-        assert!(prepare_views(&rgb[..100]).is_err());
-    }
-    #[test]
     #[ignore = "Run with PERSON_PREVIEW_RGB and CUDA runtime on host"]
     fn pipelined_frames_match_sequential_gpu_results() {
         let rgb = std::fs::read(std::env::var("PERSON_PREVIEW_RGB").unwrap()).unwrap();
@@ -889,14 +645,6 @@ mod tests {
         }
         assert!(skeleton_box(&points).is_none());
         assert!(skeleton_box_with_threshold(&points, 0.28, 9).is_some());
-        assert!(same_person_box(
-            [0.29, 0.69, 0.37, 1.0],
-            [0.294, 0.70, 0.365, 0.86]
-        ));
-        assert!(!same_person_box(
-            [0.29, 0.69, 0.37, 0.86],
-            [0.40, 0.69, 0.48, 0.86]
-        ));
     }
 
     #[test]
@@ -927,57 +675,9 @@ mod tests {
         let mut engine = PersonEngine::load(root, Device::Cpu, 4, 0).unwrap();
         let result = engine.detect(&rgb).unwrap();
         println!(
-            "RTMDet+RTMPose players: {:?}",
+            "RF-DETR + RTMPose players: {:?}",
             result.iter().map(|p| (p.bbox, p.score)).collect::<Vec<_>>()
         );
-        if std::env::var_os("PERSON_DIAGNOSTICS").is_some() {
-            for (view_id, view) in VIEWS.iter().copied().enumerate() {
-                let input = preprocess_view(&rgb, view).unwrap();
-                let tensor =
-                    Tensor::from_array((vec![1, 3, SIDE as i64, SIDE as i64], input)).unwrap();
-                let out = engine
-                    .detector
-                    .run(ort::inputs!["input" => tensor])
-                    .unwrap();
-                let (_, dets) = out
-                    .get("dets")
-                    .unwrap()
-                    .try_extract_tensor::<f32>()
-                    .unwrap();
-                let (_, labels) = out
-                    .get("labels")
-                    .unwrap()
-                    .try_extract_tensor::<i64>()
-                    .unwrap();
-                let ratio = SIDE as f64 / view.width as f64;
-                for (row, label) in dets.chunks_exact(5).zip(labels) {
-                    if *label != 0 || row[4] < 0.12 {
-                        continue;
-                    }
-                    let bb = [
-                        (row[0] as f64 / ratio + view.left as f64) / W as f64,
-                        (row[1] as f64 / ratio + view.top as f64) / H as f64,
-                        (row[2] as f64 / ratio + view.left as f64) / W as f64,
-                        (row[3] as f64 / ratio + view.top as f64) / H as f64,
-                    ]
-                    .map(|p| p.clamp(0.0, 1.0));
-                    let cx = (bb[0] + bb[2]) * 0.5;
-                    if !(0.37..=0.52).contains(&cx) {
-                        continue;
-                    }
-                    let pose = engine.pose.as_mut().unwrap().infer(&rgb, bb).unwrap();
-                    let confirmed = skeleton_box(&pose);
-                    let strong = pose
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, p)| p.score > 0.30)
-                        .map(|(i, p)| (i, (p.score * 100.) as i32))
-                        .collect::<Vec<_>>();
-                    println!("VIEW={view_id} proposal={bb:?}, score={:.2}, joints={strong:?}, validated={:?}",
-                        row[4], confirmed.map(|(b,s)|(b,s)));
-                }
-            }
-        }
         assert!(
             !result.is_empty(),
             "Expected at least one player in match frame"
@@ -989,17 +689,10 @@ mod tests {
         let mut points = [sample(0.5, 0.5, 0.9); KPT_COUNT];
         points[5].score = 0.1;
         assert!(skeleton_box(&points).is_none());
-        assert!(preprocess(&vec![0; 3 * W * H - 1]).is_err());
+        assert!(preprocess_rfdetr_medium(&vec![0; 3 * W * H - 1]).is_err());
         assert_eq!(
-            preprocess(&vec![0; 3 * W * H]).unwrap().len(),
-            3 * SIDE * SIDE
+            preprocess_rfdetr_medium(&vec![0; 3 * W * H]).unwrap().len(),
+            3 * RFDETR_SIDE * RFDETR_SIDE
         );
-        // The far-court tile preserves original image pixels (not a 2x blur).
-        let mut rgb = vec![0; 3 * W * H];
-        let px = (55 * W + 0) * 3;
-        rgb[px] = 230;
-        let tile = preprocess_view(&rgb, VIEWS[1]).unwrap();
-        let red_as_bgr = (230.0 - MEAN_BGR[2]) / STD_BGR[2];
-        assert!((tile[2 * SIDE * SIDE] - red_as_bgr).abs() < 0.01);
     }
 }

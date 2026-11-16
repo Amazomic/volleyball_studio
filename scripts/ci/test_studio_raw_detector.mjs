@@ -22,7 +22,7 @@ const s={project:"project",video:"match.mp4",analysis:"rf",
   ]}};
 const overlay={rawPeopleVisible:checkbox,rawDetectors:new Map([
   ["project:fusion-rf:match.mp4","rfdetr-medium"],
-  ["project:fusion-rt:match.mp4","rtmdet-nano"]
+  ["project:fusion-rt:match.mp4","legacy"]
 ])};
 const context={overlay,s,rawFusion:()=>s.chain.choices.find(
   choice=>choice.value===s.analysis&&choice.kind==="fusion")||null};
@@ -34,7 +34,7 @@ assert.equal(checkbox.disabled,false);
 checkbox.checked=false;
 s.analysis="rt";
 context.updateRawDetectorLabel();
-assert.equal(modelName.textContent,"RTMDet-Nano");
+assert.equal(modelName.textContent,"Архивный анализ");
 assert.equal(checkbox.checked,false,"switching analysis preserves visibility choice");
 s.analysis="missing";
 context.updateRawDetectorLabel();
@@ -45,4 +45,4 @@ assert.match(source,/const poseBoxes=raw\.poses\?\.length\?raw\.poses:\(raw\.pos
 assert.match(source,/if\(player\.interpolated===true\)\{ctx\.setLineDash/,
   "CPU preview distinguishes interpolated track boxes");
 assert.match(source,/rawDetectors\.set\(rawDetectorKey\(project,run,video\),value\.person_detector\)/);
-console.log("Raw preview checkbox follows RF-DETR / RTMDet saved GPU fusion: OK");
+console.log("Raw preview checkbox follows RF-DETR / archived saved GPU fusion: OK");

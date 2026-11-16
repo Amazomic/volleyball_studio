@@ -1850,10 +1850,23 @@ Studio показывает кнопку перехода между debug и re
 - Проверки и ограничения: [полный отчёт](superpowers/plans/2026-11-16-video-pipeline-verification.md). Изолированный Rust suite, настоящий CUDA e2e, RTMPose batch/single CUDA, WASM/Node, ownership/roadmap прошли; основной full suite сохраняет 13 доказанно прежних ReID-сбоев из пользовательского patch. Реальный размеченный матч не проверялся.
 - Применено: безопасный release restart, PID 576408 → 668010, активных заданий не было. Browser refresh остановлен защитой Computer Use; необходим F5. Счётчик roadmap остаётся 84/85, stage 85 не закрыт.
 
-### 2026-11-16 ? Remove overlapping synthetic player overlays at 00:31.7
+### 2026-11-16 - Remove overlapping synthetic player overlays at 00:31.7
 
-- Source-bound reproduction: project `d6451abac405`, saved CPU replay `69ff6d66008c45bf8820fe96de3ab2bf`, 30 FPS. The live overlay for frames 951?954 returned two inferred, nearly concentric bodies: provisional ID 6 (Irek) and ID 10 (Vlad), while their source observations alternate in the nearby frames.
+- Source-bound reproduction: project `d6451abac405`, saved CPU replay `69ff6d66008c45bf8820fe96de3ab2bf`, 30 FPS. The live overlay for frames 951-954 returned two inferred, nearly concentric bodies: provisional ID 6 (Irek) and ID 10 (Vlad), while their source observations alternate in the nearby frames.
 - Root cause: `native_preview_overlay/continuity.rs` separately interpolated each provisional track and rejected conflicts only against measured bodies. When both candidates were inferred in one empty frame, the two bodies survived.
 - Fix: remove only strongly overlapping synthetic boxes after all candidate interpolations. Order candidates by locally measured support (within 15 frames), shorter gap, then stable Track ID; never discard an observed detection. Keep the saved GPU/CPU replay, auto/manual links, touches and other athletes unchanged. The distinct source IDs are deliberately NOT merged globally; they coexist at other times.
-- Regression uses the actual 940?965 frame coordinates: one inferred ID 6 at frames 951?954, observed IDs remain intact; a separate case keeps two close athletes and even coincident measured detections.
+- Regression uses the actual 940-965 frame coordinates: one inferred ID 6 at frames 951-954, observed IDs remain intact; a separate case keeps two close athletes and even coincident measured detections.
 - Verified in an isolated worktree: `cargo fmt --all -- --check`, `cargo check --workspace --offline`, `cargo test --workspace --offline` (593 passed, 11 ignored, zero failures), `node scripts/ci/test_volley_web_wasm.mjs`, and `git diff --check`. Clippy was unavailable in installed WSL toolchain; no new GPU inference or manual visual labeling was performed. Source detection on frame 950 still carries ID 10; this preview-only guard does not silently rewrite that evidence.
+
+## 2026-11-16 — Удалён RTMDet из активного конвейера
+
+- Удалены ONNX-веса и sidecar RTMDet-Nano, CPU/GPU детекторный путь RTMDet, экспериментальные утилиты пакетного детектирования и выбор модели через VOLLEY_PERSON_DETECTOR.
+- Новые GPU-задания обнаружения игроков используют только RF-DETR Medium; RTMPose-M сохраняется отдельной стадией позы.
+- Обновлены модельный preflight, интерфейс, подписи прогресса, проверки и модельный стек; старые GPU-результаты маркируются как архивные без повторной нейросетевой обработки и без подмены происхождения.
+- Не затрагиваются исходные видео, сохранённые прогоны и пользовательские данные.
+
+### 2026-11-16 - Integrate independent RF-DETR and 30 FPS changes
+
+- Merged original-30fps branch `bc3b40a`, preview fix `b2b6ce6`, and the RTMDet-removal branch `47edd66` in a clean isolated worktree.
+- Resolved the GPU stack-version divergence by making `vballnet_rfdetr_medium_18250b5a_original30_detboxes_aligned_observed_pose_v5` its own non-reusable evidence version; kept existing leading-ball metadata for legacy fixtures and deleted obsolete RTMDet batch probe.
+- Verified the combined tree with `cargo fmt --all -- --check`, `cargo check --workspace --offline`, `cargo test --workspace --offline` (592 passed, 11 ignored, zero failures), and the real WASM Node test. No GPU / full-match inference executed. The user's uncommitted main-checkout changes remained unmodified.
