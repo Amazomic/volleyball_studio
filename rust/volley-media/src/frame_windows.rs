@@ -250,4 +250,26 @@ mod tests {
         );
         assert!(normalized_model_window(&[0; 8], 1, 1, 1).is_err());
     }
+    #[test]
+    fn retries_only_temporary_read_interruption() {
+        struct InterruptedOnce {
+            once: bool,
+            bytes: std::io::Cursor<Vec<u8>>,
+        }
+        impl Read for InterruptedOnce {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if !self.once {
+                    self.once = true;
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                self.bytes.read(buffer)
+            }
+        }
+        let source = InterruptedOnce {
+            once: false,
+            bytes: std::io::Cursor::new(vec![7; 9]),
+        };
+        let mut windows = FrameWindows::new(source, 1, 1).unwrap();
+        assert_eq!(windows.next_window().unwrap().unwrap().data, vec![7; 9]);
+    }
 }
