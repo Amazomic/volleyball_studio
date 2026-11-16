@@ -44,11 +44,11 @@ const ui={historyList:new Node("div"),progress,logPanel};
 const id="a".repeat(32),now=Date.now();
 const stages=[
   {name:"GPU · VballNet",started_ms:now-90000,finished_ms:now-40000,duration_ms:50000},
-  {name:"GPU · RTMDet + RTMPose",started_ms:now-40000,finished_ms:null,duration_ms:null}
+  {name:"GPU · RF-DETR Medium + RTMPose",started_ms:now-40000,finished_ms:null,duration_ms:null}
 ];
 const current={
   schema:"volley-studio-pipeline/1",project_id:"project",id,
-  mode:"gpu",video:"game.mp4",stage:"GPU · RTMDet + RTMPose: running",
+  mode:"gpu",video:"game.mp4",stage:"GPU · RF-DETR Medium + RTMPose: running",
   status:"running",progress_percent:67.5,elapsed_ms:91000,remaining_ms:110000,stages
 };
 const state={latestPipeline:current,historyRows:[],historyFilter:"all",historyStatusAt:now,historyOffset:0};

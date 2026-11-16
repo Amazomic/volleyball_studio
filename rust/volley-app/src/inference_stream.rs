@@ -181,7 +181,7 @@ pub async fn scan(
                         }));
                     }
                     if layout.is_none() {
-                        layout = Some(vec![json!({"name":"RTMDet + RTMPose skeleton observations"})]);
+                        layout = Some(vec![json!({"name":"RF-DETR + RTMPose person observations"})]);
                     }
                     proposals.push(json!({
                         "first_frame":window.first_frame,

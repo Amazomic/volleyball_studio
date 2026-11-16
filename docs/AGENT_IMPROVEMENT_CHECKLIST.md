@@ -68,7 +68,7 @@
 | Монтаж и Quick Reel | `rust/volley-media/src/montage.rs`; `rust/volley-app/src/player_montage.rs`, `montage.rs`, `quick_reel.rs`, `quick_reel_pipeline.rs` |
 | UI и предпросмотр | `rust/volley-web/src/lib.rs`; `rust/volley-app/src/native_preview_overlay.rs`, `native_preview_pose.rs`, `native_rally_preview.rs`; `rust/volley-app/static/` |
 
-На дату сверки новый путь игроков использует RTMDet-nano + RTMPose, а выбранный мяч — VballNet. Старые упоминания RAVEL и старые кэши не определяют текущую архитектуру. RAVEL `Touch/none` не является классификатором волейбольных приёмов. Перед изменением модели или частоты кадров перепроверить действующий `gpu_model_stack` и его совместимость.
+На дату сверки новый путь игроков использует RF-DETR Medium + RTMPose, а выбранный мяч — VballNet. Старые упоминания RAVEL и старые кэши не определяют текущую архитектуру. RAVEL `Touch/none` не является классификатором волейбольных приёмов. Перед изменением модели или частоты кадров перепроверить действующий `gpu_model_stack` и его совместимость.
 
 ## 3. Измерения до оптимизации
 

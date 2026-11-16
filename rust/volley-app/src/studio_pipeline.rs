@@ -885,7 +885,6 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
         && rallies["project_id"] == request.project_id
         && rallies["video"] == request.video
 }
-const GPU_MODEL_STACK: &str = "vballnet_rtmdet_rtmpose_tiled_coco17_sampled_observed_pose_v8";
 const RFDETR_GPU_MODEL_STACK: &str =
     "vballnet_rfdetr_medium_18250b5a_detboxes_aligned_observed_pose_v3";
 
@@ -894,7 +893,6 @@ const RFDETR_GPU_MODEL_STACK: &str =
 fn person_detector_label() -> &'static str {
     match volley_inference::person::DetectorVariant::from_env() {
         Ok(volley_inference::person::DetectorVariant::RfDetrMedium) => "RF-DETR Medium",
-        Ok(volley_inference::person::DetectorVariant::RtmDetNano) => "RTMDet + RTMPose",
         Err(_) => "Детектор игроков + RTMPose",
     }
 }
@@ -902,7 +900,6 @@ fn person_detector_label() -> &'static str {
 fn requested_gpu_model_stack() -> &'static str {
     match volley_inference::person::DetectorVariant::from_env() {
         Ok(volley_inference::person::DetectorVariant::RfDetrMedium) => RFDETR_GPU_MODEL_STACK,
-        Ok(volley_inference::person::DetectorVariant::RtmDetNano) => GPU_MODEL_STACK,
         Err(_) => "invalid_person_detector_selection_no_gpu_cache_reuse",
     }
 }
@@ -2066,8 +2063,7 @@ fn stage_aware_remaining(current: &Value, history: &Value, now: u64) -> Option<u
         Some(8.0)
     } else if name == "GPU · VballNet" {
         Some(44.0)
-    } else if name == "GPU · RTMDet + RTMPose"
-        || name == "GPU · RF-DETR Medium + RTMPose"
+    } else if name == "GPU · RF-DETR Medium + RTMPose"
         || name == "GPU · RF-DETR Medium"
     {
         Some(80.0)
@@ -2471,7 +2467,8 @@ mod branching_tests {
                     "model":model,"stride":9,"source_identity":identity,
                     "raw_candidates_only":true,"studio_gpu_run_complete":false,
                     "file":"detections.jsonl","fps":30,
-                    "sha256":sha
+                    "sha256":sha,
+                    "person_sampling_period_frames":request.gpu.pose_stride
                 }),
             );
         }
@@ -2486,7 +2483,8 @@ mod branching_tests {
                 "project_id":request.project_id,"video":request.video,
                 "sources":{"vballnet":{"job_id":gpu_ball,"sha256":sha},
                            "person_pose":{"job_id":gpu_players,"sha256":sha}},
-                "source_identity":identity,"sha256":sha,"fps":30
+                "source_identity":identity,"sha256":sha,"fps":30,
+                "player_sampling_period_frames":request.gpu.pose_stride
             }),
         );
         emit(
@@ -2509,7 +2507,9 @@ mod branching_tests {
             &json!({
                 "schema":"volley-native-cpu-touch-proposals/1","state":"motion_gated_touch_proposals","touch_id":touch,
                 "project_id":request.project_id,"video":request.video,
-                "source_replay_id":replay,"method":"vballnet_gravity_player_geometry_pose_contact_v7","sha256":sha
+                "source_replay_id":replay,"method":"vballnet_gravity_player_geometry_pose_contact_v9","sha256":sha,
+                "ball_tracking_policy":crate::cpu_retrack::ball_track::POLICY,
+                "leading_ball_rally_starts":true,"leading_ball_min_score":0.28
             }),
         );
         emit(
@@ -2522,7 +2522,9 @@ mod branching_tests {
                 "court_contact_context_version":"python_serve_toss_possession_v2",
                 "ground_boundary_version":"trajectory_court_player_v2",
                 "project_id":request.project_id,"video":request.video,
-                "source_replay_id":replay,"source_touch_id":touch,"sha256":sha
+                "source_replay_id":replay,"source_touch_id":touch,"sha256":sha,
+                "ball_tracking_policy":crate::cpu_retrack::ball_track::POLICY,
+                "leading_ball_rally_starts":true,"leading_ball_min_score":0.28
             }),
         );
         let saved = json!({

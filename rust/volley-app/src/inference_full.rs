@@ -278,7 +278,7 @@ struct JobContext {
 
 fn window_error(model: ModelKind, first_frame: u64, failure: &str) -> String {
     let model_name = if model == ModelKind::Players {
-        "RTMDet-nano + RTMPose"
+        "RF-DETR Medium + RTMPose"
     } else {
         "VballNetV4c"
     };
@@ -398,12 +398,8 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
         "video":context.video,
         "model":context.config.model,
         "person_pipeline":if context.config.model == ModelKind::Players {
-            Some(match volley_inference::person::DetectorVariant::from_env()? {
-                volley_inference::person::DetectorVariant::RtmDetNano =>
-                    "rtmdet_nano_tiled_rtmpose_m_coco17_sampled_v6",
-                volley_inference::person::DetectorVariant::RfDetrMedium =>
-                    "rfdetr_medium_18250b5a_detector_boxes_pose_deferred_sampled_v3",
-            })
+            let _ = volley_inference::person::DetectorVariant::from_env()?;
+            Some("rfdetr_medium_18250b5a_detector_boxes_pose_deferred_sampled_v3")
         } else { None },
         "person_sampling_period_frames":if context.config.model == ModelKind::Players {
             context.person_stride
@@ -716,7 +712,7 @@ mod tests {
     #[test]
     fn long_cuda_errors_name_model_and_exact_window() {
         let error = window_error(ModelKind::Players, 39240, "CUDA failure 999");
-        assert!(error.contains("RTMDet-nano + RTMPose"));
+        assert!(error.contains("RF-DETR Medium + RTMPose"));
         assert!(error.contains("39240..39248"));
         assert!(error.contains("CUDA failure 999"));
         let ball = window_error(ModelKind::Ball, 9, "device unavailable");

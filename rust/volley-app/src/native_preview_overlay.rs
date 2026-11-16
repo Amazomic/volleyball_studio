@@ -999,9 +999,10 @@ fn gpu_person_detector(project_root: &Path, fusion: &Value) -> &'static str {
     }
     match model["person_pipeline"].as_str() {
         Some(pipeline) if pipeline.starts_with("rfdetr_medium_") => "rfdetr-medium",
-        Some(pipeline) if pipeline.starts_with("rtmdet_nano_") => "rtmdet-nano",
-        // GPU runs predating the RF-DETR integration always used RTMDet-Nano.
-        None => "rtmdet-nano",
+        // Read-only historical evidence remains viewable after retiring
+        // its detector; do not label it as a current RF-DETR run.
+        Some(pipeline) if pipeline.starts_with("rtmdet_nano_") => "legacy",
+        None => "legacy",
         _ => "unknown",
     }
 }
@@ -1158,10 +1159,10 @@ mod tests {
         let mut legacy = source.clone();
         legacy["person_pipeline"] = json!("rtmdet_nano_tiled_rtmpose_m_coco17_3hz_v5");
         save(&legacy);
-        assert_eq!(gpu_person_detector(&root, &fusion), "rtmdet-nano");
+        assert_eq!(gpu_person_detector(&root, &fusion), "legacy");
         legacy.as_object_mut().unwrap().remove("person_pipeline");
         save(&legacy);
-        assert_eq!(gpu_person_detector(&root, &fusion), "rtmdet-nano");
+        assert_eq!(gpu_person_detector(&root, &fusion), "legacy");
         let mut changed = fusion.clone();
         changed["sources"]["person_pose"]["sha256"] = json!("b".repeat(64));
         assert_eq!(gpu_person_detector(&root, &changed), "unknown");

@@ -183,7 +183,7 @@ async fn quick_gpu_model(
         || *cancelled.borrow(),
         |status| {
             let model_label = if model == volley_inference::ModelKind::Players {
-                "RTMDet + RTMPose"
+                "RF-DETR Medium + RTMPose"
             } else {
                 "VballNetV4c"
             };

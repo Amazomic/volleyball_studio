@@ -83,7 +83,7 @@ reel={status:"running",stage:"Монтаж",progress:88,stage_index:4};
 await win.VolleyballTasks.refresh();
 assert.equal(list.children.length,2);
 assert.ok(!container.classList.contains("hidden"));
-assert.equal(list.children[0].children[0].children[0].textContent,"Анализ GPU · "+(win.VolleyballPersonDetector?.label||"RTMDet + RTMPose"));
+assert.equal(list.children[0].children[0].children[0].textContent,"Анализ GPU · "+(win.VolleyballPersonDetector?.label||"RF-DETR Medium + RTMPose"));
 assert.equal(list.children[0].children[0].children[1].textContent,"36%");
 assert.equal(list.children[1].children[0].children[1].textContent,"88%");
 

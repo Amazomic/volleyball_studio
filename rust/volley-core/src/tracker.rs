@@ -1,4 +1,4 @@
-//! Conservative CPU Track ID reconstruction from RTMDet/RTMPose skeleton boxes.
+//! Conservative CPU Track ID reconstruction from player detector/RTMPose boxes.
 //! IDs are provisional tracklets, NOT verified athlete identities.
 //! Pairing is globally optimal and one-to-one; crossings retain living IDs
 //! while ambiguous geometry is reported, not misrepresented as confirmed identity.
@@ -13,7 +13,7 @@ pub use pose_matching::PoseEvidence;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrackingOptions {
-    /// Score threshold for skeletal RTMDet/RTMPose boxes, replayable on CPU.
+    /// Score threshold for observed detector/pose boxes, replayable on CPU.
     pub min_player_score: f64,
     pub nms_iou: f64,
     /// Maximum disappearance in frames (90 frames = 3 seconds at the 30 FPS CPU replay rate).
@@ -780,7 +780,7 @@ mod tests {
 
     #[test]
     fn sparse_pose_crop_switch_keeps_one_real_track_on_match_frame_143271() {
-        // Reproduced from the project's immutable RTMDet+RTMPose fusion
+        // Reproduced from the project's immutable GPU person/pose fusion
         // at 1:19:33–1:19:37. The person is observed once every 10 frames.
         // Old scoring minted ID 795 when skeleton height suddenly shrank,
         // then alternated 792/795 and visual gap filling showed both.

@@ -189,7 +189,7 @@ MP4, MOV, MKV, AVI, WEBM, M4V, MTS · до 30 файлов · до 32 ГиБ к�
 Анализ матча	Match analysis
 Один запуск создаёт новую связанную пару: первичный GPU-анализ и CPU-постобработку. Активные версии выбираются только в шапке страницы.	One run creates a new linked pair: primary GPU analysis and CPU post-processing. Active versions are selected only in the page header.
 Первичный анализ	Primary analysis
-VballNet · мяч, RTMDet + RTMPose · игроки. Два независимых GPU-запуска и объединение обнаружений.	VballNet · ball, RTMDet + RTMPose · players. Two independent GPU runs and merged detections.
+VballNet · мяч, RF-DETR + RTMPose · игроки. Два независимых GPU-запуска и объединение обнаружений.	VballNet · ball, RF-DETR + RTMPose · players. Two independent GPU runs and merged detections.
 Исходное видео нового анализа	Source video for the new analysis
 Шаг окон, кадров	Window step, frames
 Лимит VRAM, МБ · 0 = без лимита	VRAM limit, MB · 0 = unlimited
@@ -199,10 +199,10 @@ VballNet · мяч, RTMDet + RTMPose · игроки. Два независим�
 Новый Track ID → физические касания → розыгрыши. Не требует повторного GPU для самостоятельного CPU-пересчёта.	New Track IDs → physical touches → rallies. A standalone CPU recompute does not rerun the GPU.
 Трекинг игроков	Player tracking
 Мин. уверенность игрока	Min. player confidence
-Оценки касаний RTMDet + RTMPose	RTMDet + RTMPose touch scores
+Оценки касаний RF-DETR + RTMPose	RF-DETR + RTMPose touch scores
 Алгоритм касаний	Touch algorithm
 Мяч VballNet	VballNet ball
-Мяч RTMDet + RTMPose	RTMDet + RTMPose ball
+Мяч RF-DETR + RTMPose	RF-DETR + RTMPose ball
 Очистить историю	Clear history
 Скрыть записи истории текущего проекта; результаты анализа сохранятся	Hide the current project's history entries; analysis results will remain
 Траектория и движение точек тела	Ball trajectory and body keypoint motion
@@ -266,7 +266,7 @@ CPU-параметры создают отдельную постобработ�
 Обработанные	Processed
 Мяч	Ball
 Касания	Touches
-Мяч: голубой — VballNet, оранжевый — RTMDet + RTMPose. Жёлтая рамка — вероятность касания.	Ball: cyan is VballNet, orange is RTMDet + RTMPose. A yellow box marks touch probability.
+Мяч: голубой — VballNet, оранжевый — RF-DETR + RTMPose. Жёлтая рамка — вероятность касания.	Ball: cyan is VballNet, orange is RF-DETR + RTMPose. A yellow box marks touch probability.
 Виды касаний — оценка CPU	Touch types — CPU estimates
 Атака	Attack
 Блок	Block
@@ -274,7 +274,7 @@ CPU-параметры создают отдельную постобработ�
 Передача сверху	Overhead pass
 Приём снизу	Dig
 Нижнее касание	Low touch
-Цветные метки — неподтверждённые оценки CPU, а не классы RTMDet + RTMPose. Блок и подача пока не определяются: нужен контекст площадки.	Colored markers are unverified CPU estimates, not RTMDet + RTMPose classes. Blocks and serves are unavailable without court context.
+Цветные метки — неподтверждённые оценки CPU, а не классы RF-DETR + RTMPose. Блок и подача пока не определяются: нужен контекст площадки.	Colored markers are unverified CPU estimates, not RF-DETR + RTMPose classes. Blocks and serves are unavailable without court context.
 Один результат CPU на каждое видео. Касания и розыгрыши предварительные, привязки к игрокам подтверждены вручную. Виды касаний определены приблизительно.	One CPU result per video. Touches and rallies are provisional, and player links are manually confirmed. Touch types are estimates.
 Розыгрышей-кандидатов	Rally candidates
 Ударов: атаки и подачи, оценка	Hits: attacks and serves, estimated
