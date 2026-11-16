@@ -24,18 +24,30 @@
   // HEVC and other unsupported browser codecs still allow exact source-frame
   // seeking, trimming and calibration, without transcoding the full match.
   let stillMode=false,stillCursor=0,stillReady=false,stillDelay=null,stillMeta=null;
+  let stillPlaying=false,stillPlaybackTimer=null,stillPlayAt=0,stillPlayClock=0,stillFetching=false,stillLastUrl="";
+  const pauseStill=()=>{
+    if(stillPlaybackTimer!==null)clearInterval(stillPlaybackTimer);
+    stillPlaybackTimer=null;stillPlaying=false;
+    if(stillMode)playButton.textContent="▶ Воспроизвести";
+  };
   const cursor=()=>stillMode?stillCursor:(Number.isFinite(video.currentTime)?video.currentTime:0);
   const renderStill=()=>{
+    if(!stillMode||!valid()||stillPlaying&&stillFetching)return;
     if(stillDelay!==null)clearTimeout(stillDelay);
-    if(!stillMode||!valid())return;
     const projectAtRequest=project,sourceAtRequest=source,token=generation;
     const at=stillCursor;
+    if(stillPlaying)stillFetching=true;
     stillDelay=setTimeout(()=>{
       stillDelay=null;
-      if(!stillMode||token!==generation||projectAtRequest!==project||sourceAtRequest!==source)return;
-      still.src=url("/api/video-preview",{
+      if(!stillMode||token!==generation||projectAtRequest!==project||sourceAtRequest!==source){
+        stillFetching=false;return;
+      }
+      const frameUrl=url("/api/video-preview",{
         video:source,mode:"source",time:at.toFixed(3),width:960
       });
+      if(stillLastUrl===frameUrl){stillFetching=false;return;}
+      stillLastUrl=frameUrl;
+      still.src=frameUrl;
     },120);
   };
   const fallbackFrames=(meta)=>{
@@ -43,7 +55,7 @@
     stillMode=true;stillCursor=0;stillReady=false;
     video.pause();video.removeAttribute("src");video.load();
     video.hidden=true;still.hidden=false;
-    playButton.disabled=true;playButton.textContent="Покадровый просмотр";
+    playButton.disabled=false;playButton.textContent="▶ Воспроизвести";
     duration=Number(meta.duration_sec)||0;
     const width=Number(meta.width),height=Number(meta.height);
     if(width>0&&height>0)media.style.setProperty("--frame-ratio",String(width/height));
@@ -52,7 +64,7 @@
     if(!end.value||Number(end.value)<=0||Number(end.value)>duration)
       end.value=duration.toFixed(2);
     updateClock();draw();renderStill();
-    message("Формат исходника не поддерживается браузером. Доступны кадры по временной шкале, обрезка и разметка поля; непрерывное воспроизведение недоступно.");
+    message("HEVC: кадровое воспроизведение без звука. Скорость обновления кадров зависит от декодирования; обрезка и разметка доступны.");
   };
 
   let baseRevision="",dirty=false,draftTimer=null,editEpoch=0;
@@ -347,23 +359,63 @@
     if(stillMeta)fallbackFrames(stillMeta);
     else message("Видео не воспроизводится, не удалось получить данные для покадрового просмотра.",true);
   });
-  still.addEventListener("load",()=>{stillReady=true;draw();});
-  still.addEventListener("error",()=>{if(stillMode)message("Не удалось декодировать выбранный кадр. Попробуйте другую секунду.",true);});
+  still.addEventListener("load",()=>{
+    stillReady=true;stillFetching=false;draw();
+    if(stillPlaying)renderStill();
+  });
+  still.addEventListener("error",()=>{
+    stillFetching=false;stillLastUrl="";pauseStill();
+    if(stillMode)message("Не удалось декодировать выбранный кадр. Попробуйте другую секунду.",true);
+  });
   video.addEventListener("timeupdate",updateClock);
   video.addEventListener("play",()=>{if(!stillMode)playButton.textContent="Пауза";});
   video.addEventListener("pause",()=>{if(!stillMode)playButton.textContent="▶ Воспроизвести";});
-  playButton.addEventListener("click",()=>{
-    if(!valid()||stillMode)return;
+  const togglePlayback=()=>{
+    if(!valid())return;
+    if(stillMode){
+      if(stillPlaying){pauseStill();return;}
+      if(duration<=0)return;
+      if(stillCursor>=duration)stillCursor=0;
+      stillPlaying=true;stillPlayAt=stillCursor;stillPlayClock=Date.now();
+      playButton.textContent="Пауза";
+      stillPlaybackTimer=setInterval(()=>{
+        if(!stillPlaying)return;
+        stillCursor=Math.min(duration,stillPlayAt+(Date.now()-stillPlayClock)/1000);
+        updateClock();
+        if(stillCursor>=duration){pauseStill();return;}
+        if(!stillFetching)renderStill();
+      },100);
+      renderStill();
+      return;
+    }
     if(video.paused){
       const started=video.play();
       if(started&&started.catch)started.catch(error=>message("Не удалось воспроизвести: "+error.message,true));
     }else video.pause();
-  });
+  };
+  playButton.addEventListener("click",togglePlayback);
+  // Capture Space before the browser can activate the focused <summary>
+  // and collapse the expanded editor instead of pausing the visible video.
+  document.addEventListener("keydown",event=>{
+    if(event.code!=="Space"&&event.key!==" ")return;
+    const editorVisible=!document.hidden&&
+      !$("studio-analysis-view").classList.contains("hidden")&&wrapper.open;
+    if(!editorVisible||event.altKey||event.ctrlKey||event.metaKey||
+       event.isComposing||["INPUT","TEXTAREA","SELECT"].includes(event.target?.tagName)||
+       event.target?.isContentEditable||event.target?.closest?.("dialog[open]"))return;
+    event.preventDefault();event.stopPropagation();
+    if(!event.repeat)togglePlayback();
+  },true);
   seek.addEventListener("input",()=>{
     if(duration>0){
       const at=clamp(Number(seek.value)/1000,0,duration);
-      if(stillMode){stillCursor=at;renderStill();}
-      else video.currentTime=at;
+      if(stillMode){
+        if(stillPlaying){
+          stillPlayAt=at;stillPlayClock=Date.now();
+        }
+        stillCursor=at;
+        if(!stillPlaying)renderStill();
+      }else video.currentTime=at;
     }
     updateClock();
   });
@@ -427,6 +479,7 @@
     video.pause();
     video.removeAttribute("src");
     video.load();
+    pauseStill();stillFetching=false;stillLastUrl="";
     if(stillDelay!==null){clearTimeout(stillDelay);stillDelay=null;}
     still.removeAttribute("src");still.hidden=true;stillMode=false;stillReady=false;stillMeta=null;
     video.hidden=false;playButton.disabled=false;playButton.textContent="▶ Воспроизвести";
@@ -474,7 +527,10 @@
     }
   };
   window.addEventListener("volley:tab-change",event=>{
-    if(event.detail?.tab!=="analysis")video.pause();
+    if(event.detail?.tab!=="analysis"){video.pause();pauseStill();}
+  });
+  document.addEventListener("visibilitychange",()=>{
+    if(document.hidden)pauseStill();
   });
   window.addEventListener("resize",draw);
   if(window.ResizeObserver){
