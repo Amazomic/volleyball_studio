@@ -372,6 +372,7 @@ body{min-width:0}
 .analysis-editor-frame video:fullscreen{width:100vw;height:100dvh;object-fit:contain;background:#000}
 .analysis-editor-stage canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:crosshair;pointer-events:none}
 .analysis-editor-stage.marking canvas{pointer-events:auto}
+.analysis-editor-stage>.analysis-editor-zoom{position:absolute;top:10px;right:10px;z-index:4;pointer-events:auto;background:rgba(12,23,40,.93);box-shadow:0 3px 14px rgba(0,0,0,.35)}
 .analysis-editor-timeline{min-width:0;display:grid;gap:6px}
 .analysis-editor-ruler{height:28px;min-width:0;position:relative;isolation:isolate;background:repeating-linear-gradient(90deg,transparent 0,transparent calc(10% - 1px),#334761 calc(10% - 1px),#334761 10%);border-radius:7px;border:1px solid #334761}
 .analysis-editor-ruler::before{content:"";position:absolute;left:0;right:0;top:12px;height:5px;background:#41526a;border-radius:3px}

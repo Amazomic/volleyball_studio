@@ -1924,3 +1924,9 @@ Studio показывает кнопку перехода между debug и re
 
 - Исправлена локальная CSS-компоновка редактора `rust/volley-app/static/studio.css`: `.analysis-editor-grid` теперь одноколоночный, `.analysis-editor-media` занимает `width:100%`; удалён ограничитель `48vh/42vh` и лишний media override. Видео (включая вертикальный HEVC) и шкала занимают всю доступную ширину; отношение сторон определяется исходным видео, разметка и элементы управления остаются связаны с тем же контейнером.
 - Проверены `test_studio_analysis_editor_fullwidth.mjs`, HEVC fallback, выбор первичного анализа и ранее исправленный каталог проектов. Сохранённые данные, пользовательские видео, GPU/CPU результаты и параллельные незафиксированные изменения не затрагивались.
+
+
+### 2026-11-16 — Масштабирование в углу видеопредпросмотра первичного анализа
+
+- Перемещены существующие кнопки `− / % / +` из списка настроек внутрь `#studio-analysis-stage` после canvas разметки. Для `.analysis-editor-stage>.analysis-editor-zoom` задано абсолютное позиционирование справа сверху, `z-index:4` и `pointer-events:auto` — панель остаётся интерактивной поверх разметки и не меняет координаты точек.
+- Изменены только владельцы интерфейса `rust/volley-app/static/studio.html` и `studio.css`; обработчики в `studio_editor.js` не менялись. Пройдены Node-регрессии `test_studio_analysis_zoom_overlay.mjs`, `test_studio_analysis_editor_fullwidth.mjs`, `test_studio_analysis_hevc_frames.mjs`.

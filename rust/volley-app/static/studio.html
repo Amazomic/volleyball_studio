@@ -406,6 +406,11 @@
                     <img id="studio-analysis-still" class="analysis-editor-still" alt="Кадр исходного видео для разметки" hidden>
                   </div>
                   <canvas id="studio-analysis-court" aria-label="Разметка четырёх углов, включая точки за пределами кадра" role="img"></canvas>
+                  <div class="analysis-editor-zoom" role="group" aria-label="Масштаб изображения для разметки">
+                    <button type="button" class="secondary" id="studio-analysis-zoom-out" aria-label="Уменьшить изображение">−</button>
+                    <output id="studio-analysis-zoom-label" aria-live="off">84%</output>
+                    <button type="button" class="secondary" id="studio-analysis-zoom-in" aria-label="Увеличить изображение">+</button>
+                  </div>
                 </div>
                 <div class="analysis-editor-timeline">
                   <div class="analysis-editor-ruler">
@@ -434,11 +439,6 @@
                   <button type="button" class="secondary" id="studio-analysis-court-auto">Определить поле и сетку</button>
                   <button type="button" class="secondary" id="studio-analysis-court-mode">Разметить поле</button>
                   <button type="button" class="secondary" id="studio-analysis-net-mode">Разметить сетку</button>
-                  <div class="analysis-editor-zoom" role="group" aria-label="Масштаб изображения для разметки">
-                    <button type="button" class="secondary" id="studio-analysis-zoom-out" aria-label="Уменьшить изображение">−</button>
-                    <output id="studio-analysis-zoom-label" aria-live="off">84%</output>
-                    <button type="button" class="secondary" id="studio-analysis-zoom-in" aria-label="Увеличить изображение">+</button>
-                  </div>
                   <button type="button" class="secondary" id="studio-analysis-court-undo">Убрать точку</button>
                   <button type="button" class="secondary" id="studio-analysis-court-clear">Сбросить поле</button>
                   <button type="button" class="primary" id="studio-analysis-edit-save">Сохранить</button>
