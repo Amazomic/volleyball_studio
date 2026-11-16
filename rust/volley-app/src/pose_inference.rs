@@ -114,10 +114,16 @@ pub(crate) fn boxes_from_raw_detections(
     detections: &[RawDetection],
     frame_index: u64,
 ) -> Result<Vec<[f64; 4]>, String> {
-    let at_frame: Vec<_> = detections
+    let mut at_frame: Vec<_> = detections
         .iter()
-        .filter(|record| record.frame_index == frame_index)
+        .filter(|record| record.frame_index == frame_index && record.class_name == "player")
         .collect();
+    // Fusion sorts proposals before applying the pose deduplication guard.
+    at_frame.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.query_index.cmp(&b.query_index))
+    });
     let candidates = serde_json::to_value(at_frame)
         .map_err(|error| format!("Serialize observed pose boxes: {error}"))?;
     Ok(boxes(&json!({"player_candidates": candidates})))
@@ -385,6 +391,29 @@ mod tests {
             assert_eq!(sampled_boxes(&row, frame, step).unwrap().len(), 1);
             assert!(sampled_boxes(&row, frame + 1, step).is_err() || step == 1);
         }
+    }
+
+    #[test]
+    fn raw_detector_pose_proposals_follow_fusion_score_order() {
+        let make = |score, bbox, query| RawDetection {
+            frame_index: 20,
+            class_name: "player",
+            score,
+            bbox_xyxy_norm: bbox,
+            query_index: Some(query),
+            touch_probability: None,
+            head_point_norm: None,
+        };
+        // Input order is not ranked; fusion ranks descending before pose NMS.
+        let low = make(0.42, [0.1, 0.1, 0.3, 0.8], 0);
+        let high = make(0.95, [0.11, 0.11, 0.31, 0.81], 1);
+        let winning_box = high.bbox_xyxy_norm.map(|v| v as f64);
+        let expected = vec![high.clone(), low.clone()];
+        let fused = json!({"player_candidates":expected});
+        let filtered = boxes_from_raw_detections(&[low, high], 20).unwrap();
+        assert_eq!(filtered, boxes(&fused));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0], winning_box);
     }
 
     #[test]

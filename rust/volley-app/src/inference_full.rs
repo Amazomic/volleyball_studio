@@ -1,6 +1,8 @@
 //! Experimental full prepared-video ONNX processing with bounded memory.
 //! One model/video per job, immutable raw-detections JSONL, durable status.
 //! This is *not* a complete Studio GPU/CPU analysis or player Track ID result.
+#[cfg(unix)]
+mod joint;
 use crate::{
     inference_stream, preparation, project_guard, projects,
     storage::{self, ApiError, ApiResult},
@@ -11,6 +13,8 @@ use axum::{
     http::HeaderMap,
     Json,
 };
+#[cfg(unix)]
+pub(crate) use joint::run_joint_pair;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -342,6 +346,73 @@ fn detect_ball_window(
     decode_vball(&tensors, first_frame, 0.05)
 }
 
+fn finalize_model_output(
+    context: &JobContext,
+    before: (u64, u128),
+    sink: EvidenceWriter,
+    summary: &DecodeSummary,
+    backend: Option<&str>,
+) -> Result<(), String> {
+    if context.cancelled.load(Ordering::Acquire) {
+        return Err("cancelled".into());
+    }
+    if inference_stream::source_stamp(&context.source)? != before {
+        return Err("Prepared video changed during full ONNX scan".into());
+    }
+    let (digest, count) = sink.finish()?;
+    if count != summary.windows {
+        return Err("Model output window count disagrees with decoder".into());
+    }
+    let final_file = context.folder.join(RESULT_FILE);
+    fs::rename(context.folder.join("detections.jsonl.partial"), &final_file)
+        .map_err(|e| format!("Publish raw detections: {e}"))?;
+    volley_media::preparation::verify_source_provenance(
+        &context.original,
+        &context.original_source,
+    )?;
+    let mut manifest = json!({
+        "schema":"volley-native-gpu-model-detections/1",
+        "original_source":context.original_source,
+        "working_stream":"original_rgb_fps30_v1",
+        "status":"model_raw_detections_complete",
+        "job_id":context.id,
+        "project_id":context.project_id,
+        "video":context.video,
+        "model":context.config.model,
+        "person_pipeline":if context.config.model == ModelKind::Players {
+            Some(match volley_inference::person::DetectorVariant::from_env()? {
+                volley_inference::person::DetectorVariant::RtmDetNano =>
+                    "rtmdet_nano_tiled_rtmpose_m_coco17_sampled_v6",
+                volley_inference::person::DetectorVariant::RfDetrMedium =>
+                    "rfdetr_medium_18250b5a_detector_boxes_pose_deferred_sampled_v3",
+            })
+        } else { None },
+        "person_sampling_period_frames":if context.config.model == ModelKind::Players {
+            context.person_stride
+        } else { 1 },
+        "provider":context.config.device,
+        "source_identity":{"bytes":before.0,"mtime_ns":before.1},
+        "fps":30,
+        "stride":context.stride,
+        "decoded_frames":summary.decoded_frames,
+        "windows":summary.windows,
+        "file":RESULT_FILE,
+        "sha256":digest,
+        "raw_candidates_only":true,
+        "stable_track_ids_present":false,
+        "touches_confirmed":false,
+        "studio_gpu_run_complete":false,
+        "cpu_processing_complete":false,
+    });
+    if let Some(backend) = backend {
+        manifest["decode_backend"] = json!(backend);
+        manifest["decode_pipeline"] = json!("shared_primary_v1");
+    }
+    storage::write_json_atomic(&context.folder.join(MANIFEST_FILE), &manifest)
+        .map_err(|e| format!("Write immutable model manifest: {e:?}"))?;
+    Ok(())
+}
+
 fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
     if context.cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
@@ -410,59 +481,7 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
             Ok(())
         },
     )?;
-    if context.cancelled.load(Ordering::Acquire) {
-        return Err("cancelled".into());
-    }
-    if inference_stream::source_stamp(&context.source)? != before {
-        return Err("Prepared video changed during full ONNX scan".into());
-    }
-    let (digest, count) = sink.finish()?;
-    if count != summary.windows {
-        return Err("Model output window count disagrees with decoder".into());
-    }
-    let final_file = context.folder.join(RESULT_FILE);
-    fs::rename(context.folder.join("detections.jsonl.partial"), &final_file)
-        .map_err(|e| format!("Publish raw detections: {e}"))?;
-    volley_media::preparation::verify_source_provenance(
-        &context.original,
-        &context.original_source,
-    )?;
-    let manifest = json!({
-        "schema":"volley-native-gpu-model-detections/1",
-        "original_source":context.original_source,
-        "working_stream":"original_rgb_fps30_v1",
-        "status":"model_raw_detections_complete",
-        "job_id":context.id,
-        "project_id":context.project_id,
-        "video":context.video,
-        "model":context.config.model,
-        "person_pipeline":if context.config.model == ModelKind::Players {
-            Some(match volley_inference::person::DetectorVariant::from_env()? {
-                volley_inference::person::DetectorVariant::RtmDetNano =>
-                    "rtmdet_nano_tiled_rtmpose_m_coco17_sampled_v6",
-                volley_inference::person::DetectorVariant::RfDetrMedium =>
-                    "rfdetr_medium_18250b5a_detector_boxes_pose_deferred_sampled_v3",
-            })
-        } else { None },
-        "person_sampling_period_frames":if context.config.model == ModelKind::Players {
-            context.person_stride
-        } else { 1 },
-        "provider":context.config.device,
-        "source_identity":{"bytes":before.0,"mtime_ns":before.1},
-        "fps":30,
-        "stride":context.stride,
-        "decoded_frames":summary.decoded_frames,
-        "windows":summary.windows,
-        "file":RESULT_FILE,
-        "sha256":digest,
-        "raw_candidates_only":true,
-        "stable_track_ids_present":false,
-        "touches_confirmed":false,
-        "studio_gpu_run_complete":false,
-        "cpu_processing_complete":false,
-    });
-    storage::write_json_atomic(&context.folder.join(MANIFEST_FILE), &manifest)
-        .map_err(|e| format!("Write immutable model manifest: {e:?}"))?;
+    finalize_model_output(context, before, sink, &summary, None)?;
     Ok(summary)
 }
 
