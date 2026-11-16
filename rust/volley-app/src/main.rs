@@ -29,6 +29,7 @@ mod native_rally_preview;
 mod native_reid_cache;
 mod native_report_montage;
 mod playback;
+mod playback_fragments;
 mod player_catalog;
 mod player_continuity;
 mod player_identity;
@@ -105,6 +106,7 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
         .route("/studio/hash.js", get(studio_web::hash_js))
         .route("/studio/upload.js", get(studio_web::upload_js))
         .route("/studio/playback.js", get(studio_web::playback_js))
+        .route("/studio/fragments.js", get(studio_web::fragments_js))
         .route("/studio/editor.js", get(studio_web::editor_js))
         .route("/studio/tasks.js", get(studio_web::tasks_js))
         .route("/studio/overview.js", get(studio_web::overview_js))
@@ -184,6 +186,10 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
         )
         .route("/api/video-view", get(playback::video_view))
         .route("/api/video-media", get(playback::video_media))
+        .route(
+            "/api/video-fragment",
+            get(playback_fragments::video_fragment),
+        )
         .route("/api/video-preview", get(playback::video_preview))
         .route("/api/analysis-resources", get(catalog::get_resources))
         .route("/api/analysis-profiles", get(catalog::get_profiles))
