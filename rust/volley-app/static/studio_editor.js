@@ -4,7 +4,7 @@
 (() => {
   const $=id=>document.getElementById(id);
   const wrapper=$("studio-analysis-editor");
-  const video=$("studio-analysis-player"),canvas=$("studio-analysis-court");
+  const video=$("studio-analysis-player"),still=$("studio-analysis-still"),canvas=$("studio-analysis-court");
   const stage=$("studio-analysis-stage"),frame=$("studio-analysis-frame");
   const media=stage.parentElement,context=canvas.getContext("2d");
   const begin=$("studio-analysis-trim-start"),end=$("studio-analysis-trim-end");
@@ -21,6 +21,39 @@
   let project="",source="",generation=0,corners=[],drag=-1,duration=0;
   let marking=false,zoom=0.84,settingsLoaded=false,settingsLoading=false,net=null,netDrag=-1,geometrySource="manual";
   let markingNet=false,netPoints=[];
+  // HEVC and other unsupported browser codecs still allow exact source-frame
+  // seeking, trimming and calibration, without transcoding the full match.
+  let stillMode=false,stillCursor=0,stillReady=false,stillDelay=null,stillMeta=null;
+  const cursor=()=>stillMode?stillCursor:(Number.isFinite(video.currentTime)?video.currentTime:0);
+  const renderStill=()=>{
+    if(stillDelay!==null)clearTimeout(stillDelay);
+    if(!stillMode||!valid())return;
+    const projectAtRequest=project,sourceAtRequest=source,token=generation;
+    const at=stillCursor;
+    stillDelay=setTimeout(()=>{
+      stillDelay=null;
+      if(!stillMode||token!==generation||projectAtRequest!==project||sourceAtRequest!==source)return;
+      still.src=url("/api/video-preview",{
+        video:source,mode:"source",time:at.toFixed(3),width:960
+      });
+    },120);
+  };
+  const fallbackFrames=(meta)=>{
+    if(stillMode||!valid()||!meta)return;
+    stillMode=true;stillCursor=0;stillReady=false;
+    video.pause();video.removeAttribute("src");video.load();
+    video.hidden=true;still.hidden=false;
+    playButton.disabled=true;playButton.textContent="Покадровый просмотр";
+    duration=Number(meta.duration_sec)||0;
+    const width=Number(meta.width),height=Number(meta.height);
+    if(width>0&&height>0)media.style.setProperty("--frame-ratio",String(width/height));
+    begin.max=String(duration);end.max=String(duration);
+    seek.max=String(Math.max(1,Math.round(duration*1000)));
+    if(!end.value||Number(end.value)<=0||Number(end.value)>duration)
+      end.value=duration.toFixed(2);
+    updateClock();draw();renderStill();
+    message("Формат исходника не поддерживается браузером. Доступны кадры по временной шкале, обрезка и разметка поля; непрерывное воспроизведение недоступно.");
+  };
 
   let baseRevision="",dirty=false,draftTimer=null,editEpoch=0;
   const revision=data=>data.edit_revision||JSON.stringify([data.trim_start_sec??0,data.trim_end_sec??null,data.court||[],data.net||null,data.source_revision??null]);
@@ -227,7 +260,7 @@
     if(valid())message("Есть несохранённые изменения");
   };
   canvas.addEventListener("pointerdown",event=>{
-    if(!marking||!valid()||!video.videoWidth)return;
+    if(!marking||!valid()||!(stillMode?stillReady:video.videoWidth))return;
     const at=point(event),rect=canvas.getBoundingClientRect();
     const image=frame.getBoundingClientRect();
     if(markingNet){
@@ -271,7 +304,7 @@
     try{
       const result=await api("/api/video-court/detect",{
         method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({project_id:project,video:source,start_sec:Math.max(0,video.currentTime||0)})
+        body:JSON.stringify({project_id:project,video:source,start_sec:Math.max(0,cursor())})
       });
       if(token!==generation||epoch!==editEpoch)return;
       if(!result.detected){message(result.message||"Не удалось уверенно распознать разметку. Отметьте углы вручную.",true);return;}
@@ -284,20 +317,21 @@
   zoomIn.addEventListener("click",()=>{if(marking)setZoom(zoom+zoomStep);});
 
   const updateClock=()=>{
-    const cursor=Number.isFinite(video.currentTime)?video.currentTime:0;
+    const position=cursor();
     const from=Number(begin.value),to=Number(end.value);
     const pct=value=>duration>0?clamp(value/duration*100,0,100):0;
     const left=pct(from),right=pct(to);
-    clock.textContent=time(cursor)+" / "+time(duration);
+    clock.textContent=time(position)+" / "+time(duration);
     rangeLabel.textContent=duration>0?"Отрезок: "+time(from)+" – "+time(to):"Отрезок: —";
     startMarker.style.left=left+"%";
     endMarker.style.left=right+"%";
-    playhead.style.left=pct(cursor)+"%";
+    playhead.style.left=pct(position)+"%";
     band.style.left=left+"%";
     band.style.width=Math.max(0,right-left)+"%";
-    seek.value=duration>0?String(clamp(Math.round(cursor*1000),0,Math.round(duration*1000))):"0";
+    seek.value=duration>0?String(clamp(Math.round(position*1000),0,Math.round(duration*1000))):"0";
   };
   video.addEventListener("loadedmetadata",()=>{
+    if(stillMode)return;
     duration=Number.isFinite(video.duration)?video.duration:0;
     if(video.videoWidth>0&&video.videoHeight>0)
       media.style.setProperty("--frame-ratio",String(video.videoWidth/video.videoHeight));
@@ -309,23 +343,31 @@
     message("Выберите отрезок и при необходимости разметьте 4 угла площадки.");
   });
   video.addEventListener("error",()=>{
-    if(valid())message("Формат/кодек не поддерживается браузером. Для разметки нужен воспроизводимый MP4 или WebM.",true);
+    if(!valid()||stillMode)return;
+    if(stillMeta)fallbackFrames(stillMeta);
+    else message("Видео не воспроизводится, не удалось получить данные для покадрового просмотра.",true);
   });
+  still.addEventListener("load",()=>{stillReady=true;draw();});
+  still.addEventListener("error",()=>{if(stillMode)message("Не удалось декодировать выбранный кадр. Попробуйте другую секунду.",true);});
   video.addEventListener("timeupdate",updateClock);
-  video.addEventListener("play",()=>{playButton.textContent="Пауза";});
-  video.addEventListener("pause",()=>{playButton.textContent="▶ Воспроизвести";});
+  video.addEventListener("play",()=>{if(!stillMode)playButton.textContent="Пауза";});
+  video.addEventListener("pause",()=>{if(!stillMode)playButton.textContent="▶ Воспроизвести";});
   playButton.addEventListener("click",()=>{
-    if(!valid())return;
+    if(!valid()||stillMode)return;
     if(video.paused){
       const started=video.play();
       if(started&&started.catch)started.catch(error=>message("Не удалось воспроизвести: "+error.message,true));
     }else video.pause();
   });
   seek.addEventListener("input",()=>{
-    if(duration>0)video.currentTime=clamp(Number(seek.value)/1000,0,duration);
+    if(duration>0){
+      const at=clamp(Number(seek.value)/1000,0,duration);
+      if(stillMode){stillCursor=at;renderStill();}
+      else video.currentTime=at;
+    }
     updateClock();
   });
-  const current=()=>clamp(Number.isFinite(video.currentTime)?video.currentTime:0,0,duration).toFixed(2);
+  const current=()=>clamp(cursor(),0,duration).toFixed(2);
   $("studio-analysis-set-start").addEventListener("click",()=>{
     begin.value=current();markModified();
   });
@@ -362,7 +404,7 @@
             const learned=await api("/api/training/examples",{
               method:"POST",headers:{"Content-Type":"application/json"},
               body:JSON.stringify({action:"court",project_id:project,video:source,
-                frame_index:Math.max(0,Math.floor((video.currentTime||0)*30)),corners:court,net})
+                frame_index:Math.max(0,Math.floor(cursor()*30)),corners:court,net})
             });
             if(token===generation&&learned.ok)
               message("Разметка сохранена и добавлена в обучающие примеры.");
@@ -385,6 +427,9 @@
     video.pause();
     video.removeAttribute("src");
     video.load();
+    if(stillDelay!==null){clearTimeout(stillDelay);stillDelay=null;}
+    still.removeAttribute("src");still.hidden=true;stillMode=false;stillReady=false;stillMeta=null;
+    video.hidden=false;playButton.disabled=false;playButton.textContent="▶ Воспроизвести";
     project=projectId||"";source=videoName||"";corners=[];net=null;markingNet=false;netPoints=[];
     duration=0;begin.value="0";end.value="0";seek.value="0";seek.max="1000";
     media.style.setProperty("--frame-ratio","1.77778");
@@ -407,10 +452,21 @@
       corners=Array.isArray(data.court)?data.court.filter(p=>
         Array.isArray(p)&&p.length===2&&p.every(v=>Number.isFinite(v)&&v>=-0.5&&v<=1.5)):[];
       net=Array.isArray(data.net)&&data.net.length===2?data.net:null;geometrySource=data.geometry_source||"manual";
-      video.src=url("/api/video-source",{project_id:project,video:source});
-      video.load();
+      // Metadata is cheap even for large linked files and supplies source
+      // duration/aspect ratio when HTMLVideoElement cannot decode HEVC.
+      stillMeta=await api(url("/api/video-info",{video:source})).catch(()=>null);
+      if(token!==generation)return;
+      const hevc=stillMeta&&/^(hevc|h265)$/i.test(stillMeta.codec||"");
+      const supported=typeof video.canPlayType!=="function"||
+        video.canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"')==="probably";
+      if(hevc&&!supported)fallbackFrames(stillMeta);
+      else{
+        video.src=url("/api/video-source",{project_id:project,video:source});
+        video.load();
+        message(restored?"Восстановлен несохранённый черновик. Нажмите «Сохранить» для применения.":"Разметка загружена. Видео читается по частям.");
+      }
       settingsLoaded=true;
-      updateClock();draw();message(restored?"Восстановлен несохранённый черновик. Нажмите «Сохранить» для применения.":"Разметка загружена. Видео читается по частям.");
+      updateClock();draw();
     }catch(error){
       if(token===generation)message(error.message,true);
     }finally{

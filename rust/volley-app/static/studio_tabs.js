@@ -725,7 +725,11 @@
     clear(ui.video);
     const option=make("option","","Выберите видео");option.value="";ui.video.append(option);
     for(const name of videos){
-      const item=make("option","",name);item.value=name;ui.video.append(item);
+      // Linked originals have opaque internal IDs; show the actual filename.
+      const recorded=current?.source_paths?.[name];
+      const label=name.startsWith("linked_")&&typeof recorded==="string"?
+        recorded.replace(/\\/g,"/").split("/").pop()||name:name;
+      const item=make("option","",label);item.value=name;ui.video.append(item);
     }
     const savedVideo=restoreAnalysisSettings(project);
     const selected=$("studio-inference")?.value||"";

@@ -367,6 +367,8 @@ body{min-width:0}
 .analysis-editor-stage.marking{background:radial-gradient(ellipse at center,#1a2b42 0%,#0b1522 83%);outline:1px dashed #63738a}
 .analysis-editor-frame{position:absolute;left:50%;top:50%;width:calc(100% * var(--editor-zoom,1));height:calc(100% * var(--editor-zoom,1));transform:translate(-50%,-50%);transition:width .14s ease,height .14s ease;box-shadow:0 0 0 1px rgba(255,255,255,.12)}
 .analysis-editor-frame video{display:block;width:100%;height:100%;object-fit:fill}
+.analysis-editor-frame .analysis-editor-still{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;pointer-events:none}
+.analysis-editor-frame video[hidden],.analysis-editor-frame img[hidden]{display:none}
 .analysis-editor-frame video:fullscreen{width:100vw;height:100dvh;object-fit:contain;background:#000}
 .analysis-editor-stage canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:crosshair;pointer-events:none}
 .analysis-editor-stage.marking canvas{pointer-events:auto}
