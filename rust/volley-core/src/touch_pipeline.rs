@@ -21,6 +21,7 @@ pub use pose_motion::{
 /// impact inside the bounded (at most ten-frame) missing-ball island.
 /// The touch itself must still reference a real same-frame ball and player.
 pub const MAX_OBSERVED_TOUCH_OFFSET_FRAMES: u64 = 9;
+pub const TRAJECTORY_DETECTOR_VERSION: &str = "piecewise_ballistic_motion_v1";
 
 use crate::{
     action_prediction::{self, ActionPrediction, CourtContext, PositionEvidence},
@@ -228,6 +229,56 @@ fn standing_height(
 /// emits only [emit_start,emit_end); 32+ frame overlap keeps local smoothing,
 /// physical motion and time-based dedup decisions away from block boundaries.
 /// Peaks are relative to first frame so this never allocates a full-game curve.
+pub fn evaluate_rally_blocks(
+    frames: &[TouchFrame],
+    width: u32,
+    height: u32,
+    emit_start: u64,
+    emit_end: u64,
+    settings: TouchSettings,
+    rally_starts: &[u64],
+) -> Result<Vec<PhysicalTouchCandidate>, String> {
+    settings.validate()?;
+    if rally_starts.windows(2).any(|p| p[0] >= p[1]) {
+        return Err("Rally boundaries must be ordered".into());
+    }
+    if frames.is_empty() {
+        return evaluate_block(frames, width, height, emit_start, emit_end, settings);
+    }
+    if frames.len() > 1200
+        || emit_start < frames[0].frame_index
+        || emit_start > emit_end
+        || emit_end > frames.last().unwrap().frame_index.saturating_add(1)
+        || frames
+            .iter()
+            .enumerate()
+            .any(|(i, f)| f.frame_index != frames[0].frame_index + i as u64)
+    {
+        return Err("Invalid rally touch emission window".into());
+    }
+    let mut boundaries = vec![0];
+    boundaries.extend(
+        rally_starts
+            .iter()
+            .map(|start| frames.partition_point(|f| f.frame_index < *start))
+            .filter(|&i| i > 0 && i < frames.len()),
+    );
+    boundaries.push(frames.len());
+    boundaries.dedup();
+    let mut events = Vec::new();
+    for pair in boundaries.windows(2) {
+        let segment = &frames[pair[0]..pair[1]];
+        let start = emit_start.max(segment[0].frame_index);
+        let end = emit_end.min(segment.last().unwrap().frame_index + 1);
+        if start < end {
+            events.extend(evaluate_block(
+                segment, width, height, start, end, settings,
+            )?);
+        }
+    }
+    Ok(events)
+}
+
 pub fn evaluate_block(
     frames: &[TouchFrame],
     width: u32,
