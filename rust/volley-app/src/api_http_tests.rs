@@ -12,6 +12,7 @@ struct TestServer {
     addr: SocketAddr,
     task: tokio::task::JoinHandle<()>,
     root: PathBuf,
+    state: Arc<AppState>,
 }
 
 impl TestServer {
@@ -37,10 +38,16 @@ impl TestServer {
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let serving = state.clone();
         let task = tokio::spawn(async move {
-            axum::serve(listener, app(state)).await.unwrap();
+            axum::serve(listener, app(serving)).await.unwrap();
         });
-        Self { addr, task, root }
+        Self {
+            addr,
+            task,
+            root,
+            state,
+        }
     }
 
     fn seed_project(&self, project_id: &str) {
@@ -183,6 +190,64 @@ async fn analysis_api_renames_and_deletes_linked_results() {
 }
 
 #[tokio::test]
+async fn original_video_is_ready_without_intermediate_mp4() {
+    let server = TestServer::spawn(true).await;
+    server.seed_project("123456abcdef");
+    let source = server.root.join("original/project/match.mp4");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=96x64:rate=25:duration=0.6",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
+        ])
+        .arg(&source)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let original = fs::read(&source).unwrap();
+    let (code, _) = server
+        .request(
+            "POST",
+            "/api/project-preparation/retry",
+            Some(r#"{"project_id":"123456abcdef"}"#),
+        )
+        .await;
+    assert_eq!(code, 200);
+    let (code, body) = server
+        .request(
+            "GET",
+            "/api/project-preparation?project_id=123456abcdef",
+            None,
+        )
+        .await;
+    assert_eq!(code, 200);
+    let status: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status["ready"], 1);
+    assert_eq!(status["videos"][0]["preparation"], "not_required");
+    let (code, body) = server
+        .request(
+            "GET",
+            "/api/video-media?project_id=123456abcdef&video=match.mp4",
+            None,
+        )
+        .await;
+    assert_eq!(code, 200);
+    assert_eq!(body, String::from_utf8_lossy(&original));
+    assert!(!server.root.join("sandbox/prepared").exists());
+    assert_eq!(fs::read(source).unwrap(), original);
+    server.close().await;
+}
+
+#[tokio::test]
 async fn preview_serves_compatible_original_instead_of_downscaled_analysis_copy() {
     check_preview_source(30, true).await;
 }
@@ -234,6 +299,29 @@ async fn check_preview_source(rate: u32, original: bool) {
     assert!(status.success());
     let (size, sha) = volley_media::preparation::prepared_file_sha256(&plan.output).unwrap();
     storage::write_json_atomic(&plan.manifest, &serde_json::json!({"status":"ready","identity":plan.identity,"cache_size_bytes":size,"cache_sha256":sha})).unwrap();
+    let run = "0123456789abcdef0123456789abcdef";
+    let run_root = server
+        .root
+        .join("sandbox/projects/123456abcdef/native_gpu_runs")
+        .join(run);
+    fs::create_dir_all(&run_root).unwrap();
+    let (bytes, mtime) = inference_stream::source_stamp(&plan.output).unwrap();
+    storage::write_json_atomic(
+        &run_root.join("manifest.json"),
+        &serde_json::json!({
+            "source_identity":{"bytes":bytes,"mtime_ns":mtime}
+        }),
+    )
+    .unwrap();
+    let legacy = preparation::plan_for_run(
+        &server.state,
+        "123456abcdef",
+        "match.mp4",
+        "native_gpu_runs",
+        run,
+    )
+    .unwrap();
+    assert_eq!(legacy.ready_path(), Some(plan.output.as_path()));
     let (code, body) = server
         .request(
             "GET",

@@ -22,7 +22,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, OnceLock,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -1201,94 +1201,13 @@ async fn pipeline(
     path: &Path,
     status: &mut Value,
 ) -> Result<(), String> {
-    // Preparation is part of the one-click workflow. Reuses only the canonical
-    // content-addressed prepared video, never old inference or CPU snapshots.
     log_native(
         path,
-        "Подготовка видео",
-        "preparation::plan_for",
+        "Проверка исходного видео",
+        "preparation::plan_for_analysis_async",
         json!({"project_id":request.project_id,"video":request.video}),
     )?;
-    let plan = preparation::plan_for_analysis_async(
-        app.clone(),
-        &request.project_id,
-        &request.video,
-        if request.mode == PipelineMode::Post {
-            request.source_analysis_id.as_deref()
-        } else {
-            None
-        },
-    )
-    .await
-    .map_err(reason)?;
-    progress(path, status, "Подготовка исходного видео", 0.0)?;
-    let cached = preparation::ready_path_async(&plan).await?;
-    log_event(
-        path,
-        "Подготовка видео",
-        "info",
-        if cached.is_some() {
-            "Подготовленное видео уже в кэше; FFmpeg не запускается"
-        } else {
-            "Необходима подготовка исходного видео"
-        },
-    )?;
-    if cached.is_none() {
-        log_native(
-            path,
-            "Подготовка видео",
-            "preparation::prepare_standalone",
-            json!({"project_id":request.project_id,"video":request.video,"output":plan.output.display().to_string()}),
-        )?;
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        let preparation_progress = Arc::new(Mutex::new(preparation::Progress::queued()));
-        let mut ffmpeg_logged = false;
-        let mut last_preparation_bucket = -1i32;
-        let worker =
-            preparation::prepare_standalone(app.clone(), plan, rx, preparation_progress.clone());
-        tokio::pin!(worker);
-        loop {
-            tokio::select! {
-                result = &mut worker => {
-                    let completed = preparation_progress.lock().await;
-                    if !ffmpeg_logged {
-                        if let Some(argv)=&completed.process_argv {
-                            log_entry(path,"info","invocation","Подготовка видео","Вызов Command::spawn (FFmpeg)",
-                                Some(json!({"type":"process","name":"ffmpeg","argv":argv})))?;
-                        }
-                    }
-                    drop(completed);
-                    result?;
-                    log_event(path,"Подготовка видео","success","FFmpeg завершён; кэш подготовлен")?;
-                    break;
-                }
-                _ = tokio::time::sleep(Duration::from_millis(600)) => {
-                    if cancel.load(Ordering::Acquire) {
-                        let _ = tx.send(true);
-                    }
-                    let current = preparation_progress.lock().await;
-                    if !ffmpeg_logged {
-                        if let Some(argv)=&current.process_argv {
-                            log_entry(path,"info","invocation","Подготовка видео","Вызов Command::spawn (FFmpeg)",
-                                Some(json!({"type":"process","name":"ffmpeg","argv":argv})))?;
-                            ffmpeg_logged=true;
-                        }
-                    }
-                    let bucket=(current.progress.clamp(0.0,100.0)/10.0).floor() as i32;
-                    if bucket>last_preparation_bucket {
-                        last_preparation_bucket=bucket;
-                        log_event(path,"Подготовка видео","info",&format!("FFmpeg: {} · {:.1}%",current.state,current.progress))?;
-                    }
-                    progress(path, status, "Подготовка исходного видео",
-                        (current.progress * 0.08).clamp(0.0, 8.0))?;
-                }
-            }
-        }
-    }
-    if cancel.load(Ordering::Acquire) {
-        return Err("cancelled".into());
-    }
-    progress(path, status, "Видео подготовлено", 8.0)?;
+    progress(path, status, "Проверка исходного видео", 0.0)?;
     let ready = preparation::plan_for_analysis_async(
         app.clone(),
         &request.project_id,
@@ -1303,7 +1222,21 @@ async fn pipeline(
     .map_err(reason)?;
     let prepared = preparation::ready_path_async(&ready)
         .await?
-        .ok_or("Подготовленное видео недоступно")?;
+        .ok_or("Источник видео недоступен")?;
+    if cancel.load(Ordering::Acquire) {
+        return Err("cancelled".into());
+    }
+    log_event(
+        path,
+        "Проверка исходного видео",
+        "success",
+        if request.mode == PipelineMode::Post {
+            "Источник сохранённого анализа проверен"
+        } else {
+            "Источник проверен; первичный анализ читает оригинал без промежуточного MP4"
+        },
+    )?;
+    progress(path, status, "Источник видео проверен", 8.0)?;
     let (bytes, mtime_ns) = crate::inference_stream::source_stamp(&prepared)?;
     let identity = json!({"bytes":bytes,"mtime_ns":mtime_ns});
     let original_source = volley_media::preparation::source_provenance(&ready.source)?;

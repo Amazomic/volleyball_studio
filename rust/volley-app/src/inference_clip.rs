@@ -61,9 +61,9 @@ async fn decode_nine(prepared: PathBuf, request: &ClipRequest) -> Result<Vec<u8>
     let mut ff = Command::new("ffmpeg");
     ff.arg("-hide_banner")
         .args(["-loglevel", "error", "-nostdin", "-threads", "4"])
-        .args(["-ss", &format!("{seek:.6}")])
         .arg("-i")
         .arg(&prepared)
+        .args(["-ss", &format!("{seek:.6}")])
         .args([
             "-map",
             "0:v:0",
@@ -71,7 +71,7 @@ async fn decode_nine(prepared: PathBuf, request: &ClipRequest) -> Result<Vec<u8>
             "-sn",
             "-dn",
             "-vf",
-            &format!("scale={w}:{h}:flags=bilinear,format={format}"),
+            &format!("fps=30,scale={w}:{h}:flags=bilinear,format={format}"),
             "-frames:v",
             "9",
             "-pix_fmt",

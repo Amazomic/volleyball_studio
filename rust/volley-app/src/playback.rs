@@ -167,13 +167,21 @@ pub async fn video_media(
     // prepared MP4 both block; keep them together off the tokio workers.
     let prepared = tokio::task::spawn_blocking(move || {
         let plan = preparation::plan_for(&reading, &id, &name)?;
-        Ok::<_, ApiError>(plan.ready_path().map(|path| {
-            if plan.original_preview_safe {
-                plan.source.clone()
-            } else {
-                path.to_path_buf()
+        if !plan.original_preview_safe {
+            let legacy = volley_media::preparation::PreparationPlan::new(
+                &plan.source,
+                &reading.data_root,
+                None,
+            )
+            .map_err(storage::bad_request)?;
+            let bound = legacy.clone().bind_source().map_err(storage::bad_request)?;
+            for candidate in [bound, legacy] {
+                if candidate.reused() == Some(volley_media::preparation::PreparationReuse::Cached) {
+                    return Ok::<_, ApiError>(Some(candidate.output));
+                }
             }
-        }))
+        }
+        Ok::<_, ApiError>(plan.ready_path().map(Path::to_path_buf))
     })
     .await
     .map_err(|error| storage::internal(format!("Video-media plan failed: {error}")))??

@@ -353,6 +353,11 @@ fn prepared_receipt_matches(path: &Path, size: u64, expected_sha: &str) -> bool 
 }
 
 impl PreparationPlan {
+    pub fn read_original(mut self) -> Self {
+        self.already_analysis_ready = true;
+        self
+    }
+
     pub fn bind_source(mut self) -> Result<Self, String> {
         let proof = source_provenance(&self.source)?;
         let base = cache_id(&self.identity);

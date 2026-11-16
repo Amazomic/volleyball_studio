@@ -117,14 +117,6 @@ pub(crate) fn plan_for(
     // original file identity (path, size, nanosecond mtime) remains unchanged.
     let source_proof =
         volley_media::preparation::source_provenance(&source).map_err(storage::bad_request)?;
-    let prefer_bound = |plan: PreparationPlan| -> Result<PreparationPlan, ApiError> {
-        let bound = plan.clone().bind_source().map_err(storage::bad_request)?;
-        if bound.ready_path().is_some() {
-            Ok(bound)
-        } else {
-            Ok(plan)
-        }
-    };
     let metadata = source
         .metadata()
         .map_err(|error| storage::internal(format!("Video metadata: {error}")))?;
@@ -140,17 +132,19 @@ pub(crate) fn plan_for(
                     && cached.identity.size == metadata.len()
                     && cached.identity.mtime_ns == stamp
                 {
-                    return prefer_bound(cached.clone());
+                    return Ok(cached.clone());
                 }
             }
         }
     }
-    let plan =
-        PreparationPlan::new(&source, &state.data_root, None).map_err(storage::bad_request)?;
+    let plan = PreparationPlan::new(&source, &state.data_root, None)
+        .and_then(PreparationPlan::bind_source)
+        .map(PreparationPlan::read_original)
+        .map_err(storage::bad_request)?;
     if let Ok(mut lookup) = state.preparation.plan_cache.lock() {
         lookup.insert(source, (plan.clone(), source_proof));
     }
-    prefer_bound(plan)
+    Ok(plan)
 }
 
 /// ffprobe on a plan-cache miss and the first full SHA verification are
@@ -193,7 +187,15 @@ pub(crate) fn plan_for_run(
         &manifest["original_source"],
     )
     .map_err(storage::conflict)?;
-    let mut legacy = current.clone();
+    if let Some(path) = current.ready_path() {
+        let (bytes, mtime) =
+            crate::inference_stream::source_stamp(path).map_err(storage::bad_request)?;
+        if manifest["source_identity"] == json!({"bytes":bytes,"mtime_ns":mtime}) {
+            return Ok(current);
+        }
+    }
+    let mut legacy = PreparationPlan::new(&current.source, &state.data_root, None)
+        .map_err(storage::bad_request)?;
     let parent = current
         .output
         .parent()
@@ -203,7 +205,7 @@ pub(crate) fn plan_for_run(
     legacy.manifest = parent.join(format!("{metadata_id}.json"));
     legacy.original_source = None;
     let bound = legacy.clone().bind_source().map_err(storage::bad_request)?;
-    for candidate in [current, bound, legacy] {
+    for candidate in [bound, legacy] {
         if let Some(path) = candidate.ready_path() {
             let (bytes, mtime) =
                 crate::inference_stream::source_stamp(path).map_err(storage::bad_request)?;
@@ -352,6 +354,16 @@ async fn run_one(
     mut cancel: watch::Receiver<bool>,
     progress: &Arc<Mutex<Progress>>,
 ) -> Result<(), String> {
+    if plan.already_analysis_ready {
+        if *cancel.borrow() {
+            return Err("cancelled".into());
+        }
+        if reused_async(plan).await?.is_none() {
+            return Err("Original video changed before analysis".into());
+        }
+        update(progress, "ready", 100.0, "").await;
+        return Ok(());
+    }
     let parent = plan.output.parent().ok_or("Prepared video has no parent")?;
     fs::create_dir_all(parent).map_err(|error| format!("Prepare directory: {error}"))?;
 

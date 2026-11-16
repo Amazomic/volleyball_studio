@@ -625,7 +625,7 @@ mod tests {
                 "-f",
                 "lavfi",
                 "-i",
-                "testsrc2=size=64x64:rate=30:duration=0.6",
+                "testsrc2=size=64x64:rate=25:duration=0.6",
                 "-an",
                 "-c:v",
                 "libx264",
@@ -663,6 +663,11 @@ mod tests {
         };
         let prepared = preparation::plan_for(&state, project_id, video).unwrap();
         assert!(prepared.ready_path().is_some());
+        assert_eq!(
+            prepared.ready_path(),
+            Some(original.canonicalize().unwrap().as_path())
+        );
+        assert!(!data.join("prepared").exists());
         let (size, mtime) = inference_stream::source_stamp(&original).unwrap();
         let runs = projects::project_root(&state)
             .join(project_id)
