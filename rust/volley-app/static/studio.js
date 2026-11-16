@@ -473,7 +473,7 @@
     const variant=fusion?overlay.rawDetectors.get(
       rawDetectorKey(s.project,fusion.id,s.video)):null;
     name.textContent=variant==="rfdetr-medium"?"RF-DETR Medium":
-      variant==="rtmdet-nano"?"RTMDet-Nano":
+      variant==="legacy"?"Архивный анализ":
       "\u0414\u0435\u0442\u0435\u043a\u0442\u043e\u0440 \u0438\u0433\u0440\u043e\u043a\u043e\u0432";
     input.disabled=!fusion;
   };
@@ -543,7 +543,7 @@
          !Number.isSafeInteger(value.height)||value.height<=0||
          value.project_id!==project||
          (isRaw?value.fusion_id!==run:value.rally_run_id!==run)||
-         (isRaw&&!["rfdetr-medium","rtmdet-nano","unknown"].includes(value.person_detector))||
+         (isRaw&&!["rfdetr-medium","legacy","unknown"].includes(value.person_detector))||
          (isRaw?!/^[a-f0-9]{64}$/.test(value.source_fusion_sha256):false)||
          value.video!==video||value.start_frame!==start||
          !Number.isSafeInteger(value.end_frame)||value.end_frame<=start||

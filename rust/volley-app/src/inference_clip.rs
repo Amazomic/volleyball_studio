@@ -234,8 +234,8 @@ pub async fn clip_preview(
                 }));
             }
             (
-                vec![json!({"name":"rtmdet_dets + rtmpose_simcc",
-                "description":"Person rectangles are derived from body keypoints"})],
+                vec![json!({"name":"rfdetr_pred_boxes + rtmpose_simcc",
+                "description":"RF-DETR rectangles and independently inferred body keypoints"})],
                 json!(frames),
             )
         } else {

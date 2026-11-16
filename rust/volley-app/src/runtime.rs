@@ -250,7 +250,6 @@ pub(crate) async fn rewrite_status(
         production_ready: false,
         person_detector: match volley_inference::person::DetectorVariant::from_env() {
             Ok(volley_inference::person::DetectorVariant::RfDetrMedium) => "rfdetr-medium",
-            Ok(volley_inference::person::DetectorVariant::RtmDetNano) => "rtmdet-nano",
             Err(_) => "invalid",
         },
         isolated_writes_enabled: state.writes_enabled,

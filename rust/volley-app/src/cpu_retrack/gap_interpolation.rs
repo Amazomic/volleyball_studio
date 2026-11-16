@@ -109,7 +109,7 @@ mod tests {
     }
     #[test]
     fn mm_25m54s_partial_body_ghost_is_blocked_by_real_full_body_track() {
-        // Real RTMDet/RTMPose measurements from the saved GPU fusion.
+        // Real detector/pose measurements from the saved GPU fusion.
         // ID 238: partial-body crops at frames 46590 and 46630.
         // ID 241: full-body crops at 46600, 46610, 46620.
         // The 0.155 -> 0.32 height ratio formerly blocked bridging.

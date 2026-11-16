@@ -20,7 +20,7 @@ use std::{
 };
 
 const BALL_FILE: &str = "VballNetV4c_seq9_grayscale_20260908_213829.onnx";
-const PLAYER_FILE: &str = person::DETECTOR_FILE;
+const PLAYER_FILE: &str = person::RFDETR_MEDIUM_FILE;
 const MAX_MODEL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_OUTPUT_VALUES: usize = 25_000_000;
 
@@ -41,7 +41,7 @@ impl ModelKind {
     pub fn expected_input(self) -> &'static [i64] {
         match self {
             Self::Ball => &[1, 9, 288, 512],
-            Self::Players => &[1, 3, 320, 320],
+            Self::Players => &[1, 3, 576, 576],
         }
     }
     pub fn input_name(self) -> &'static str {
@@ -53,7 +53,7 @@ impl ModelKind {
     pub fn required_outputs(self) -> &'static [&'static str] {
         match self {
             Self::Ball => &["heatmaps"],
-            Self::Players => &["dets", "labels"],
+            Self::Players => &["pred_boxes", "pred_logits"],
         }
     }
 }
@@ -185,8 +185,8 @@ fn spec_for(repo: &Path, kind: ModelKind) -> Result<(ModelSpec, PathBuf), String
         }
     } else {
         let version = sidecar["release_id"].as_str();
-        if version != Some("RTMDet-Nano-Person") || sidecar["sha256"] != person::DETECTOR_SHA256 {
-            return Err("Incompatible RTMDet person model sidecar".into());
+        if version != Some("rf-detr-medium") || sidecar["sha256"] != person::RFDETR_MEDIUM_SHA256 {
+            return Err("Incompatible RF-DETR person model sidecar".into());
         }
     }
     let spec=ModelSpec{
@@ -195,7 +195,7 @@ fn spec_for(repo: &Path, kind: ModelKind) -> Result<(ModelSpec, PathBuf), String
         outputs,
         output_expected:match kind{
             ModelKind::Ball=>"[1,18,288,512] f32 heatmap[9] + radius[9]".into(),
-            ModelKind::Players=>"RTMDet [1,N,5] dets + [1,N] labels; RTMPose COCO17 skeletons".into(),
+            ModelKind::Players=>"RF-DETR [1,300,4] boxes + [1,300,91] logits; RTMPose COCO17 skeletons".into(),
         },
         runtime_required:"ONNX Runtime shared library (ORT_DYLIB_PATH), CUDAExecutionProvider for cuda; no Python fallback".into(),
     };
@@ -265,7 +265,7 @@ impl Engine {
     pub fn load(repo: &Path, config: &Config) -> Result<Self, String> {
         config.verify()?;
         if config.model == ModelKind::Players {
-            return Err("Person detection requires PersonEngine (RTMDet + RTMPose), not a single-model clip".into());
+            return Err("Person detection requires PersonEngine (RF-DETR + RTMPose), not a single-model clip".into());
         }
         let (model, path) = spec_for(repo, config.model)?;
         // load-dynamic is configured at compile time; process startup must
@@ -384,7 +384,7 @@ mod tests {
     }
     #[test]
     fn default_shapes() {
-        assert_eq!(ModelKind::Players.expected_input(), &[1, 3, 320, 320]);
+        assert_eq!(ModelKind::Players.expected_input(), &[1, 3, 576, 576]);
         assert_eq!(ModelKind::Ball.expected_input(), &[1, 9, 288, 512]);
     }
     #[test]
@@ -427,7 +427,7 @@ mod tests {
             "cpu" => Device::Cpu,
             other => panic!("Unexpected VOLLEY_TEST_ORT_DEVICE: {other}"),
         };
-        for kind in [ModelKind::Ball, ModelKind::Players] {
+        for kind in [ModelKind::Ball] {
             let config = Config {
                 model: kind,
                 device,

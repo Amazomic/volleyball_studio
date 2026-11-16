@@ -81,7 +81,7 @@ pub async fn preflight(
                 if model == ModelKind::Players {
                     match PersonEngine::load(&path, choice.device, choice.cpu_threads, choice.gpu_memory_limit_mb) {
                         Ok(_) => sessions.push(json!({"model":"person_pose","session_opened":true,
-                            "input":"RTMDet + RTMPose", "note":"Two ONNX sessions; no inference performed"})),
+                            "input":"RF-DETR Medium + RTMPose", "note":"Two ONNX sessions; no inference performed"})),
                         Err(e) => sessions.push(json!({"model":"person_pose","session_opened":false,"error":e})),
                     }
                     continue;

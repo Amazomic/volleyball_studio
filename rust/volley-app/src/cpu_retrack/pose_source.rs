@@ -109,7 +109,7 @@ impl PoseRows {
         self.recent_pose_crops
             .retain(|(_, observed)| frame.saturating_sub(*observed) <= 12);
         let Some(sample) = sample else {
-            // RTMDet samples can fall between adjacent RTMPose samples. A
+            // Detector samples can fall between adjacent RTMPose samples. A
             // second detector crop of the *same* skeleton must not mint a new
             // provisional ID just because its bounding box is taller.
             let raw = detector
