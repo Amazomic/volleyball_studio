@@ -115,6 +115,71 @@ pub(super) fn append_poses(frames: &mut [Value]) {
     }
 }
 
+/// Two independent interpolations can fill the same missing body in the same
+/// frame when measured Track IDs alternated. Never collapse real detections:
+/// the saved replay and athlete assignments remain authoritative.
+fn same_synthetic_body(a: &Value, b: &Value) -> bool {
+    let (Some(a), Some(b)) = (super::box_norm(a), super::box_norm(b)) else {
+        return false;
+    };
+    let area = |r: [f64; 4]| (r[2] - r[0]) * (r[3] - r[1]);
+    let intersection =
+        (a[2].min(b[2]) - a[0].max(b[0])).max(0.0) * (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+    let a_area = area(a);
+    let b_area = area(b);
+    let iou = intersection / (a_area + b_area - intersection).max(1e-9);
+    let contained = intersection / a_area.min(b_area).max(1e-9);
+    let centers_close = ((a[0] + a[2]) - (b[0] + b[2])).abs() < 0.030
+        && ((a[1] + a[3]) - (b[1] + b[3])).abs() < 0.060;
+    iou >= 0.55 && contained >= 0.80 && centers_close
+}
+
+/// Keep the locally best supported interpolated track, not whichever athlete
+/// happens to sort first. This operates on preview-only rows; measured source
+/// rows are never changed and IDs with distinct physical boxes stay separate.
+fn remove_synthetic_duplicates(rows: &mut [Value], support: &BTreeMap<(usize, u64), usize>) {
+    for (frame, row) in rows.iter_mut().enumerate() {
+        let Some(players) = row["players"].as_array_mut() else {
+            continue;
+        };
+        if players.len() < 2 || !players.iter().any(|p| p["interpolated"] == true) {
+            continue;
+        }
+        let priority = |p: &Value| {
+            let id = p["id"].as_u64().unwrap_or(0);
+            let gap = p["interpolation_frames"][1]
+                .as_u64()
+                .unwrap_or(u64::MAX)
+                .saturating_sub(p["interpolation_frames"][0].as_u64().unwrap_or(0));
+            (
+                p["interpolated"] != true,
+                support.get(&(frame, id)).copied().unwrap_or(0),
+                std::cmp::Reverse(gap),
+                std::cmp::Reverse(id),
+            )
+        };
+        let mut ranked = (0..players.len()).collect::<Vec<_>>();
+        ranked.sort_by(|&a, &b| priority(&players[b]).cmp(&priority(&players[a])));
+        let mut retained: Vec<usize> = Vec::new();
+        for index in ranked {
+            let candidate = &players[index];
+            if candidate["interpolated"] == true
+                && retained
+                    .iter()
+                    .any(|&kept| same_synthetic_body(&candidate["box"], &players[kept]["box"]))
+            {
+                continue;
+            }
+            retained.push(index);
+        }
+        retained.sort_unstable();
+        *players = retained
+            .into_iter()
+            .map(|index| players[index].clone())
+            .collect();
+    }
+}
+
 pub(super) fn fill(
     frames: &mut [Value],
     intervals: &[(u64, u64)],
@@ -167,6 +232,7 @@ pub(super) fn fill(
                 }
             }
         }
+        let mut support = BTreeMap::<(usize, u64), usize>::new();
         for (k, anchors) in boxes {
             for pair in anchors.windows(2) {
                 let ((a, left), (b, right)) = (&pair[0], &pair[1]);
@@ -199,6 +265,13 @@ pub(super) fn fill(
                     }) {
                         continue;
                     }
+                    let count_before =
+                        anchors.partition_point(|(at, _)| *at < i.saturating_sub(15));
+                    let count_after =
+                        anchors.partition_point(|(at, _)| *at <= i.saturating_add(15));
+                    if let Some(id) = left["id"].as_u64() {
+                        support.insert((i, id), count_after - count_before);
+                    }
                     players.push(json!({"id":left["id"],"box":bb,"interpolated":true,
                         "interpolation_source":"cpu_rally_linear_v1",
                         "interpolation_endpoints":[left["id"],right["id"]],
@@ -206,6 +279,7 @@ pub(super) fn fill(
                 }
             }
         }
+        remove_synthetic_duplicates(rows, &support);
         for (k, anchors) in poses {
             for pair in anchors.windows(2) {
                 let ((a, left), (b, right)) = (&pair[0], &pair[1]);
@@ -384,6 +458,61 @@ mod tests {
         assert!(linked
             .iter()
             .all(|row| row["players"].as_array().unwrap().len() == 1));
+    }
+
+    #[test]
+    fn alternating_vlad_irek_31_7_does_not_draw_two_synthetic_players() {
+        // Production CPU replay in project "uu": Track 6 belongs to Irek,
+        // Track 10 to Vlad. The measured IDs alternate at 31.5-32.0s,
+        // although their boxes describe one moving body. Do not globally
+        // merge the IDs: both have independent observations elsewhere.
+        let mut rows = (940..=965_u64)
+            .map(|frame| json!({"frame":frame,"in_rally":true,"players":[],"ball":null}))
+            .collect::<Vec<_>>();
+        let put = |rows: &mut Vec<Value>, frame: u64, id, bbox: [f64; 4]| {
+            rows[(frame - 940) as usize]["players"] =
+                json!([{"id":id,"box":bbox,"interpolated":false}]);
+        };
+        put(&mut rows, 940, 6, [0.4350, 0.3799, 0.4514, 0.5234]);
+        put(&mut rows, 945, 6, [0.4277, 0.4062, 0.4454, 0.5179]);
+        put(&mut rows, 950, 10, [0.4242, 0.4196, 0.4465, 0.4954]);
+        put(&mut rows, 955, 6, [0.4152, 0.4195, 0.4495, 0.5197]);
+        put(&mut rows, 960, 10, [0.4162, 0.4249, 0.4385, 0.5216]);
+        put(&mut rows, 965, 6, [0.4126, 0.4271, 0.4351, 0.5217]);
+        let linked = BTreeMap::from([(6, "irek".to_string()), (10, "vlad".to_string())]);
+        fill(&mut rows, &[(940, 965)], &linked);
+        for at in 951..955 {
+            let players = rows[(at - 940) as usize]["players"].as_array().unwrap();
+            assert_eq!(players.len(), 1, "duplicate synthetic player at frame {at}");
+            assert_eq!(players[0]["id"], 6, "use the locally supported body");
+            assert_eq!(players[0]["interpolated"], true);
+        }
+        // The true, immutable detections and linked Track IDs are intact.
+        assert_eq!(rows[10]["players"][0]["id"], 10);
+        assert_eq!(rows[10]["players"][0]["interpolated"], false);
+        assert_eq!(rows[15]["players"][0]["id"], 6);
+        assert_eq!(rows[15]["players"][0]["interpolated"], false);
+    }
+
+    #[test]
+    fn independent_neighboring_players_and_real_overlaps_are_preserved() {
+        let mut rows = frames(3);
+        rows[0]["players"] = json!([
+            {"id":6,"box":[0.20,0.4,0.28,0.8],"interpolated":false},
+            {"id":10,"box":[0.27,0.4,0.35,0.8],"interpolated":false}
+        ]);
+        rows[2]["players"] = rows[0]["players"].clone();
+        fill(&mut rows, &[(0, 2)], &BTreeMap::new());
+        assert_eq!(rows[1]["players"].as_array().unwrap().len(), 2);
+        // Even identical measured boxes remain untouched: they must be
+        // resolved by tracking/review, never silently removed from preview.
+        let mut measured = frames(1);
+        measured[0]["players"] = json!([
+            {"id":6,"box":[0.2,0.4,0.3,0.8],"interpolated":false},
+            {"id":10,"box":[0.2,0.4,0.3,0.8],"interpolated":false}
+        ]);
+        fill(&mut measured, &[(0, 0)], &BTreeMap::new());
+        assert_eq!(measured[0]["players"].as_array().unwrap().len(), 2);
     }
 
     #[test]
