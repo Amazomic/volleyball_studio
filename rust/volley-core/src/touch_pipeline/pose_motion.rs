@@ -313,7 +313,7 @@ pub fn pose_contact_from_nearby_sample(
         ) else {
             continue;
         };
-        let rank = contact.normalized_distance
+        let rank = contact.priority_distance()
             + 0.002 * sample.frame_index.abs_diff(current.frame_index) as f64
             + if pose.interpolated { 0.03 } else { 0.0 };
         if best.as_ref().is_none_or(|old| rank < old.0) {
@@ -631,10 +631,9 @@ pub fn evaluate_pose_block(
             ) else {
                 continue;
             };
-            if best
-                .as_ref()
-                .is_none_or(|candidate| distance.normalized_distance < candidate.0)
-            {
+            if best.as_ref().is_none_or(|candidate| {
+                distance.priority_distance() < candidate.3.priority_distance()
+            }) {
                 best = Some((
                     distance.normalized_distance,
                     player.track_id,
@@ -717,10 +716,9 @@ pub fn evaluate_pose_block(
             ) else {
                 continue;
             };
-            if best
-                .as_ref()
-                .is_none_or(|candidate| distance.normalized_distance < candidate.0)
-            {
+            if best.as_ref().is_none_or(|candidate| {
+                distance.priority_distance() < candidate.3.priority_distance()
+            }) {
                 best = Some((
                     distance.normalized_distance,
                     player.track_id,
@@ -1087,6 +1085,57 @@ mod tests {
             })
             .collect();
         (frames, poses)
+    }
+
+    #[test]
+    fn simultaneous_other_players_foot_does_not_steal_hand_touch() {
+        let (mut frames, mut poses) = sparse_rebound(true);
+        for frame in &mut frames {
+            let mut other = frame.players[0].clone();
+            other.track_id = 17;
+            frame.players.insert(0, other);
+        }
+        for sample in &mut poses {
+            let mut hand = sample.players[0].clone();
+            hand.keypoints[9][0] = match sample.frame_index {
+                28 => 0.35,
+                32 => 0.476,
+                _ => 0.60,
+            };
+            let mut foot = hand.clone();
+            foot.track_id = 17;
+            foot.keypoints = [[0.0; 3]; 17];
+            foot.keypoints[15] = [
+                match sample.frame_index {
+                    28 => 0.30,
+                    32 => 0.466,
+                    _ => 0.60,
+                },
+                0.365,
+                0.97,
+            ];
+            sample.players = vec![foot, hand];
+        }
+        let settings = TouchSettings::default();
+        let hand = pose_contact_at_frame(&frames, &poses, &frames[32], 42, 640, 360, settings)
+            .expect("measured hand")
+            .1;
+        let foot = pose_contact_at_frame(&frames, &poses, &frames[32], 17, 640, 360, settings)
+            .expect("measured foot")
+            .1;
+        assert!(hand.distance_px > foot.distance_px);
+        assert!(hand.priority_distance() < foot.priority_distance());
+        let events = evaluate_pose_block(&frames, &poses, 640, 360, 29, 36, settings)
+            .expect("pose evaluation");
+        assert!(
+            events
+                .iter()
+                .any(|event| event.provisional_track_id == Some(42)
+                    && event
+                        .contact_landmark
+                        .is_some_and(|point| point.is_arm_contact())),
+            "the hand track must win: {events:?}"
+        );
     }
 
     #[test]

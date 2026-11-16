@@ -296,6 +296,45 @@ mod source_track_integrity_tests {
     use super::*;
 
     #[test]
+    fn near_hand_overrides_other_players_foot_in_pending_selection() {
+        let contact =
+            |joint, distance, normalized_distance| volley_core::pose_contact::BodyContact {
+                joint_indices: [joint, joint],
+                point_px: [320.0 + distance, 144.0],
+                distance_px: distance,
+                normalized_distance,
+            };
+        let event = |id, probability, landmark| PhysicalTouchCandidate {
+            frame_index: 1086,
+            provisional_track_id: Some(id),
+            probability,
+            ball_x_px: 320.0,
+            ball_y_px: 144.0,
+            motion_frame_index: 1086,
+            direction_change_deg: 90.0,
+            speed_before_px_frame: 10.0,
+            speed_after_px_frame: 13.0,
+            velocity_residual_px_frame: 25.0,
+            technique: "unknown_touch",
+            action_prediction: None,
+            court: None,
+            physical_motion_supported: true,
+            body_contact_supported: true,
+            contact_landmark: Some(landmark),
+            contact_pose_sample_frame: None,
+            ball_occluded_at_contact: false,
+            inferred_body_reach_supported: false,
+            athlete_identity_verified: false,
+        };
+        let foot = event(17, 0.90, contact(15, 1.0, 0.0));
+        let hand = event(42, 0.65, contact(9, 9.0, 0.02));
+        let mut pending = None;
+        assert!(select_pending_touch(&mut pending, foot, 3).is_none());
+        assert!(select_pending_touch(&mut pending, hand, 3).is_none());
+        assert_eq!(pending.unwrap().provisional_track_id, Some(42));
+    }
+
+    #[test]
     fn unverified_touch_uses_nearest_observed_player_not_original_guess() {
         let source = vec![TouchFrame {
             frame_index: 32,
@@ -401,9 +440,20 @@ fn select_pending_touch(
             return None;
         }
         if event.frame_index.saturating_sub(last.frame_index) <= separation {
-            if (event.body_contact_supported, event.probability)
-                > (last.body_contact_supported, last.probability)
-            {
+            let better = match (event.contact_landmark, last.contact_landmark) {
+                (Some(next), Some(previous))
+                    if event.body_contact_supported && last.body_contact_supported =>
+                {
+                    next.priority_distance() < previous.priority_distance()
+                        || (next.priority_distance() == previous.priority_distance()
+                            && event.probability > last.probability)
+                }
+                _ => {
+                    (event.body_contact_supported, event.probability)
+                        > (last.body_contact_supported, last.probability)
+                }
+            };
+            if better {
                 *pending = Some(event);
             }
             return None;
@@ -491,44 +541,56 @@ fn refine_pose_events_policy(
         if (event.ball_x_px - center[0]).hypot(event.ball_y_px - center[1]) > radius.max(2.0) {
             continue;
         }
-        let contact = pose_contact_at_frame(
-            frames,
-            &poses,
-            frame,
-            track_id,
-            video_width,
-            video_height,
-            settings,
-        )
-        .map(|(evidence, point)| (evidence, point, None))
-        .or_else(|| {
-            if settings.require_pose
-                || event.ball_occluded_at_contact
-                || event.direction_change_deg < 75.0
-                || event.velocity_residual_px_frame < 18.0
-                || event.motion_frame_index.abs_diff(event.frame_index) > 3
-            {
-                return None;
-            }
-            pose_contact_from_nearby_sample(
-                frames,
-                &poses,
-                frame,
-                track_id,
-                video_width,
-                video_height,
-                settings,
-            )
-            .map(|(evidence, point, sample_frame)| (evidence, point, Some(sample_frame)))
-        });
-        let Some((evidence, point, sample_frame)) = contact else {
+        let contact = frame
+            .players
+            .iter()
+            .filter_map(|player| {
+                let id = player.track_id;
+                pose_contact_at_frame(
+                    frames,
+                    &poses,
+                    frame,
+                    id,
+                    video_width,
+                    video_height,
+                    settings,
+                )
+                .map(|(evidence, point)| (id, evidence, point, None))
+                .or_else(|| {
+                    if settings.require_pose
+                        || event.ball_occluded_at_contact
+                        || event.direction_change_deg < 75.0
+                        || event.velocity_residual_px_frame < 18.0
+                        || event.motion_frame_index.abs_diff(event.frame_index) > 3
+                    {
+                        return None;
+                    }
+                    pose_contact_from_nearby_sample(
+                        frames,
+                        &poses,
+                        frame,
+                        id,
+                        video_width,
+                        video_height,
+                        settings,
+                    )
+                    .map(|(evidence, point, sample_frame)| {
+                        (id, evidence, point, Some(sample_frame))
+                    })
+                })
+            })
+            .min_by(|a, b| a.2.priority_distance().total_cmp(&b.2.priority_distance()));
+        let Some((selected_track, evidence, point, sample_frame)) = contact else {
             continue;
         };
         supported[index] = true;
+        event.provisional_track_id = Some(selected_track);
         event.body_contact_supported = true;
         event.contact_landmark = Some(point);
         event.contact_pose_sample_frame = sample_frame;
-        if let Some(geometry) = event.action_prediction.as_ref() {
+        if selected_track != track_id {
+            event.action_prediction = None;
+        } else if let Some(geometry) = event.action_prediction.as_ref() {
             if let Some(refined) = pose_classification::refine(&evidence, geometry) {
                 event.action_prediction = Some(refined);
             }
@@ -792,6 +854,18 @@ fn detect_stream_with_pose(
                     events.sort_by(|a, b| {
                         b.body_contact_supported
                             .cmp(&a.body_contact_supported)
+                            .then_with(|| {
+                                a.contact_landmark
+                                    .as_ref()
+                                    .map(|point| point.priority_distance())
+                                    .unwrap_or(f64::INFINITY)
+                                    .total_cmp(
+                                        &b.contact_landmark
+                                            .as_ref()
+                                            .map(|point| point.priority_distance())
+                                            .unwrap_or(f64::INFINITY),
+                                    )
+                            })
                             .then_with(|| {
                                 b.velocity_residual_px_frame
                                     .total_cmp(&a.velocity_residual_px_frame)
@@ -1124,7 +1198,7 @@ pub(crate) fn process_with_ball_scope(
             "court_context_enabled":court_calibration.is_some(),
             "motion_supported_proposals_before_dedup":raw,
             "touch_candidates":events,
-            "method":if settings.algorithm == TouchAlgorithm::PoseMotion { "vballnet_trajectory_body_contact_v9" } else { "vballnet_gravity_player_geometry_pose_contact_v9" },
+            "method":if settings.algorithm == TouchAlgorithm::PoseMotion { "vballnet_trajectory_body_contact_v10" } else { "vballnet_gravity_player_geometry_pose_contact_v10" },
             "pose_classification_requested":pose_requested,
             "human_training_example_count":training_examples.len(),
             "human_training_touch_sha256":training_sha,

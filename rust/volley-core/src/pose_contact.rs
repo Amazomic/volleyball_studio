@@ -12,6 +12,17 @@ pub struct BodyContact {
     pub normalized_distance: f64,
 }
 impl BodyContact {
+    pub fn is_arm_contact(&self) -> bool {
+        self.joint_indices
+            .iter()
+            .all(|index| (5..=10).contains(index))
+            && self.joint_indices != [5, 6]
+    }
+
+    pub fn priority_distance(&self) -> f64 {
+        self.normalized_distance - if self.is_arm_contact() { 0.06 } else { 0.0 }
+    }
+
     pub fn valid(&self, width: u32, height: u32) -> bool {
         self.joint_indices.iter().all(|i| *i < 17)
             && self.point_px[0].is_finite()
@@ -168,13 +179,14 @@ pub fn trajectory_body_contact(evidence: &ContactTrajectory) -> Option<BodyConta
         {
             let normalized =
                 (contact - evidence.ball_radius_px).max(0.0) / evidence.player_height_px;
-            if closest.is_none_or(|old| normalized < old.normalized_distance) {
-                closest = Some(BodyContact {
-                    joint_indices: indices,
-                    point_px: point,
-                    distance_px: contact,
-                    normalized_distance: normalized,
-                });
+            let candidate = BodyContact {
+                joint_indices: indices,
+                point_px: point,
+                distance_px: contact,
+                normalized_distance: normalized,
+            };
+            if closest.is_none_or(|old| candidate.priority_distance() < old.priority_distance()) {
+                closest = Some(candidate);
             }
         }
     };
@@ -270,13 +282,14 @@ pub fn sampled_body_contact(
             return;
         }
         let normalized_distance = (distance_px - ball_radius_px).max(0.0) / player_height_px;
-        if best.is_none_or(|b| normalized_distance < b.normalized_distance) {
-            best = Some(BodyContact {
-                joint_indices: indices,
-                point_px: point,
-                distance_px,
-                normalized_distance,
-            });
+        let candidate = BodyContact {
+            joint_indices: indices,
+            point_px: point,
+            distance_px,
+            normalized_distance,
+        };
+        if best.is_none_or(|b| candidate.priority_distance() < b.priority_distance()) {
+            best = Some(candidate);
         }
     };
     for joint in 0..17 {
@@ -341,6 +354,39 @@ mod tests {
             max_distance_ratio: 0.30,
         }
     }
+    #[test]
+    fn near_hand_takes_precedence_over_a_closer_foot() {
+        let mut e = evidence();
+        for sample in [&mut e.before, &mut e.impact, &mut e.after] {
+            sample.keypoints[15] = [0.5, 0.4, 0.95];
+            sample.keypoints[9] = [0.515, 0.4, 0.95];
+        }
+        let contact = trajectory_body_contact(&e).unwrap();
+        assert_eq!(contact.joint_indices, [9, 9]);
+        let sampled = sampled_body_contact(
+            e.impact.keypoints,
+            e.impact.ball_px,
+            640.0,
+            360.0,
+            150.0,
+            6.0,
+            0.35,
+            0.30,
+        )
+        .unwrap();
+        assert_eq!(sampled.joint_indices, [9, 9]);
+    }
+
+    #[test]
+    fn distant_arm_does_not_override_a_real_foot_contact() {
+        let mut e = evidence();
+        for sample in [&mut e.before, &mut e.impact, &mut e.after] {
+            sample.keypoints[15] = [0.5, 0.4, 0.95];
+            sample.keypoints[9] = [0.56, 0.4, 0.95];
+        }
+        assert_eq!(trajectory_body_contact(&e).unwrap().joint_indices, [15, 15]);
+    }
+
     #[test]
     fn rebound_off_still_hand_is_contact() {
         assert_eq!(trajectory_body_intersection(&evidence()), Some(0.0));
