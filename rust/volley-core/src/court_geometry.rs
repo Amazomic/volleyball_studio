@@ -74,7 +74,90 @@ pub fn observed_net_contact(net: Option<[[f64; 2]; 2]>, [x, y]: [f64; 2]) -> boo
     })
 }
 
+/// Perspective-correct division into the two 9 x 9 m court halves and
+/// the *visible* net surface. No collision is implied by image overlap.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CourtZones {
+    pub near_half: [[f64; 2]; 4],
+    pub far_half: [[f64; 2]; 4],
+    pub ground_divider: [[f64; 2]; 2],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub net_surface: Option<[[f64; 2]; 4]>,
+}
+
 impl CourtTransform {
+    /// Inverse homography: map a point on the physical floor to image space.
+    /// The 2D camera projection is not an estimate of airborne ball height.
+    pub fn floor_to_image(&self, [x, y]: [f64; 2]) -> Option<[f64; 2]> {
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        let m = &self.matrix;
+        let adj = [
+            m[4] * m[8] - m[5] * m[7],
+            m[2] * m[7] - m[1] * m[8],
+            m[1] * m[5] - m[2] * m[4],
+            m[5] * m[6] - m[3] * m[8],
+            m[0] * m[8] - m[2] * m[6],
+            m[2] * m[3] - m[0] * m[5],
+            m[3] * m[7] - m[4] * m[6],
+            m[1] * m[6] - m[0] * m[7],
+            m[0] * m[4] - m[1] * m[3],
+        ];
+        let z = adj[6] * x + adj[7] * y + adj[8];
+        if !z.is_finite() || z.abs() < 1e-10 {
+            return None;
+        }
+        let point = [
+            (adj[0] * x + adj[1] * y + adj[2]) / z,
+            (adj[3] * x + adj[4] * y + adj[5]) / z,
+        ];
+        point.iter().all(|n| n.is_finite()).then_some(point)
+    }
+
+    pub fn zones(&self) -> Option<CourtZones> {
+        let left = self.floor_to_image([0.0, -COURT_WIDTH_M / 2.0])?;
+        let right = self.floor_to_image([0.0, COURT_WIDTH_M / 2.0])?;
+        let c0 = self.floor_to_image([-COURT_LENGTH_M / 2.0, -COURT_WIDTH_M / 2.0])?;
+        let c1 = self.floor_to_image([COURT_LENGTH_M / 2.0, -COURT_WIDTH_M / 2.0])?;
+        let c2 = self.floor_to_image([COURT_LENGTH_M / 2.0, COURT_WIDTH_M / 2.0])?;
+        let c3 = self.floor_to_image([-COURT_LENGTH_M / 2.0, COURT_WIDTH_M / 2.0])?;
+        let net_surface = self.net.map(|[a, b]| {
+            let (a, b) = if (a[0] - left[0]).hypot(a[1] - left[1])
+                + (b[0] - right[0]).hypot(b[1] - right[1])
+                <= (b[0] - left[0]).hypot(b[1] - left[1]) + (a[0] - right[0]).hypot(a[1] - right[1])
+            {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            [a, b, right, left]
+        });
+        Some(CourtZones {
+            near_half: [c0, left, right, c3],
+            far_half: [left, c1, c2, right],
+            ground_divider: [left, right],
+            net_surface,
+        })
+    }
+
+    /// A ball can be classified only after independent motion evidence of
+    /// a *floor* bounce. A flying ball must not be projected onto the floor.
+    pub fn tentative_landing(&self, floor_point: [f64; 2]) -> Option<&'static str> {
+        let [x, y] = self.to_court(floor_point)?;
+        const UNCERTAINTY_M: f64 = 0.15;
+        let dx = x.abs() - COURT_LENGTH_M / 2.0;
+        let dy = y.abs() - COURT_WIDTH_M / 2.0;
+        Some(if dx > UNCERTAINTY_M || dy > UNCERTAINTY_M {
+            "out"
+        } else if dx >= -UNCERTAINTY_M || dy >= -UNCERTAINTY_M {
+            "line_uncertain"
+        } else if x < 0.0 {
+            "near_half"
+        } else {
+            "far_half"
+        })
+    }
     pub fn with_net(mut self, net: Option<[[f64; 2]; 2]>) -> Result<Self, String> {
         if !valid_net(net) {
             return Err("Invalid observed net line".into());
@@ -227,6 +310,34 @@ mod tests {
     use super::*;
 
     const QUAD: [[f64; 2]; 4] = [[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]];
+
+    #[test]
+    fn zones_use_projective_court_midline_and_landing_margin() {
+        // Trapezoid: arithmetic image midpoints would be wrong in perspective.
+        let corners = [[0.15, 0.86], [0.37, 0.16], [0.70, 0.16], [0.94, 0.86]];
+        let court = CourtTransform::new(corners)
+            .unwrap()
+            .with_net(Some([[0.37, 0.33], [0.71, 0.33]]))
+            .unwrap();
+        let zones = court.zones().unwrap();
+        for point in zones.ground_divider {
+            let metres = court.to_court(point).unwrap();
+            assert!(metres[0].abs() < 1e-7);
+        }
+        assert!(zones.net_surface.is_some());
+        let inside = court.floor_to_image([-3.0, 0.0]).unwrap();
+        let outside = court.floor_to_image([12.0, 0.0]).unwrap();
+        let line = court.floor_to_image([9.0, 0.0]).unwrap();
+        assert_eq!(court.tentative_landing(inside), Some("near_half"));
+        assert_eq!(court.tentative_landing(outside), Some("out"));
+        assert_eq!(court.tentative_landing(line), Some("line_uncertain"));
+        assert!(CourtTransform::new(corners)
+            .unwrap()
+            .zones()
+            .unwrap()
+            .net_surface
+            .is_none());
+    }
 
     #[test]
     fn python_court_transform_matches_corners_and_net() {

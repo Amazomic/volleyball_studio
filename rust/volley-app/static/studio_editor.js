@@ -111,6 +111,45 @@
     for(const node of wrapper.querySelectorAll("button,input"))node.disabled=!valid();
     updateZoomControls();
   };
+  // Three perspective-aware zones are derived from the four saved court corners
+  // and the observed net top. Nothing extra or synthetic is persisted.
+  const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+  const line=(a,b)=>cross([...a,1],[...b,1]);
+  const intersect=(a,b)=>{
+    const v=cross(a,b);
+    return Number.isFinite(v[2])&&Math.abs(v[2])>1e-8?[v[0]/v[2],v[1]/v[2]]:null;
+  };
+  const zonesForMarkup=()=>{
+    if(corners.length!==4)return null;
+    const [a,b,c,d]=corners;
+    const center=intersect(line(a,c),line(b,d));
+    if(!center)return null;
+    const transverseVanishing=intersect(line(a,d),line(b,c));
+    const divider=transverseVanishing
+      ?line(center,transverseVanishing)
+      :line(center,[center[0]+d[0]-a[0],center[1]+d[1]-a[1]]);
+    const left=intersect(divider,line(a,b));
+    const right=intersect(divider,line(d,c));
+    if(!left||!right)return null;
+    // The near and far halves are 9 x 9 m, not arbitrary pixel halves.
+    const near=[a,left,right,d],far=[left,b,c,right];
+    let surface=null;
+    if(net){
+      const [u,v]=net;
+      const dist=(p,q)=>Math.hypot(p[0]-q[0],p[1]-q[1]);
+      const [topLeft,topRight]=dist(u,left)+dist(v,right)<=dist(v,left)+dist(u,right)?[u,v]:[v,u];
+      surface=[topLeft,topRight,right,left];
+    }
+    return {near,far,divider:[left,right],surface};
+  };
+  const legend=document.createElement("div");
+  legend.className="analysis-editor-zone-legend";
+  legend.setAttribute("aria-label","Зоны разметки площадки");
+  legend.style.cssText="display:flex;flex-wrap:wrap;gap:8px 14px;margin:8px 0;font-size:12px";
+  for(const [name,color] of [["Ближняя половина","#34d399"],["Дальняя половина","#60a5fa"],["Сетка","#35e0ef"]]){
+    const item=document.createElement("span");item.textContent="● "+name;item.style.color=color;legend.appendChild(item);
+  }
+  media.insertBefore(legend,stage.nextSibling);
   const pointXY=([x,y],stageRect,frameRect)=>[
     frameRect.left-stageRect.left+x*frameRect.width,
     frameRect.top-stageRect.top+y*frameRect.height
@@ -123,15 +162,36 @@
     canvas.height=Math.round(rect.height*dpr);
     context.setTransform(dpr,0,0,dpr,0,0);
     context.clearRect(0,0,rect.width,rect.height);
+    legend.children[2].style.opacity=net?"1":".42";
+    legend.children[2].textContent=net?"● Сетка":"○ Сетка: не размечена";
     if((!corners.length&&!net)||!image.width||!image.height)return;
     const points=corners.map(p=>pointXY(p,rect,image));
-    context.beginPath();
-    points.forEach(([x,y],i)=>i?context.lineTo(x,y):context.moveTo(x,y));
-    if(points.length===4)context.closePath();
-    context.fillStyle="rgba(255,198,48,.13)";
-    if(points.length===4)context.fill();
-    context.strokeStyle="#ffd166";context.lineWidth=2.5;
-    context.stroke();
+    const zones=zonesForMarkup();
+    const fillZone=(polygon,color,label)=>{
+      const px=polygon.map(p=>pointXY(p,rect,image));
+      context.beginPath();px.forEach(([x,y],i)=>i?context.lineTo(x,y):context.moveTo(x,y));
+      context.closePath();context.fillStyle=color;context.fill();
+      const x=px.reduce((sum,p)=>sum+p[0],0)/px.length;
+      const y=px.reduce((sum,p)=>sum+p[1],0)/px.length;
+      context.font="600 12px sans-serif";context.textAlign="center";context.textBaseline="middle";
+      const w=context.measureText(label).width+14;
+      context.fillStyle="rgba(12,24,38,.82)";context.fillRect(x-w/2,y-12,w,24);
+      context.fillStyle="#fff";context.fillText(label,x,y);
+    };
+    if(zones){
+      fillZone(zones.near,"rgba(16,185,129,.16)","Ближняя половина");
+      fillZone(zones.far,"rgba(59,130,246,.17)","Дальняя половина");
+      if(zones.surface)fillZone(zones.surface,"rgba(45,212,191,.28)","Сетка");
+      const [a,b]=zones.divider.map(p=>pointXY(p,rect,image));
+      context.beginPath();context.moveTo(...a);context.lineTo(...b);
+      context.strokeStyle="#d6f1fa";context.lineWidth=1.8;context.setLineDash([6,5]);
+      context.stroke();context.setLineDash([]);
+    }
+    if(points.length){
+      context.beginPath();points.forEach(([x,y],i)=>i?context.lineTo(x,y):context.moveTo(x,y));
+      if(points.length===4)context.closePath();
+      context.strokeStyle="#ffd166";context.lineWidth=2.5;context.stroke();
+    }
     if(net){
       const endpoints=net.map(p=>pointXY(p,rect,image));
       context.beginPath();
@@ -216,7 +276,7 @@
       if(token!==generation||epoch!==editEpoch)return;
       if(!result.detected){message(result.message||"Не удалось уверенно распознать разметку. Отметьте углы вручную.",true);return;}
       corners=result.court;net=result.net||null;geometrySource="automatic";setMarking(true);markModified();draw();
-      message((result.inferred?"Часть границ достроена по размерам площадки и перспективе — проверьте положение каждой точки. ":result.temporal_composite?"Разметка восстановлена из нескольких кадров — проверьте её. ":result.weak_consensus?"Предварительная разметка (мало совпавших кадров). ":"Найдена разметка. ")+"Подтверждений: "+result.supporting_frames+"/"+result.sampled_frames+". Проверьте углы и сетку, при необходимости перетащите точки, затем сохраните.");
+      message((result.inferred?"Часть границ достроена по размерам площадки и перспективе — проверьте положение каждой точки. ":result.temporal_composite?"Разметка восстановлена из нескольких кадров — проверьте её. ":result.weak_consensus?"Предварительная разметка (мало совпавших кадров). ":"Найдена разметка. ")+"Подтверждений: "+result.supporting_frames+"/"+result.sampled_frames+". "+(net?"Три зоны выделены: две половины и сетка. ":"Две половины выделены; сетка не распознана, разметьте её вручную. ")+"Проверьте геометрию и сохраните.");
     }catch(error){if(token===generation)message(error.message,true);}
     finally{button.disabled=!valid();}
   });  modeButton.addEventListener("click",()=>setMarking(!marking));

@@ -63,6 +63,82 @@ pub struct BallFrame {
     pub y_px: f64,
     pub score: f64,
 }
+/// Provisional physical ball/surface event. These are NOT athlete touches or
+/// referee-confirmed in/out calls; the image-space net is not a 3D plane.
+#[derive(Clone, Debug, Serialize)]
+pub struct SurfaceEventProposal {
+    pub frame_index: u64,
+    pub surface: &'static str,
+    pub outcome: &'static str,
+    pub evidence: &'static str,
+    pub provisional: bool,
+}
+
+/// Screen-space overlap alone cannot imply a net touch. Require a
+/// continuous high-confidence trajectory with an abrupt direction change.
+pub fn net_deflection_candidate(
+    points: &[BallFrame; 9],
+    net_surface: &[[f64; 2]; 4],
+    width: f64,
+    height: f64,
+    nearby_player_or_touch: bool,
+) -> bool {
+    if nearby_player_or_touch
+        || width <= 0.0
+        || height <= 0.0
+        || points.iter().any(|p| {
+            !p.x_px.is_finite() || !p.y_px.is_finite() || !p.score.is_finite() || p.score < 0.35
+        })
+    {
+        return false;
+    }
+    let (x, y) = (points[4].x_px / width, points[4].y_px / height);
+    // Point in the quadrilateral between the observed net tape and its
+    // projected ground divider. Reject zero-area/incomplete markup.
+    let twice_area: f64 = (0..4)
+        .map(|i| {
+            let a = net_surface[i];
+            let b = net_surface[(i + 1) % 4];
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum();
+    if twice_area.abs() < 0.0002 {
+        return false;
+    }
+    let mut inside = false;
+    for i in 0..4 {
+        let a = net_surface[i];
+        let b = net_surface[(i + 1) % 4];
+        if (a[1] > y) != (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0] {
+            inside = !inside;
+        }
+    }
+    if !inside {
+        return false;
+    }
+    // Guard against a teleport masquerading as a sudden impact.
+    if points.windows(2).any(|pair| {
+        (pair[0].x_px - pair[1].x_px).hypot(pair[0].y_px - pair[1].y_px) > width.max(height) * 0.12
+    }) {
+        return false;
+    }
+    let before = [
+        (points[4].x_px - points[1].x_px) / 3.0,
+        (points[4].y_px - points[1].y_px) / 3.0,
+    ];
+    let after = [
+        (points[7].x_px - points[4].x_px) / 3.0,
+        (points[7].y_px - points[4].y_px) / 3.0,
+    ];
+    let vb = before[0].hypot(before[1]);
+    let va = after[0].hypot(after[1]);
+    if vb < 1.5 || va < 0.6 {
+        return false;
+    }
+    let cosine = ((before[0] * after[0] + before[1] * after[1]) / (vb * va)).clamp(-1.0, 1.0);
+    cosine < (35.0_f64).to_radians().cos()
+}
+
 pub fn ground_bounce_candidate(points: &[BallFrame; 9], near_player: bool, on_court: bool) -> bool {
     if near_player
         || !on_court
@@ -814,5 +890,28 @@ mod tests {
                 }]
             )
             .is_err());
+    }
+
+    #[test]
+    fn net_deflection_requires_surface_motion_and_real_samples() {
+        let net = [[0.35, 0.3], [0.65, 0.3], [0.65, 0.7], [0.35, 0.7]];
+        let xs = [
+            200.0, 250.0, 300.0, 350.0, 400.0, 365.0, 330.0, 295.0, 260.0,
+        ];
+        let ball = std::array::from_fn(|i| BallFrame {
+            x_px: xs[i],
+            y_px: 240.0,
+            score: 0.9,
+        });
+        assert!(net_deflection_candidate(&ball, &net, 800.0, 500.0, false));
+        assert!(!net_deflection_candidate(&ball, &net, 800.0, 500.0, true));
+        let normal = std::array::from_fn(|i| BallFrame {
+            x_px: 200.0 + 25.0 * i as f64,
+            y_px: 240.0,
+            score: 0.9,
+        });
+        assert!(!net_deflection_candidate(
+            &normal, &net, 800.0, 500.0, false
+        ));
     }
 }

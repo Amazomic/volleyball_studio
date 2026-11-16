@@ -9,6 +9,17 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{process::Stdio, sync::Arc, time::Duration};
 use volley_core::court_detection::{combine_frames, combine_frames_advisory, detect_frame};
+use volley_core::court_geometry::CourtTransform;
+
+// The detector provides the two physically different halves and observed
+// net area from one source of truth. No artificial net is fabricated.
+fn zone_response(corners: [[f64; 2]; 4], net: Option<[[f64; 2]; 2]>) -> Value {
+    CourtTransform::new(corners)
+        .and_then(|t| t.with_net(net))
+        .ok()
+        .and_then(|t| t.zones())
+        .map_or(Value::Null, |zones| json!(zones))
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,6 +132,11 @@ pub(crate) async fn detect(
                     .total_cmp(&b["confidence"].as_f64().unwrap_or(0.0))
             })
         {
+            if let Ok(corners) = serde_json::from_value::<[[f64; 2]; 4]>(learned["court"].clone()) {
+                let net = serde_json::from_value::<Option<[[f64; 2]; 2]>>(learned["net"].clone())
+                    .unwrap_or(None);
+                learned["zones"] = zone_response(corners, net);
+            }
             learned["sampled_frames"] = json!(total);
             learned["supporting_frames"] = json!(0);
             learned["review_required"] = json!(true);
@@ -143,10 +159,11 @@ pub(crate) async fn detect(
     });
     Ok(Json(match result {
         Some(c) => json!({"detected":true,"court":c.court,"net":c.net,
+            "zones":zone_response(c.court, c.net),
             "confidence":c.confidence,"sampled_frames":total,
             "supporting_frames":detected.len(),"weak_consensus":weak || c.inferred,
             "inferred":c.inferred,"temporal_composite":temporal_composite}),
-        None => json!({"detected":false,"court":[],"net":null,
+        None => json!({"detected":false,"court":[],"net":null,"zones":null,
             "sampled_frames":total,"supporting_frames":detected.len(),
             "message":"Не удалось уверенно выделить границы площадки на этих кадрах. Выберите более четкий момент видео или отметьте углы вручную"}),
     }))
@@ -155,6 +172,17 @@ pub(crate) async fn detect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zones_are_derived_without_fabricating_unobserved_net() {
+        let corners = [[0.1, 0.8], [0.35, 0.2], [0.7, 0.2], [0.95, 0.8]];
+        let without = zone_response(corners, None);
+        assert!(without["near_half"].is_array());
+        assert!(without["far_half"].is_array());
+        assert!(without.get("net_surface").is_none());
+        let with = zone_response(corners, Some([[0.2, 0.4], [0.8, 0.4]]));
+        assert!(with["net_surface"].is_array());
+    }
 
     #[test]
     fn median_preserves_static_floor_and_removes_moving_occlusions() {

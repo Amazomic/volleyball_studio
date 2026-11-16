@@ -114,6 +114,23 @@ pub(crate) fn finalize_touch(
     })
 }
 
+#[cfg(test)]
+#[test]
+fn physical_surface_events_are_never_validated_as_athlete_touches() {
+    let floor: NativeSurfaceEvent = serde_json::from_value(json!({
+        "frame_index":20,"surface":"floor","outcome":"out",
+        "evidence":"nine_observed_ball_frames_vertical_reversal","provisional":true
+    }))
+    .unwrap();
+    assert!(floor.valid(10, 30));
+    assert!(!floor.valid(21, 30));
+    let mut not_provisional = floor.clone();
+    not_provisional.provisional = false;
+    assert!(!not_provisional.valid(10, 30));
+    let mut fake = floor;
+    fake.surface = "player".into();
+    assert!(!fake.valid(10, 30));
+}
 fn default_gold_filter() -> String {
     "all".into()
 }
@@ -135,6 +152,39 @@ struct CourtTimelineEvent {
     estimated_kind: Option<ActionKind>,
     ignored_serve_toss: bool,
 }
+// Physical contacts with a marked surface are provisional and never have
+// an athlete Track ID. Keep them isolated from the player Touch stream.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeSurfaceEvent {
+    frame_index: u64,
+    surface: String,
+    outcome: String,
+    evidence: String,
+    provisional: bool,
+}
+impl NativeSurfaceEvent {
+    fn valid(&self, start: u64, end: u64) -> bool {
+        self.provisional
+            && (start..=end).contains(&self.frame_index)
+            && matches!(
+                (
+                    self.surface.as_str(),
+                    self.outcome.as_str(),
+                    self.evidence.as_str()
+                ),
+                (
+                    "floor",
+                    "near_half" | "far_half" | "out" | "line_uncertain",
+                    "nine_observed_ball_frames_vertical_reversal"
+                ) | (
+                    "net",
+                    "possible_deflection",
+                    "trajectory_deflection_inside_projected_net"
+                )
+            )
+    }
+}
 #[derive(Debug, Deserialize)]
 struct NativeRally {
     candidate_id: String,
@@ -152,6 +202,8 @@ struct NativeRally {
     serve_verified: bool,
     #[serde(default)]
     court_contact_context: Option<CourtTimelineContext>,
+    #[serde(default)]
+    surface_event_candidates: Vec<NativeSurfaceEvent>,
     reviewed: bool,
 }
 
@@ -549,6 +601,7 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
         ),
     };
     let mut timeline_rallies = Vec::<Value>::new();
+    let mut surface_timeline = Vec::<Value>::new();
     let mut timeline_contexts = HashMap::<u64, (Option<u64>, bool, Option<ActionKind>)>::new();
     let mut reader = BoundedReader::open(&run.rally_file)?;
     let mut records = Vec::<Value>::with_capacity(limit);
@@ -592,6 +645,15 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
             || item.first_touch_frame < start
             || item.last_touch_frame > end
             || item.first_touch_frame > item.last_touch_frame
+            || item.surface_event_candidates.len() > 256
+            || item
+                .surface_event_candidates
+                .iter()
+                .any(|event| !event.valid(start, end))
+            || item
+                .surface_event_candidates
+                .windows(2)
+                .any(|pair| pair[0].frame_index >= pair[1].frame_index)
             || all_ids
                 .insert(item.candidate_id.clone(), intervals.len())
                 .is_some()
@@ -601,6 +663,18 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
         let index = intervals.len();
         intervals.push(Interval { start, end });
         if timeline {
+            for event in &item.surface_event_candidates {
+                if surface_timeline.len() >= 30_000 {
+                    return Err("Too many provisional surface events in timeline".into());
+                }
+                surface_timeline.push(json!({
+                    "frame_index":event.frame_index,
+                    "surface":event.surface,
+                    "outcome":event.outcome,
+                    "evidence":event.evidence,
+                    "provisional":true,
+                }));
+            }
             if let Some(ref context) = item.court_contact_context {
                 for touch in &context.events {
                     if !(start..=end).contains(&touch.frame_index)
@@ -806,6 +880,7 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
                 "raw_touch_candidates": raw_touch_count,
                 "estimated_actions": estimated_actions,
                 "touch_annotations": touch_annotations,
+                "surface_contact_candidates": surface_timeline,
                 "contextual_contacts":timeline_contexts,
                 "authoritative_game_events": false,
                 "source_rallies_sha256": run.rally_sha,

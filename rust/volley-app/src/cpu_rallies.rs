@@ -29,8 +29,8 @@ use volley_core::{
     fusion::Candidate,
     rally_contact_context::{BallSample as CourtBallSample, ContactEvidence},
     rally_reconstruction::{
-        ground_bounce_candidate, BallFrame, ContactFrame, RallyProposal, RallySegmenter,
-        RallySettings, RallyTotals,
+        ground_bounce_candidate, net_deflection_candidate, BallFrame, ContactFrame, RallyProposal,
+        RallySegmenter, RallySettings, RallyTotals, SurfaceEventProposal,
     },
 };
 
@@ -201,12 +201,22 @@ fn write_proposal(
     out_hash: &mut Sha256,
     proposal: RallyProposal,
     history: &CourtHistory,
+    surface_events: &std::collections::VecDeque<SurfaceEventProposal>,
     replay_id: &str,
     touch_id: &str,
     counters: &mut OutputCounters,
 ) -> Result<(), String> {
     let mut value =
         serde_json::to_value(&proposal).map_err(|e| format!("Serialize rally candidate: {e}"))?;
+    // Physical surface candidates have no athlete Track ID and must remain
+    // separate from the player Touch statistics/review contract.
+    value["surface_event_candidates"] = json!(surface_events
+        .iter()
+        .filter(
+            |event| (proposal.detected_start_frame..=proposal.detected_end_frame)
+                .contains(&event.frame_index)
+        )
+        .collect::<Vec<_>>());
     if let Some(context) = history.for_rally(&proposal) {
         value["estimated_gameplay_contacts"] =
             json!(context.events.len() as u64 - context.ignored_serve_toss_count as u64);
@@ -296,6 +306,8 @@ fn rebuild_from_snapshots(
     let mut next = next_contact(&mut touches)?;
     let mut previous_contact: Option<u64> = None;
     let mut ground_window = std::collections::VecDeque::new();
+    let mut surface_events = std::collections::VecDeque::<SurfaceEventProposal>::new();
+    let net_surface = court.and_then(|c| c.zones()).and_then(|z| z.net_surface);
     for frame_index in 0..frames {
         let bytes = inputs.line()?.ok_or("Tracked frame JSONL is truncated")?;
         let frame: ReplayFrame = serde_json::from_slice(&bytes)
@@ -444,23 +456,22 @@ fn rebuild_from_snapshots(
                 &mut digest,
                 proposal,
                 &history,
+                &surface_events,
                 replay_id,
                 touch_id,
                 &mut totals,
             )?;
         }
-        let on_court = reliable_ball.is_some_and(|b| {
-            court.is_some_and(|c| {
-                c.evidence_for_feet([b.x_px / width as f64, b.y_px / height as f64])
-                    .is_some()
-            })
-        });
+        // A bounce outside the sidelines is still a candidate for ending a rally.
+        // The observed ball centre is projected onto the floor ONLY after
+        // the independent nine-frame reversal test succeeds.
+        let has_calibrated_court = court.is_some() && reliable_ball.is_some();
         ground_window.push_back((
             frame_index,
             reliable_ball,
             near_player,
             !events.is_empty(),
-            on_court,
+            has_calibrated_court,
         ));
         if ground_window.len() == 9 {
             let center = &ground_window[4];
@@ -469,29 +480,70 @@ fn rebuild_from_snapshots(
             if let Some(samples) = samples {
                 let points: [BallFrame; 9] =
                     samples.try_into().map_err(|_| "Invalid ground window")?;
+                let near_contact = ground_window.iter().any(|entry| entry.3);
+                let near_player = ground_window.iter().skip(3).take(3).any(|entry| entry.2);
                 let scale = 1280.0 / width.max(height) as f64;
-                let points = points.map(|point| BallFrame {
+                let scaled = points.map(|point| BallFrame {
                     x_px: point.x_px * scale,
                     y_px: point.y_px * scale,
                     score: point.score,
                 });
-                let near_contact = ground_window.iter().any(|entry| entry.3);
-                let near_player = ground_window.iter().skip(3).take(3).any(|entry| entry.2);
-                if ground_bounce_candidate(&points, near_player || near_contact, center.4) {
+                let is_floor =
+                    ground_bounce_candidate(&scaled, near_player || near_contact, center.4);
+                if is_floor {
+                    if let Some(outcome) = court.and_then(|c| {
+                        c.tentative_landing([
+                            points[4].x_px / width as f64,
+                            points[4].y_px / height as f64,
+                        ])
+                    }) {
+                        surface_events.push_back(SurfaceEventProposal {
+                            frame_index: center.0,
+                            surface: "floor",
+                            outcome,
+                            evidence: "nine_observed_ball_frames_vertical_reversal",
+                            provisional: true,
+                        });
+                    }
                     if let Some(proposal) = segmenter.finish_at_possible_ground_bounce(center.0) {
                         write_proposal(
                             &mut writer,
                             &mut digest,
                             proposal,
                             &history,
+                            &surface_events,
                             replay_id,
                             touch_id,
                             &mut totals,
                         )?;
                     }
+                } else if let Some(surface) = net_surface.as_ref() {
+                    if net_deflection_candidate(
+                        &points,
+                        surface,
+                        width as f64,
+                        height as f64,
+                        near_player || near_contact,
+                    ) && !surface_events.back().is_some_and(|event| {
+                        event.surface == "net" && center.0.saturating_sub(event.frame_index) < 10
+                    }) {
+                        surface_events.push_back(SurfaceEventProposal {
+                            frame_index: center.0,
+                            surface: "net",
+                            outcome: "possible_deflection",
+                            evidence: "trajectory_deflection_inside_projected_net",
+                            provisional: true,
+                        });
+                    }
                 }
             }
             ground_window.pop_front();
+        }
+        while surface_events
+            .front()
+            .is_some_and(|event| frame_index.saturating_sub(event.frame_index) > 1000)
+        {
+            surface_events.pop_front();
         }
         history.trim(frame_index);
     }
@@ -510,6 +562,7 @@ fn rebuild_from_snapshots(
             &mut digest,
             proposal,
             &history,
+            &surface_events,
             replay_id,
             touch_id,
             &mut totals,
@@ -756,7 +809,7 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
             "court_revision":contacts["court_revision"],
             "court_context_enabled":contacts["court_context_enabled"],
             "court_contact_context_version":"python_serve_toss_possession_v2",
-            "ground_boundary_version":"trajectory_court_player_v2",
+            "ground_boundary_version":"trajectory_court_surface_v3",
             "touch_candidates_ingested":output.ingested_touch_candidates,
             "physical_touch_player_gate":"same_frame_verified_cpu_track",
             "physical_touch_ball_gate":"same_frame_selected_ball",
