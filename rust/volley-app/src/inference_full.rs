@@ -291,6 +291,57 @@ fn window_error(model: ModelKind, first_frame: u64, failure: &str) -> String {
     )
 }
 
+// Shared inference kernels for both standalone diagnostics and the primary
+// co-scheduled decode path. RawDetector detections remain real observations:
+// never write interpolated boxes or synthetic pose data here.
+fn detect_player_window(
+    engine: &mut PersonEngine,
+    data: &[u8],
+    first_frame: u64,
+    stride: u64,
+    cancelled: &AtomicBool,
+) -> Result<Vec<RawDetection>, String> {
+    let mut detections = Vec::new();
+    engine.detect_frames_sampled(data, first_frame, stride, |offset, poses| {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        for (index, pose) in poses.into_iter().enumerate() {
+            detections.push(RawDetection {
+                frame_index: first_frame + offset as u64,
+                class_name: "player",
+                score: pose.score,
+                bbox_xyxy_norm: pose.bbox.map(|value| value as f32),
+                query_index: Some(index),
+                touch_probability: None,
+                head_point_norm: pose.head.map(|p| p.map(|value| value as f32)),
+            });
+        }
+        Ok(())
+    })?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("cancelled".into());
+    }
+    Ok(detections)
+}
+
+fn detect_ball_window(
+    engine: &mut Engine,
+    data: &[u8],
+    first_frame: u64,
+    cancelled: &AtomicBool,
+) -> Result<Vec<RawDetection>, String> {
+    let (w, h, channels, _) = ModelPixels::BallGray.dimensions();
+    let input = normalized_model_window(data, w, h, channels)?;
+    let tensors = engine
+        .infer_clip(input)
+        .map_err(|error| window_error(ModelKind::Ball, first_frame, &error))?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("cancelled".into());
+    }
+    decode_vball(&tensors, first_frame, 0.05)
+}
+
 fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
     if context.cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
@@ -320,7 +371,6 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
         ModelKind::Ball => ModelPixels::BallGray,
         ModelKind::Players => ModelPixels::PlayersRgb,
     };
-    let (w, h, channels, _) = pixels.dimensions();
     let mut sink = EvidenceWriter::create(&context.folder)?;
     let estimated_frames = (context.duration_sec * 30.0).max(9.0);
     let summary = decode_full_video(
@@ -333,41 +383,18 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
                 return Err("cancelled".into());
             }
             let records = if let Some(engine) = person_engine.as_mut() {
-                let mut detections = Vec::new();
-                // Sample real detector observations every configured N video
-                // frames (30 FPS source). Intermediate frames have no ONNX boxes.
-                engine.detect_frames_sampled(
+                detect_player_window(
+                    engine,
                     &window.data,
                     window.first_frame,
                     context.person_stride as u64,
-                    |offset, poses| {
-                        if context.cancelled.load(Ordering::Acquire) {
-                            return Err("cancelled".into());
-                        }
-                        for (index, pose) in poses.into_iter().enumerate() {
-                            detections.push(RawDetection {
-                                frame_index: window.first_frame + offset as u64,
-                                class_name: "player",
-                                score: pose.score,
-                                bbox_xyxy_norm: pose.bbox.map(|v| v as f32),
-                                query_index: Some(index),
-                                touch_probability: None,
-                                head_point_norm: pose.head.map(|p| p.map(|v| v as f32)),
-                            });
-                        }
-                        Ok(())
-                    },
-                )?;
-                detections
+                    &context.cancelled,
+                )?
             } else {
-                let input = normalized_model_window(&window.data, w, h, channels)?;
                 let engine = ball_engine
                     .as_mut()
                     .ok_or("Missing VBallNet inference session")?;
-                let tensors = engine.infer_clip(input).map_err(|error| {
-                    window_error(context.config.model, window.first_frame, &error)
-                })?;
-                decode_vball(&tensors, window.first_frame, 0.05)?
+                detect_ball_window(engine, &window.data, window.first_frame, &context.cancelled)?
             };
             sink.push(window.first_frame, &records)?;
             let windows = sink.count;

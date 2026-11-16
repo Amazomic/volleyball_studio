@@ -12,6 +12,7 @@ use std::{
 };
 use uuid::Uuid;
 use volley_inference::{
+    decode::RawDetection,
     pose::{PoseEngine, MODEL_FILE, MODEL_SHA256},
     Device,
 };
@@ -99,6 +100,27 @@ fn boxes(frame: &Value) -> Vec<[f64; 4]> {
         }
     }
     unique
+}
+
+/// Canonical pose proposals directly from observed detector evidence before
+/// fusion is written. This intentionally serializes the same RawDetection
+/// payload that the existing fusion reader validates, so score rounding,
+/// geometry, count and NMS guards all stay in this single owner.
+#[expect(
+    dead_code,
+    reason = "Consumed when the joint GPU inference worker is connected"
+)]
+pub(crate) fn boxes_from_raw_detections(
+    detections: &[RawDetection],
+    frame_index: u64,
+) -> Result<Vec<[f64; 4]>, String> {
+    let at_frame: Vec<_> = detections
+        .iter()
+        .filter(|record| record.frame_index == frame_index)
+        .collect();
+    let candidates = serde_json::to_value(at_frame)
+        .map_err(|error| format!("Serialize observed pose boxes: {error}"))?;
+    Ok(boxes(&json!({"player_candidates": candidates})))
 }
 
 /// Legacy sampling mode for stored GPU profiles; new primary analysis always
@@ -365,6 +387,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn raw_detector_pose_boxes_exactly_match_serialized_fusion_guards() {
+        let sample = |frame_index, score, bbox| RawDetection {
+            frame_index,
+            class_name: "player",
+            score,
+            bbox_xyxy_norm: bbox,
+            query_index: Some(0),
+            touch_probability: None,
+            head_point_norm: None,
+        };
+        let detections = vec![
+            sample(20, 0.9, [0.1, 0.1, 0.3, 0.8]),
+            sample(20, 0.8, [0.1, 0.1, 0.3, 0.8]),
+            sample(20, 0.35, [0.5, 0.1, 0.7, 0.8]),
+            sample(20, 0.9, [0.5, 0.5, 0.5001, 0.7]),
+            sample(30, 0.9, [0.75, 0.1, 0.9, 0.8]),
+        ];
+        let filtered: Vec<_> = detections.iter().filter(|r| r.frame_index == 20).collect();
+        let fused = json!({"player_candidates":filtered});
+        assert_eq!(
+            boxes_from_raw_detections(&detections, 20).unwrap(),
+            boxes(&fused)
+        );
+        assert_eq!(boxes_from_raw_detections(&detections, 30).unwrap().len(), 1);
+        assert!(boxes_from_raw_detections(&detections, 40)
+            .unwrap()
+            .is_empty());
+    }
     #[test]
     fn pose_boxes_are_aligned_to_detector_and_never_synthesized() {
         let row = json!({"frame_index":20,"player_candidates":[
