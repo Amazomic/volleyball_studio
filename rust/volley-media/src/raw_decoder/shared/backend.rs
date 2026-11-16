@@ -39,6 +39,8 @@ pub enum DecodePreference {
 pub struct DecodeSelection {
     pub backend: DecodeBackend,
     pub fallback_reason: Option<String>,
+    #[serde(skip)]
+    pub(super) rotation_filter: &'static str,
 }
 
 fn bounded_output(
@@ -97,7 +99,7 @@ fn bounded_output(
     ))
 }
 
-fn inspect_video(source: &Path, cancelled: &AtomicBool) -> Result<(), String> {
+fn inspect_video(source: &Path, cancelled: &AtomicBool) -> Result<&'static str, String> {
     let mut probe = Command::new("ffprobe");
     probe.args([
         "-v", "error",
@@ -131,31 +133,45 @@ fn inspect_video(source: &Path, cancelled: &AtomicBool) -> Result<(), String> {
     if matches!(transfer, "smpte2084" | "arib-std-b67") {
         return Err("NVDEC HDR transfer is not yet certified for parity".into());
     }
-    let rotate_tag = stream["tags"]["rotate"].as_str().unwrap_or("0");
-    if rotate_tag.parse::<i32>().unwrap_or(1) != 0 {
-        return Err("NVDEC rotated sources are not yet certified for parity".into());
+    rotation_filter(stream)
+}
+
+fn rotation_filter(stream: &Value) -> Result<&'static str, String> {
+    let rotation = stream["side_data_list"]
+        .as_array()
+        .and_then(|sides| sides.iter().find_map(|side| side.get("rotation")))
+        .cloned()
+        .or_else(|| stream["tags"].get("rotate").cloned());
+    let rotation = match rotation {
+        None => 0.0,
+        Some(Value::String(value)) => value
+            .parse::<f64>()
+            .map_err(|_| "Invalid video rotation metadata")?,
+        Some(value) => value.as_f64().ok_or("Invalid video rotation metadata")?,
+    };
+    match rotation.rem_euclid(360.0) {
+        0.0 => Ok(""),
+        90.0 => Ok("transpose=cclock,"),
+        180.0 => Ok("hflip,vflip,"),
+        270.0 => Ok("transpose=clock,"),
+        _ => Err("NVDEC non-orthogonal rotation is not certified for parity".into()),
     }
-    if stream["side_data_list"].as_array().is_some_and(|sides| {
-        sides.iter().any(|side| {
-            side["rotation"]
-                .as_i64()
-                .is_none_or(|rotation| rotation != 0)
-        })
-    }) {
-        return Err("NVDEC display-matrix rotation is not yet certified for parity".into());
-    }
-    Ok(())
 }
 
 /// Preflight requests CUDA output explicitly, so FFmpeg cannot silently use a
 /// software decoder and make the backend label untrustworthy.
-fn preflight_nvdec(source: &Path, cancelled: &AtomicBool) -> Result<(), String> {
+fn preflight_nvdec(
+    source: &Path,
+    rotation_filter: &str,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
     let mut command = Command::new("ffmpeg");
     command.args([
         "-hide_banner",
         "-loglevel",
         "error",
         "-nostdin",
+        "-noautorotate",
         "-hwaccel",
         "cuda",
         "-hwaccel_output_format",
@@ -169,7 +185,7 @@ fn preflight_nvdec(source: &Path, cancelled: &AtomicBool) -> Result<(), String> 
         "-sn",
         "-dn",
         "-vf",
-        "hwdownload,format=nv12",
+        &format!("hwdownload,format=nv12,{rotation_filter}null"),
         "-frames:v",
         "2",
         "-f",
@@ -201,17 +217,23 @@ pub fn select_decode_backend(
         return Ok(DecodeSelection {
             backend: DecodeBackend::Software,
             fallback_reason: None,
+            rotation_filter: "",
         });
     }
-    match inspect_video(source, cancelled).and_then(|_| preflight_nvdec(source, cancelled)) {
-        Ok(()) => Ok(DecodeSelection {
+    match inspect_video(source, cancelled).and_then(|rotation| {
+        preflight_nvdec(source, rotation, cancelled)?;
+        Ok(rotation)
+    }) {
+        Ok(rotation_filter) => Ok(DecodeSelection {
             backend: DecodeBackend::Nvdec,
             fallback_reason: None,
+            rotation_filter,
         }),
         Err(error) if error == "cancelled" => Err(error),
         Err(error) if preference == DecodePreference::Auto => Ok(DecodeSelection {
             backend: DecodeBackend::Software,
             fallback_reason: Some(error),
+            rotation_filter: "",
         }),
         Err(error) => Err(error),
     }

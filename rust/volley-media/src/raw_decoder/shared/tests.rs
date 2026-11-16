@@ -112,6 +112,7 @@ fn final_partial_rgb_frames_are_supplied_only_as_pose_lookahead() {
         &source,
         9,
         DecodePreference::Software,
+        0,
         &cancelled,
         |batch| {
             assert_eq!(batch.first_frame, windows.get() as u64 * 9);
@@ -403,55 +404,114 @@ fn hevc_8bit_cuda_parity_and_hevc_10bit_conservative_fallback() {
 }
 
 #[test]
-fn rotated_h264_auto_backend_avoids_unverified_cuda_transforms() {
-    if Command::new("ffmpeg").arg("-version").output().is_err()
-        || Command::new("ffprobe").arg("-version").output().is_err()
-    {
-        return;
-    }
+#[ignore = "requires NVIDIA GPU and H264/HEVC encoders"]
+fn rotated_nvdec_matches_software_pixels() {
     let temp = SocketDir::new().unwrap();
-    let original = temp.0.join("original.mp4");
-    let rotated = temp.0.join("rotated.mp4");
-    assert!(Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=320x180:rate=30:duration=0.5",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            "yuv420p",
-            "-y",
-        ])
-        .arg(&original)
-        .status()
-        .unwrap()
-        .success());
-    assert!(Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-display_rotation:v:0",
-            "90",
-            "-i"
-        ])
-        .arg(&original)
-        .args(["-c", "copy", "-y"])
-        .arg(&rotated)
-        .status()
-        .unwrap()
-        .success());
     let cancelled = AtomicBool::new(false);
-    let selected = select_decode_backend(&rotated, DecodePreference::Auto, &cancelled).unwrap();
-    assert_eq!(selected.backend, DecodeBackend::Software);
-    assert!(selected.fallback_reason.unwrap().contains("rotation"));
-    fs::remove_file(original).unwrap();
-    fs::remove_file(rotated).unwrap();
+    for (codec, size) in [("libx264", "320x180"), ("libx265", "3840x2160")] {
+        let original = temp.0.join("original.mp4");
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("testsrc2=size={size}:rate=30:duration=0.4"),
+                "-c:v",
+                codec,
+                "-preset",
+                "ultrafast",
+                "-threads",
+                "2",
+            ])
+            .args(if codec == "libx265" {
+                vec!["-x265-params", "pools=1:frame-threads=1:log-level=error"]
+            } else {
+                vec![]
+            })
+            .args(["-pix_fmt", "yuv420p", "-y"])
+            .arg(&original)
+            .status()
+            .unwrap()
+            .success());
+        for rotation in ["-90", "90", "180", "0"] {
+            let rotated = temp.0.join("rotated.mp4");
+            assert!(Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-display_rotation:v:0",
+                    rotation,
+                    "-i"
+                ])
+                .arg(&original)
+                .args(["-c", "copy", "-y"])
+                .arg(&rotated)
+                .status()
+                .unwrap()
+                .success());
+            let mut expected = Vec::new();
+            let software = decode_full_video_shared(&rotated, 9, &cancelled, |batch| {
+                expected.push((batch.first_frame, batch.gray, batch.rgb));
+                Ok(())
+            })
+            .unwrap();
+            let mut position = 0;
+            let hardware = decode_full_video_shared_with_backend(
+                &rotated,
+                9,
+                DecodePreference::Nvdec,
+                &cancelled,
+                |batch| {
+                    assert_eq!(batch.first_frame, expected[position].0);
+                    assert_eq!(
+                        Sha256::digest(&batch.gray),
+                        Sha256::digest(&expected[position].1),
+                        "{codec} rotation={rotation} gray"
+                    );
+                    assert_eq!(
+                        Sha256::digest(&batch.rgb),
+                        Sha256::digest(&expected[position].2),
+                        "{codec} rotation={rotation} rgb"
+                    );
+                    position += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(hardware.backend, DecodeBackend::Nvdec);
+            assert_eq!(hardware.decode.decoded_frames, software.decoded_frames);
+            assert_eq!(position, expected.len());
+            eprintln!("{codec} {size} rotation={rotation}: NVDEC pixel parity passed");
+            fs::remove_file(rotated).unwrap();
+        }
+        fs::remove_file(original).unwrap();
+    }
+}
+
+#[test]
+fn shared_command_honors_requested_decoder_and_filter_threads() {
+    let decision = DecodeSelection {
+        backend: DecodeBackend::Software,
+        fallback_reason: None,
+        rotation_filter: "",
+    };
+    for threads in [0, 1, 32] {
+        let command = shared_decode_command(Path::new("input.mp4"), &decision, threads);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        for option in ["-threads", "-filter_complex_threads"] {
+            let position = args.iter().position(|arg| arg == option).unwrap();
+            assert_eq!(args[position + 1], threads.to_string());
+        }
+        assert!(
+            args.iter().position(|arg| arg == "-threads").unwrap()
+                < args.iter().position(|arg| arg == "-i").unwrap()
+        );
+    }
 }

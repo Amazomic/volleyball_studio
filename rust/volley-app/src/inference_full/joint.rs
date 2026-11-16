@@ -223,6 +223,7 @@ pub(crate) fn run_joint_pair(
         original,
         9,
         backend_preference()?,
+        cpu_threads,
         cancelled,
         |batch| {
             if cancelled.load(Ordering::Acquire) {

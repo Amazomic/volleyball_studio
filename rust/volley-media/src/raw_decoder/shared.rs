@@ -228,7 +228,12 @@ pub fn decode_full_video_shared(
         source,
         stride,
         cancelled,
-        DecodeBackend::Software,
+        &DecodeSelection {
+            backend: DecodeBackend::Software,
+            fallback_reason: None,
+            rotation_filter: "",
+        },
+        0,
         consume,
         |_, _| Ok(()),
     )
@@ -244,14 +249,10 @@ pub fn decode_full_video_shared_with_backend(
     consume: impl FnMut(PrimaryFrameBatch) -> Result<(), String>,
 ) -> Result<PrimaryDecodeSummary, String> {
     let decision = select_decode_backend(source, preference, cancelled)?;
-    let decode = decode_full_video_shared_impl(
-        source,
-        stride,
-        cancelled,
-        decision.backend,
-        consume,
-        |_, _| Ok(()),
-    )?;
+    let decode =
+        decode_full_video_shared_impl(source, stride, cancelled, &decision, 0, consume, |_, _| {
+            Ok(())
+        })?;
     Ok(PrimaryDecodeSummary {
         decode,
         backend: decision.backend,
@@ -266,6 +267,7 @@ pub fn decode_full_video_shared_with_backend_and_tail(
     source: &Path,
     stride: usize,
     preference: DecodePreference,
+    cpu_threads: usize,
     cancelled: &AtomicBool,
     consume: impl FnMut(PrimaryFrameBatch) -> Result<(), String>,
     on_tail: impl FnMut(&[u8], u64) -> Result<(), String>,
@@ -278,7 +280,8 @@ pub fn decode_full_video_shared_with_backend_and_tail(
         source,
         stride,
         cancelled,
-        decision.backend,
+        &decision,
+        cpu_threads,
         consume,
         on_tail,
     )?;
@@ -289,11 +292,49 @@ pub fn decode_full_video_shared_with_backend_and_tail(
     })
 }
 
+fn shared_decode_command(source: &Path, decision: &DecodeSelection, cpu_threads: usize) -> Command {
+    let prefix = if decision.backend == DecodeBackend::Nvdec {
+        format!(
+            "[0:v]hwdownload,format=nv12,{}fps=30,split=2[ball][players];",
+            decision.rotation_filter
+        )
+    } else {
+        "[0:v]fps=30,split=2[ball][players];".into()
+    };
+    let filters = format!("{prefix}[ball]scale=512:288:flags=bilinear,format=gray[g];[players]scale=640:360:flags=bilinear,format=rgb24[r]");
+    let mut command = Command::new("ffmpeg");
+    command.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-threads",
+        &cpu_threads.to_string(),
+    ]);
+    if decision.backend == DecodeBackend::Nvdec {
+        command.args([
+            "-noautorotate",
+            "-hwaccel",
+            "cuda",
+            "-hwaccel_output_format",
+            "cuda",
+        ]);
+    }
+    command.arg("-i").arg(source).args([
+        "-filter_complex_threads",
+        &cpu_threads.to_string(),
+        "-filter_complex",
+        &filters,
+    ]);
+    command
+}
+
 fn decode_full_video_shared_impl(
     source: &Path,
     stride: usize,
     cancelled: &AtomicBool,
-    backend: DecodeBackend,
+    decision: &DecodeSelection,
+    cpu_threads: usize,
     mut consume: impl FnMut(PrimaryFrameBatch) -> Result<(), String>,
     mut on_tail: impl FnMut(&[u8], u64) -> Result<(), String>,
 ) -> Result<DecodeSummary, String> {
@@ -321,42 +362,9 @@ fn decode_full_video_shared_impl(
         .set_nonblocking(true)
         .map_err(|error| format!("RGB socket: {error}"))?;
 
-    // Hardware frames are explicitly downloaded in NV12 format before the
-    // old CPU fps/scale/format chain. Requiring CUDA output prevents FFmpeg
-    // from silently decoding unsupported sources on CPU.
-    let filter_prefix = if backend == DecodeBackend::Nvdec {
-        "[0:v]hwdownload,format=nv12,fps=30,split=2[ball][players];"
-    } else {
-        "[0:v]fps=30,split=2[ball][players];"
-    };
-    let filters = format!(
-        "{filter_prefix}[ball]scale=512:288:flags=bilinear,format=gray[g];\
-[players]scale=640:360:flags=bilinear,format=rgb24[r]"
-    );
-    let mut command = Command::new("ffmpeg");
-    command.args([
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-nostdin",
-        "-threads",
-        "4",
-    ]);
-    if backend == DecodeBackend::Nvdec {
-        command.args(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]);
-    }
+    let mut command = shared_decode_command(source, decision, cpu_threads);
     command
-        .arg("-i")
-        .arg(source)
-        .args([
-            "-filter_complex",
-            &filters,
-            "-map",
-            "[g]",
-            "-an",
-            "-sn",
-            "-dn",
-        ])
+        .args(["-map", "[g]", "-an", "-sn", "-dn"])
         .args(["-f", "rawvideo", "-pix_fmt", "gray"])
         .arg(format!("unix://{}", gray_path.display()))
         .args(["-map", "[r]", "-an", "-sn", "-dn"])
