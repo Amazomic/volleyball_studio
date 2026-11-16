@@ -126,6 +126,20 @@ impl<R: Read> FrameWindows<R> {
     pub fn decoded_frames(&self) -> u64 {
         self.decoded
     }
+
+    /// Raw trailing frames after EOF, excluded from model windows. For
+    /// stride=9 these are exactly the final 0..8 source frames. Pose evidence
+    /// uses them as lookahead without running detector inference on the tail.
+    pub fn trailing_frame_bytes(&self) -> Option<Vec<u8>> {
+        if !self.eof || self.queue.len() >= CLIP_FRAMES {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(self.queue.len() * self.frame_bytes);
+        for frame in &self.queue {
+            bytes.extend_from_slice(frame);
+        }
+        Some(bytes)
+    }
 }
 
 /// Pixel-normalization contract shared by clip diagnostics and future full
@@ -219,6 +233,18 @@ mod tests {
         assert_eq!(windows.decoded_frames(), 75);
     }
 
+    #[test]
+    fn disjoint_windows_expose_only_the_incomplete_tail_after_eof() {
+        let mut stream =
+            FrameWindows::new(Cursor::new((0u8..22).collect::<Vec<_>>()), 1, 9).unwrap();
+        assert!(stream.trailing_frame_bytes().is_none());
+        assert_eq!(stream.next_window().unwrap().unwrap().first_frame, 0);
+        assert_eq!(stream.next_window().unwrap().unwrap().first_frame, 9);
+        assert!(stream.next_window().unwrap().is_none());
+        assert_eq!(stream.decoded_frames(), 22);
+        assert_eq!(stream.trailing_frame_bytes().unwrap(), vec![18, 19, 20, 21]);
+        assert!(stream.next_window().unwrap().is_none());
+    }
     #[test]
     fn truncated_last_frame_is_not_silently_discarded() {
         let bytes = vec![0u8; 3 * 9 + 1];

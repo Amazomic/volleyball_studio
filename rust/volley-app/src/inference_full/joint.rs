@@ -1,8 +1,10 @@
 //! Experimental single-source GPU pair. The existing raw model manifests
 //! and fusion contracts remain unchanged; no tracking or touches are invented.
 use super::*;
+use crate::pose_inference::{PendingPose, PoseStream};
+use std::cell::RefCell;
 use volley_media::raw_decoder::{
-    decode_full_video_shared_with_backend, DecodeBackend, DecodePreference,
+    decode_full_video_shared_with_backend_and_tail, DecodeBackend, DecodePreference,
 };
 
 #[derive(Debug)]
@@ -13,6 +15,7 @@ pub(crate) struct JointPair {
     pub fallback_reason: Option<String>,
     pub windows: usize,
     pub decoded_frames: u64,
+    pub pending_pose: Option<PendingPose>,
 }
 
 #[derive(Default)]
@@ -111,6 +114,7 @@ pub(crate) fn run_joint_pair(
     original: &Path,
     duration: f64,
     person_stride: usize,
+    pose_enabled: bool,
     gpu_memory_limit_mb: u64,
     cpu_threads: usize,
     cancelled: &AtomicBool,
@@ -122,7 +126,14 @@ pub(crate) fn run_joint_pair(
     if !state.writes_enabled || !(1..=30).contains(&person_stride) {
         return Err("Invalid shared GPU job or person sampling interval".into());
     }
-    if gpu_memory_limit_mb == 1 {
+    // The legacy RTMDet option embeds a private pose session for box
+    // qualification; RF-DETR does not. Count that CUDA arena too.
+    let legacy_inline_pose = matches!(
+        volley_inference::person::DetectorVariant::from_env()?,
+        volley_inference::person::DetectorVariant::RtmDetNano,
+    );
+    let session_count = 2u64 + u64::from(legacy_inline_pose) + u64::from(pose_enabled);
+    if gpu_memory_limit_mb > 0 && gpu_memory_limit_mb < session_count {
         return Err("GPU memory limit too small for shared sessions".into());
     }
     let source_identity = volley_media::preparation::source_provenance(original)?;
@@ -131,7 +142,7 @@ pub(crate) fn run_joint_pair(
     let session_memory = if gpu_memory_limit_mb == 0 {
         0
     } else {
-        gpu_memory_limit_mb / 2
+        gpu_memory_limit_mb / session_count
     };
     let config = |model| Config {
         model,
@@ -182,8 +193,23 @@ pub(crate) fn run_joint_pair(
 
     let mut ball_writer = EvidenceWriter::create(&ball.folder)?;
     let mut person_writer = EvidenceWriter::create(&players.folder)?;
+    let pose = if pose_enabled {
+        Some(PoseStream::new(
+            state,
+            project_id,
+            video,
+            source_identity.clone(),
+            json!({"bytes":before.0,"mtime_ns":before.1}),
+            person_stride,
+            session_memory,
+            cpu_threads,
+        )?)
+    } else {
+        None
+    };
+    let pose = RefCell::new(pose);
     let estimated = (duration * 30.0).max(9.0);
-    let summary = decode_full_video_shared_with_backend(
+    let summary = decode_full_video_shared_with_backend_and_tail(
         original,
         9,
         backend_preference()?,
@@ -203,6 +229,9 @@ pub(crate) fn run_joint_pair(
             )?;
             ball_writer.push(batch.first_frame, &balls)?;
             person_writer.push(batch.first_frame, &persons)?;
+            if let Some(stage) = pose.borrow_mut().as_mut() {
+                stage.observe(&batch, &persons, cancelled)?;
+            }
             if ball_writer.count % 10 == 0 {
                 let frames = batch.first_frame + 9;
                 update_progress(&ball.status, ball_writer.count, frames, estimated);
@@ -210,6 +239,12 @@ pub(crate) fn run_joint_pair(
                 persist(&ball.folder, &snapshot(&ball.status))?;
                 persist(&players.folder, &snapshot(&players.status))?;
                 report((frames as f64 / estimated).clamp(0.0, 0.99))?;
+            }
+            Ok(())
+        },
+        |tail, decoded| {
+            if let Some(stage) = pose.borrow_mut().as_mut() {
+                stage.tail(tail, decoded, cancelled)?;
             }
             Ok(())
         },
@@ -237,6 +272,16 @@ pub(crate) fn run_joint_pair(
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
+    let pending_pose = pose
+        .into_inner()
+        .map(|stage| {
+            stage.finish(
+                summary.decode.decoded_frames,
+                summary.decode.windows,
+                cancelled,
+            )
+        })
+        .transpose()?;
     report(1.0)?;
     pending.committed = true;
     Ok(JointPair {
@@ -246,6 +291,7 @@ pub(crate) fn run_joint_pair(
         fallback_reason: summary.fallback_reason,
         windows: summary.decode.windows,
         decoded_frames: summary.decode.decoded_frames,
+        pending_pose,
     })
 }
 

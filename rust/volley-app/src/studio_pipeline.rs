@@ -1094,8 +1094,17 @@ fn selected_gpu(
 
 /// The existing fusion evidence uses disjoint 9-frame model windows.
 #[cfg(unix)]
-fn shared_primary_requested(flag: Option<&str>, stride: usize) -> bool {
-    flag == Some("1") && stride == 9
+fn shared_primary_requested(
+    flag: Option<&str>,
+    stride: usize,
+    pose_enabled: bool,
+    pose_mode: crate::pose_inference::PoseInputMode,
+) -> bool {
+    // The existing video-pose profile requires per-frame inference. Do not
+    // reinterpret it as sampled still frames in the experimental joint path.
+    flag == Some("1")
+        && stride == 9
+        && (!pose_enabled || pose_mode == crate::pose_inference::PoseInputMode::Photo)
 }
 
 // GPU stage coordinates (progress window, status document, cancellation)
@@ -1207,6 +1216,8 @@ async fn pipeline(
     path: &Path,
     status: &mut Value,
 ) -> Result<(), String> {
+    #[cfg(unix)]
+    let mut pending_shared_pose: Option<crate::pose_inference::PendingPose> = None;
     log_native(
         path,
         "Проверка исходного видео",
@@ -1383,6 +1394,8 @@ async fn pipeline(
             let shared = if shared_primary_requested(
                 std::env::var("VOLLEY_SHARED_PRIMARY").ok().as_deref(),
                 request.gpu.stride,
+                request.gpu.pose_enabled,
+                request.gpu.pose_mode,
             ) {
                 progress(path, status, "GPU · общий поток VBallNet + игроки", 8.0)?;
                 log_native(
@@ -1426,6 +1439,7 @@ async fn pipeline(
                         &plan.source,
                         plan.duration_sec,
                         request.gpu.pose_stride,
+                        request.gpu.pose_enabled,
                         request.gpu.gpu_memory_limit_mb,
                         request.gpu.cpu_threads,
                         cancel,
@@ -1451,6 +1465,7 @@ async fn pipeline(
                         result.fallback_reason.as_deref().unwrap_or("none")
                     ),
                 )?;
+                pending_shared_pose = result.pending_pose;
                 Some((result.ball_job_id, result.player_job_id))
             } else {
                 None
@@ -1520,6 +1535,26 @@ async fn pipeline(
                 "success",
                 &format!("GPU объединён: fusion_id={fusion_id}"),
             )?;
+            #[cfg(unix)]
+            if let Some(pending) = pending_shared_pose.take() {
+                if cancel.load(Ordering::Acquire) {
+                    return Err("cancelled".into());
+                }
+                // Pose evidence is invisible to reuse until its detector
+                // source and SHA-bound fusion are both immutable and verified.
+                let pose = pending.publish(&fusion, request.gpu.interpolate_pose, cancel)?;
+                status["gpu_jobs"]["pose"] = pose["pose_run_id"].clone();
+                save(path, status)?;
+                log_event(
+                    path,
+                    "GPU · RTMPose-M",
+                    "success",
+                    &format!(
+                        "Поза из общего RGB-потока: samples={}, players={}, fusion={fusion_id}",
+                        pose["sampled_frames"], pose["player_poses"]
+                    ),
+                )?;
+            }
             if cancel.load(Ordering::Acquire) {
                 return Err("cancelled".into());
             }
@@ -2303,11 +2338,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn experimental_shared_decode_never_rewrites_gpu_stride() {
-        assert!(!shared_primary_requested(None, 9));
-        assert!(!shared_primary_requested(Some("0"), 9));
-        assert!(!shared_primary_requested(Some("1"), 1));
-        assert!(!shared_primary_requested(Some("1"), 3));
-        assert!(shared_primary_requested(Some("1"), 9));
+        use crate::pose_inference::PoseInputMode::{Photo, Video};
+        assert!(!shared_primary_requested(None, 9, true, Photo));
+        assert!(!shared_primary_requested(Some("0"), 9, true, Photo));
+        assert!(!shared_primary_requested(Some("1"), 1, true, Photo));
+        assert!(!shared_primary_requested(Some("1"), 3, true, Photo));
+        assert!(!shared_primary_requested(Some("1"), 9, true, Video));
+        assert!(shared_primary_requested(Some("1"), 9, true, Photo));
+        assert!(shared_primary_requested(Some("1"), 9, false, Video));
     }
     #[test]
     fn progress_records_stage_transitions_for_history() {
