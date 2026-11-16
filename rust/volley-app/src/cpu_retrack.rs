@@ -741,7 +741,7 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             "discarded_short_track_ids":totals.unconfirmed_tracks,
             "tentative_track_count":totals.tentative_tracks,
             "duplicate_track_ids_merged":totals.duplicate_track_ids_merged,
-            "identity_turnover_version":"measured_roster_turnover_handoff_v2",
+            "identity_turnover_version":"measured_roster_turnover_handoff_v3",
             "identity_turnover_splits":totals.identity_turnover_splits,
             "identity_handoff_splits":totals.identity_handoff_splits,
             "ambiguous_detections":totals.ambiguous,

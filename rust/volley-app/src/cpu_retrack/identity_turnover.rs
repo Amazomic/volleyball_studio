@@ -30,7 +30,7 @@ fn boundaries(spans: &BTreeMap<u64, Span>, frames: u64) -> Vec<u64> {
                     && span.first <= ending.last.saturating_add(30)
             })
             .collect::<Vec<_>>();
-        if deaths.len() < 3 || births.len() < 3 {
+        if deaths.len() < 3 || births.len() < 2 {
             continue;
         }
         let last_old = deaths.iter().map(|(_, span)| span.last).max().unwrap();
@@ -262,6 +262,35 @@ mod tests {
             (13, span(860, 1728, 181)),
         ]);
         assert_eq!(boundaries(&tracks, 1737), vec![856]);
+    }
+
+    #[test]
+    fn two_new_tracks_at_roster_cut_separate_surviving_identities() {
+        let tracks = BTreeMap::from([
+            (1, span(0, 850, 171)),
+            (2, span(0, 850, 171)),
+            (3, span(0, 705, 133)),
+            (4, span(0, 1735, 339)),
+            (6, span(155, 1735, 285)),
+            (7, span(180, 850, 135)),
+            (10, span(800, 1170, 46)),
+            (11, span(855, 1735, 174)),
+            (12, span(855, 1735, 177)),
+            (13, span(955, 1735, 157)),
+        ]);
+        assert_eq!(boundaries(&tracks, 1737), vec![852]);
+    }
+
+    #[test]
+    fn two_reacquired_tracks_without_three_departures_do_not_cut_roster() {
+        let tracks = BTreeMap::from([
+            (1, span(0, 850, 171)),
+            (2, span(0, 850, 171)),
+            (4, span(0, 1735, 339)),
+            (11, span(855, 1735, 174)),
+            (12, span(855, 1735, 177)),
+        ]);
+        assert!(boundaries(&tracks, 1737).is_empty());
     }
 
     #[test]
