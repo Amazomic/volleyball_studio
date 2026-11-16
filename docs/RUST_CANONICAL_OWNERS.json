@@ -167,7 +167,8 @@
                                          "rust/volley-app/src/rallies.rs",
                                          "rust/volley-app/src/cpu_rallies.rs",
                                          "rust/volley-app/src/native_rally_preview.rs",
-                                         "rust/volley-app/src/native_preview_overlay.rs"
+                                         "rust/volley-app/src/native_preview_overlay.rs",
+                                         "rust/volley-app/src/native_preview_overlay/continuity.rs"
                                      ],
                         "routes":  [
                                        {

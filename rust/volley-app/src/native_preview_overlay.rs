@@ -26,6 +26,7 @@ use std::{
 };
 
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
+mod continuity;
 const MAX_REPLAY_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_LINE_BYTES: u64 = 512 * 1024 + 1;
 const MAX_WINDOW: u64 = 180;
@@ -356,6 +357,17 @@ fn box_norm(value: &Value) -> Option<[f64; 4]> {
 // Rendering must never show a visual-only interpolated ID over a measured
 // player. Photo/identity review deliberately excludes interpolated evidence,
 // so drawing a competing inferred ID creates apparent identity swaps in video.
+fn boxes_clash(a: [f64; 4], b: [f64; 4]) -> bool {
+    let intersection =
+        (a[2].min(b[2]) - a[0].max(b[0])).max(0.0) * (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+    let area = |v: [f64; 4]| (v[2] - v[0]) * (v[3] - v[1]);
+    let iou = intersection / (area(a) + area(b) - intersection).max(1e-12);
+    let center_distance = (((a[0] + a[2] - b[0] - b[2]) * 0.5).powi(2)
+        + ((a[1] + a[3] - b[1] - b[3]) * 0.5).powi(2))
+    .sqrt();
+    iou > 0.20 || center_distance < 0.045
+}
+
 fn overlay_players(frame: &Value) -> Vec<Value> {
     let inferred = frame["interpolated_track_ids"]
         .as_array()
@@ -374,16 +386,6 @@ fn overlay_players(frame: &Value) -> Vec<Value> {
         })
         .filter_map(|p| box_norm(&p["detection"]["bbox_xyxy_norm"]))
         .collect::<Vec<_>>();
-    let clashes = |a: [f64; 4], b: [f64; 4]| {
-        let intersection =
-            (a[2].min(b[2]) - a[0].max(b[0])).max(0.0) * (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
-        let area = |v: [f64; 4]| (v[2] - v[0]) * (v[3] - v[1]);
-        let iou = intersection / (area(a) + area(b) - intersection).max(1e-12);
-        let center_distance = (((a[0] + a[2] - b[0] - b[2]) * 0.5).powi(2)
-            + ((a[1] + a[3] - b[1] - b[3]) * 0.5).powi(2))
-        .sqrt();
-        iou > 0.20 || center_distance < 0.045
-    };
     players
         .into_iter()
         .flatten()
@@ -395,11 +397,21 @@ fn overlay_players(frame: &Value) -> Vec<Value> {
             }
             let bb = box_norm(&p["detection"]["bbox_xyxy_norm"])?;
             if inferred.contains(&id)
-                && observed_boxes.iter().any(|measured| clashes(bb, *measured))
+                && observed_boxes
+                    .iter()
+                    .any(|measured| boxes_clash(bb, *measured))
             {
                 return None;
             }
-            Some(json!({"id":id,"box":bb,"interpolated":inferred.contains(&id)}))
+            let mut player = json!({"id":id,"box":bb,"interpolated":inferred.contains(&id)});
+            if p["pose"]
+                .as_array()
+                .is_some_and(|points| points.len() == 17)
+            {
+                player["pose"] = p["pose"].clone();
+                player["pose_interpolated"] = json!(p["pose_interpolated"] == true);
+            }
+            Some(player)
         })
         .collect()
 }
@@ -719,6 +731,7 @@ pub async fn get(
         .map_err(storage::bad_request)?;
     let replay_sha = run.replay_sha.clone();
     let total = run.frames;
+    let interpolate_players = manifest["interpolate_players"].as_bool().unwrap_or(true);
     let start = query.start_frame;
     let preview_run = run.clone();
     let fusion_for_pose = if query.pose.unwrap_or(false) {
@@ -733,6 +746,7 @@ pub async fn get(
         None
     };
     let pose_root = projects::project_root(&state).join(&query.project_id);
+    let continuity_state = state.clone();
     let (frames, poses_available) = tokio::task::spawn_blocking(move || {
         let windows = native_rally_preview::verified_track_windows(&preview_run)
             .map_err(|e| format!("Unverified rally scope: {e}"))?;
@@ -746,12 +760,13 @@ pub async fn get(
         )
         .map_err(|_| "Invalid rally ball policy manifest")?;
         let ball_scope = crate::cpu_retrack::ball_track::saved_scope(&saved)?;
+        let (context_start, context_end) = continuity::context(start, end, &windows.intervals);
         let mut frames = extract_frames(
             &replay_path,
             &replay_sha,
             total,
-            start,
-            end,
+            context_start,
+            context_end,
             &windows,
             preview_run.width,
             preview_run.height,
@@ -761,18 +776,45 @@ pub async fn get(
                 .as_ref()
                 .map(|(starts, score)| (starts.as_slice(), *score)),
         )?;
+        let reviewed = native_player_tracks::reviewed_owners(
+            &continuity_state,
+            &preview_run.project_id,
+            &preview_run.video,
+            &preview_run.replay_id,
+        )
+        .map_err(|_| "Confirmed player links unavailable for interpolation")?;
+        if reviewed.source_sha != preview_run.replay_sha {
+            return Err("Confirmed player links belong to another CPU replay".into());
+        }
         let poses_available = if let Some(fusion) = fusion_for_pose {
+            native_preview_pose::enrich_exact(
+                &pose_root,
+                &fusion,
+                context_start,
+                context_end,
+                &mut frames,
+            )?;
             native_preview_pose::processed_window(
                 &pose_root,
                 &fusion,
                 total,
-                start,
-                end,
+                context_start,
+                context_end,
                 &mut frames,
             )?
         } else {
             false
         };
+        continuity::fill(
+            &mut frames,
+            &windows.intervals,
+            &reviewed.owners,
+            interpolate_players,
+        );
+        if poses_available {
+            continuity::append_poses(&mut frames);
+        }
+        frames.retain(|row| row["frame"].as_u64().is_some_and(|f| f >= start && f < end));
         Ok::<_, String>((frames, poses_available))
     })
     .await
@@ -780,6 +822,7 @@ pub async fn get(
     .map_err(storage::bad_request)?;
     Ok(Json(json!({
         "schema":"volley-native-preview-overlay/1",
+        "continuity_policy":"cpu_rally_linear_v1",
         "ball_policy":"vballnet_leading_ball_rally_v1",
         "expected_balls":1,
         "fps":30,
@@ -1544,7 +1587,6 @@ mod tests {
         assert_eq!(overlay[2]["players"][0]["id"], 7);
         fs::remove_dir_all(root).unwrap();
     }
-
 
     #[test]
     fn player_labels_include_only_manually_reviewed_owners() {

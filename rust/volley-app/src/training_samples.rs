@@ -270,10 +270,14 @@ fn observed_movement(row: &Value, track: u64) -> Option<MotionSample> {
         .as_array()?
         .iter()
         .find(|p| p["id"].as_u64() == Some(track))?;
+    if player["interpolated"] == true {
+        return None;
+    }
     let bbox: [f64; 4] = serde_json::from_value(player["box"].clone()).ok()?;
     let mut candidates = row["pose_points"]
         .as_array()?
         .iter()
+        .filter(|p| p["interpolated"] != true)
         .filter_map(|p| {
             let pb: [f64; 4] = serde_json::from_value(p["box"].clone()).ok()?;
             let pose: [[f64; 3]; 17] = serde_json::from_value(p["keypoints"].clone()).ok()?;
@@ -864,6 +868,20 @@ fn touch_safe_court_examples(state: &AppState) -> Option<Vec<Example>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn movement_capture_rejects_synthetic_pose_in_a_mixed_frame() {
+        let mut row = json!({"players":[{"id":7,"box":[0.1,0.2,0.3,0.8]}],
+            "pose_points_interpolated":false,"ball_origin":"vballnet","ball":[0.2,0.4],
+            "pose_points":[
+                {"box":[0.1,0.2,0.3,0.8],"keypoints":vec![[0.2,0.4,0.9];17],"interpolated":true},
+                {"box":[0.7,0.2,0.9,0.8],"keypoints":vec![[0.8,0.4,0.9];17]}]});
+        assert!(observed_movement(&row, 7).is_none());
+        row["pose_points"][0]["interpolated"] = json!(false);
+        assert!(observed_movement(&row, 7).is_some());
+        row["players"][0]["interpolated"] = json!(true);
+        assert!(observed_movement(&row, 7).is_none());
+    }
     #[test]
     fn camera_signature_is_bounded() {
         assert!(camera_signature(&[]).is_none());

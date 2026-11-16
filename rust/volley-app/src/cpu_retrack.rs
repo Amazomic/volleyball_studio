@@ -428,6 +428,10 @@ fn replay_frames_verified(
                 } else {
                     "detector_bbox"
                 });
+                if let Some(Some(pose)) = joints.get(index) {
+                    row["pose"] = json!(pose.joints);
+                    row["pose_interpolated"] = json!(false);
+                }
             }
         }
         totals.frames += 1;
@@ -703,6 +707,7 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             "schema":"volley-native-cpu-tracking/1",
             "state":"provisional_tracklets_rebuilt",
             "interpolated_positions_version":if req.interpolate_players {"bounded_same_track_3s_v2"} else {"disabled_v1"},
+            "pose_storage_version":"measured_coco17_v1",
             "interpolate_players":req.interpolate_players,
             "project_id":req.project_id,
             "video":req.video,
@@ -1455,6 +1460,14 @@ mod tests {
             0
         );
         assert_eq!(at_three["tracked_players"].as_array().unwrap().len(), 2);
+        assert!(at_three["tracked_players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["pose"]
+                .as_array()
+                .is_some_and(|points| points.len() == 17)
+                && p["pose_interpolated"] == false));
         assert!(at_three["tracked_players"]
             .as_array()
             .unwrap()
