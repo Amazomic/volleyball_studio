@@ -1,0 +1,21 @@
+import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
+import {fileURLToPath} from "node:url";
+import {join} from "node:path";
+const repo=fileURLToPath(new URL("../..",import.meta.url));
+const css=readFileSync(join(repo,"rust/volley-app/static/studio.css"),"utf8");
+const html=readFileSync(join(repo,"rust/volley-app/static/studio.html"),"utf8");
+const grid=css.match(/\.analysis-editor-grid\{([^}]*)\}/)?.[1];
+const media=css.match(/\.analysis-editor-media\{([^}]*)\}/)?.[1];
+const stage=css.match(/\.analysis-editor-stage\{([^}]*)\}/)?.[1];
+assert.ok(grid&&media&&stage);
+assert.match(grid,/grid-template-columns:minmax\(0,1fr\)/);
+assert.doesNotMatch(grid,/1\.45fr|260px/);
+assert.match(media,/width:100%/);
+assert.doesNotMatch(media,/vh|calc\(|width:min\(/);
+assert.match(stage,/width:100%/);
+assert.match(stage,/aspect-ratio:var\(--frame-ratio/);
+assert.doesNotMatch(css,/\.analysis-editor-media\{[^}]*width:min\(/g);
+for (const id of ["studio-analysis-player","studio-analysis-court","studio-analysis-seek"])
+  assert.ok(html.includes('id="'+id+'"'));
+console.log("PASS: primary-analysis video fills container width with preserved aspect and aligned timeline/overlay");
