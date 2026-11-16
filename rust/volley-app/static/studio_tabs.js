@@ -314,6 +314,30 @@
     ui.start.disabled=state.starting||(running?state.stopRequested:
       (!valid||!projectId()||!ui.video.value));
     const blocked=running||state.starting||!projectId()||!ui.video.value;
+    // Primary analysis starts above the history panel. Show live progress on
+    // that very button so large FFmpeg preparations do not look like a no-op.
+    const live=state.latestPipeline;
+    const primaryRunning=running&&state.pipelineProject===projectId()&&
+      live?.id===state.pipelineId&&live.mode==="gpu"&&
+      ["queued","running","cancelling"].includes(live.status);
+    if(state.starting&&!running){
+      ui.gpuOnly.textContent="… Создание задачи";
+    }else if(primaryRunning){
+      const total=Number(live.progress_percent);
+      const measured=Number.isFinite(total)?Math.max(0,Math.min(100,total)):null;
+      const preparing=live.stage==="Подготовка исходного видео";
+      const phase=preparing?"Подготовка":
+        /V[Bb]allNet/.test(live.stage||"")?"Мяч":
+        /RF-DETR|RTMPose|RTMDet/.test(live.stage||"")?"Игроки":"Первичный анализ";
+      const shown=measured===null?"…":
+        (preparing?Math.min(100,measured/8*100):measured).toFixed(1)+"%";
+      ui.gpuOnly.textContent="◌ "+phase+" · "+shown;
+      ui.gpuOnly.title=String(live.stage||"Выполняется")+
+        (measured===null?"":" · "+measured.toFixed(1)+"% всего");
+    }else{
+      ui.gpuOnly.textContent="▶ Начать анализ";
+      ui.gpuOnly.title="Запустить только GPU и создать отдельную версию первичного анализа";
+    }
     ui.gpuOnly.disabled=blocked||!gpuValid;
     ui.postOnly.disabled=blocked||!postValid||!selectedGpuSource();
     ui.postOnly.title=selectedGpuSource()?
