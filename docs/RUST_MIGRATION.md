@@ -1849,3 +1849,13 @@ Studio показывает кнопку перехода между debug и re
 - Самостоятельная реализация и независимое read-only ревью в отдельном worktree; интеграция сохраняет первоначальные пользовательские правки. Исправлены source-binding/prepared-root замечания ревью, обновлены владельцы и архитектура, переводы и устаревшие browser test fixtures. Форматирование workspace нормализовано штатным rustfmt.
 - Проверки и ограничения: [полный отчёт](superpowers/plans/2026-11-16-video-pipeline-verification.md). Изолированный Rust suite, настоящий CUDA e2e, RTMPose batch/single CUDA, WASM/Node, ownership/roadmap прошли; основной full suite сохраняет 13 доказанно прежних ReID-сбоев из пользовательского patch. Реальный размеченный матч не проверялся.
 - Применено: безопасный release restart, PID 576408 → 668010, активных заданий не было. Browser refresh остановлен защитой Computer Use; необходим F5. Счётчик roadmap остаётся 84/85, stage 85 не закрыт.
+
+
+## 2026-11-16 — Категории касаний и независимость розыгрышей от личности
+
+- Branch: codex/20261116/touch-types-rally-identity, base bc3b40ad8be236f5c168103e4ada5ecaed9da1ef. UI and service changes in isolated worktree; shared working tree was dirty and not overwritten.
+- Unified legacy low_touch into dig in pose-based classification, canonical Rust statistics/review/rallies and Studio UI. Old saved low_touch JSON accepted by serde alias and normalized into dig.
+- CPU action prediction requires source-bound RTMPose body evidence; geometry-only candidate may still form a Touch but cannot assign a named technique. unknown_touch is the only unclassified category.
+- CPU rally proposal segmentation accepts physical touches with no Track ID and uses time-based short-peak deduplication independently of track reassignment. Player-specific attribution still happens during the later report/montage stage.
+- Introduced Touch method v10 and a new CPU Rally identity policy to prevent reuse of old semantic caches. No source analyses, media or GPU data were mutated.
+- Tests: cargo test -p volley-core --offline 223 passed; cargo check -p volley-app --offline passed; cargo test -p volley-app --offline 306 passed, 7 ignored. Real-video quality regression not executed. Generated WASM copied temporarily into isolated worktree solely to compile; not committed.

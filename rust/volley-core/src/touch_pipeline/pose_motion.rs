@@ -670,7 +670,7 @@ pub fn evaluate_pose_block(
                     context: CourtContext::Unavailable,
                 })
             })
-            .map(|geometry| pose_classification::refine(&evidence, &geometry).unwrap_or(geometry));
+            .and_then(|geometry| pose_classification::refine(&evidence, &geometry));
         result.push(PhysicalTouchCandidate {
             frame_index: frame.frame_index,
             provisional_track_id: Some(track_id),
@@ -800,11 +800,10 @@ pub fn evaluate_pose_block(
                     context: CourtContext::Unavailable,
                 })
             })
-            .map(|geometry| {
+            .and_then(|geometry| {
                 witness
                     .as_ref()
                     .and_then(|evidence| pose_classification::refine(evidence, &geometry))
-                    .unwrap_or(geometry)
             });
         result.push(PhysicalTouchCandidate {
             frame_index: frame.frame_index,
@@ -1291,8 +1290,8 @@ mod tests {
         assert_eq!(found[0].frame_index, 32);
         assert_eq!(found[0].provisional_track_id, Some(42));
         assert!(
-            found[0].action_prediction.is_some(),
-            "geometry label is retained"
+            found[0].action_prediction.is_none(),
+            "sparse pose can confirm the touch without proving its technique"
         );
 
         let (straight, _) = sparse_rebound(false);

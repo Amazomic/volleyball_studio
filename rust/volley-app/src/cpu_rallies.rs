@@ -113,15 +113,15 @@ impl MotionContact {
         if self.frame_index >= frames
             || !self.physical_motion_supported
             || self.athlete_identity_verified
-            // A new CPU rally may contain no Touch without a real source-frame ID.
-            || self.provisional_track_id.is_none()
             || self
                 .contact_landmark
                 .as_ref()
                 .is_some_and(|part| !part.valid(width, height))
             || self.contact_pose_sample_frame.is_some_and(|at| {
-                !self.body_contact_supported || self.contact_landmark.is_none()
-                    || at >= frames || at.abs_diff(self.frame_index) > 3
+                !self.body_contact_supported
+                    || self.contact_landmark.is_none()
+                    || at >= frames
+                    || at.abs_diff(self.frame_index) > 3
             })
             || (self.ball_occluded_at_contact
                 && (!self.body_contact_supported && !self.inferred_body_reach_supported
@@ -757,8 +757,9 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
             "court_context_enabled":contacts["court_context_enabled"],
             "court_contact_context_version":"python_serve_toss_possession_v2",
             "ground_boundary_version":"trajectory_court_player_v2",
+            "contact_identity_policy":"rally_independent_of_track_id_v2",
             "touch_candidates_ingested":output.ingested_touch_candidates,
-            "physical_touch_player_gate":"same_frame_verified_cpu_track",
+            "physical_touch_player_gate":"when_present_same_frame_verified_cpu_track",
             "physical_touch_ball_gate":"same_frame_selected_ball",
             "unknown_player_contacts_allowed":true,
             "rally_candidates":output.proposals,
@@ -957,7 +958,7 @@ mod tests {
         touch.provisional_track_id = Some(0);
         assert!(touch.verify(756, 1280, 720).is_err());
         touch.provisional_track_id = None;
-        assert!(touch.verify(756, 1280, 720).is_err());
+        assert!(touch.verify(756, 1280, 720).is_ok());
     }
 
     #[test]

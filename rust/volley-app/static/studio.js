@@ -348,7 +348,7 @@
     rawBall:$("studio-raw-ball"),rawVballVisible:$("studio-raw-vball-visible"),rawPeopleVisible:$("studio-raw-people-visible"),rawPlayer:$("studio-raw-player"),
     rawPose:$("studio-raw-pose"),rawPoseVisible:$("studio-raw-pose-visible"),
     raw:false,
-    actionFlags:{attack:true,block:true,serve:true,overhead_pass:true,dig:true,low_touch:true},
+    actionFlags:{attack:true,block:true,serve:true,overhead_pass:true,dig:true},
     source:null,cache:new Map(),rawFrames:new Map(),rawDetectors:new Map(),presentedTime:null,
     fetching:new Set(),controllers:new Map(),failed:new Map(),loop:0,
     flags:{rallies:true,touches:true,trajectory:true,players:true,pose:true,court:true}
@@ -598,9 +598,9 @@
     block:["#c38cff","≈ Блок"],
     serve:["#f29d49","≈ Подача"],
     overhead_pass:["#55d6ff","≈ Передача"],
-    dig:["#71e49e","≈ Приём"],
-    low_touch:["#e5c55d","≈ Нижнее касание"]
+    dig:["#71e49e","≈ Приём снизу"]
   };
+  const canonicalTouchKind=kind=>kind==="low_touch"?"dig":kind;
   // The timeline belongs to the selected saved CPU postprocessing snapshot.
   // Raw GPU detections and limited rally-card motion_events are never Touchs.
   const cpuTouchesForFrame=(project,run,video,sha,frame)=>{
@@ -617,14 +617,14 @@
     }
     const near=[];
     for(let i=left;i<events.length&&events[i].frame_index<=frame+8;i++)
-      if(events[i].touch_attributed===true||events[i].contact_verified===true)near.push(events[i]);
+      near.push(events[i]);
     return near;
   };
   const drawCpuTouches=(ctx,record,project,run,video,frame,x,y,width,height)=>{
     if(!overlay.flags.touches||!record.width||!record.height)return;
     const events=cpuTouchesForFrame(project,run,video,record.replay_sha256,frame);
     for(const event of events){
-      const kind=event.kind;
+      const kind=canonicalTouchKind(event.kind);
       if(kind&&(!Object.hasOwn(cpuTouchStyle,kind)||!overlay.actionFlags[kind]))continue;
       if(!Array.isArray(event.ball_position_px)||event.ball_position_px.length!==2)continue;
       const [bx,by]=event.ball_position_px;
@@ -978,11 +978,11 @@
       training.list.replaceChildren();
       training.count.textContent=String(data.examples.length);
       const names={attack:"Атака",block:"Блок",serve:"Подача",
-        overhead_pass:"Передача сверху",dig:"Приём снизу",low_touch:"Нижнее касание"};
+        overhead_pass:"Передача сверху",dig:"Приём снизу"};
       for(const item of data.examples){
         const row=document.createElement("div");row.className="studio-training-example";
         const label=document.createElement("span");
-        label.textContent=(item.type==="court"?"Поле и сетка":names[item.label]||item.label)+
+        label.textContent=(item.type==="court"?"Поле и сетка":names[canonicalTouchKind(item.label)]||item.label)+
           " · "+item.video+" · "+(Number(item.frame_index)/30).toFixed(1)+" с"+
           (item.type==="touch"?" · ID "+item.track_id:"");
         label.title=item.project_id;
@@ -1271,7 +1271,7 @@
         raw.touch_annotations.length!==raw.touch_frames.length||
         !raw.touch_annotations.every((event,index)=>
           event.frame_index===raw.touch_frames[index]&&
-          (event.kind===null||Object.hasOwn(cpuTouchStyle,event.kind)))||
+          (event.kind===null||Object.hasOwn(cpuTouchStyle,canonicalTouchKind(event.kind))))||
         raw.authoritative_game_events!==false||
         (s.video&&raw.video!==s.video))
         throw Error("Недостоверный индекс временной шкалы");
@@ -1279,7 +1279,7 @@
       s.fps=Number(raw.fps)||0;
       if(!s.video)s.video=raw.video;
       ensurePreviewVideo();
-      const actual=raw.touch_annotations.filter(e=>e.touch_attributed===true||e.contact_verified===true);
+      const actual=raw.touch_annotations;
       const attacks=actual.filter(e=>e.kind==="attack").length;
       const blocks=actual.filter(e=>e.kind==="block").length;
       timeline.status.textContent=raw.rallies.length+" розыгрышей · "+
@@ -1843,7 +1843,7 @@
   // determine which action types are shown on a rally card.
   const estimatedTypes=item=>{
     const labels={attack:"Атака",block:"Блок",serve:"Подача",
-      overhead_pass:"Передача сверху",dig:"Приём снизу",low_touch:"Нижнее касание"};
+      overhead_pass:"Передача сверху",dig:"Приём снизу"};
     const counts=item?.estimated_action_counts;
     const known=counts&&typeof counts==="object"&&!Array.isArray(counts)?
       Object.entries(labels).filter(([kind])=>
@@ -1921,30 +1921,30 @@
         "Загрузка касаний выбранной CPU-постобработки…";
       return;
     }
-    const touches=data.touch_annotations.filter(event=>
-      (event.touch_attributed===true||event.contact_verified===true)&&event.frame_index>=start&&event.frame_index<=end);
+    const touches=data.touch_annotations.filter(event=>event.frame_index>=start&&event.frame_index<=end);
     const labels={attack:"Атака",block:"Блок",serve:"Подача",
-      overhead_pass:"Передача сверху",dig:"Приём снизу",low_touch:"Нижнее касание"};
+      overhead_pass:"Передача сверху",dig:"Приём снизу"};
     const counts=new Map();
     for(const touch of touches){
-      const kind=touch.kind||"unclassified";
+      const kind=canonicalTouchKind(touch.kind)||"unclassified";
       counts.set(kind,(counts.get(kind)||0)+1);
     }
     const breakdown=Object.entries(labels)
       .filter(([kind])=>counts.has(kind))
       .map(([kind,label])=>label+" ×"+counts.get(kind));
     if(counts.has("unclassified"))
-      breakdown.push("Без типа ×"+counts.get("unclassified"));
+      breakdown.push("Касание ×"+counts.get("unclassified"));
     ui.viewDescription.textContent="Фрагмент "+clock(start)+" – "+clock(end)+
       ". Касаний из CPU-постобработки: "+touches.length+
       ". Оценка типов: "+(breakdown.join(" · ")||"нет данных")+
       ". Классификация автоматическая, не подтверждена вручную.";
     for(const touch of touches.slice(0,32)){
-      const label=touch.kind&&labels[touch.kind]?"≈ "+labels[touch.kind]:"Касание без типа";
+      const kind=canonicalTouchKind(touch.kind);
+      const label=kind&&labels[kind]?"≈ "+labels[kind]:"Касание";
       const pill=make("span","event-pill",clock(touch.frame_index)+" · "+label);
       pill.title="Результат выбранной CPU-постобработки. Автоматическая оценка.";
-      if(cpuTouchStyle[touch.kind])
-        pill.style.borderColor=cpuTouchStyle[touch.kind][0];
+      if(cpuTouchStyle[kind])
+        pill.style.borderColor=cpuTouchStyle[kind][0];
       ui.events.append(pill);
     }
   };

@@ -157,7 +157,13 @@ fn select_player_actions(
                 .map(String::as_str)
                 .or(event.estimated_kind.as_deref())
                 .unwrap_or("unknown_touch");
-            (kind == "all" || kind == actual_kind).then_some((event.frame, manual.is_some()))
+            let requested = if kind == "low_touch" { "dig" } else { kind };
+            let actual = if actual_kind == "low_touch" {
+                "dig"
+            } else {
+                actual_kind
+            };
+            (requested == "all" || requested == actual).then_some((event.frame, manual.is_some()))
         })
         .collect()
 }
@@ -187,6 +193,7 @@ fn reviewed_action_labels(response: &Value) -> Result<BTreeMap<(u64, u64), Strin
         ) {
             return Err("Unsupported manual action label".into());
         }
+        let kind = if kind == "low_touch" { "dig" } else { kind };
         if labels.insert((frame, track), kind.to_string()).is_some() {
             return Err("Duplicate manual action label".into());
         }

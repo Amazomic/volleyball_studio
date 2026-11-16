@@ -501,8 +501,8 @@ mod tests {
         assert_eq!(contacts.len(), 1);
         assert_eq!(contacts[0].provisional_track_id, Some(1));
         assert!(
-            contacts[0].action_prediction.is_some(),
-            "Keep geometry classification when wrists are inconclusive"
+            contacts[0].action_prediction.is_none(),
+            "inconclusive wrists must leave the confirmed contact unclassified"
         );
         let mut unrelated = poses.clone();
         unrelated.insert(

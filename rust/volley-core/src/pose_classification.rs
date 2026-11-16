@@ -73,7 +73,7 @@ pub fn contact_distance(e: &PoseEvidence, min_confidence: f64) -> Option<f64> {
 }
 
 /// Use wrists, elbows and shoulders; when anything is ambiguous, keep
-/// the older, source-backed contact geometry classification unchanged.
+/// the contact unclassified until confident pose evidence is available.
 #[must_use]
 pub fn refine(e: &PoseEvidence, geometry: &ActionPrediction) -> Option<ActionPrediction> {
     if !geometry.valid()
@@ -150,11 +150,7 @@ pub fn refine(e: &PoseEvidence, geometry: &ActionPrediction) -> Option<ActionPre
             return None;
         }
     } else if low {
-        if wrist[1] > (y1 + 0.93 * (y2 - y1)) * e.video_height {
-            ActionKind::LowTouch
-        } else {
-            ActionKind::Dig
-        }
+        ActionKind::Dig
     } else if both_hands_near {
         ActionKind::Dig
     } else {
@@ -229,7 +225,7 @@ mod tests {
         assert_eq!(refine(&d, &geom()).unwrap().kind, ActionKind::Attack);
     }
     #[test]
-    fn missing_or_distant_wrist_never_overrides_geometry() {
+    fn missing_or_distant_wrist_leaves_touch_unclassified() {
         let mut d = data();
         d.keypoints[9][2] = 0.0;
         d.keypoints[10][2] = 0.0;
@@ -238,6 +234,17 @@ mod tests {
         d.ball_x_norm = 0.97;
         assert!(refine(&d, &geom()).is_none());
     }
+    #[test]
+    fn very_low_wrist_still_infers_the_same_lower_contact() {
+        let mut e = data();
+        e.keypoints[7] = [0.42, 0.70, 0.9];
+        e.keypoints[9] = [0.47, 0.85, 0.9];
+        e.keypoints[10][2] = 0.0;
+        e.ball_x_norm = 0.47;
+        e.ball_y_norm = 0.85;
+        assert_eq!(refine(&e, &geom()).unwrap().kind, ActionKind::Dig);
+    }
+
     #[test]
     fn low_wrist_infers_dig() {
         let mut d = data();

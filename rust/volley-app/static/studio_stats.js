@@ -126,7 +126,7 @@
     const metrics=el("div","report-player-metrics");
     const actions=player.estimated_actions||{};
     for(const [key,label] of [["attack","Атаки"],["serve","Подачи"],["block","Блоки"],
-      ["dig","Приёмы"],["overhead_pass","Передачи"]]){
+      ["dig","Приёмы снизу"],["overhead_pass","Передачи"]]){
       const metric=el("div","report-player-metric report-action-"+key);
       metric.append(el("span","",label),el("strong","",classification?(actions[key]??0):"—"));
       metrics.append(metric);

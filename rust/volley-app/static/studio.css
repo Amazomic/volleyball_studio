@@ -948,7 +948,6 @@ body[data-ui-theme="light"] #studio-preview-view .rallies-panel-head span{color:
 #studio-preview-view .action-serve{color:#f29d49}
 #studio-preview-view .action-overhead-pass{color:#55d6ff}
 #studio-preview-view .action-dig{color:#71e49e}
-#studio-preview-view .action-low-touch{color:#e5c55d}
 #studio-preview-view .video-overlay-status{
   position:absolute;z-index:2;left:10px;bottom:50px;max-width:calc(100% - 20px);
   font-size:11px;padding:5px 9px;border-radius:6px;background:rgba(11,20,35,.85);color:#ffcfb2;

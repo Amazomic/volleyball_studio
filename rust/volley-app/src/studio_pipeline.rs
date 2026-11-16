@@ -867,13 +867,14 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
         // The new strict body/ball intersection must never reuse a saved
         // PoseMotion v1 run just because its sliders happen to match.
         && (match request.post.touches.algorithm {
-            TouchAlgorithm::PoseMotion => touches["method"] == "vballnet_trajectory_body_contact_v9",
-            TouchAlgorithm::Legacy => touches["method"] == "vballnet_gravity_player_geometry_pose_contact_v9",
+            TouchAlgorithm::PoseMotion => touches["method"] == "vballnet_trajectory_body_contact_v10",
+            TouchAlgorithm::Legacy => touches["method"] == "vballnet_gravity_player_geometry_pose_contact_v10",
         })
         && rallies["schema"] == "volley-native-cpu-rally-proposals/1"
         && rallies["state"] == "provisional_rally_segments"
         && rallies["court_contact_context_version"] == "python_serve_toss_possession_v2"
         && rallies["ground_boundary_version"] == "trajectory_court_player_v2"
+        && rallies["contact_identity_policy"] == "rally_independent_of_track_id_v2"
         && touches["ball_tracking_policy"] == crate::cpu_retrack::ball_track::POLICY
         && rallies["ball_tracking_policy"] == crate::cpu_retrack::ball_track::POLICY
         && touches["leading_ball_rally_starts"] == rallies["leading_ball_rally_starts"]
@@ -2566,7 +2567,7 @@ mod branching_tests {
             &json!({
                 "schema":"volley-native-cpu-touch-proposals/1","state":"motion_gated_touch_proposals","touch_id":touch,
                 "project_id":request.project_id,"video":request.video,
-                "source_replay_id":replay,"method":"vballnet_gravity_player_geometry_pose_contact_v9","sha256":sha,
+                "source_replay_id":replay,"method":"vballnet_gravity_player_geometry_pose_contact_v10","sha256":sha,
                 "ball_tracking_policy":crate::cpu_retrack::ball_track::POLICY
             }),
         );
@@ -2579,6 +2580,7 @@ mod branching_tests {
                 "schema":"volley-native-cpu-rally-proposals/1","state":"provisional_rally_segments","rally_run_id":rally,
                 "court_contact_context_version":"python_serve_toss_possession_v2",
                 "ground_boundary_version":"trajectory_court_player_v2",
+                "contact_identity_policy":"rally_independent_of_track_id_v2",
                 "ball_tracking_policy":crate::cpu_retrack::ball_track::POLICY,
                 "project_id":request.project_id,"video":request.video,
                 "source_replay_id":replay,"source_touch_id":touch,"sha256":sha

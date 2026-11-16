@@ -822,6 +822,17 @@ fn detect_stream_with_pose(
                 training,
             )?;
             for event in &mut events {
+                // Geometry may seed a pose classifier, but never publishes a
+                // named technique without RTMPose joint evidence.
+                if event.action_prediction.as_ref().is_some_and(|prediction| {
+                    !matches!(
+                        prediction.method,
+                        volley_core::action_prediction::PredictionMethod::PoseKeypointsV1
+                            | volley_core::action_prediction::PredictionMethod::LearnedPoseV1
+                    )
+                }) {
+                    event.action_prediction = None;
+                }
                 if !event.body_contact_supported || event.contact_landmark.is_none() {
                     event.provisional_track_id =
                         nearest_source_track_for_ball(&block, event, width, height);
@@ -853,10 +864,11 @@ fn detect_stream_with_pose(
                 // Reconstructed gap positions must not acquire authority as
                 // source-frame detections. Check before cross-chunk dedup so
                 // an inferred candidate cannot suppress a genuine contact.
-                let Some(track_id) = event.provisional_track_id else {
-                    continue;
-                };
-                if !source_frame_contains_track(&block, event.frame_index, track_id) {
+                // An independently motion-supported Touch must survive when
+                // the identity association is unavailable at this frame.
+                if event.provisional_track_id.is_some_and(|track_id| {
+                    !source_frame_contains_track(&block, event.frame_index, track_id)
+                }) {
                     continue;
                 }
                 motion_candidates += 1;
@@ -1124,7 +1136,7 @@ pub(crate) fn process_with_ball_scope(
             "court_context_enabled":court_calibration.is_some(),
             "motion_supported_proposals_before_dedup":raw,
             "touch_candidates":events,
-            "method":if settings.algorithm == TouchAlgorithm::PoseMotion { "vballnet_trajectory_body_contact_v9" } else { "vballnet_gravity_player_geometry_pose_contact_v9" },
+            "method":if settings.algorithm == TouchAlgorithm::PoseMotion { "vballnet_trajectory_body_contact_v10" } else { "vballnet_gravity_player_geometry_pose_contact_v10" },
             "pose_classification_requested":pose_requested,
             "human_training_example_count":training_examples.len(),
             "human_training_touch_sha256":training_sha,
@@ -1139,8 +1151,8 @@ pub(crate) fn process_with_ball_scope(
             "action_technique_classification_complete":false,
             "automatic_action_predictions_enabled":true,
             "automatic_action_prediction_method":if pose_requested {
-                "pose_keypoints_v1_with_geometry_fallback"
-            } else { "contact_geometry_v1" },
+                "pose_keypoints_v1_required"
+            } else { "unclassified_without_pose_v1" },
             "cpu_processing_complete":false,
         });
         storage::write_json_atomic(&folder.join("manifest.json"), &record)

@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 
 const OVERHEAD_TOP_DEPTH: f64 = -0.05;
 const OVERHEAD_DEPTH_LIMIT: f64 = 0.25;
-const DIG_DEPTH_LIMIT: f64 = 0.95;
 const WIDE_POSTURE_RATIO: f64 = 0.65;
 const WIDE_POSTURE_OVERHEAD_LIMIT: f64 = 0.0;
 const BALL_RADIUS_CM: f64 = 10.5;
@@ -21,8 +20,8 @@ const MIN_PLAYER_WIDTH_PX: f64 = 6.0;
 pub enum ActionKind {
     Attack,
     OverheadPass,
+    #[serde(alias = "low_touch")]
     Dig,
-    LowTouch,
     Block,
     Serve,
 }
@@ -34,7 +33,6 @@ impl ActionKind {
             Self::Attack => "attack",
             Self::OverheadPass => "overhead_pass",
             Self::Dig => "dig",
-            Self::LowTouch => "low_touch",
             Self::Block => "block",
             Self::Serve => "serve",
         }
@@ -153,10 +151,8 @@ pub fn predict(evidence: PositionEvidence) -> Option<ActionPrediction> {
         };
         if depth < overhead_limit {
             ActionKind::OverheadPass
-        } else if depth <= DIG_DEPTH_LIMIT {
-            ActionKind::Dig
         } else {
-            ActionKind::LowTouch
+            ActionKind::Dig
         }
     };
     let prediction = ActionPrediction {
@@ -186,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn python_describe_technique_attack_overhead_dig_low() {
+    fn python_describe_technique_attack_overhead_and_lower_contact() {
         assert_eq!(
             predict(sample(80.0)).expect("above head").kind,
             ActionKind::Attack
@@ -201,8 +197,15 @@ mod tests {
         );
         assert_eq!(
             predict(sample(285.0)).expect("below knees").kind,
-            ActionKind::LowTouch
+            ActionKind::Dig
         );
+    }
+
+    #[test]
+    fn old_lower_contact_kind_deserializes_as_dig() {
+        let kind: ActionKind = serde_json::from_str("\"low_touch\"").unwrap();
+        assert_eq!(kind, ActionKind::Dig);
+        assert_eq!(serde_json::to_string(&kind).unwrap(), "\"dig\"");
     }
 
     #[test]

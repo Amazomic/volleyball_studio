@@ -743,9 +743,8 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
             }
             prior = Some(event.frame_index);
             raw_touch_count += 1;
-            let Some(_) = event.provisional_track_id else {
-                continue;
-            };
+            // An unassigned physical contact still belongs on the timeline.
+            // Athlete assignment is a later, player-specific processing stage.
             let contextual = timeline_contexts.get(&event.frame_index);
             let rally_index =
                 intervals.partition_point(|interval| interval.end < event.frame_index);
@@ -930,9 +929,7 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
             let row = &mut cards[idx];
             let raw = row["raw_motion_event_count"].as_u64().unwrap_or(0);
             row["raw_motion_event_count"] = json!(raw + 1);
-            let Some(track_id) = event.provisional_track_id else {
-                continue;
-            };
+            // A rally card counts the physical Touch even without an owner.
             let context = row["court_contact_context"]["events"]
                 .as_array()
                 .and_then(|entries| {
@@ -955,12 +952,14 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
                 continue;
             }
             let pose_verified = event.body_contact_supported && event.contact_landmark.is_some();
-            if !retain_rally_touch(
-                &mut last_attributed[idx],
-                event.frame_index,
-                track_id,
-                pose_verified,
-            ) {
+            if event.provisional_track_id.is_some_and(|track_id| {
+                !retain_rally_touch(
+                    &mut last_attributed[idx],
+                    event.frame_index,
+                    track_id,
+                    pose_verified,
+                )
+            }) {
                 continue;
             }
             let prev = row["motion_event_count"].as_u64().unwrap_or(0);
@@ -1002,8 +1001,10 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
                 };
                 detail["assignment_method"] = json!(if pose_verified {
                     "pose"
-                } else {
+                } else if event.provisional_track_id.is_some() {
                     "nearest_player"
+                } else {
+                    "unassigned"
                 });
                 if pose_verified {
                     if let Some(ref rally_context) = context {
@@ -1861,6 +1862,54 @@ mod tests {
         };
         (run, root)
     }
+    #[test]
+    fn unassigned_motion_touch_remains_in_timeline_and_rally_card() {
+        let (mut run, root) = fixture();
+        let mut events = fs::read_to_string(&run.touch_file)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        events[1]["provisional_track_id"] = Value::Null;
+        events[1]["body_contact_supported"] = json!(false);
+        events[1]["contact_landmark"] = Value::Null;
+        let mut bytes = Vec::new();
+        for event in events {
+            bytes.extend(serde_json::to_vec(&event).unwrap());
+            bytes.push(b'\n');
+        }
+        fs::write(&run.touch_file, &bytes).unwrap();
+        run.touch_sha = format!("{:x}", Sha256::digest(&bytes));
+
+        let timeline = generate(&run, Choice::Timeline).unwrap();
+        assert_eq!(timeline.value["touch_frames"].as_array().unwrap().len(), 6);
+        let unassigned = &timeline.value["touch_annotations"][1];
+        assert_eq!(unassigned["provisional_track_id"], Value::Null);
+        assert_eq!(unassigned["kind"], Value::Null);
+        assert_eq!(unassigned["touch_attributed"], false);
+
+        let page = generate(
+            &run,
+            Choice::Page {
+                offset: 0,
+                limit: 1,
+                filter: "all".into(),
+                sort_by: "time".into(),
+                marked: BTreeSet::new(),
+            },
+        )
+        .unwrap();
+        let card = &page.value["items"][0];
+        assert_eq!(card["raw_motion_event_count"], 2);
+        assert_eq!(card["motion_event_count"], 2);
+        assert_eq!(card["motion_events"][1]["assignment_method"], "unassigned");
+        assert_eq!(
+            card["motion_events"][1]["provisional_track_id"],
+            Value::Null
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn predicted_action_does_not_bypass_source_track_or_score_validation() {
         let (run, root) = fixture();

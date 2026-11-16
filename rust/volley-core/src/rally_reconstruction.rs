@@ -141,7 +141,6 @@ struct ActiveSegment {
     first_touch: Option<u64>,
     last_touch: Option<u64>,
     last_touch_samples: Option<u64>,
-    last_touch_track_id: Option<u64>,
     max_touch: f64,
     ids: BTreeSet<u64>,
     unknown: u64,
@@ -221,13 +220,9 @@ impl RallySegmenter {
         {
             return Err("Invalid motion-gated contact proposal".into());
         }
-        let Some(id) = touch.provisional_track_id else {
-            return Ok(false);
-        };
-        if active.last_touch_track_id == Some(id)
-            && active
-                .last_touch
-                .is_some_and(|last| frame.saturating_sub(last) <= 6)
+        if active
+            .last_touch
+            .is_some_and(|last| frame.saturating_sub(last) <= 6)
         {
             // Deduplicate adjacent motion peaks, not separate toss/serve impacts.
             return Ok(false);
@@ -239,9 +234,12 @@ impl RallySegmenter {
         active.first_touch.get_or_insert(frame);
         active.last_touch = Some(frame);
         active.last_touch_samples = Some(active.samples);
-        active.last_touch_track_id = Some(id);
         active.max_touch = active.max_touch.max(touch.probability);
-        active.ids.insert(id);
+        if let Some(id) = touch.provisional_track_id {
+            active.ids.insert(id);
+        } else {
+            active.unknown += 1;
+        }
         Ok(true)
     }
     fn finish_active(&mut self, reason: &'static str) -> Option<RallyProposal> {
@@ -389,7 +387,6 @@ impl RallySegmenter {
                     first_touch: None,
                     last_touch: None,
                     last_touch_samples: None,
-                    last_touch_track_id: None,
                     max_touch: 0.0,
                     ids: BTreeSet::new(),
                     unknown: 0,
@@ -784,10 +781,34 @@ mod tests {
         }
         assert_eq!(rallies.len(), 2);
         assert_eq!(rallies[0].motion_supported_touch_proposals, 3);
-        assert_eq!(rallies[1].motion_supported_touch_proposals, 2);
+        assert_eq!(rallies[1].motion_supported_touch_proposals, 3);
         assert_eq!(rallies[0].unidentified_contacts, 0);
-        assert_eq!(rallies[1].unidentified_contacts, 0);
-        assert_eq!(segment.totals().ignored_touch_proposals, 2);
+        assert_eq!(rallies[1].unidentified_contacts, 1);
+        assert_eq!(segment.totals().ignored_touch_proposals, 1);
+    }
+
+    #[test]
+    fn rally_accepts_contacts_without_player_identity_and_deduplicates_track_handoffs() {
+        let mut segment = RallySegmenter::new(RallySettings::default(), 640, 360).unwrap();
+        for frame in 0..115 {
+            let contact = match frame {
+                20 => vec![ContactFrame {
+                    probability: 0.9,
+                    provisional_track_id: None,
+                }],
+                22 => hit_with_id(4).to_vec(), // same physical contact, new ID
+                70 => hit_with_id(9).to_vec(),
+                _ => vec![],
+            };
+            segment
+                .push(frame, b(100.0 + frame as f64 * 2.0), &contact)
+                .unwrap();
+        }
+        let rally = segment.finish().unwrap();
+        assert_eq!(rally.motion_supported_touch_proposals, 2);
+        assert_eq!(rally.unidentified_contacts, 1);
+        assert_eq!(rally.provisional_track_ids, vec![9]);
+        assert_eq!(segment.totals().ignored_touch_proposals, 1);
     }
 
     #[test]

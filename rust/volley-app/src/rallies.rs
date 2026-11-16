@@ -543,7 +543,11 @@ fn select(state: &AppState, request: &SelectionRequest) -> Result<Selection, Api
                 video,
                 cache,
                 player_id,
-                &request.player_action,
+                if request.player_action == "low_touch" {
+                    "dig"
+                } else {
+                    &request.player_action
+                },
                 &request.selection_strategy,
                 &mut scenes,
             )?;

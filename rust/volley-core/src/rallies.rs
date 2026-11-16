@@ -8,14 +8,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const FPS: f64 = 30.0;
-const ACTIONS: [&str; 6] = [
-    "attack",
-    "block",
-    "dig",
-    "overhead_pass",
-    "serve",
-    "low_touch",
-];
+const ACTIONS: [&str; 5] = ["attack", "block", "dig", "overhead_pass", "serve"];
 
 #[derive(Debug, Clone)]
 pub struct Track {
@@ -325,7 +318,13 @@ pub fn rebuild(
             ACTIONS.iter().map(|name| (name.to_string(), 0)).collect();
         let mut seen = HashSet::new();
         for event in events {
-            if !counts.contains_key(&event.kind) {
+            // Existing analyses may contain the former lower-contact label.
+            let kind = if event.kind == "low_touch" {
+                "dig"
+            } else {
+                event.kind.as_str()
+            };
+            if !counts.contains_key(kind) {
                 continue;
             }
             if (event.frame < detected_start || event.frame > end)
@@ -341,12 +340,12 @@ pub fn rebuild(
                     format!(
                         "{}:{}:{}",
                         event.frame,
-                        event.kind,
+                        kind,
                         event.player_track_id.as_deref().unwrap_or("")
                     )
                 });
             if seen.insert(unique) {
-                *counts.get_mut(&event.kind).expect("known action") += 1;
+                *counts.get_mut(kind).expect("known action") += 1;
             }
         }
         if counts.values().all(|count| *count == 0) {
@@ -355,7 +354,6 @@ pub fn rebuild(
                     let feature = match name {
                         "dig" => "dig_count",
                         "overhead_pass" => "overhead_count",
-                        "low_touch" => "low_touch_count",
                         _ => "",
                     };
                     let constructed = if feature.is_empty() {
@@ -363,11 +361,21 @@ pub fn rebuild(
                     } else {
                         feature.to_string()
                     };
-                    *counts.get_mut(name).expect("known") += track
+                    let count = track
                         .action_features
                         .get(&constructed)
                         .copied()
                         .unwrap_or(0);
+                    let legacy_lower = if name == "dig" {
+                        track
+                            .action_features
+                            .get("low_touch_count")
+                            .copied()
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    *counts.get_mut(name).expect("known") += count + legacy_lower;
                 }
             }
         }

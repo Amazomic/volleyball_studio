@@ -3,14 +3,7 @@
 //! This is independent of verified athlete identity.
 use serde::Serialize;
 
-pub const REVIEWABLE_ACTIONS: [&str; 6] = [
-    "serve",
-    "attack",
-    "block",
-    "dig",
-    "overhead_pass",
-    "low_touch",
-];
+pub const REVIEWABLE_ACTIONS: [&str; 5] = ["serve", "attack", "block", "dig", "overhead_pass"];
 #[derive(Clone, Copy, Debug)]
 pub struct ContactEvidence {
     pub frame_index: u64,
@@ -45,6 +38,9 @@ pub fn classify(
     {
         return Err("Action classification requires a verified source contact");
     }
+    // Accept an old stored review label, but never emit a separate type.
+    let manually_reviewed =
+        manually_reviewed.map(|kind| if kind == "low_touch" { "dig" } else { kind });
     let named = match manually_reviewed {
         Some(action)
             if REVIEWABLE_ACTIONS.contains(&action) && evidence.physical_motion_supported =>
@@ -89,14 +85,7 @@ mod tests {
         assert_eq!(item.action_kind, "unknown_touch");
         assert!(!item.action_verified);
         assert!(!item.athlete_identity_verified);
-        for kind in [
-            "attack",
-            "serve",
-            "block",
-            "dig",
-            "overhead_pass",
-            "low_touch",
-        ] {
+        for kind in ["attack", "serve", "block", "dig", "overhead_pass"] {
             let checked = classify(source(), Some(kind)).unwrap();
             assert_eq!(checked.action_kind, kind);
             assert!(checked.action_verified);
@@ -104,6 +93,12 @@ mod tests {
             assert!(!checked.athlete_identity_verified);
         }
     }
+    #[test]
+    fn legacy_low_touch_review_is_the_same_as_dig() {
+        let checked = classify(source(), Some("low_touch")).unwrap();
+        assert_eq!(checked.action_kind, "dig");
+    }
+
     #[test]
     fn unverified_source_or_motion_does_not_claim_named_action() {
         let mut input = source();
