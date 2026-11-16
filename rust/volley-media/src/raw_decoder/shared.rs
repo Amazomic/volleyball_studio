@@ -1,8 +1,11 @@
 //! One FFmpeg decode, with the existing CPU pixel filters on two synchronous
 //! streams. Linux UNIX sockets carry frames without full-video raw caches.
 //! No model observations or cache manifests are published by this module.
+mod backend;
 use super::{stderr_tail, DecodeSummary, ManagedChild, ModelPixels};
 use crate::frame_windows::{FrameWindows, RawWindow, MAX_FULL_VIDEO_STRIDE};
+pub use backend::{select_decode_backend, DecodeBackend, DecodePreference, DecodeSelection};
+use serde::Serialize;
 use std::{
     fs::{self, DirBuilder},
     io::{self, Read},
@@ -31,6 +34,14 @@ pub struct PrimaryFrameBatch {
     pub first_frame: u64,
     pub gray: Vec<u8>,
     pub rgb: Vec<u8>,
+}
+
+/// Immutable summary returned after both outputs reach verified EOF.
+#[derive(Clone, Debug, Serialize)]
+pub struct PrimaryDecodeSummary {
+    pub decode: DecodeSummary,
+    pub backend: DecodeBackend,
+    pub fallback_reason: Option<String>,
 }
 
 struct SocketDir(PathBuf);
@@ -200,12 +211,40 @@ fn receive(
 /// at the same global frame index; mismatches fail rather than silently drift.
 /// Channels are bounded to two windows per output, regardless of video length.
 ///
-/// This Linux/WSL primitive does not enable NVDEC or replace Studio orchestration
-/// until exact pixel/model parity and lifecycle tests have been accepted.
+/// Use the legacy software backend explicitly for parity tests and diagnostics.
 pub fn decode_full_video_shared(
     source: &Path,
     stride: usize,
     cancelled: &AtomicBool,
+    consume: impl FnMut(PrimaryFrameBatch) -> Result<(), String>,
+) -> Result<DecodeSummary, String> {
+    decode_full_video_shared_impl(source, stride, cancelled, DecodeBackend::Software, consume)
+}
+
+/// Backend decision is made before creating any model evidence; an NVDEC
+/// failure after this point is terminal, never an in-run software fallback.
+pub fn decode_full_video_shared_with_backend(
+    source: &Path,
+    stride: usize,
+    preference: DecodePreference,
+    cancelled: &AtomicBool,
+    consume: impl FnMut(PrimaryFrameBatch) -> Result<(), String>,
+) -> Result<PrimaryDecodeSummary, String> {
+    let decision = select_decode_backend(source, preference, cancelled)?;
+    let decode =
+        decode_full_video_shared_impl(source, stride, cancelled, decision.backend, consume)?;
+    Ok(PrimaryDecodeSummary {
+        decode,
+        backend: decision.backend,
+        fallback_reason: decision.fallback_reason,
+    })
+}
+
+fn decode_full_video_shared_impl(
+    source: &Path,
+    stride: usize,
+    cancelled: &AtomicBool,
+    backend: DecodeBackend,
     mut consume: impl FnMut(PrimaryFrameBatch) -> Result<(), String>,
 ) -> Result<DecodeSummary, String> {
     if !(1..=MAX_FULL_VIDEO_STRIDE).contains(&stride) {
@@ -232,26 +271,36 @@ pub fn decode_full_video_shared(
         .set_nonblocking(true)
         .map_err(|error| format!("RGB socket: {error}"))?;
 
-    let filters = concat!(
-        "[0:v]fps=30,split=2[ball][players];",
-        "[ball]scale=512:288:flags=bilinear,format=gray[g];",
-        "[players]scale=640:360:flags=bilinear,format=rgb24[r]"
+    // Hardware frames are explicitly downloaded in NV12 format before the
+    // old CPU fps/scale/format chain. Requiring CUDA output prevents FFmpeg
+    // from silently decoding unsupported sources on CPU.
+    let filter_prefix = if backend == DecodeBackend::Nvdec {
+        "[0:v]hwdownload,format=nv12,fps=30,split=2[ball][players];"
+    } else {
+        "[0:v]fps=30,split=2[ball][players];"
+    };
+    let filters = format!(
+        "{filter_prefix}[ball]scale=512:288:flags=bilinear,format=gray[g];\
+[players]scale=640:360:flags=bilinear,format=rgb24[r]"
     );
     let mut command = Command::new("ffmpeg");
+    command.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-threads",
+        "4",
+    ]);
+    if backend == DecodeBackend::Nvdec {
+        command.args(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]);
+    }
     command
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-threads",
-            "4",
-            "-i",
-        ])
+        .arg("-i")
         .arg(source)
         .args([
             "-filter_complex",
-            filters,
+            &filters,
             "-map",
             "[g]",
             "-an",
@@ -474,5 +523,293 @@ mod tests {
         assert!(result.unwrap_err().contains("cancelled"));
         assert!(started.elapsed() < Duration::from_secs(2));
         fs::remove_file(&source).unwrap();
+    }
+    #[test]
+    fn auto_h264_backend_preserves_all_model_input_bytes() {
+        if Command::new("ffmpeg").arg("-version").output().is_err()
+            || Command::new("ffprobe").arg("-version").output().is_err()
+        {
+            return;
+        }
+        let temp = SocketDir::new().unwrap();
+        let source = temp.0.join("auto-h264.mp4");
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=60:duration=0.7",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(generated.success());
+        let cancelled = AtomicBool::new(false);
+        let mut software = Vec::new();
+        let sw = decode_full_video_shared(&source, 9, &cancelled, |batch| {
+            software.push((
+                batch.first_frame,
+                Sha256::digest(&batch.gray).to_vec(),
+                Sha256::digest(&batch.rgb).to_vec(),
+            ));
+            Ok(())
+        })
+        .unwrap();
+        let mut current = 0usize;
+        let choice = decode_full_video_shared_with_backend(
+            &source,
+            9,
+            DecodePreference::Auto,
+            &cancelled,
+            |batch| {
+                assert_eq!(batch.first_frame, software[current].0);
+                assert_eq!(Sha256::digest(&batch.gray).to_vec(), software[current].1);
+                assert_eq!(Sha256::digest(&batch.rgb).to_vec(), software[current].2);
+                current += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        eprintln!(
+            "Auto backend: {:?}, fallback: {:?}",
+            choice.backend, choice.fallback_reason
+        );
+        assert_eq!(choice.decode.windows, sw.windows);
+        assert_eq!(choice.decode.decoded_frames, sw.decoded_frames);
+        assert_eq!(current, sw.windows);
+        if choice.backend == DecodeBackend::Software {
+            assert!(choice.fallback_reason.is_some());
+        } else {
+            assert_eq!(choice.backend, DecodeBackend::Nvdec);
+            assert!(choice.fallback_reason.is_none());
+        }
+        fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn uncertified_codec_never_uses_nvdec_even_when_forced() {
+        if Command::new("ffmpeg").arg("-version").output().is_err()
+            || Command::new("ffprobe").arg("-version").output().is_err()
+        {
+            return;
+        }
+        let temp = SocketDir::new().unwrap();
+        let source = temp.0.join("unsupported.mkv");
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=30:duration=0.5",
+                "-c:v",
+                "mpeg4",
+                "-y",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let cancelled = AtomicBool::new(false);
+        let selected = select_decode_backend(&source, DecodePreference::Auto, &cancelled).unwrap();
+        assert_eq!(selected.backend, DecodeBackend::Software);
+        assert!(selected.fallback_reason.unwrap().contains("not certified"));
+        let mut called = false;
+        let rejected = decode_full_video_shared_with_backend(
+            &source,
+            1,
+            DecodePreference::Nvdec,
+            &cancelled,
+            |_| {
+                called = true;
+                Ok(())
+            },
+        );
+        assert!(rejected.unwrap_err().contains("not certified"));
+        assert!(!called);
+        fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn preflight_does_not_fake_cuda_on_small_hevc_frames() {
+        if Command::new("ffmpeg").arg("-version").output().is_err()
+            || Command::new("ffprobe").arg("-version").output().is_err()
+        {
+            return;
+        }
+        let temp = SocketDir::new().unwrap();
+        let source = temp.0.join("small-hevc.mkv");
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=30:duration=0.5",
+                "-c:v",
+                "libx265",
+                "-preset",
+                "ultrafast",
+                "-x265-params",
+                "pools=1:frame-threads=1:log-level=error",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+            ])
+            .arg(&source)
+            .status();
+        if !generated.is_ok_and(|s| s.success()) {
+            return; // Optional external encoder not installed on this host.
+        }
+        let cancelled = AtomicBool::new(false);
+        let selection = select_decode_backend(&source, DecodePreference::Auto, &cancelled).unwrap();
+        assert_eq!(selection.backend, DecodeBackend::Software);
+        assert!(selection.fallback_reason.unwrap().contains("geometry"));
+        assert!(select_decode_backend(&source, DecodePreference::Nvdec, &cancelled).is_err());
+        fs::remove_file(source).unwrap();
+    }
+    #[test]
+    fn hevc_8bit_cuda_parity_and_hevc_10bit_conservative_fallback() {
+        if Command::new("ffmpeg").arg("-version").output().is_err()
+            || Command::new("ffprobe").arg("-version").output().is_err()
+        {
+            return;
+        }
+        let temp = SocketDir::new().unwrap();
+        let cancelled = AtomicBool::new(false);
+        for (name, format) in [("hevc-8", "yuv420p"), ("hevc-10", "yuv420p10le")] {
+            let source = temp.0.join(format!("{name}.mkv"));
+            let status = Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-threads",
+                    "2",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=320x180:rate=30:duration=0.7",
+                    "-c:v",
+                    "libx265",
+                    "-preset",
+                    "ultrafast",
+                    "-x265-params",
+                    "pools=1:frame-threads=1:log-level=error",
+                    "-pix_fmt",
+                    format,
+                    "-y",
+                ])
+                .arg(&source)
+                .status();
+            if !status.is_ok_and(|s| s.success()) {
+                return; // Hardware parity is conditional on local encoder availability.
+            }
+            let mut previous = Vec::new();
+            let software = decode_full_video_shared(&source, 9, &cancelled, |batch| {
+                previous.push((
+                    batch.first_frame,
+                    Sha256::digest(&batch.gray).to_vec(),
+                    Sha256::digest(&batch.rgb).to_vec(),
+                ));
+                Ok(())
+            })
+            .unwrap();
+            let mut position = 0;
+            let result = decode_full_video_shared_with_backend(
+                &source,
+                9,
+                DecodePreference::Auto,
+                &cancelled,
+                |batch| {
+                    assert_eq!(batch.first_frame, previous[position].0);
+                    assert_eq!(Sha256::digest(&batch.gray).to_vec(), previous[position].1);
+                    assert_eq!(Sha256::digest(&batch.rgb).to_vec(), previous[position].2);
+                    position += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            eprintln!(
+                "{name}: backend={:?}, fallback={:?}",
+                result.backend, result.fallback_reason
+            );
+            assert_eq!(result.decode.windows, software.windows);
+            assert_eq!(result.decode.decoded_frames, software.decoded_frames);
+            assert_eq!(position, software.windows);
+            if name == "hevc-10" {
+                assert_eq!(result.backend, DecodeBackend::Software);
+                assert!(result.fallback_reason.unwrap().contains("not certified"));
+            }
+            fs::remove_file(&source).unwrap();
+        }
+    }
+
+    #[test]
+    fn rotated_h264_auto_backend_avoids_unverified_cuda_transforms() {
+        if Command::new("ffmpeg").arg("-version").output().is_err()
+            || Command::new("ffprobe").arg("-version").output().is_err()
+        {
+            return;
+        }
+        let temp = SocketDir::new().unwrap();
+        let original = temp.0.join("original.mp4");
+        let rotated = temp.0.join("rotated.mp4");
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=30:duration=0.5",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+            ])
+            .arg(&original)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-display_rotation:v:0",
+                "90",
+                "-i"
+            ])
+            .arg(&original)
+            .args(["-c", "copy", "-y"])
+            .arg(&rotated)
+            .status()
+            .unwrap()
+            .success());
+        let cancelled = AtomicBool::new(false);
+        let selected = select_decode_backend(&rotated, DecodePreference::Auto, &cancelled).unwrap();
+        assert_eq!(selected.backend, DecodeBackend::Software);
+        assert!(selected.fallback_reason.unwrap().contains("rotation"));
+        fs::remove_file(original).unwrap();
+        fs::remove_file(rotated).unwrap();
     }
 }

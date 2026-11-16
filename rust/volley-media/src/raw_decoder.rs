@@ -4,7 +4,10 @@
 #[cfg(unix)]
 mod shared;
 #[cfg(unix)]
-pub use shared::{decode_full_video_shared, PrimaryFrameBatch};
+pub use shared::{
+    decode_full_video_shared, decode_full_video_shared_with_backend, select_decode_backend,
+    DecodeBackend, DecodePreference, DecodeSelection, PrimaryDecodeSummary, PrimaryFrameBatch,
+};
 
 use crate::frame_windows::{FrameWindows, RawWindow, CLIP_FRAMES, MAX_FRAMES};
 use serde::Serialize;
