@@ -55,13 +55,19 @@ canvas.getContext=()=>new Proxy({},{
   get:(_,name)=>name==="measureText"?()=>({width:60}):()=>{}
 });
 element("studio-analysis-stage").parentElement=element("analysis-media-fixture");
-const requests=[];
+const requests=[],writes=[];
 const win={
   devicePixelRatio:1,addEventListener(){},
   ResizeObserver:class {observe(){}},
   VolleyballStudioActivity:{
-    async fetch(path){
+    async fetch(path,options={}){
       requests.push(path);
+      if(path==="/api/video-edit"&&options.method==="POST"){
+        const saved=JSON.parse(options.body);writes.push(saved);
+        return {ok:true,json:async()=>({...saved,edit_revision:"saved-revision-2"})};
+      }
+      if(path==="/api/training/examples"&&options.method==="POST")
+        return {ok:true,json:async()=>({ok:true})};
       if(path.startsWith("/api/video-edit?"))
         return {ok:true,json:async()=>({
           trim_start_sec:0,trim_end_sec:null,court:[],edit_revision:"revision-1"
@@ -127,6 +133,90 @@ assert.match(element("studio-analysis-edit-status").textContent,/несохра�
 assert.equal(requests.filter(s=>s.startsWith("/api/video-edit?")).length,1);
 assert.equal(requests.filter(s=>s.startsWith("/api/video-info?")).length,1);
 console.log("PASS: HEVC frame fallback loads original frames and supports time selection/markup");
+
+// Four corners form a field that can be dragged from anywhere inside the polygon.
+const place=async (x,y,id=1)=>{
+  await canvas.fire("pointerdown",{clientX:x,clientY:y,pointerId:id});
+  await canvas.fire("pointerup",{clientX:x,clientY:y,pointerId:id});
+};
+for(const [x,y] of [[670,220],[670,450],[270,450]])await place(x,y);
+await element("studio-analysis-net-mode").fire("click");
+await place(340,270);
+await place(580,270);
+const draft=()=>{
+  const entry=[...storage.entries()].find(([key])=>key.startsWith("local:volley:editor-draft:v1:"));
+  assert.ok(entry,"Court changes should be saved as draft metadata");
+  return JSON.parse(entry[1]).value;
+};
+const flush=()=>new Promise(resolve=>setTimeout(resolve,290));
+const close=(a,b)=>Math.abs(a-b)<0.00001;
+await flush();
+const before=draft();
+assert.equal(before.court.length,4);
+assert.equal(before.net.length,2);
+await canvas.fire("pointerdown",{clientX:470,clientY:335,pointerId:7});
+await canvas.fire("pointermove",{clientX:524,clientY:371,pointerId:7});
+await canvas.fire("pointerup",{clientX:524,clientY:371,pointerId:7});
+await flush();
+const moved=draft();
+const dx=54/(960*.84),dy=36/(540*.84);
+for(let i=0;i<4;i++){
+  assert.ok(close(moved.court[i][0]-before.court[i][0],dx),"all four corners shift equally in X");
+  assert.ok(close(moved.court[i][1]-before.court[i][1],dy),"all four corners shift equally in Y");
+}
+for(let i=0;i<2;i++){
+  assert.ok(close(moved.net[i][0]-before.net[i][0],dx),"net stays aligned with court in X");
+  assert.ok(close(moved.net[i][1]-before.net[i][1],dy),"net stays aligned with court in Y");
+}
+// Outside clicks cannot reposition a completed field.
+await canvas.fire("pointerdown",{clientX:900,clientY:500,pointerId:8});
+await canvas.fire("pointermove",{clientX:920,clientY:520,pointerId:8});
+await canvas.fire("pointerup",{clientX:920,clientY:520,pointerId:8});
+await flush();
+assert.deepEqual(JSON.stringify(draft().court),JSON.stringify(moved.court));
+// Existing individual-corner and net-point editing retain precedence.
+await canvas.fire("pointerdown",{clientX:324,clientY:256,pointerId:9});
+await canvas.fire("pointermove",{clientX:335,clientY:260,pointerId:9});
+await canvas.fire("pointerup",{clientX:335,clientY:260,pointerId:9});
+await flush();
+const cornerOnly=draft();
+assert.ok(!close(cornerOnly.court[0][0],moved.court[0][0]));
+for(let i=1;i<4;i++)assert.deepEqual(JSON.stringify(cornerOnly.court[i]),JSON.stringify(moved.court[i]));
+assert.deepEqual(JSON.stringify(cornerOnly.net),JSON.stringify(moved.net));
+// Net endpoints remain separately draggable without moving the court.
+await canvas.fire("pointerdown",{clientX:394,clientY:306,pointerId:11});
+await canvas.fire("pointermove",{clientX:409,clientY:310,pointerId:11});
+await canvas.fire("pointerup",{clientX:409,clientY:310,pointerId:11});
+await flush();
+const netOnly=draft();
+assert.ok(!close(netOnly.net[0][0],cornerOnly.net[0][0]));
+assert.deepEqual(JSON.stringify(netOnly.net[1]),JSON.stringify(cornerOnly.net[1]));
+assert.deepEqual(JSON.stringify(netOnly.court),JSON.stringify(cornerOnly.court));
+// A large translation is clamped as a single unit, without distorting the polygon.
+await canvas.fire("pointerdown",{clientX:524,clientY:371,pointerId:10});
+await canvas.fire("pointermove",{clientX:4000,clientY:371,pointerId:10});
+await canvas.fire("pointerup",{clientX:4000,clientY:371,pointerId:10});
+await flush();
+const limited=draft();
+const limitedDx=limited.court[0][0]-netOnly.court[0][0];
+for(let i=1;i<4;i++)assert.ok(close(limited.court[i][0]-netOnly.court[i][0],limitedDx));
+for(const p of [...limited.court,...limited.net])
+  assert.ok(p.every(v=>v>=-.5-1e-8&&v<=1.5+1e-8),"Translated field stays within backend bounds");
+
+// Zoom-out must allow significantly more context than the previous 52% floor.
+for(let i=0;i<20;i++)await element("studio-analysis-zoom-out").fire("click");
+assert.equal(element("studio-analysis-zoom-label").textContent,"10%");
+assert.equal(element("studio-analysis-zoom-out").disabled,true);
+await element("studio-analysis-zoom-in").fire("click");
+assert.equal(element("studio-analysis-zoom-label").textContent,"18%");
+await element("studio-analysis-edit-save").fire("click");
+assert.equal(writes.length,1,"Field translation must be saved through the existing video-edit API");
+assert.equal(writes[0].court.length,4);
+assert.equal(writes[0].net.length,2);
+assert.deepEqual(JSON.stringify(writes[0].court),JSON.stringify(limited.court));
+assert.deepEqual(JSON.stringify(writes[0].net),JSON.stringify(limited.net));
+console.log("PASS: entire field/net drag, separate point edits, bounded translation, saved coordinates, 10% zoom");
+
 
 
 // With focus on <summary>, Space is consumed and must not collapse the editor.

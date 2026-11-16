@@ -17,10 +17,10 @@
   const modeButton=$("studio-analysis-court-mode");
   const zoomOut=$("studio-analysis-zoom-out"),zoomIn=$("studio-analysis-zoom-in");
   const zoomLabel=$("studio-analysis-zoom-label");
-  const minZoom=0.52,maxZoom=1.24,zoomStep=0.08;
+  const minZoom=0.10,maxZoom=1.24,zoomStep=0.08;
   let project="",source="",generation=0,corners=[],drag=-1,duration=0;
   let marking=false,zoom=0.84,settingsLoaded=false,settingsLoading=false,net=null,netDrag=-1,geometrySource="manual";
-  let markingNet=false,netPoints=[];
+  let markingNet=false,netPoints=[],courtDrag=null;
   // HEVC and other unsupported browser codecs still allow exact source-frame
   // seeking, trimming and calibration, without transcoding the full match.
   let stillMode=false,stillCursor=0,stillReady=false,stillDelay=null,stillMeta=null;
@@ -256,13 +256,23 @@
       context.fillText(String(i+1),x,y);
     });
   };
-  const point=event=>{
+  const rawPoint=event=>{
     const rect=frame.getBoundingClientRect();
     if(!rect.width||!rect.height)return [0,0];
-    // Image-relative coordinates can be outside [0,1] in the margin.
-    // Guard extreme values to match the bounded Rust API.
-    return [clamp((event.clientX-rect.left)/rect.width,-0.5,1.5),
-      clamp((event.clientY-rect.top)/rect.height,-0.5,1.5)];
+    return [(event.clientX-rect.left)/rect.width,
+      (event.clientY-rect.top)/rect.height];
+  };
+  // Persisted image-relative coordinates are bounded by the Rust API.
+  const point=event=>rawPoint(event).map(v=>clamp(v,-0.5,1.5));
+  const insideCourt=([x,y])=>{
+    if(corners.length!==4)return false;
+    let inside=false;
+    for(let i=0,j=corners.length-1;i<corners.length;j=i++){
+      const [xi,yi]=corners[i],[xj,yj]=corners[j];
+      if((yi>y)!==(yj>y)&&x<(xj-xi)*(y-yi)/(yj-yi)+xi)
+        inside=!inside;
+    }
+    return inside;
   };
   const markModified=()=>{
     updateClock();
@@ -286,6 +296,13 @@
       const [x,y]=pointXY(p,rect,image);
       return Math.hypot(x-(event.clientX-rect.left),y-(event.clientY-rect.top))<17;
     });
+    if(drag<0&&corners.length===4&&insideCourt(rawPoint(event))){
+      courtDrag={pointerId:event.pointerId,start:rawPoint(event),
+        corners:corners.map(p=>[...p]),net:net?net.map(p=>[...p]):null,moved:false};
+      canvas.style.cursor="grabbing";
+      canvas.setPointerCapture(event.pointerId);
+      return;
+    }
     if(drag<0&&corners.length<4){
       geometrySource="manual";corners.push(at);drag=corners.length-1;
       markModified();draw();
@@ -293,11 +310,30 @@
     if(drag>=0)canvas.setPointerCapture(event.pointerId);
   });
   canvas.addEventListener("pointermove",event=>{
+    if(courtDrag){
+      if(event.pointerId!==courtDrag.pointerId)return;
+      const all=[...courtDrag.corners,...(courtDrag.net||[])];
+      const delta=rawPoint(event).map((value,i)=>
+        clamp(value-courtDrag.start[i],
+          -0.5-Math.min(...all.map(p=>p[i])),
+          1.5-Math.max(...all.map(p=>p[i]))));
+      const translate=points=>points.map(p=>p.map((v,i)=>v+delta[i]));
+      corners=translate(courtDrag.corners);
+      if(courtDrag.net)net=translate(courtDrag.net);
+      courtDrag.moved=delta.some(v=>Math.abs(v)>1e-8);
+      draw();return;
+    }
     if(netDrag>=0){net[netDrag]=point(event);draw();return;}
-    if(drag<0)return;
-    corners[drag]=point(event);draw();
+    if(drag>=0){corners[drag]=point(event);draw();return;}
+    canvas.style.cursor=marking&&insideCourt(rawPoint(event))?"grab":"crosshair";
   });
-  const finishDrag=()=>{if(drag>=0||netDrag>=0){geometrySource="manual";markModified();}drag=-1;netDrag=-1;};
+  const finishDrag=event=>{
+    if(courtDrag&&event.pointerId!==courtDrag.pointerId)return;
+    if(drag>=0||netDrag>=0||courtDrag?.moved){
+      geometrySource="manual";markModified();
+    }
+    drag=-1;netDrag=-1;courtDrag=null;canvas.style.cursor="crosshair";
+  };
   canvas.addEventListener("pointerup",finishDrag);
   canvas.addEventListener("pointercancel",finishDrag);
   $("studio-analysis-net-mode").addEventListener("click",()=>{
@@ -307,7 +343,7 @@
     corners.pop();geometrySource="manual";draw();markModified();
   });
   $("studio-analysis-court-clear").addEventListener("click",()=>{
-    corners=[];net=null;markingNet=false;netPoints=[];geometrySource="manual";draw();markModified();
+    corners=[];net=null;markingNet=false;netPoints=[];courtDrag=null;geometrySource="manual";draw();markModified();
   });
   $("studio-analysis-court-auto").addEventListener("click",async()=>{
     if(!valid())return;
@@ -483,7 +519,7 @@
     if(stillDelay!==null){clearTimeout(stillDelay);stillDelay=null;}
     still.removeAttribute("src");still.hidden=true;stillMode=false;stillReady=false;stillMeta=null;
     video.hidden=false;playButton.disabled=false;playButton.textContent="▶ Воспроизвести";
-    project=projectId||"";source=videoName||"";corners=[];net=null;markingNet=false;netPoints=[];
+    project=projectId||"";source=videoName||"";corners=[];net=null;markingNet=false;netPoints=[];courtDrag=null;
     duration=0;begin.value="0";end.value="0";seek.value="0";seek.max="1000";
     media.style.setProperty("--frame-ratio","1.77778");
     zoom=0.84;setMarking(false);
