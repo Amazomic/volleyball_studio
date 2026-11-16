@@ -10,10 +10,12 @@ Write paths: `rust/volley-core/src/motion.rs`, `rust/volley-core/src/motion/traj
 
 Review focus: real 33.1-second rebound; smooth apex; single-frame localization error; two nearby independent contacts; missing samples; no crossing rally/video boundaries; player-free detection and ambiguous attribution.
 
-- [ ] Add trajectory regressions and real-ball fixture; run red against the current detector.
-- [ ] Implement bounded flight fitting and deduplicated motion candidates; run core tests.
-- [ ] Feed motion candidates into existing player geometry, preserving pose confirmation and unknown technique when unsupported.
-- [ ] Verify real replay contact and negative cases; inspect full diff and run workspace, WASM and ownership/roadmap checks.
+- [x] Add trajectory regressions and real-ball fixture; run red against the current detector.
+- [x] Implement bounded flight fitting and deduplicated motion candidates; run core tests.
+- [x] Feed motion candidates into existing player geometry, preserving pose confirmation and unknown technique when unsupported.
+- [x] Verify recorded-coordinate contact regression and negative cases; inspect full diff and run workspace, WASM and ownership/roadmap checks.
 - [ ] Integrate only reviewed paths into rust, record limitations and provenance, commit in Russian, check active jobs, rebuild/restart safely, and create a new CPU version using saved GPU evidence.
 
 Execution: sequential in this chat under the user's implementation request; no worker agents.
+
+Integration is committed to rust and release is built. Runtime restart is blocked by the existing process refusing two graceful stop attempts; real replay rerun is unavailable because both projects lack saved GPU evidence. See docs/TRAJECTORY_TOUCH_DETECTOR.md.
