@@ -30,6 +30,7 @@ const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_ROW_BYTES: usize = 512 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
+pub(crate) const POSE_TRACK_ASSOCIATION_VERSION: &str = "pose_coco17_recency_v2";
 pub(crate) mod ball_track;
 mod gap_interpolation;
 mod identity_handoff;
@@ -725,7 +726,7 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             "replay_id":replay_id,
             "source_fusion_id":req.fusion_id,
             "source_fusion_sha256":expected,
-            "track_association_version":if pose_source.is_some(){"pose_coco17_primary_v1"}else{"detector_box_legacy_v1"},
+            "track_association_version":if pose_source.is_some(){POSE_TRACK_ASSOCIATION_VERSION}else{"detector_box_legacy_v1"},
             "source_pose_run_id":pose_source.as_ref().map(|s| s.id.as_str()),
             "source_pose_sha256":pose_source.as_ref().map(|s| s.sha.as_str()),
             "pose_measured_track_proposals":totals.pose_detections,

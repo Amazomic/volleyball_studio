@@ -850,7 +850,7 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
         })
         && (saved["gpu_model_stack"] != requested_gpu_model_stack()
             || !request.gpu.pose_enabled
-            || track["track_association_version"] == "pose_coco17_primary_v1")
+            || track["track_association_version"] == cpu_retrack::POSE_TRACK_ASSOCIATION_VERSION)
         && track["replay_id"] == replay
         && track["interpolate_pose"].as_bool().unwrap_or(true) == request.gpu.interpolate_pose
         && track["source_fusion_id"] == fusion

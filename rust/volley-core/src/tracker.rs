@@ -391,7 +391,7 @@ fn score_match(
     if let Some(pose_score) = pose_score {
         // A measured torso trajectory outweighs disagreements between crop
         // shapes, but cannot teleport or override an invalid skeleton.
-        score = score.max(0.40 + 0.53 * pose_score);
+        score = score.max(0.40 + 0.53 * pose_score - 0.18 * freshness);
     }
     let threshold = config.min_assignment_score - 0.08 * freshness;
     // Prefer a stable, repeatedly observed skeleton over a transient duplicate,
@@ -584,6 +584,49 @@ mod tests {
             query_index: Some(query),
             touch_probability: Some(0.9),
             head_point_norm: Some([x + 0.05, 0.2]),
+        }
+    }
+
+    #[test]
+    fn recent_setter_track_is_not_stolen_by_a_stale_track_at_overhead_pass() {
+        #[derive(Deserialize)]
+        struct Sample {
+            frame: u64,
+            detection: Candidate,
+            pose: [[f64; 3]; 17],
+        }
+        let samples: Vec<Sample> = serde_json::from_str(include_str!(
+            "../tests/fixtures/alternating_setter_tracks.json"
+        ))
+        .unwrap();
+        let active = |id, a: &Sample, b: &Sample| ActiveTrack {
+            id,
+            last_frame: b.frame,
+            bbox: b.detection.bbox_xyxy_norm,
+            head: b.detection.head_point_norm,
+            pose: Some((b.frame, PoseEvidence { joints: b.pose })),
+            observations: 90,
+            prev: Some((a.frame, a.detection.bbox_xyxy_norm)),
+        };
+        let mut tracker = ProvisionalTracker::new(TrackingOptions::default()).unwrap();
+        tracker.active = vec![
+            active(6, &samples[0], &samples[1]),
+            active(10, &samples[2], &samples[3]),
+        ];
+        tracker.last_frame = Some(935);
+        tracker.next_id = 11;
+        for sample in &samples[4..] {
+            let result = tracker
+                .process_frame_with_poses(
+                    sample.frame,
+                    std::slice::from_ref(&sample.detection),
+                    &[Some(PoseEvidence {
+                        joints: sample.pose,
+                    })],
+                )
+                .unwrap();
+            assert_eq!(result.tracks.len(), 1);
+            assert_eq!(result.tracks[0].track_id, 10, "frame {}", sample.frame);
         }
     }
 
