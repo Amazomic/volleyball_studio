@@ -35,6 +35,7 @@ mod gap_interpolation;
 mod identity_handoff;
 mod identity_turnover;
 mod pose_source;
+mod track_appearance;
 mod track_merge;
 
 pub(crate) use volley_core::contracts::job_id as opaque_id;
@@ -176,7 +177,16 @@ fn replay_frames_with_pose(
     expected_sha: &str,
     pose: Option<&pose_source::Snapshot>,
 ) -> Result<(String, ReplayTotals, u64), String> {
-    replay_frames_with_pose_options(source, output, count, config, expected_sha, pose, true)
+    replay_frames_with_pose_options(
+        source,
+        output,
+        count,
+        config,
+        expected_sha,
+        pose,
+        true,
+        None,
+    )
 }
 
 fn replay_frames_with_pose_options(
@@ -187,6 +197,7 @@ fn replay_frames_with_pose_options(
     expected_sha: &str,
     pose: Option<&pose_source::Snapshot>,
     interpolate_players: bool,
+    photos: Option<&track_appearance::Source<'_>>,
 ) -> Result<(String, ReplayTotals, u64), String> {
     if !(1..=48 * 3600 * 30).contains(&count) {
         return Err("Invalid fused CPU frame count".into());
@@ -202,6 +213,7 @@ fn replay_frames_with_pose_options(
         expected_sha,
         pose,
         interpolate_players,
+        photos,
     );
     // This intermediate output is never exposed as a CPU run, including errors.
     let _ = fs::remove_file(tentative);
@@ -385,6 +397,7 @@ fn replay_frames_verified(
     expected_sha: &str,
     pose: Option<&pose_source::Snapshot>,
     interpolate_players: bool,
+    photos: Option<&track_appearance::Source<'_>>,
 ) -> Result<(String, ReplayTotals, u64), String> {
     let mut reader = BoundedReader::open(source)?;
     let mut pose_rows = pose.map(pose_source::PoseRows::open).transpose()?;
@@ -558,7 +571,7 @@ fn replay_frames_verified(
     let observed_sha = format!("{:x}", sha.finalize());
     // Merge genuinely duplicated bodies while every observation is still
     // independent. Never use the later visual interpolation for identity.
-    let (canonical_sha, merged) = track_merge::merge(output, &observed_sha, count)?;
+    let (canonical_sha, merged) = track_merge::merge(output, &observed_sha, count, photos)?;
     totals.duplicate_track_ids_merged = merged;
     let (turnover_sha, splits, handoffs) = identity_turnover::split(output, &canonical_sha, count)?;
     totals.identity_turnover_splits = splits;
@@ -707,6 +720,10 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             expected,
             pose_source.as_ref(),
             req.interpolate_players,
+            Some(&track_appearance::Source {
+                video: prepared,
+                repository: &state.repository_root,
+            }),
         )?;
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared video changed during CPU replay".into());
@@ -741,6 +758,7 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             "discarded_short_track_ids":totals.unconfirmed_tracks,
             "tentative_track_count":totals.tentative_tracks,
             "duplicate_track_ids_merged":totals.duplicate_track_ids_merged,
+            "track_merge_appearance_method":"multi_sample_person_reid_v1_fail_closed",
             "identity_turnover_version":"measured_roster_turnover_handoff_v2",
             "identity_turnover_splits":totals.identity_turnover_splits,
             "identity_handoff_splits":totals.identity_handoff_splits,
@@ -1526,6 +1544,7 @@ mod tests {
             &fusion_sha,
             Some(&snapshot),
             false,
+            None,
         )
         .unwrap();
         let disabled_bytes = fs::read(&without_gaps).unwrap();

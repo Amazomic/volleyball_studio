@@ -1,6 +1,7 @@
 //! Merge only independently observed duplicate boxes of the same physical body.
-//! Never use interpolated positions, photo similarity or overlapping lifespans
-//! to infer identity. Operates exclusively on the unpublished CPU replay file.
+//! Never merge by geometry alone: candidate pairs require several independent
+//! OpenVINO ReID crops BEFORE any player-name assignment. Operates only on
+//! an unpublished CPU replay; unavailable photo evidence fails closed.
 use super::{BoundedReader, MAX_ROW_BYTES};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -14,14 +15,14 @@ use std::{
 use volley_core::fusion::Candidate;
 
 #[derive(Deserialize)]
-struct Row {
-    frame_index: u64,
-    tracked_players: Vec<Observation>,
+pub(super) struct Row {
+    pub(super) frame_index: u64,
+    pub(super) tracked_players: Vec<Observation>,
 }
 #[derive(Deserialize)]
-struct Observation {
-    track_id: u64,
-    detection: Candidate,
+pub(super) struct Observation {
+    pub(super) track_id: u64,
+    pub(super) detection: Candidate,
 }
 #[derive(Default)]
 struct PairEvidence {
@@ -268,8 +269,20 @@ pub(super) fn merge(
     source: &Path,
     expected_sha: &str,
     frames: u64,
+    photos: Option<&super::track_appearance::Source<'_>>,
 ) -> Result<(String, u64), String> {
-    let aliases = find_aliases(source, expected_sha, frames)?;
+    let proposed = find_aliases(source, expected_sha, frames)?;
+    let aliases =
+        super::track_appearance::approved_aliases(source, expected_sha, frames, &proposed, photos);
+    write_aliases(source, expected_sha, frames, aliases)
+}
+
+fn write_aliases(
+    source: &Path,
+    expected_sha: &str,
+    frames: u64,
+    aliases: BTreeMap<u64, u64>,
+) -> Result<(String, u64), String> {
     if aliases.is_empty() {
         return Ok((expected_sha.to_owned(), 0));
     }
@@ -351,7 +364,7 @@ mod tests {
             "bbox_xyxy_norm":box_xy,"query_index":0,"head_point_norm":head})
     }
     #[test]
-    fn merges_repeated_same_head_and_keeps_distinct_players_even_if_interpolated() {
+    fn geometry_canonicalizes_same_head_after_independent_verification() {
         let dir = std::env::temp_dir().join(format!("track-merge-{}", Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
         let path = dir.join("tracks.jsonl");
@@ -370,7 +383,10 @@ mod tests {
         }
         fs::write(&path, &raw).unwrap();
         let sha = format!("{:x}", Sha256::digest(&raw));
-        let (after, merged) = merge(&path, &sha, 12).unwrap();
+        let (unverified, rejected) = merge(&path, &sha, 12, None).unwrap();
+        assert_eq!((unverified, rejected), (sha.clone(), 0));
+        let aliases = find_aliases(&path, &sha, 12).unwrap();
+        let (after, merged) = write_aliases(&path, &sha, 12, aliases).unwrap();
         assert_eq!(merged, 1);
         let rows = fs::read_to_string(&path).unwrap();
         for line in rows.lines() {
@@ -417,7 +433,8 @@ mod tests {
         fs::write(&path, &raw).unwrap();
         let sha = format!("{:x}", Sha256::digest(&raw));
         assert_eq!(find_aliases(&path, &sha, 76).unwrap().get(&7), Some(&6));
-        let (_, count) = merge(&path, &sha, 76).unwrap();
+        let aliases = find_aliases(&path, &sha, 76).unwrap();
+        let (_, count) = write_aliases(&path, &sha, 76, aliases).unwrap();
         assert_eq!(count, 1);
         for row in fs::read_to_string(&path).unwrap().lines() {
             let doc: Value = serde_json::from_str(row).unwrap();
@@ -457,7 +474,7 @@ mod tests {
         fs::write(&path, &raw).unwrap();
         let sha = format!("{:x}", Sha256::digest(&raw));
         assert!(find_aliases(&path, &sha, 44).unwrap().is_empty());
-        let (unchanged, count) = merge(&path, &sha, 44).unwrap();
+        let (unchanged, count) = merge(&path, &sha, 44, None).unwrap();
         assert_eq!(count, 0);
         assert_eq!(unchanged, sha);
         fs::remove_dir_all(dir).unwrap();
