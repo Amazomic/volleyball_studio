@@ -308,10 +308,20 @@ pub async fn report(
     if operation == "preview" {
         return Ok(Json(plan.preview));
     }
+    let runs = plan.outro["sources"]
+        .as_array()
+        .ok_or_else(|| storage::bad_request("Missing report sources"))?
+        .iter()
+        .filter_map(|source| source["rally_run_id"].as_str().map(str::to_owned))
+        .collect();
+    let materials =
+        crate::native_rally_preview::material_bindings(state.clone(), project_id.clone(), runs)
+            .await?;
     let Json(job) = montage::start_native_montage(
         State(state),
         headers,
         Json(montage::MontageRequest {
+            materials,
             project_id,
             clips: plan.clips,
             audio_file,

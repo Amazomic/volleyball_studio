@@ -323,7 +323,8 @@ fn source_with_verified_tracks(
             "Video does not belong to selected project",
         ));
     }
-    let plan = preparation::plan_for(state, project_id, video)?;
+    let plan =
+        preparation::plan_for_run(state, project_id, video, "native_cpu_replays", replay_id)?;
     let prepared = plan
         .ready_path()
         .ok_or_else(|| storage::bad_request("Prepared video missing"))?;
@@ -402,10 +403,18 @@ fn source_with_verified_tracks(
     let known = VerifiedTrackSet::new(evidence.clone(), tracks.keys().copied())
         .map_err(storage::bad_request)?;
     let (catalog, _) = player_catalog::load(state, false)?;
+    if project
+        .get("player_ids")
+        .is_some_and(|value| !value.is_null() && !value.is_array())
+    {
+        return Err(storage::bad_request(
+            "Project roster must contain a player_ids array",
+        ));
+    }
     let allowed = project["player_ids"]
         .as_array()
-        .ok_or_else(|| storage::bad_request("Project roster must contain a player_ids array"))?
-        .iter()
+        .into_iter()
+        .flatten()
         .filter_map(Value::as_str)
         .collect::<BTreeSet<_>>();
     let mut roster = BTreeMap::new();
@@ -553,6 +562,7 @@ mod rally_scope_tests {
         assert_eq!(full.len(), 4);
         let windows = crate::native_rally_preview::RallyWindows {
             intervals: vec![(12, 20), (40, 44)],
+            contexts: std::collections::BTreeMap::new(),
         };
         let (scoped, full_also) = scan_with_scope(&path, &sha, 48, Some(&windows)).unwrap();
         assert_eq!(full_also.unwrap().len(), 4);

@@ -35,6 +35,7 @@ pub struct PreparationPlan {
     pub duration_sec: f64,
     pub already_analysis_ready: bool,
     pub original_preview_safe: bool,
+    pub original_source: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +114,68 @@ pub fn prepared_file_sha256(path: &Path) -> io::Result<(u64, String)> {
         ));
     }
     Ok((total, format!("{:x}", digest.finalize())))
+}
+
+type SourceProof = (u64, SystemTime, (u64, u64, i64, i64), Value);
+
+pub fn source_provenance(path: &Path) -> Result<Value, String> {
+    static SOURCES: OnceLock<Mutex<HashMap<PathBuf, SourceProof>>> = OnceLock::new();
+    let meta = fs::symlink_metadata(path).map_err(|e| format!("Original metadata: {e}"))?;
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err("Unsafe original video".into());
+    }
+    let modified = meta
+        .modified()
+        .map_err(|e| format!("Original timestamp: {e}"))?;
+    let change = file_change_stamp(path, &meta);
+    let cache = SOURCES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(stamp) = change {
+        let entries = cache.lock().map_err(|_| "Original proof lock poisoned")?;
+        if let Some((size, time, previous, proof)) = entries.get(path) {
+            if *size == meta.len() && *time == modified && *previous == stamp {
+                return Ok(proof.clone());
+            }
+        }
+    }
+    let (size, hash) = prepared_file_sha256(path).map_err(|e| format!("Original SHA-256: {e}"))?;
+    let probe = ffprobe(path)?;
+    let info = inspect_probe(&probe)?;
+    let after = fs::symlink_metadata(path).map_err(|e| format!("Original metadata: {e}"))?;
+    if after.len() != size
+        || after.modified().ok() != Some(modified)
+        || file_change_stamp(path, &after) != change
+    {
+        return Err("Original video changed during verification".into());
+    }
+    let video = probe["streams"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["codec_type"] == "video"))
+        .ok_or("Missing original video stream")?;
+    let proof = serde_json::json!({
+        "schema":"volley-original-source/1","sha256":hash,"size_bytes":size,
+        "video":info,"native_avg_frame_rate":video["avg_frame_rate"],
+        "native_time_base":video["time_base"],"native_start_time":video["start_time"],
+        "timeline":{"analysis_fps":30,"origin":"original_relative_seconds",
+            "frame_time":"frame_index / 30","source_offset_sec":0.0}
+    });
+    if let Some(stamp) = change {
+        let mut entries = cache.lock().map_err(|_| "Original proof lock poisoned")?;
+        if entries.len() >= 32 {
+            entries.clear();
+        }
+        entries.insert(path.to_path_buf(), (size, modified, stamp, proof.clone()));
+    }
+    Ok(proof)
+}
+
+pub fn verify_source_provenance(path: &Path, expected: &Value) -> Result<(), String> {
+    if expected.is_null() {
+        return Ok(());
+    }
+    if expected["schema"] != "volley-original-source/1" || source_provenance(path)? != *expected {
+        return Err("Original video differs from the analysis source".into());
+    }
+    Ok(())
 }
 // A finished prepared MP4 can be gigabytes. Verify its receipt once per
 // process/file stamp, not once per API request. The receipt is still read from
@@ -290,6 +353,17 @@ fn prepared_receipt_matches(path: &Path, size: u64, expected_sha: &str) -> bool 
 }
 
 impl PreparationPlan {
+    pub fn bind_source(mut self) -> Result<Self, String> {
+        let proof = source_provenance(&self.source)?;
+        let base = cache_id(&self.identity);
+        let hash = proof["sha256"].as_str().ok_or("Missing original digest")?;
+        let parent = self.output.parent().ok_or("Missing prepared parent")?;
+        self.manifest = parent.join(format!("{base}-{hash}.json"));
+        self.output = parent.join(format!("{base}-{hash}.mp4"));
+        self.original_source = Some(proof);
+        Ok(self)
+    }
+
     pub fn new(source: &Path, shared_root: &Path, width: Option<u32>) -> Result<Self, String> {
         let source = source
             .canonicalize()
@@ -335,6 +409,7 @@ impl PreparationPlan {
             duration_sec: info.duration_sec,
             already_analysis_ready,
             original_preview_safe,
+            original_source: None,
         })
     }
 
@@ -371,6 +446,13 @@ impl PreparationPlan {
         // Old ready manifests (Python schema 2 or early Rust without a
         // content receipt) are NOT trusted; rebuild rather than silently
         // accepting a same-size corrupted or replaced video.
+        if let Some(expected) = &self.original_source {
+            if &value["original_source"] != expected
+                || verify_source_provenance(&self.source, expected).is_err()
+            {
+                return None;
+            }
+        }
         let declared_size = value["cache_size_bytes"].as_u64()?;
         let declared_hash = value["cache_sha256"].as_str()?;
         if declared_hash.len() != 64
@@ -429,6 +511,70 @@ impl PreparationPlan {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn original_provenance_hashes_content_and_maps_analysis_to_relative_time() {
+        let root = std::env::temp_dir().join(format!("volley-provenance-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.mp4");
+        let output = std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:r=60000/1001",
+                "-t",
+                "0.3",
+                "-c:v",
+                "libx264",
+                "-threads",
+                "1",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&source)
+            .unwrap()
+            .write_all(&[0, 0, 0, 9, b'f', b'r', b'e', b'e', 0])
+            .unwrap();
+        let stamp = std::fs::metadata(&source).unwrap().modified().unwrap();
+        let legacy_plan = super::PreparationPlan::new(&source, &root, None).unwrap();
+        let bound_before = legacy_plan.clone().bind_source().unwrap();
+        assert_ne!(legacy_plan.output, bound_before.output);
+        let first = super::source_provenance(&source).unwrap();
+        assert_eq!(
+            first["sha256"],
+            super::prepared_file_sha256(&source).unwrap().1
+        );
+        assert_eq!(first["timeline"]["analysis_fps"], 30);
+        assert_eq!(first["timeline"]["origin"], "original_relative_seconds");
+        let mut bytes = std::fs::read(&source).unwrap();
+        *bytes.last_mut().unwrap() = 1;
+        std::fs::write(&source, bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(stamp))
+            .unwrap();
+        let changed_plan = super::PreparationPlan::new(&source, &root, None).unwrap();
+        assert_eq!(legacy_plan.output, changed_plan.output);
+        assert_ne!(
+            bound_before.output,
+            changed_plan.bind_source().unwrap().output
+        );
+        assert_ne!(
+            first["sha256"],
+            super::source_provenance(&source).unwrap()["sha256"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use super::{cache_id, python_fingerprint_json, PreparedIdentity};
 
     #[test]
@@ -482,6 +628,7 @@ mod tests {
             duration_sec: 1.0,
             already_analysis_ready: false,
             original_preview_safe: false,
+            original_source: None,
         };
         std::fs::write(&cached, b"this-is-prepared-video").unwrap();
         let (size, digest) = prepared_file_sha256(&cached).unwrap();
@@ -596,6 +743,7 @@ mod tests {
             duration_sec: 1.0,
             already_analysis_ready: true,
             original_preview_safe: true,
+            original_source: None,
         };
         assert_eq!(plan.reused(), Some(PreparationReuse::Original));
         std::fs::write(&source, b"modified different size").unwrap();

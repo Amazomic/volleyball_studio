@@ -346,7 +346,7 @@
   }
   function buildWordMaps(){
     const count=wasm.volley_ui_text_count();
-    if(count<80||count>500)throw Error("Unexpected UI translation catalogue");
+    if(count<80||count>1024)throw Error("Unexpected UI translation catalogue");
     const previous=wasm.volley_ui_get(KEYS.locale);
     for(let i=0;i<count;i++){
       wasm.volley_ui_set(KEYS.locale,0);

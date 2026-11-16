@@ -416,13 +416,33 @@ fn interpolate_raw_players(before: &[Value], after: &[Value], t: f64) -> Vec<Val
 /// Exact detections stay in raw.poses; interpolation is kept separately in
 /// raw.poses_interpolated. CPU touch analysis can explicitly consume the same
 /// bounded estimates while preserving their non-measured provenance.
-pub fn raw_window(
+pub(crate) fn raw_window(
     project_root: &Path,
     fusion_id: &str,
     total_frames: u64,
     start: u64,
     end: u64,
     frames: &mut [Value],
+) -> Result<Option<String>, String> {
+    raw_window_policy(
+        project_root,
+        fusion_id,
+        total_frames,
+        start,
+        end,
+        frames,
+        None,
+    )
+}
+
+pub fn raw_window_policy(
+    project_root: &Path,
+    fusion_id: &str,
+    total_frames: u64,
+    start: u64,
+    end: u64,
+    frames: &mut [Value],
+    interpolation: Option<bool>,
 ) -> Result<Option<String>, String> {
     if !volley_core::contracts::job_id(fusion_id)
         || start >= end
@@ -434,6 +454,7 @@ pub fn raw_window(
     let Some((path, sha, stride, interpolate_pose)) = pose_run(project_root, fusion_id)? else {
         return Ok(None);
     };
+    let interpolate_pose = interpolation.unwrap_or(interpolate_pose);
     let index = index_for(&path, &sha, stride)?;
     if index.iter().any(|(frame, _)| *frame >= total_frames) {
         return Err("RTMPose evidence exceeds selected GPU fusion frames".into());
@@ -503,7 +524,8 @@ pub fn raw_window(
 /// Render every model pose even when the player Track ID is missing, outside
 /// a rally, or too far from a tracked bounding box for safe ID association.
 /// Interpolated joints are explicitly visual-only and never carry Track IDs.
-pub fn processed_window(
+#[cfg(test)]
+pub(crate) fn processed_window(
     project_root: &Path,
     fusion_id: &str,
     total_frames: u64,
@@ -511,19 +533,40 @@ pub fn processed_window(
     end: u64,
     frames: &mut [Value],
 ) -> Result<bool, String> {
+    processed_window_policy(
+        project_root,
+        fusion_id,
+        total_frames,
+        start,
+        end,
+        frames,
+        None,
+    )
+}
+
+pub fn processed_window_policy(
+    project_root: &Path,
+    fusion_id: &str,
+    total_frames: u64,
+    start: u64,
+    end: u64,
+    frames: &mut [Value],
+    interpolation: Option<bool>,
+) -> Result<bool, String> {
     if start >= end || frames.len() != (end - start) as usize {
         return Err("Invalid processed RTMPose frame bounds".into());
     }
     let mut scratch = (start..end)
         .map(|frame| json!({"frame":frame,"raw":{"poses":[]}}))
         .collect::<Vec<_>>();
-    if raw_window(
+    if raw_window_policy(
         project_root,
         fusion_id,
         total_frames,
         start,
         end,
         &mut scratch,
+        interpolation,
     )?
     .is_none()
     {
@@ -626,12 +669,24 @@ fn enrich_with_tolerance(
     Ok(true)
 }
 
+#[cfg(test)]
 pub(crate) fn enrich_continuous(
     project_root: &Path,
     fusion_id: &str,
     start: u64,
     end: u64,
     frames: &mut [Value],
+) -> Result<bool, String> {
+    enrich_continuous_policy(project_root, fusion_id, start, end, frames, None)
+}
+
+pub(crate) fn enrich_continuous_policy(
+    project_root: &Path,
+    fusion_id: &str,
+    start: u64,
+    end: u64,
+    frames: &mut [Value],
+    interpolation: Option<bool>,
 ) -> Result<bool, String> {
     if !enrich_exact(project_root, fusion_id, start, end, frames)? {
         return Ok(false);
@@ -645,6 +700,7 @@ pub(crate) fn enrich_continuous(
     let Some((path, sha, stride, interpolate_pose)) = pose_run(project_root, fusion_id)? else {
         return Ok(false);
     };
+    let interpolate_pose = interpolation.unwrap_or(interpolate_pose);
     if !interpolate_pose {
         return Ok(true);
     }
@@ -902,6 +958,22 @@ mod tests {
         assert!(without_pose_gap[1]["players"][0].get("pose").is_none());
         assert!(without_pose_gap[2]["players"][0].get("pose").is_none());
         assert!(without_pose_gap[3]["players"][0].get("pose").is_some());
+        let mut override_frames = (0..5)
+            .map(|frame| {
+                json!({"frame":frame,
+            "players":[{"id":7,"box":[0.2,0.2,0.5,0.9]}]})
+            })
+            .collect::<Vec<_>>();
+        let evidence_before = fs::read(pose_dir.join("poses.jsonl")).unwrap();
+        assert!(
+            enrich_continuous_policy(&root, &fusion, 0, 5, &mut override_frames, Some(true))
+                .unwrap()
+        );
+        assert_eq!(override_frames[1]["players"][0]["pose_interpolated"], true);
+        assert_eq!(
+            evidence_before,
+            fs::read(pose_dir.join("poses.jsonl")).unwrap()
+        );
         manifest["sha256"] = json!("0".repeat(64));
         fs::write(
             pose_dir.join("manifest.json"),

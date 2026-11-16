@@ -41,7 +41,17 @@ const CHUNK: usize = 240;
 const HALO: usize = 96;
 const OUTPUT_FILE: &str = "touch_candidates.jsonl";
 
+#[cfg(test)]
 fn pose_frames(root: &Path, fusion: &str, frames: &[TouchFrame]) -> Result<Vec<PoseFrame>, String> {
+    pose_frames_policy(root, fusion, frames, None)
+}
+
+fn pose_frames_policy(
+    root: &Path,
+    fusion: &str,
+    frames: &[TouchFrame],
+    interpolation: Option<bool>,
+) -> Result<Vec<PoseFrame>, String> {
     let Some(first) = frames.first() else {
         return Ok(Vec::new());
     };
@@ -52,12 +62,13 @@ fn pose_frames(root: &Path, fusion: &str, frames: &[TouchFrame]) -> Result<Vec<P
         "frame":frame.frame_index,
         "players":frame.players.iter().map(|player| json!({"id":player.track_id,"box":player.bbox_xyxy_norm})).collect::<Vec<_>>()
     })).collect();
-    if !native_preview_pose::enrich_continuous(
+    if !native_preview_pose::enrich_continuous_policy(
         root,
         fusion,
         first.frame_index,
         last.frame_index + 1,
         &mut values,
+        interpolation,
     )? {
         return Err("Для выбранного режима необходим сохранённый анализ позы".into());
     }
@@ -405,6 +416,7 @@ fn select_pending_touch(
 /// A single-frame pose overlap cannot promote a candidate to a real Touch:
 /// require same-Track-ID body intersection before/at/after a motion-gated hit.
 /// When pose is optional, legacy results remain *unverified proposals*.
+#[cfg(test)]
 fn refine_pose_events(
     events: &mut Vec<PhysicalTouchCandidate>,
     frames: &[TouchFrame],
@@ -413,6 +425,28 @@ fn refine_pose_events(
     project_root: &Path,
     fusion_id: &str,
     settings: TouchSettings,
+) -> Result<(), String> {
+    refine_pose_events_policy(
+        events,
+        frames,
+        video_width,
+        video_height,
+        project_root,
+        fusion_id,
+        settings,
+        None,
+    )
+}
+
+fn refine_pose_events_policy(
+    events: &mut Vec<PhysicalTouchCandidate>,
+    frames: &[TouchFrame],
+    video_width: u32,
+    video_height: u32,
+    project_root: &Path,
+    fusion_id: &str,
+    settings: TouchSettings,
+    interpolation: Option<bool>,
 ) -> Result<(), String> {
     if events.is_empty() || frames.is_empty() {
         return Ok(());
@@ -423,7 +457,7 @@ fn refine_pose_events(
         }
         return Ok(());
     }
-    let poses = pose_frames(project_root, fusion_id, frames)?;
+    let poses = pose_frames_policy(project_root, fusion_id, frames, interpolation)?;
     let first = frames[0].frame_index;
     let mut supported = vec![false; events.len()];
     for (index, event) in events.iter_mut().enumerate() {
@@ -518,7 +552,7 @@ fn refine_pose_events(
 fn apply_training(
     events: &mut [PhysicalTouchCandidate],
     frames: &[TouchFrame],
-    pose_source: Option<(&Path, &str)>,
+    pose_source: Option<(&Path, &str, bool)>,
     width: u32,
     height: u32,
     settings: TouchSettings,
@@ -527,10 +561,10 @@ fn apply_training(
     if events.is_empty() || training.is_empty() {
         return Ok(());
     }
-    let Some((root, fusion)) = pose_source else {
+    let Some((root, fusion, interpolation)) = pose_source else {
         return Ok(());
     };
-    let poses = pose_frames(root, fusion, frames)?;
+    let poses = pose_frames_policy(root, fusion, frames, Some(interpolation))?;
     let Some(first) = frames.first().map(|f| f.frame_index) else {
         return Ok(());
     };
@@ -619,6 +653,7 @@ pub(crate) fn detect_stream(
         true,
         None,
         None,
+        None,
         &[],
         None,
     )
@@ -634,8 +669,9 @@ fn detect_stream_with_pose(
     height: u32,
     settings: TouchSettings,
     interpolate_players: bool,
-    pose_source: Option<(&Path, &str)>,
+    pose_source: Option<(&Path, &str, bool)>,
     court: Option<&CourtTransform>,
+    net: Option<[[f64; 2]; 2]>,
     training: &[training_samples::Example],
     ball_mask: Option<&crate::cpu_retrack::ball_track::BallTrackMask>,
 ) -> Result<(String, u64, u64), String> {
@@ -644,7 +680,7 @@ fn detect_stream_with_pose(
         return Err("Touch source frame count exceeds limit".into());
     }
     if settings.require_pose {
-        let (root, fusion) =
+        let (root, fusion, _) =
             pose_source.ok_or("Для выбранного режима необходим сохранённый анализ позы")?;
         if !native_preview_pose::enrich(root, fusion, 0, 0, &mut [])? {
             return Err("Для выбранного режима необходим сохранённый анализ позы".into());
@@ -720,15 +756,15 @@ fn detect_stream_with_pose(
             };
             let evidence_frames: &[TouchFrame] = &filtered;
             let mut events = if settings.algorithm == TouchAlgorithm::PoseMotion {
-                let (root, fusion) =
+                let (root, fusion, interpolation) =
                     pose_source.ok_or("Для выбранного режима необходим сохранённый анализ позы")?;
-                let poses = pose_frames(root, fusion, evidence_frames)?;
+                let poses = pose_frames_policy(root, fusion, evidence_frames, Some(interpolation))?;
                 evaluate_pose_block(evidence_frames, &poses, width, height, start, end, settings)?
             } else {
                 let mut events =
                     evaluate_block(evidence_frames, width, height, start, end, settings)?;
-                if let Some((root, fusion)) = pose_source {
-                    refine_pose_events(
+                if let Some((root, fusion, interpolation)) = pose_source {
+                    refine_pose_events_policy(
                         &mut events,
                         evidence_frames,
                         width,
@@ -736,12 +772,14 @@ fn detect_stream_with_pose(
                         root,
                         fusion,
                         settings,
+                        Some(interpolation),
                     )?;
                     // The default legacy detector can miss a motion-supported
                     // wrist contact that RTMPose confirms independently.
                     // Add those source-backed candidates rather than restricting
                     // pose evidence to labels of already-found legacy touches.
-                    let poses = pose_frames(root, fusion, evidence_frames)?;
+                    let poses =
+                        pose_frames_policy(root, fusion, evidence_frames, Some(interpolation))?;
                     events.extend(evaluate_pose_block(
                         evidence_frames,
                         &poses,
@@ -795,6 +833,21 @@ fn detect_stream_with_pose(
             }
             if let Some(calibration) = court {
                 court_touch::annotate(&mut events, evidence_frames, calibration);
+            }
+            if net.is_some() {
+                for event in &mut events {
+                    if event.action_prediction.as_ref().is_some_and(|p| {
+                        p.kind == volley_core::action_prediction::ActionKind::Block
+                    }) && !volley_core::court_geometry::observed_net_contact(
+                        net,
+                        [
+                            event.ball_x_px / width as f64,
+                            event.ball_y_px / height as f64,
+                        ],
+                    ) {
+                        event.action_prediction = None;
+                    }
+                }
             }
             for event in events {
                 // Reconstructed gap positions must not acquire authority as
@@ -902,7 +955,13 @@ pub(crate) fn process_with_ball_scope(
     {
         return Err(storage::bad_request("Video not present in project"));
     }
-    let plan = preparation::plan_for(state, &req.project_id, &req.video)?;
+    let plan = preparation::plan_for_run(
+        state,
+        &req.project_id,
+        &req.video,
+        "native_cpu_replays",
+        &req.replay_id,
+    )?;
     let prepared = plan
         .ready_path()
         .ok_or_else(|| storage::bad_request("Prepared video unavailable"))?;
@@ -931,6 +990,8 @@ pub(crate) fn process_with_ball_scope(
             .map_err(|e| storage::internal(format!("Read CPU tracking manifest: {e}")))?,
     )
     .map_err(|e| storage::bad_request(format!("Invalid tracking manifest: {e}")))?;
+    volley_media::preparation::verify_source_provenance(&plan.source, &manifest["original_source"])
+        .map_err(storage::conflict)?;
     if manifest["schema"] != "volley-native-cpu-tracking/1"
         || manifest["state"] != "provisional_tracklets_rebuilt"
         || manifest["project_id"].as_str() != Some(&req.project_id)
@@ -1019,8 +1080,15 @@ pub(crate) fn process_with_ball_scope(
             dimensions.height,
             settings,
             manifest["interpolate_players"].as_bool().unwrap_or(true),
-            pose_requested.then_some((project_dir.as_path(), fusion_id.as_str())),
-            court_calibration.as_ref().map(|value| &value.transform),
+            pose_requested.then_some((
+                project_dir.as_path(),
+                fusion_id.as_str(),
+                manifest["interpolate_pose"].as_bool().unwrap_or(true),
+            )),
+            court_calibration
+                .as_ref()
+                .and_then(|value| value.transform.as_ref()),
+            court_calibration.as_ref().and_then(|value| value.net),
             &training_examples,
             Some(&ball_mask),
         )?;
@@ -1043,6 +1111,8 @@ pub(crate) fn process_with_ball_scope(
             "source_replay_id":req.replay_id,
             "source_replay_sha256":sha,
             "source_identity":{"bytes":size,"mtime_ns":mtime},
+            "original_source":manifest["original_source"],
+            "original_source":manifest["original_source"],
             "width":dimensions.width,"height":dimensions.height,"fps":30,
             "frames":frames,
             "settings":settings,
@@ -1484,7 +1554,8 @@ mod tests {
                 ..TouchSettings::default()
             },
             true,
-            Some((&root, &fusion)),
+            Some((&root, &fusion, true)),
+            None,
             None,
             &[],
             None,
@@ -1684,7 +1755,8 @@ mod local_tuning_diagnostic {
             720,
             settings,
             true,
-            Some((&root, fusion)),
+            Some((&root, fusion, true)),
+            None,
             None,
             &[],
             None,

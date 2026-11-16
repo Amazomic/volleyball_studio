@@ -52,9 +52,41 @@ pub enum CourtSide {
 #[derive(Clone, Debug)]
 pub struct CourtTransform {
     matrix: [f64; 9],
+    net: Option<[[f64; 2]; 2]>,
+}
+
+pub fn valid_net(net: Option<[[f64; 2]; 2]>) -> bool {
+    net.is_none_or(|[a, b]| {
+        a.iter()
+            .chain(b.iter())
+            .all(|v| v.is_finite() && (-0.5..=1.5).contains(v))
+            && (a[0] - b[0]).hypot(a[1] - b[1]) > 0.01
+    })
+}
+
+pub fn observed_net_contact(net: Option<[[f64; 2]; 2]>, [x, y]: [f64; 2]) -> bool {
+    net.is_none_or(|[a, b]| {
+        let dx = b[0] - a[0];
+        let dy = b[1] - a[1];
+        let t = ((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy);
+        (-0.1..=1.1).contains(&t)
+            && ((x - a[0]) * dy - (y - a[1]) * dx).abs() / dx.hypot(dy) <= 0.12
+    })
 }
 
 impl CourtTransform {
+    pub fn with_net(mut self, net: Option<[[f64; 2]; 2]>) -> Result<Self, String> {
+        if !valid_net(net) {
+            return Err("Invalid observed net line".into());
+        }
+        self.net = net;
+        Ok(self)
+    }
+
+    pub fn supports_net_contact(&self, point: [f64; 2]) -> bool {
+        observed_net_contact(self.net, point)
+    }
+
     /// Map four ordered normalized pixels to the 18 x 9 meter playing plane.
     /// The same four targets are used by Python CourtTransformer.
     ///
@@ -133,7 +165,7 @@ impl CourtTransform {
             rows[0][8], rows[1][8], rows[2][8], rows[3][8], rows[4][8], rows[5][8], rows[6][8],
             rows[7][8], 1.0,
         ];
-        let transform = Self { matrix };
+        let transform = Self { matrix, net: None };
         for (point, target) in corners.iter().zip(targets) {
             let got = transform
                 .to_court(*point)

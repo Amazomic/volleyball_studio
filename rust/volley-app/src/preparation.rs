@@ -61,7 +61,7 @@ struct ActiveJob {
 pub struct PreparationManager {
     jobs: Mutex<HashMap<String, ActiveJob>>,
     cancelled_projects: Mutex<HashSet<String>>,
-    plan_cache: StdMutex<HashMap<PathBuf, PreparationPlan>>,
+    plan_cache: StdMutex<HashMap<PathBuf, (PreparationPlan, Value)>>,
     concurrency: Arc<Semaphore>,
 }
 
@@ -115,6 +115,16 @@ pub(crate) fn plan_for(
     }
     // FFprobe is expensive on long videos. Cache a probe plan while the
     // original file identity (path, size, nanosecond mtime) remains unchanged.
+    let source_proof =
+        volley_media::preparation::source_provenance(&source).map_err(storage::bad_request)?;
+    let prefer_bound = |plan: PreparationPlan| -> Result<PreparationPlan, ApiError> {
+        let bound = plan.clone().bind_source().map_err(storage::bad_request)?;
+        if bound.ready_path().is_some() {
+            Ok(bound)
+        } else {
+            Ok(plan)
+        }
+    };
     let metadata = source
         .metadata()
         .map_err(|error| storage::internal(format!("Video metadata: {error}")))?;
@@ -125,9 +135,12 @@ pub(crate) fn plan_for(
         .map(|t| t.as_nanos());
     if let Some(stamp) = stamp {
         if let Ok(lookup) = state.preparation.plan_cache.lock() {
-            if let Some(cached) = lookup.get(&source) {
-                if cached.identity.size == metadata.len() && cached.identity.mtime_ns == stamp {
-                    return Ok(cached.clone());
+            if let Some((cached, proof)) = lookup.get(&source) {
+                if proof == &source_proof
+                    && cached.identity.size == metadata.len()
+                    && cached.identity.mtime_ns == stamp
+                {
+                    return prefer_bound(cached.clone());
                 }
             }
         }
@@ -135,9 +148,9 @@ pub(crate) fn plan_for(
     let plan =
         PreparationPlan::new(&source, &state.data_root, None).map_err(storage::bad_request)?;
     if let Ok(mut lookup) = state.preparation.plan_cache.lock() {
-        lookup.insert(source, plan.clone());
+        lookup.insert(source, (plan.clone(), source_proof));
     }
-    Ok(plan)
+    prefer_bound(plan)
 }
 
 /// ffprobe on a plan-cache miss and the first full SHA verification are
@@ -152,6 +165,78 @@ pub(crate) async fn plan_for_async(
     tokio::task::spawn_blocking(move || plan_for(&state, &id, &video))
         .await
         .map_err(|error| storage::internal(format!("Preparation plan task: {error}")))?
+}
+
+pub(crate) fn plan_for_run(
+    state: &AppState,
+    id: &str,
+    video: &str,
+    directory: &str,
+    run: &str,
+) -> Result<PreparationPlan, ApiError> {
+    if !crate::cpu_retrack::opaque_id(run) {
+        return Err(storage::bad_request("Invalid source run"));
+    }
+    let root = projects::project_root(state).join(id).join(directory);
+    crate::cpu_retrack::safe_folder(&root).map_err(storage::bad_request)?;
+    let folder = root.join(run);
+    crate::cpu_retrack::safe_folder(&folder).map_err(storage::bad_request)?;
+    let file = crate::cpu_retrack::safe_file(&folder, "manifest.json", 64 * 1024)
+        .map_err(storage::bad_request)?;
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(file).map_err(|e| storage::internal(format!("Read source: {e}")))?,
+    )
+    .map_err(|_| storage::bad_request("Invalid source manifest"))?;
+    let current = plan_for(state, id, video)?;
+    volley_media::preparation::verify_source_provenance(
+        &current.source,
+        &manifest["original_source"],
+    )
+    .map_err(storage::conflict)?;
+    let mut legacy = current.clone();
+    let parent = current
+        .output
+        .parent()
+        .ok_or_else(|| storage::bad_request("Prepared root missing"))?;
+    let metadata_id = cache_id(&current.identity);
+    legacy.output = parent.join(format!("{metadata_id}.mp4"));
+    legacy.manifest = parent.join(format!("{metadata_id}.json"));
+    legacy.original_source = None;
+    let bound = legacy.clone().bind_source().map_err(storage::bad_request)?;
+    for candidate in [current, bound, legacy] {
+        if let Some(path) = candidate.ready_path() {
+            let (bytes, mtime) =
+                crate::inference_stream::source_stamp(path).map_err(storage::bad_request)?;
+            if manifest["source_identity"] == json!({"bytes":bytes,"mtime_ns":mtime}) {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(storage::conflict(
+        "Prepared media for this evidence version is unavailable",
+    ))
+}
+
+pub(crate) async fn plan_for_analysis_async(
+    state: Arc<AppState>,
+    id: &str,
+    video: &str,
+    fusion: Option<&str>,
+) -> Result<PreparationPlan, ApiError> {
+    let id = id.to_owned();
+    let video = video.to_owned();
+    let fusion = fusion.map(str::to_owned);
+    tokio::task::spawn_blocking(move || {
+        if let Some(fusion) = fusion {
+            plan_for_run(&state, &id, &video, "native_gpu_fusions", &fusion)
+        } else {
+            plan_for(&state, &id, &video)?
+                .bind_source()
+                .map_err(storage::bad_request)
+        }
+    })
+    .await
+    .map_err(|e| storage::internal(format!("Analysis source plan: {e}")))?
 }
 
 pub(crate) async fn reused_async(
@@ -205,6 +290,7 @@ fn manifest_write_verified_ready(
             "identity":plan.identity,
             "status":"ready",
             "progress":100.0,
+            "original_source":plan.original_source,
             "cache_size_bytes":size,
             "cache_sha256":sha256,
             "cache_verification":"sha256-stream-v1"
@@ -380,6 +466,9 @@ async fn run_one(
             return Err("cancelled".into());
         }
         validate_source_unchanged(plan)?;
+        if let Some(expected) = &plan.original_source {
+            volley_media::preparation::verify_source_provenance(&plan.source, expected)?;
+        }
         if !partial
             .metadata()
             .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)

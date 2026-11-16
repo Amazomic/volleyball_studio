@@ -435,5 +435,4 @@ mod tests {
         let result = analyze(&[first], &[]);
         assert_eq!(result.serve_frame, Some(100));
     }
-
 }

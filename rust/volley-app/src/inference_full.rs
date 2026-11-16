@@ -266,6 +266,8 @@ struct JobContext {
     project_id: String,
     video: String,
     source: PathBuf,
+    original: PathBuf,
+    original_source: Value,
     duration_sec: f64,
     config: Config,
     stride: usize,
@@ -293,6 +295,10 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
     if context.cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
+    volley_media::preparation::verify_source_provenance(
+        &context.original,
+        &context.original_source,
+    )?;
     let before = inference_stream::source_stamp(&context.source)?;
     // The player path never constructs or runs a RAVEL session.
     let mut ball_engine = if context.config.model == ModelKind::Ball {
@@ -318,7 +324,7 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
     let mut sink = EvidenceWriter::create(&context.folder)?;
     let estimated_frames = (context.duration_sec * 30.0).max(9.0);
     let summary = decode_full_video(
-        &context.source,
+        &context.original,
         pixels,
         context.stride,
         &context.cancelled,
@@ -390,8 +396,14 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
     let final_file = context.folder.join(RESULT_FILE);
     fs::rename(context.folder.join("detections.jsonl.partial"), &final_file)
         .map_err(|e| format!("Publish raw detections: {e}"))?;
+    volley_media::preparation::verify_source_provenance(
+        &context.original,
+        &context.original_source,
+    )?;
     let manifest = json!({
         "schema":"volley-native-gpu-model-detections/1",
+        "original_source":context.original_source,
+        "working_stream":"original_rgb_fps30_v1",
         "status":"model_raw_detections_complete",
         "job_id":context.id,
         "project_id":context.project_id,
@@ -526,7 +538,9 @@ pub async fn start(
     let project_id = request.project_id.clone();
     let _guard = project_guard::write_guard(&state, &project_id)?;
     projects::existing_project(&state, &project_id)?;
-    let plan = preparation::plan_for_async(state.clone(), &project_id, &request.video).await?;
+    let plan =
+        preparation::plan_for_analysis_async(state.clone(), &project_id, &request.video, None)
+            .await?;
     let source = preparation::ready_path_async(&plan)
         .await
         .map_err(storage::bad_request)?
@@ -560,6 +574,9 @@ pub async fn start(
         project_id: project_id.clone(),
         video: request.video.clone(),
         source,
+        original_source: volley_media::preparation::source_provenance(&plan.source)
+            .map_err(storage::bad_request)?,
+        original: plan.source.clone(),
         duration_sec: plan.duration_sec,
         config,
         stride: request.stride,
@@ -948,6 +965,11 @@ mod tests {
             .status()
             .unwrap();
         assert!(media.success());
+        fs::copy(
+            source_models.join("RTMPose-M-Body7.onnx"),
+            repo.join("models/RTMPose-M-Body7.onnx"),
+        )
+        .unwrap();
         let source_size = fs::metadata(&original).unwrap().len();
         storage::write_json_atomic(
             &data.join("projects").join("projects.json"),
@@ -1086,6 +1108,7 @@ mod tests {
                 fusion_id: merged["fusion_id"].as_str().unwrap().into(),
                 settings: None,
                 interpolate_players: true,
+                interpolate_pose: true,
             },
         )
         .unwrap();
@@ -1167,6 +1190,24 @@ mod tests {
             "Native {device:?} full GPU -> fusion -> tracks -> Touch -> rally proposals: {}",
             rally_run["rally_candidates"]
         );
+        let material = crate::native_rally_preview::publish_material(
+            &state,
+            id,
+            rally_run["rally_run_id"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(material["schema"], "volley-montage-material/1");
+        assert_eq!(
+            material["readiness"]["original_verified_against_analysis"],
+            true
+        );
+        let repeated = crate::native_rally_preview::publish_material(
+            &state,
+            id,
+            rally_run["rally_run_id"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(material, repeated);
         let read_only_preview = crate::native_rally_preview::preview(
             axum::extract::State(state.clone()),
             axum::extract::Query(crate::native_rally_preview::PreviewQuery {
@@ -1188,6 +1229,25 @@ mod tests {
         assert_eq!(read_only_preview["items"].as_array().unwrap().len(), 0);
         println!("Native {device:?} CPU rally preview loaded and SHA-verified");
         assert_eq!(fs::metadata(&original).unwrap().len(), source_size);
+        let bindings = crate::native_rally_preview::material_bindings(
+            state.clone(),
+            id.into(),
+            vec![rally_run["rally_run_id"].as_str().unwrap().into()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(bindings.len(), 1);
+        crate::native_rally_preview::validate_material_binding(&state, &bindings[0]).unwrap();
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&original)
+            .unwrap()
+            .write_all(&[0, 0, 0, 9, b'f', b'r', b'e', b'e', 1])
+            .unwrap();
+        assert!(
+            crate::native_rally_preview::validate_material_binding(&state, &bindings[0]).is_err()
+        );
         assert!(!repo.join("results").exists());
         fs::remove_dir_all(root).unwrap();
     }

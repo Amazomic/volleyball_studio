@@ -187,9 +187,14 @@ pub fn process(
         .filter(|n| (1..=30).contains(n))
         .ok_or("RTMPose requires a verified shared 1..30-frame detector sampling period")?
         as usize;
-    let plan = preparation::plan_for(app, project_id, video).map_err(|e| format!("{e:?}"))?;
+    let plan = preparation::plan_for_run(app, project_id, video, "native_gpu_fusions", fusion_id)
+        .map_err(|e| format!("{e:?}"))?;
     let prepared = plan.ready_path().ok_or("Prepared pose video missing")?;
     let source = inference_stream::source_stamp(prepared)?;
+    volley_media::preparation::verify_source_provenance(
+        &plan.source,
+        &manifest["original_source"],
+    )?;
     if manifest["source_identity"] != json!({"bytes":source.0,"mtime_ns":source.1}) {
         return Err("Prepared video changed since GPU fusion".into());
     }
@@ -228,7 +233,7 @@ pub fn process(
             .filter(|v| *v > 0)
             .unwrap_or(1);
         let decode = decode_full_video(
-            prepared,
+            &plan.source,
             ModelPixels::PlayersRgb,
             stride,
             cancel,
@@ -308,6 +313,10 @@ pub fn process(
         drop(writer);
         fs::rename(output.join("poses.jsonl.partial"), output.join(POSE_FILE))
             .map_err(|e| format!("Commit RTMPose evidence: {e}"))?;
+        volley_media::preparation::verify_source_provenance(
+            &plan.source,
+            &manifest["original_source"],
+        )?;
         let pose_manifest = json!({
             "schema":"volley-native-gpu-pose/1","state":"pose_evidence_complete",
             "pose_run_id":run_id, "fusion_id":fusion_id,
@@ -316,6 +325,9 @@ pub fn process(
             "decoded_frames":decode.decoded_frames,
             "sampled_frames":samples, "player_poses":players,
             "model":"RTMPose-M-Body7","model_sha256":hash,
+            "original_source":manifest["original_source"],
+            "working_stream":"original_rgb_fps30_v1",
+            "original_source":manifest["original_source"],
             "source_fusion_sha256":manifest["sha256"], "source_identity":manifest["source_identity"],
             "box_source_version":"detector_observed_sampling_v1",
             "source_person_sampling_period_frames":stride,

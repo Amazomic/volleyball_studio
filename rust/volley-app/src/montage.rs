@@ -40,11 +40,23 @@ use volley_media::{
 const MAX_CLIPS: usize = 80;
 const MAX_TOTAL_SECONDS: f64 = 600.0;
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct MaterialBinding {
+    pub(crate) project_id: String,
+    pub(crate) rally_run_id: String,
+    pub(crate) revision: String,
+    pub(crate) video: String,
+    pub(crate) original_source: Value,
+    pub(crate) intervals: Vec<(u64, u64)>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MontageRequest {
     pub project_id: String,
     pub clips: Vec<SelectedClip>,
+    #[serde(skip)]
+    pub(crate) materials: Vec<MaterialBinding>,
     #[serde(default)]
     pub audio_file: Option<String>,
     #[serde(default = "default_volume")]
@@ -141,6 +153,8 @@ struct Planned {
     project_id: String,
     job_id: String,
     clips: Vec<OriginalClip>,
+    original_sources: HashMap<PathBuf, Value>,
+    materials: Vec<MaterialBinding>,
     output_dir: PathBuf,
     audio: Option<PathBuf>,
     audio_volume: f64,
@@ -238,9 +252,31 @@ fn prepare_request(state: &AppState, request: MontageRequest) -> Result<Planned,
         .filter_map(Value::as_str)
         .collect::<HashSet<_>>();
     let mut plans: HashMap<String, PathBuf> = HashMap::new();
+    for material in &request.materials {
+        if material.project_id != request.project_id {
+            return Err(storage::conflict(
+                "Montage material belongs to another project",
+            ));
+        }
+        crate::native_rally_preview::validate_material_binding(state, material)?;
+    }
     let mut clips = Vec::new();
     let mut total = 0.0;
     for clip in &request.clips {
+        if !request.materials.is_empty()
+            && !request.materials.iter().any(|material| {
+                material.video == clip.video
+                    && material
+                        .intervals
+                        .iter()
+                        .any(|(start, end)| clip.start_frame >= *start && clip.end_frame <= *end)
+            })
+        {
+            return Err(storage::conflict(
+                "Clip is outside its frozen montage material",
+            ));
+        }
+
         if !allowed.contains(clip.video.as_str()) {
             return Err(storage::bad_request(
                 "Видео не принадлежит выбранному проекту",
@@ -318,7 +354,30 @@ fn prepare_request(state: &AppState, request: MontageRequest) -> Result<Planned,
     if output_dir.exists() {
         return Err(storage::conflict("Папка монтажа уже существует"));
     }
+    let original_sources = clips
+        .iter()
+        .map(|clip| {
+            volley_media::preparation::source_provenance(&clip.source)
+                .and_then(|proof| {
+                    if request.materials.iter().any(|material| {
+                        material.original_source != proof
+                            && request.clips.iter().any(|selected| {
+                                selected.video == material.video
+                                    && plans
+                                        .get(&selected.video)
+                                        .is_some_and(|path| path == &clip.source)
+                            })
+                    }) {
+                        return Err("Original differs from frozen montage material".into());
+                    }
+                    Ok((clip.source.clone(), proof))
+                })
+                .map_err(storage::bad_request)
+        })
+        .collect::<Result<HashMap<_, _>, _>>()?;
     Ok(Planned {
+        original_sources,
+        materials: request.materials,
         project_id: request.project_id,
         job_id,
         clips,
@@ -543,6 +602,8 @@ async fn render(plan: Planned, status: Arc<Mutex<JobStatus>>, mut cancel: watch:
             if *cancel.borrow() {
                 return Err("cancelled".into());
             }
+            let proof = plan.original_sources.get(&clip.source).ok_or("Missing montage original proof")?;
+            volley_media::preparation::verify_source_provenance(&clip.source, proof)?;
             let target = segments.join(format!("segment_{index:04}.mp4"));
             let seconds = clip.duration_sec();
             encode_with_fallback(
@@ -742,11 +803,16 @@ async fn render(plan: Planned, status: Arc<Mutex<JobStatus>>, mut cancel: watch:
         }
         fs::rename(final_path, &output)
             .map_err(|e| format!("Не удалось сохранить готовый монтаж: {e}"))?;
+        for (source, proof) in &plan.original_sources {
+            volley_media::preparation::verify_source_provenance(source, proof)?;
+        }
         let report = json!({
             "schema":"volley-rust-montage/1",
             "id":plan.job_id,
             "project_id":plan.project_id,
             "render_source":"original_recording",
+            "montage_materials":plan.materials,
+            "original_sources":plan.original_sources.iter().map(|(path,proof)| json!({"source":path,"proof":proof})).collect::<Vec<_>>(),
             "original_resolution_verified":plan.layout==VideoLayout::Original,
             "source_clips_native_resolution_verified":true,
             "layout":plan.layout,
@@ -1208,6 +1274,7 @@ pub async fn start_native_from_run(
         })
         .collect();
     let montage_request = MontageRequest {
+        materials: Vec::new(),
         project_id: selection.project_id,
         clips,
         audio_file: request.audio_file,
@@ -1259,6 +1326,8 @@ mod highlight_cancellation_tests {
         let plan = Planned {
             project_id: "abcdef012345".into(),
             job_id: "montage_test".into(),
+            original_sources: HashMap::new(),
+            materials: Vec::new(),
             clips: vec![OriginalClip {
                 source: original.clone(),
                 start_frame: 0,

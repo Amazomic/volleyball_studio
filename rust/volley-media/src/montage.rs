@@ -460,7 +460,6 @@ pub fn compose_args_for_layout(
     Ok(args)
 }
 
-
 /// One time-stamped, normalized (0..1) point from a SHA-verified VBallNet replay.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CameraPoint {
@@ -474,10 +473,13 @@ fn follow_expression(points: &[CameraPoint], x_axis: bool) -> Result<String, Str
     }
     let mut previous = -1.0;
     for point in points {
-        if !point.time_sec.is_finite() || point.time_sec <= previous
+        if !point.time_sec.is_finite()
+            || point.time_sec <= previous
             || point.time_sec < 0.0
-            || !point.x.is_finite() || !(0.0..=1.0).contains(&point.x)
-            || !point.y.is_finite() || !(0.0..=1.0).contains(&point.y)
+            || !point.x.is_finite()
+            || !(0.0..=1.0).contains(&point.x)
+            || !point.y.is_finite()
+            || !(0.0..=1.0).contains(&point.y)
         {
             return Err("Недопустимая точка траектории камеры".into());
         }
@@ -491,14 +493,18 @@ fn follow_expression(points: &[CameraPoint], x_axis: bool) -> Result<String, Str
         let delta = b.time_sec - a.time_sec;
         let interpolate = format!(
             "({:.6}+({:.6})*(t-{:.6})/{:.6})",
-            ordinate(a), ordinate(b) - ordinate(a), a.time_sec, delta
+            ordinate(a),
+            ordinate(b) - ordinate(a),
+            a.time_sec,
+            delta
         );
         expr = format!("if(lt(t,{:.4}),{interpolate},{expr})", b.time_sec);
     }
     let first = points.first().unwrap();
     let result = format!(
         "if(lt(t,{:.4}),{:.6},{expr})",
-        first.time_sec, ordinate(first)
+        first.time_sec,
+        ordinate(first)
     );
     Ok(result.replace(',', "\\,"))
 }
@@ -513,14 +519,21 @@ pub fn compose_follow_args(
     output: &Path,
     hardware: bool,
 ) -> Result<Vec<String>, String> {
-    if clips.is_empty() || clips.len() != formats.len() || clips.len() != tracks.len()
-        || !zoom.is_finite() || !(1.0..=2.5).contains(&zoom) {
+    if clips.is_empty()
+        || clips.len() != formats.len()
+        || clips.len() != tracks.len()
+        || !zoom.is_finite()
+        || !(1.0..=2.5).contains(&zoom)
+    {
         return Err("Некорректные клипы, траектории или увеличение камеры".into());
     }
     let (width, height, fps) = output_profile_for_layout(formats, VideoLayout::VerticalFollow)?;
     let mut args = vec![
-        "-nostdin".into(), "-hide_banner".into(), "-loglevel".into(),
-        "error".into(), "-y".into()
+        "-nostdin".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-y".into(),
     ];
     for path in clips {
         args.extend(["-i".into(), path.to_string_lossy().into_owned()]);
@@ -528,8 +541,8 @@ pub fn compose_follow_args(
     let mut filters = Vec::new();
     let mut refs = String::new();
     for (index, points) in tracks.iter().enumerate() {
-        let (w,h,_,_) = formats[index];
-        let segment_zoom = if points.len() == 1 {1.0} else {zoom};
+        let (w, h, _, _) = formats[index];
+        let segment_zoom = if points.len() == 1 { 1.0 } else { zoom };
         let crop_h = (((h as f64).min(w as f64 * 16.0 / 9.0) / segment_zoom) as u32 / 2 * 2).max(2);
         let crop_w = (((crop_h as f64 * 9.0 / 16.0) as u32) / 2 * 2).max(2);
         if crop_w > w || crop_h > h {
@@ -546,16 +559,23 @@ pub fn compose_follow_args(
         ));
         refs.push_str(&format!("[v{index}]"));
     }
-    let mapped = if clips.len()==1 {
+    let mapped = if clips.len() == 1 {
         "[v0]".to_owned()
     } else {
-        filters.push(format!("{refs}concat=n={}:v=1:a=0[combined]",clips.len()));
+        filters.push(format!("{refs}concat=n={}:v=1:a=0[combined]", clips.len()));
         "[combined]".to_owned()
     };
-    args.extend(["-filter_complex".into(),filters.join(";"),"-map".into(),mapped]);
+    args.extend([
+        "-filter_complex".into(),
+        filters.join(";"),
+        "-map".into(),
+        mapped,
+    ]);
     args.extend(encode_flags(hardware));
     args.extend([
-        "-movflags".into(),"+faststart".into(),output.to_string_lossy().into_owned()
+        "-movflags".into(),
+        "+faststart".into(),
+        output.to_string_lossy().into_owned(),
     ]);
     Ok(args)
 }

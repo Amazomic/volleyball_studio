@@ -827,7 +827,9 @@ fn checked_request(state: &AppState, input: StartRequest) -> Result<PreparedRun,
             ));
         }
         plans.push(
-            PreparationPlan::new(&source, &state.data_root, None).map_err(storage::bad_request)?,
+            PreparationPlan::new(&source, &state.data_root, None)
+                .and_then(PreparationPlan::bind_source)
+                .map_err(storage::bad_request)?,
         );
         sources.push(src);
     }
@@ -906,7 +908,9 @@ pub(crate) fn prepared_plan_for_quick_reel(
     let source: Source = serde_json::from_value(saved.clone())
         .map_err(|_| storage::bad_request("Damaged Quick Reel source identity"))?;
     let canonical = verify_source(&source)?;
-    let plan = PreparationPlan::new(&canonical, global_root, None).map_err(storage::bad_request)?;
+    let plan = PreparationPlan::new(&canonical, global_root, None)
+        .and_then(PreparationPlan::bind_source)
+        .map_err(storage::bad_request)?;
     if plan.ready_path().is_none() {
         return Err(storage::conflict(
             "Quick Reel prepared media not ready; no inference reuse allowed",

@@ -64,6 +64,8 @@ pub struct ReplayRequest {
     pub(crate) settings: Option<TrackingOptions>,
     #[serde(default = "default_interpolation_enabled")]
     pub(crate) interpolate_players: bool,
+    #[serde(default = "default_interpolation_enabled")]
+    pub(crate) interpolate_pose: bool,
 }
 const fn default_interpolation_enabled() -> bool {
     true
@@ -609,7 +611,13 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             "CPU replay video does not belong to project",
         ));
     }
-    let plan = preparation::plan_for(state, &req.project_id, &req.video)?;
+    let plan = preparation::plan_for_run(
+        state,
+        &req.project_id,
+        &req.video,
+        "native_gpu_fusions",
+        &req.fusion_id,
+    )?;
     let prepared = plan
         .ready_path()
         .ok_or_else(|| storage::bad_request("Prepared video is unavailable"))?;
@@ -648,6 +656,8 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
         .as_u64()
         .filter(|v| *v > 0 && *v <= 48 * 3600 * 30)
         .ok_or_else(|| storage::bad_request("Invalid GPU fusion frame count"))?;
+    volley_media::preparation::verify_source_provenance(&plan.source, &manifest["original_source"])
+        .map_err(storage::conflict)?;
     if manifest["windows"].as_u64() != Some(frames / 9) || frames % 9 != 0 {
         return Err(storage::bad_request(
             "Fusion window count does not match emitted frames",
@@ -709,6 +719,7 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             "interpolated_positions_version":if req.interpolate_players {"bounded_same_track_3s_v2"} else {"disabled_v1"},
             "pose_storage_version":"measured_coco17_v1",
             "interpolate_players":req.interpolate_players,
+            "interpolate_pose":req.interpolate_pose,
             "project_id":req.project_id,
             "video":req.video,
             "replay_id":replay_id,
@@ -720,6 +731,7 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             "pose_measured_track_proposals":totals.pose_detections,
             "ball_selection_policy":"vballnet_only_v1",
             "source_identity":{"bytes":size,"mtime_ns":mtime},
+            "original_source":manifest["original_source"],
             "fps":30,
             "settings":settings,
             "frames":totals.frames,
@@ -1328,6 +1340,7 @@ mod tests {
             fusion_id: fusion_id.into(),
             settings: None,
             interpolate_players: true,
+            interpolate_pose: true,
         };
         let first = process(&state, &request).unwrap();
         assert_eq!(first["provisional_track_count"], 1);

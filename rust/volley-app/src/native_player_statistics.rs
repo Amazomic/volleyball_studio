@@ -93,7 +93,7 @@ fn count_native_contacts(
     let mut before = None::<u64>;
     let mut total = ContactCounts::default();
     let mut verified_touches = 0_u64;
-    let mut last_attributed = BTreeMap::<u64, u64>::new();
+    let mut last_attributed = vec![BTreeMap::<u64, u64>::new(); windows.intervals.len()];
     for frame in 0..run.frames {
         let raw = source
             .line()?
@@ -147,15 +147,22 @@ fn count_native_contacts(
                 verified_touches += 1;
                 let pose_verified =
                     event.body_contact_supported && event.contact_landmark.is_some();
+                let interval = windows.intervals.partition_point(|(_, end)| *end < frame);
+                let mut outside = BTreeMap::new();
+                let final_touch = native_rally_preview::finalize_touch(
+                    event,
+                    windows.contains(frame),
+                    windows.contexts.get(&frame),
+                    if windows.contains(frame) {
+                        &mut last_attributed[interval]
+                    } else {
+                        &mut outside
+                    },
+                )?;
                 if !windows.contains(frame) {
                     total.outside_rally_proposals += 1;
                 } else if let Some(id) = track {
-                    if !native_rally_preview::retain_rally_touch(
-                        &mut last_attributed,
-                        frame,
-                        id,
-                        pose_verified,
-                    ) {
+                    if !final_touch.attributed {
                         total.unverified_proposals += 1;
                     } else if owners.excluded.contains(&id) {
                         total.excluded_proposals += 1;
@@ -165,13 +172,7 @@ fn count_native_contacts(
                         if !pose_verified {
                             total.generic_touches += 1;
                         }
-                        let estimated_kind = if pose_verified {
-                            event
-                                .action_prediction()
-                                .map(|p| p.kind.as_str().to_owned())
-                        } else {
-                            None
-                        };
+                        let estimated_kind = final_touch.kind.map(|kind| kind.as_str().to_owned());
                         total.montage_contacts.push(MontageContact {
                             frame,
                             track_id: id,
@@ -729,6 +730,7 @@ mod tests {
             &owners,
             &native_rally_preview::RallyWindows {
                 intervals: vec![(0, 79)],
+                contexts: BTreeMap::new(),
             },
         )
         .unwrap();
@@ -763,6 +765,7 @@ mod tests {
             &owners,
             &native_rally_preview::RallyWindows {
                 intervals: vec![(0, 79)],
+                contexts: BTreeMap::new(),
             },
         )
         .unwrap();
@@ -775,6 +778,7 @@ mod tests {
             &owners,
             &native_rally_preview::RallyWindows {
                 intervals: vec![(0, 79)],
+                contexts: BTreeMap::new(),
             },
         )
         .unwrap();
@@ -785,10 +789,36 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn final_rally_context_is_shared_by_statistics_and_montage() {
+        use volley_core::action_prediction::ActionKind;
+        let (root, run, replay, owners) = fixture();
+        let scope = native_rally_preview::RallyWindows {
+            intervals: vec![(0, 79)],
+            contexts: BTreeMap::from([
+                (10, (Some(7), true, None)),
+                (20, (Some(7), false, Some(ActionKind::Serve))),
+            ]),
+        };
+        let counts = count_native_contacts(&run, &replay, &owners, &scope).unwrap();
+        assert_eq!(counts.touches, 4);
+        assert_eq!(counts.estimated_actions.get("serve"), Some(&1));
+        assert!(counts
+            .montage_contacts
+            .iter()
+            .any(|event| event.frame == 20 && event.estimated_kind.as_deref() == Some("serve")));
+        assert!(!counts
+            .montage_contacts
+            .iter()
+            .any(|event| event.frame == 10));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn stats_exclude_touches_between_rallies_without_skipping_source_validation() {
         let (root, run, replay, owners) = fixture();
         let scope = native_rally_preview::RallyWindows {
             intervals: vec![(8, 22), (48, 53)],
+            contexts: BTreeMap::new(),
         };
         let counts = count_native_contacts(&run, &replay, &owners, &scope).unwrap();
         // Source contains five physically valid Touch events; only three
@@ -827,6 +857,7 @@ mod tests {
             &owners,
             &native_rally_preview::RallyWindows {
                 intervals: vec![(0, 79)],
+                contexts: BTreeMap::new(),
             },
         )
         .unwrap();
@@ -869,6 +900,7 @@ mod tests {
             &owners,
             &native_rally_preview::RallyWindows {
                 intervals: vec![(0, 79)],
+                contexts: BTreeMap::new(),
             },
         )
         .unwrap_err();
@@ -952,6 +984,7 @@ mod tests {
             &owners,
             &native_rally_preview::RallyWindows {
                 intervals: vec![(8, 22), (48, 53)],
+                contexts: BTreeMap::new(),
             },
         )
         .unwrap();

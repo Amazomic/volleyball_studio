@@ -19,7 +19,8 @@
   const zoomLabel=$("studio-analysis-zoom-label");
   const minZoom=0.52,maxZoom=1.24,zoomStep=0.08;
   let project="",source="",generation=0,corners=[],drag=-1,duration=0;
-  let marking=false,zoom=0.84,settingsLoaded=false,settingsLoading=false,net=null,netDrag=-1;
+  let marking=false,zoom=0.84,settingsLoaded=false,settingsLoading=false,net=null,netDrag=-1,geometrySource="manual";
+  let markingNet=false,netPoints=[];
 
   let baseRevision="",dirty=false,draftTimer=null,editEpoch=0;
   const revision=data=>data.edit_revision||JSON.stringify([data.trim_start_sec??0,data.trim_end_sec??null,data.court||[],data.net||null,data.source_revision??null]);
@@ -43,7 +44,7 @@
     draftTimer=null;
     if(!dirty||!project||!source||!baseRevision)return;
     const row={base:baseRevision,expires:Date.now()+14*86400000,
-      value:{trim_start_sec:Number(begin.value),trim_end_sec:Number(end.value)||null,court:corners,net}};
+      value:{trim_start_sec:Number(begin.value),trim_end_sec:Number(end.value)||null,court:corners,net,geometry_source:geometrySource}};
     try{const text=JSON.stringify(row);if(text.length<=4096)localStorage.setItem(draftKey(project,source),text);}catch{}
   };
   window.addEventListener("beforeunload",flushDraft);
@@ -169,6 +170,11 @@
     if(!marking||!valid()||!video.videoWidth)return;
     const at=point(event),rect=canvas.getBoundingClientRect();
     const image=frame.getBoundingClientRect();
+    if(markingNet){
+      netPoints.push(at);
+      if(netPoints.length===2){net=netPoints.map(p=>[...p]);netPoints=[];markingNet=false;geometrySource="manual";markModified();draw();}
+      return;
+    }
     netDrag=net?net.findIndex(p=>{const [x,y]=pointXY(p,rect,image);return Math.hypot(x-(event.clientX-rect.left),y-(event.clientY-rect.top))<17;}):-1;
     if(netDrag>=0){canvas.setPointerCapture(event.pointerId);return;}
     drag=corners.findIndex(p=>{
@@ -176,7 +182,7 @@
       return Math.hypot(x-(event.clientX-rect.left),y-(event.clientY-rect.top))<17;
     });
     if(drag<0&&corners.length<4){
-      corners.push(at);drag=corners.length-1;
+      geometrySource="manual";corners.push(at);drag=corners.length-1;
       markModified();draw();
     }
     if(drag>=0)canvas.setPointerCapture(event.pointerId);
@@ -186,14 +192,17 @@
     if(drag<0)return;
     corners[drag]=point(event);draw();
   });
-  const finishDrag=()=>{if(drag>=0||netDrag>=0)markModified();drag=-1;netDrag=-1;};
+  const finishDrag=()=>{if(drag>=0||netDrag>=0){geometrySource="manual";markModified();}drag=-1;netDrag=-1;};
   canvas.addEventListener("pointerup",finishDrag);
   canvas.addEventListener("pointercancel",finishDrag);
+  $("studio-analysis-net-mode").addEventListener("click",()=>{
+    markingNet=true;netPoints=[];setMarking(true);message("Отметьте два конца верхней линии сетки");
+  });
   $("studio-analysis-court-undo").addEventListener("click",()=>{
-    corners.pop();draw();markModified();
+    corners.pop();geometrySource="manual";draw();markModified();
   });
   $("studio-analysis-court-clear").addEventListener("click",()=>{
-    corners=[];net=null;draw();markModified();
+    corners=[];net=null;markingNet=false;netPoints=[];geometrySource="manual";draw();markModified();
   });
   $("studio-analysis-court-auto").addEventListener("click",async()=>{
     if(!valid())return;
@@ -206,7 +215,7 @@
       });
       if(token!==generation||epoch!==editEpoch)return;
       if(!result.detected){message(result.message||"Не удалось уверенно распознать разметку. Отметьте углы вручную.",true);return;}
-      corners=result.court;net=result.net||null;setMarking(true);markModified();draw();
+      corners=result.court;net=result.net||null;geometrySource="automatic";setMarking(true);markModified();draw();
       message((result.inferred?"Часть границ достроена по размерам площадки и перспективе — проверьте положение каждой точки. ":result.temporal_composite?"Разметка восстановлена из нескольких кадров — проверьте её. ":result.weak_consensus?"Предварительная разметка (мало совпавших кадров). ":"Найдена разметка. ")+"Подтверждений: "+result.supporting_frames+"/"+result.sampled_frames+". Проверьте углы и сетку, при необходимости перетащите точки, затем сохраните.");
     }catch(error){if(token===generation)message(error.message,true);}
     finally{button.disabled=!valid();}
@@ -280,7 +289,7 @@
     try{
       const result=await api("/api/video-edit",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({project_id:project,video:source,trim_start_sec:from,
-          trim_end_sec:to,court,net})});
+          trim_end_sec:to,court,net,geometry_source:geometrySource,expected_revision:baseRevision})});
       if(token===generation){
         const data={...result,trim_start_sec:from,trim_end_sec:to,court,net};
         editCache.write(project,source,data);
@@ -316,7 +325,7 @@
     video.pause();
     video.removeAttribute("src");
     video.load();
-    project=projectId||"";source=videoName||"";corners=[];net=null;
+    project=projectId||"";source=videoName||"";corners=[];net=null;markingNet=false;netPoints=[];
     duration=0;begin.value="0";end.value="0";seek.value="0";seek.max="1000";
     media.style.setProperty("--frame-ratio","1.77778");
     zoom=0.84;setMarking(false);
@@ -337,7 +346,7 @@
       end.value=data.trim_end_sec==null?"0":String(data.trim_end_sec);
       corners=Array.isArray(data.court)?data.court.filter(p=>
         Array.isArray(p)&&p.length===2&&p.every(v=>Number.isFinite(v)&&v>=-0.5&&v<=1.5)):[];
-      net=Array.isArray(data.net)&&data.net.length===2?data.net:null;
+      net=Array.isArray(data.net)&&data.net.length===2?data.net:null;geometrySource=data.geometry_source||"manual";
       video.src=url("/api/video-source",{project_id:project,video:source});
       video.load();
       settingsLoaded=true;

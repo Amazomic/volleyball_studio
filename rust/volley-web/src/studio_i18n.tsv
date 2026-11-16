@@ -320,3 +320,108 @@ RTMPose · шаг кадров (1–9)	RTMPose · frame stride (1–9)
 Активность относительно среднего	Activity relative to the mean
 Следующее фото игрока	Next player photo
 Активность	Activity
+Разметить сетку	Mark net
+Отметьте два конца верхней линии сетки	Mark both ends of the net top line
+Выберите оригинальные видео с диска	Choose original videos from disk
+Нажмите, чтобы открыть проводник Windows. Перетаскивание тоже откроет выбор файлов.	Click to open Windows Explorer. Dropping files also opens the file picker.
+Выберите исходные видео через проводник. Сохраняются только ссылки на оригиналы: без копирования и SHA-256.	Choose source videos in Explorer. Selection stores only references: no copies or SHA-256 calculation.
+▱ Поле и сетка	▱ Court and net
+Дообучение	Training
+RTMPose-M · плавные точки (между измерениями — интерполяция)	RTMPose-M · smooth joints (interpolated between observations)
+Точные измерения раз в несколько кадров; между ними только визуальная интерполяция. Без Track ID.	Measured every few frames; visual interpolation between observations. No Track ID.
+Обучение на движениях игрока	Learn from player movement
+Пауза → выбрать игрока на кадре → подтвердить тип	Pause → select player in frame → confirm type
+Выберите игрока, коснувшегося мяча, непосредственно на кадре видео.	Select the player who contacted the ball in the video frame.
+Тип касания	Contact type
+Сохранить пример	Save example
+Обновить базу	Refresh examples
+Обучающие примеры	Training examples
+Создание видео	Create video
+ОДИН КОНСТРУКТОР — РАЗНЫЕ ВАРИАНТЫ	ONE EDITOR — MULTIPLE OPTIONS
+Выберите профиль и настройте ролик	Choose a profile and customize your video
+Весь монтаж — из исходного видео. Анализ повторно не запускается.	All clips use the original video. Analysis is reused.
+Рилс игрока	Player reel
+Лучшие атаки	Best attacks
+Отчёт об игре	Match report
+Тип монтажа	Video type
+Избранные розыгрыши	Favorite rallies
+Касания выбранного игрока	Selected player contacts
+Лучшие и длинные розыгрыши + статистика	Best and longest rallies + statistics
+Игрок	Player
+Тип касаний	Contact types
+Все подтверждённые касания	All verified contacts
+Подачи	Serves
+Приёмы	Receptions
+Верхние передачи	Overhead passes
+Нижние передачи	Forearm passes
+Контекст вокруг касания, сек.	Context around contact, seconds
+0,5 · быстрый	0.5 · fast
+1 · стандартный	1 · standard
+1,5 · подробный	1.5 · detailed
+2 · плавный	2 · smooth
+Желаемая длительность, сек.	Target duration, seconds
+Формат	Format
+Вертикальное 9:16 · вся площадка	Vertical 9:16 · entire court
+Оригинал · горизонтальное	Original · landscape
+Рендер	Renderer
+Автоматически (GPU / CPU)	Automatic (GPU / CPU)
+Слежение за мячом	Ball tracking camera
+Выключено · видна вся площадка	Off · show the entire court
+Включено · следить за мячом	On · follow the ball
+Увеличение кадра	Camera zoom
+Отмечено розыгрышей ·	Selected rallies ·
+Добавьте розыгрыши в избранное во вкладке предпросмотра.	Add rallies to favorites in the preview tab.
+Источники и версии CPU-анализа	Sources and CPU analysis versions
+Аудиодорожка (необязательно)	Soundtrack (optional)
+Подогнать длительность под музыку	Match duration to soundtrack
+После выбора трека длительность установится автоматически.	Selecting a track sets the duration automatically.
+Громкость трека	Soundtrack volume
+Проверить подборку	Preview selection
+Создать видео	Create video
+Внутренний запуск избранного	Internal favorites render
+Для персонального рилса используются только короткие фрагменты вокруг проверенных касаний.	Player reels use short clips around verified contacts.
+VBallNet определяет мяч.	VBallNet detects the ball.
+Детектор игроков + RTMPose	Player detector + RTMPose
+определяет игроков и скелеты. Результат сохраняется для повторной постобработки.	detects players and skeletons. Results are saved for repeated postprocessing.
+Исходное видео	Source video
+Шаг анализа мяча	Ball analysis stride
+Шаг окон VBallNet в кадрах: от 1 до 9. Меньший шаг увеличивает перекрытие окон и время анализа.	VBallNet window stride: 1–9 frames. A smaller stride increases overlap and processing time.
+Игроки и позы · шаг, кадров	Players and poses · stride, frames
+Детектор игроков и RTMPose работают на одних кадрах, по реальным рамкам детектора. Промежуточные кадры не передаются в эти нейросети.	The player detector and RTMPose use the same frames and observed detector boxes. Intermediate frames are not sent to these models.
+Видео: 30 кадров в секунду (30 FPS). Каждый 10-й кадр → 3 раза/с.	Video: 30 frames per second (30 FPS). Every 10th frame → 3 samples/s.
+Дополнительные настройки	Additional settings
+Определить поле и сетку	Detect court and net
+Трекинг · касания · розыгрыши. Повторный GPU-анализ не требуется.	Tracking · contacts · rallies. GPU analysis is reused.
+Строгий: траектория + точки тела	Strict: trajectory + body keypoints
+VBallNet + RTMPose: контакты и изломы ±0,1 с	VBallNet + RTMPose: contacts and trajectory changes ±0.1 s
+Мин. уверенность физического касания	Minimum physical contact score
+Настройки постобработки · дополнительно	Postprocessing · additional settings
+Игроки и позы	Players and poses
+Интерполяция игроков в CPU	CPU player interpolation
+Плавные скелеты в предпросмотре	Smooth preview skeletons
+Интерполяция точек позы между измерениями делает движение скелетов плавнее в предпросмотре. Дополнительный запуск нейросети не требуется.	Interpolating joints between measurements makes preview skeletons smoother. No additional neural inference is required.
+Контакты мяча	Ball contacts
+Не обязательно (рекомендуется)	Optional (recommended)
+Строгая фильтрация (меньше касаний)	Strict filtering (fewer contacts)
+Мин. поворот мяча при пропуске VBallNet, градусы	Minimum ball turn across VBallNet gaps, degrees
+Окно объединения изломов, кадров	Trajectory change merge window, frames
+Технические пороги	Technical thresholds
+Максимум без нового касания другого игрока, кадров	Maximum gap without another player's contact, frames
+Журнал выполнения ·	Execution log ·
+Фактические вызовы Rust и аргументы отдельно от внешних процессов (FFmpeg).	Actual Rust calls and arguments, separate from external processes (FFmpeg).
+История	History
+Пересчитать статистику	Recalculate statistics
+Показать сохранённые границы площадки и сетку	Show saved court boundaries and net
+Дообучение на подтверждённых касаниях	Train on confirmed contacts
+Конструктор монтажа	Video editor
+Готовые профили	Preset profiles
+О первичном анализе	About primary analysis
+О шаге анализа мяча	About ball analysis stride
+О частоте определения игроков и поз	About player and pose sampling
+Об интерполяции поз	About pose interpolation
+При восстановлении касания через пропущенные кадры мяч должен действительно изменить направление, а не просто ускоряться под действием гравитации	Reconstructing a contact across missing frames requires a change in ball direction, not just gravitational acceleration.
+Прогресс текущего анализа	Current analysis progress
+Журнал текущего анализа	Current analysis log
+Скрыть записи истории текущего проекта; результаты анализа сохраняются	Hide this project's history entries; saved analysis results are retained
+Фильтры и режимы плеера	Player filters and modes
+Фильтры отображения	Display filters

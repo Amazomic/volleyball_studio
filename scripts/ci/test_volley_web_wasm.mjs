@@ -76,7 +76,7 @@ assert.equal(e.volley_ui_current_load(2,epoch1),0);
 assert.equal(e.volley_ui_current_load(2,epoch2),1);
 assert.equal(e.volley_ui_begin_load(6),0);
 const words=e.volley_ui_text_count();
-assert.ok(words>160&&words<500,"Expected substantial Rust-owned bilingual UI strings");
+assert.ok(words>160&&words<1024,"Expected substantial Rust-owned bilingual UI strings");
 const sourceKeys=new Set(),allWords=[];
 function encodedText(index){
   assert.equal(e.volley_ui_text_copy(index),1);

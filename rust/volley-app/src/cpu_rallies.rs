@@ -596,7 +596,13 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
     {
         return Err(storage::bad_request("Video does not belong to project"));
     }
-    let plan = preparation::plan_for(state, &request.project_id, &request.video)?;
+    let plan = preparation::plan_for_run(
+        state,
+        &request.project_id,
+        &request.video,
+        "native_cpu_replays",
+        &request.replay_id,
+    )?;
     let prepared = plan
         .ready_path()
         .ok_or_else(|| storage::bad_request("Prepared video missing from selected project"))?;
@@ -615,6 +621,13 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
     let touch_dir = touch_root.join(&request.touch_id);
     let tracked = source_manifest(&track_dir, "CPU Track ID").map_err(storage::bad_request)?;
     let contacts = source_manifest(&touch_dir, "CPU Touch").map_err(storage::bad_request)?;
+    volley_media::preparation::verify_source_provenance(&plan.source, &tracked["original_source"])
+        .map_err(storage::conflict)?;
+    if tracked["original_source"] != contacts["original_source"] {
+        return Err(storage::conflict(
+            "Track and Touch original content differs",
+        ));
+    }
     let court = crate::video_edits::court_snapshot(state, &request.project_id, &request.video)?;
     let current_court_revision = court.as_ref().map(|snapshot| snapshot.revision.clone());
     if contacts["court_revision"] != json!(current_court_revision) {
@@ -711,7 +724,9 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
             &part,
             &request.replay_id,
             &request.touch_id,
-            court.as_ref().map(|snapshot| &snapshot.transform),
+            court
+                .as_ref()
+                .and_then(|snapshot| snapshot.transform.as_ref()),
             Some((rally_starts, tracking_score)),
         )?;
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
@@ -730,6 +745,8 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
             "source_touch_id":request.touch_id,
             "source_touch_sha256":touch_sha,
             "source_identity":identity,
+            "original_source":tracked["original_source"],
+            "original_source":tracked["original_source"],
             "width":dimensions.width,"height":dimensions.height,"fps":30,
             "frames":frames,
             "settings":settings,

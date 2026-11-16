@@ -779,7 +779,6 @@ fn gpu_lineage_valid(
             || (saved["gpu_model_stack"] != requested_gpu_model_stack()
                 && pose["interpolate_players"].as_bool().unwrap_or(true)
                     != request.gpu.interpolate_players)
-            || pose["interpolate_pose"].as_bool().unwrap_or(true) != request.gpu.interpolate_pose
             || pose["project_id"] != request.project_id
             || pose["video"] != request.video
             || pose["source_identity"] != *identity
@@ -853,6 +852,7 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
             || !request.gpu.pose_enabled
             || track["track_association_version"] == "pose_coco17_primary_v1")
         && track["replay_id"] == replay
+        && track["interpolate_pose"].as_bool().unwrap_or(true) == request.gpu.interpolate_pose
         && track["source_fusion_id"] == fusion
         && track["ball_selection_policy"] == "vballnet_only_v1"
         && track["project_id"] == request.project_id
@@ -885,9 +885,8 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
         && rallies["project_id"] == request.project_id
         && rallies["video"] == request.video
 }
-const GPU_MODEL_STACK: &str = "vballnet_rtmdet_rtmpose_tiled_coco17_sampled_observed_pose_v8";
-const RFDETR_GPU_MODEL_STACK: &str =
-    "vballnet_rfdetr_medium_18250b5a_detboxes_aligned_observed_pose_v3";
+const GPU_MODEL_STACK: &str = "vballnet_rtmdet_rtmpose_original30_observed_pose_v9";
+const RFDETR_GPU_MODEL_STACK: &str = "vballnet_rfdetr_medium_18250b5a_original30_observed_pose_v4";
 
 /// The GPU-evidence cache must not be shared by different detector weights
 /// or detector-to-pose box policies.
@@ -915,6 +914,7 @@ fn compatible_version(saved: &Value, request: &StartRequest, identity: &Value) -
         && serde_json::from_value::<GpuProfile>(saved["profile"]["gpu"].clone())
             .is_ok_and(|mut gpu| {
                 gpu.interpolate_players = request.gpu.interpolate_players;
+                gpu.interpolate_pose = request.gpu.interpolate_pose;
                 json!(gpu) == json!(request.gpu)
             })
         // Older pipeline status files can predate the source_identity field;
@@ -1209,9 +1209,18 @@ async fn pipeline(
         "preparation::plan_for",
         json!({"project_id":request.project_id,"video":request.video}),
     )?;
-    let plan = preparation::plan_for_async(app.clone(), &request.project_id, &request.video)
-        .await
-        .map_err(reason)?;
+    let plan = preparation::plan_for_analysis_async(
+        app.clone(),
+        &request.project_id,
+        &request.video,
+        if request.mode == PipelineMode::Post {
+            request.source_analysis_id.as_deref()
+        } else {
+            None
+        },
+    )
+    .await
+    .map_err(reason)?;
     progress(path, status, "Подготовка исходного видео", 0.0)?;
     let cached = preparation::ready_path_async(&plan).await?;
     log_event(
@@ -1280,14 +1289,25 @@ async fn pipeline(
         return Err("cancelled".into());
     }
     progress(path, status, "Видео подготовлено", 8.0)?;
-    let ready = preparation::plan_for_async(app.clone(), &request.project_id, &request.video)
-        .await
-        .map_err(reason)?;
+    let ready = preparation::plan_for_analysis_async(
+        app.clone(),
+        &request.project_id,
+        &request.video,
+        if request.mode == PipelineMode::Post {
+            request.source_analysis_id.as_deref()
+        } else {
+            None
+        },
+    )
+    .await
+    .map_err(reason)?;
     let prepared = preparation::ready_path_async(&ready)
         .await?
         .ok_or("Подготовленное видео недоступно")?;
     let (bytes, mtime_ns) = crate::inference_stream::source_stamp(&prepared)?;
     let identity = json!({"bytes":bytes,"mtime_ns":mtime_ns});
+    let original_source = volley_media::preparation::source_provenance(&ready.source)?;
+    status["original_source"] = original_source.clone();
     status["source_identity"] = identity.clone();
     let court_revision =
         crate::video_edits::court_snapshot(app, &request.project_id, &request.video)
@@ -1303,7 +1323,12 @@ async fn pipeline(
         "Проверка GPU/CPU профилей, подготовленного видео и подписанных идентификаторов источника",
     )?;
     let reusable = if request.mode == PipelineMode::Full {
-        find_reusable(app, request, &identity, current_id)
+        let reusable = find_reusable(app, request, &identity, current_id);
+        let matches = |saved: &Value| saved["original_source"] == original_source;
+        ExistingVersions {
+            full: reusable.full.filter(|saved| matches(saved)),
+            gpu: reusable.gpu.filter(|saved| matches(saved)),
+        }
     } else {
         ExistingVersions::default()
     };
@@ -1326,6 +1351,7 @@ async fn pipeline(
         status["gpu_jobs"] = source["gpu_jobs"].clone();
         status["profile"]["gpu"] = source["profile"]["gpu"].clone();
         status["profile"]["gpu"]["interpolate_players"] = json!(request.gpu.interpolate_players);
+        status["profile"]["gpu"]["interpolate_pose"] = json!(request.gpu.interpolate_pose);
         status["gpu_reused"] = json!(true);
         status["reused_from_id"] = source["id"].clone();
         save(path, status)?;
@@ -1553,6 +1579,7 @@ async fn pipeline(
             video: request.video.clone(),
             fusion_id,
             settings: Some(request.post.tracking),
+            interpolate_pose: request.gpu.interpolate_pose,
             interpolate_players: status["profile"]["gpu"]["interpolate_players"]
                 .as_bool()
                 .unwrap_or(true),
@@ -1780,7 +1807,35 @@ async fn perform(
         "info",
         "Запуск создан, настройки и выбранный источник сохранены.",
     );
-    let outcome = pipeline(&state, &request, &cancel, &path, &mut status).await;
+    let mut outcome = pipeline(&state, &request, &cancel, &path, &mut status).await;
+    if outcome.is_ok() && request.mode != PipelineMode::Gpu && !cancel.load(Ordering::Acquire) {
+        let _ = progress(&path, &mut status, "Монтажная временная разметка", 99.5);
+        let rally = status["postprocessing_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let app = state.clone();
+        let project = request.project_id.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::native_rally_preview::publish_material(&app, &project, &rally)
+        })
+        .await
+        {
+            Ok(Ok(material)) => {
+                status["montage_material"] = material;
+                if let Err(error) = log_event(
+                    &path,
+                    "Монтажная разметка",
+                    "success",
+                    "Финальная временная разметка и план монтажа сохранены",
+                ) {
+                    outcome = Err(error);
+                }
+            }
+            Ok(Err(error)) => outcome = Err(reason(error)),
+            Err(error) => outcome = Err(format!("Timeline worker: {error}")),
+        }
+    }
     match outcome {
         Ok(()) => {
             status["status"] = json!("complete");
@@ -2343,7 +2398,7 @@ mod tests {
         request.gpu.interpolate_players = false;
         assert!(compatible_version(&saved, &request, &identity));
         request.gpu.interpolate_pose = false;
-        assert!(!compatible_version(&saved, &request, &identity));
+        assert!(compatible_version(&saved, &request, &identity));
     }
 
     #[test]
@@ -2469,6 +2524,7 @@ mod branching_tests {
                     "status":"model_raw_detections_complete","job_id":id,
                     "project_id":request.project_id,"video":request.video,
                     "model":model,"stride":9,"source_identity":identity,
+                    "person_sampling_period_frames":request.gpu.pose_stride,
                     "raw_candidates_only":true,"studio_gpu_run_complete":false,
                     "file":"detections.jsonl","fps":30,
                     "sha256":sha
@@ -2486,7 +2542,8 @@ mod branching_tests {
                 "project_id":request.project_id,"video":request.video,
                 "sources":{"vballnet":{"job_id":gpu_ball,"sha256":sha},
                            "person_pose":{"job_id":gpu_players,"sha256":sha}},
-                "source_identity":identity,"sha256":sha,"fps":30
+                "source_identity":identity,"sha256":sha,"fps":30,
+                "player_sampling_period_frames":request.gpu.pose_stride
             }),
         );
         emit(
@@ -2509,7 +2566,8 @@ mod branching_tests {
             &json!({
                 "schema":"volley-native-cpu-touch-proposals/1","state":"motion_gated_touch_proposals","touch_id":touch,
                 "project_id":request.project_id,"video":request.video,
-                "source_replay_id":replay,"method":"vballnet_gravity_player_geometry_pose_contact_v7","sha256":sha
+                "source_replay_id":replay,"method":"vballnet_gravity_player_geometry_pose_contact_v9","sha256":sha,
+                "ball_tracking_policy":crate::cpu_retrack::ball_track::POLICY
             }),
         );
         emit(
@@ -2521,6 +2579,7 @@ mod branching_tests {
                 "schema":"volley-native-cpu-rally-proposals/1","state":"provisional_rally_segments","rally_run_id":rally,
                 "court_contact_context_version":"python_serve_toss_possession_v2",
                 "ground_boundary_version":"trajectory_court_player_v2",
+                "ball_tracking_policy":crate::cpu_retrack::ball_track::POLICY,
                 "project_id":request.project_id,"video":request.video,
                 "source_replay_id":replay,"source_touch_id":touch,"sha256":sha
             }),

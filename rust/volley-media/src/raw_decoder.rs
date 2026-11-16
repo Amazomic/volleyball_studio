@@ -181,7 +181,7 @@ pub fn decode_windows(
     .args(["-map", "0:v:0", "-an", "-sn", "-dn"])
     .args([
         "-vf",
-        &format!("scale={w}:{h}:flags=bilinear,format={format}"),
+        &format!("fps=30,scale={w}:{h}:flags=bilinear,format={format}"),
     ])
     .args(["-frames:v", &total_frames.to_string()])
     .args(["-pix_fmt", format, "-f", "rawvideo", "pipe:1"]);
@@ -323,7 +323,7 @@ pub fn decode_full_video(
     .args(["-map", "0:v:0", "-an", "-sn", "-dn"])
     .args([
         "-vf",
-        &format!("scale={w}:{h}:flags=bilinear,format={format}"),
+        &format!("fps=30,scale={w}:{h}:flags=bilinear,format={format}"),
     ])
     .args(["-pix_fmt", format, "-f", "rawvideo", "pipe:1"]);
     ff.stdin(Stdio::null())
@@ -446,7 +446,7 @@ mod tests {
                 "-f",
                 "lavfi",
                 "-i",
-                "testsrc2=size=64x64:rate=30:duration=0.6",
+                "testsrc2=size=64x64:rate=60:duration=0.6",
                 "-an",
                 "-c:v",
                 "mpeg4",

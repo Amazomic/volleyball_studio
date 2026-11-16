@@ -732,6 +732,7 @@ pub async fn get(
     let replay_sha = run.replay_sha.clone();
     let total = run.frames;
     let interpolate_players = manifest["interpolate_players"].as_bool().unwrap_or(true);
+    let interpolate_pose = manifest["interpolate_pose"].as_bool().unwrap_or(true);
     let start = query.start_frame;
     let preview_run = run.clone();
     let fusion_for_pose = if query.pose.unwrap_or(false) {
@@ -794,13 +795,14 @@ pub async fn get(
                 context_end,
                 &mut frames,
             )?;
-            native_preview_pose::processed_window(
+            native_preview_pose::processed_window_policy(
                 &pose_root,
                 &fusion,
                 total,
                 context_start,
                 context_end,
                 &mut frames,
+                Some(interpolate_pose),
             )?
         } else {
             false
@@ -1022,7 +1024,13 @@ fn inspect_gpu_source(
     }) {
         return Err(storage::bad_request("GPU video does not belong to project"));
     }
-    let plan = preparation::plan_for(state, &query.project_id, &query.video)?;
+    let plan = preparation::plan_for_run(
+        state,
+        &query.project_id,
+        &query.video,
+        "native_gpu_fusions",
+        &query.fusion_id,
+    )?;
     let prepared = plan
         .ready_path()
         .ok_or_else(|| storage::bad_request("Prepared GPU video is unavailable"))?;
@@ -1388,6 +1396,7 @@ mod tests {
         let sha = format!("{:x}", Sha256::digest(&bytes));
         let scope = native_rally_preview::RallyWindows {
             intervals: vec![(0, 499)],
+            contexts: std::collections::BTreeMap::new(),
         };
         let rows = extract_frames(
             &path, &sha, 500, 400, 405, &scope, 1280, 720, 0.35, None, None,
@@ -1436,6 +1445,7 @@ mod tests {
         let sha = format!("{:x}", Sha256::digest(&data));
         let scope = native_rally_preview::RallyWindows {
             intervals: vec![(0, 7)],
+            contexts: std::collections::BTreeMap::new(),
         };
         // A request beginning inside the hole needs the VballNet anchors
         // outside the requested subwindow. The +/-8-frame read halo supplies them.
@@ -1495,7 +1505,10 @@ mod tests {
             (vec![(0, 3), (6, 11)], false),
             (vec![], false),
         ] {
-            let scope = native_rally_preview::RallyWindows { intervals };
+            let scope = native_rally_preview::RallyWindows {
+                intervals,
+                contexts: std::collections::BTreeMap::new(),
+            };
             let frames = extract_frames(
                 &path,
                 &sha,
@@ -1572,6 +1585,7 @@ mod tests {
         let sha = format!("{:x}", Sha256::digest(&data));
         let active = native_rally_preview::RallyWindows {
             intervals: vec![(2, 4)],
+            contexts: std::collections::BTreeMap::new(),
         };
         let overlay =
             extract_frames(&input, &sha, 6, 0, 6, &active, 640, 360, 0.35, None, None).unwrap();

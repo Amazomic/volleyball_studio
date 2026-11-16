@@ -81,6 +81,7 @@ struct ModelEvidence {
     windows: u64,
     decoded_frames: u64,
     source_identity: Value,
+    original_source: Value,
     person_sampling_period_frames: u64,
 }
 
@@ -132,6 +133,7 @@ fn open_evidence(
         windows,
         decoded_frames: decoded,
         source_identity: manifest["source_identity"].clone(),
+        original_source: manifest["original_source"].clone(),
         person_sampling_period_frames: manifest["person_sampling_period_frames"]
             .as_u64()
             .filter(|n| (1..=30).contains(n))
@@ -303,7 +305,13 @@ pub(crate) fn do_fusion(state: &AppState, request: &FuseRequest) -> Result<Value
     {
         return Err(storage::bad_request("Video not in project"));
     }
-    let plan = preparation::plan_for(state, &request.project_id, &request.video)?;
+    let plan = preparation::plan_for_run(
+        state,
+        &request.project_id,
+        &request.video,
+        "native_gpu_runs",
+        &request.person_job_id,
+    )?;
     let prepared = plan
         .ready_path()
         .ok_or_else(|| storage::bad_request("Prepared video unavailable"))?;
@@ -327,6 +335,13 @@ pub(crate) fn do_fusion(state: &AppState, request: &FuseRequest) -> Result<Value
         "ball",
     )
     .map_err(storage::bad_request)?;
+    if ravel.original_source != ball.original_source {
+        return Err(storage::conflict(
+            "GPU models belong to different original content",
+        ));
+    }
+    volley_media::preparation::verify_source_provenance(&plan.source, &ball.original_source)
+        .map_err(storage::conflict)?;
     if ravel.source_identity != identity || ball.source_identity != identity {
         return Err(storage::conflict(
             "Prepared source changed since original model runs",
@@ -366,6 +381,7 @@ pub(crate) fn do_fusion(state: &AppState, request: &FuseRequest) -> Result<Value
                 "vballnet":{"job_id":ball.job_id,"sha256":ball.sha256},
             },
             "source_identity":identity,
+            "original_source":ball.original_source,
             "fps":30,
             "windows":ball.windows,
             "decoded_frames":ball.decoded_frames,
@@ -496,6 +512,7 @@ mod tests {
             windows: 2,
             decoded_frames: 18,
             source_identity: manifest["source_identity"].clone(),
+            original_source: manifest["original_source"].clone(),
             person_sampling_period_frames: 1,
         }
     }

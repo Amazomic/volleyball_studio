@@ -1,12 +1,10 @@
-use ort::{
-    execution_providers::CUDAExecutionProvider,
-    session::Session,
-    value::Tensor,
-};
+use ort::{execution_providers::CUDAExecutionProvider, session::Session, value::Tensor};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     ort::init().commit()?;
-    let detector = std::env::args().nth(1).unwrap_or_else(|| "models/RTMDet-Nano-Person.onnx".into());
+    let detector = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "models/RTMDet-Nano-Person.onnx".into());
     for (path, height, width) in [
         (detector.as_str(), 320, 320),
         ("models/RTMPose-M-Body7.onnx", 256, 192),
@@ -22,9 +20,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))?;
         println!("{path}");
         match session.run(ort::inputs!["input" => tensor]) {
-            Ok(output) => for (name, value) in output.iter() {
-                println!("{name}: {:?}", value.dtype());
-            },
+            Ok(output) => {
+                for (name, value) in output.iter() {
+                    println!("{name}: {:?}", value.dtype());
+                }
+            }
             Err(error) => println!("batch failed: {error}"),
         };
     }

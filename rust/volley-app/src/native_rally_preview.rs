@@ -36,7 +36,9 @@ const MAX_RALLIES: usize = 200_000;
 const DUPLICATE_TRACK_FRAMES: u64 = 4;
 
 fn adjacent_same_track(last: Option<(u64, u64)>, track_id: u64, frame: u64) -> bool {
-    last.is_some_and(|(id, previous)| id == track_id && frame.saturating_sub(previous) <= DUPLICATE_TRACK_FRAMES)
+    last.is_some_and(|(id, previous)| {
+        id == track_id && frame.saturating_sub(previous) <= DUPLICATE_TRACK_FRAMES
+    })
 }
 
 pub(crate) fn retain_rally_touch(
@@ -45,8 +47,7 @@ pub(crate) fn retain_rally_touch(
     track: u64,
     pose_verified: bool,
 ) -> bool {
-    if !pose_verified
-        && adjacent_same_track(last.get(&track).map(|&at| (track, at)), track, frame)
+    if !pose_verified && adjacent_same_track(last.get(&track).map(|&at| (track, at)), track, frame)
     {
         return false;
     }
@@ -75,6 +76,44 @@ fn second_strike_by_same_player_is_not_a_duplicate_when_time_separated() {
     assert!(!adjacent_same_track(Some((3, 100)), 3, 130));
     assert!(!adjacent_same_track(Some((3, 100)), 4, 103));
 }
+type ContactContext = (Option<u64>, bool, Option<ActionKind>);
+
+pub(crate) struct FinalTouch {
+    pub(crate) attributed: bool,
+    pub(crate) pose_supported: bool,
+    pub(crate) kind: Option<ActionKind>,
+}
+
+pub(crate) fn finalize_touch(
+    event: &NativeMotion,
+    in_rally: bool,
+    context: Option<&ContactContext>,
+    last: &mut BTreeMap<u64, u64>,
+) -> Result<FinalTouch, String> {
+    if context.is_some_and(|(id, _, _)| *id != event.provisional_track_id) {
+        return Err("Rally context references a foreign-frame Track ID".into());
+    }
+    let pose_supported = event.body_contact_supported && event.contact_landmark.is_some();
+    let attributed = in_rally
+        && !context.is_some_and(|(_, ignored, _)| *ignored)
+        && event
+            .provisional_track_id
+            .is_some_and(|id| retain_rally_touch(last, event.frame_index, id, pose_supported));
+    let kind = if attributed && pose_supported {
+        match context {
+            Some((_, _, kind)) => *kind,
+            None => event.action_prediction().map(|value| value.kind),
+        }
+    } else {
+        None
+    };
+    Ok(FinalTouch {
+        attributed,
+        pose_supported: attributed && pose_supported,
+        kind,
+    })
+}
+
 fn default_gold_filter() -> String {
     "all".into()
 }
@@ -325,7 +364,13 @@ pub(crate) fn inspect_project(
     safe_folder(&touch_root).map_err(storage::bad_request)?;
     let touch_dir = touch_root.join(&touch_id);
     let touch = read_manifest(&touch_dir, "Touch").map_err(storage::bad_request)?;
-    let plan = preparation::plan_for(state, project_id, &video)?;
+    let plan = preparation::plan_for_run(
+        state,
+        project_id,
+        &video,
+        "native_cpu_rallies",
+        rally_run_id,
+    )?;
     let prepared = plan
         .ready_path()
         .ok_or_else(|| storage::bad_request("Prepared source is not ready"))?;
@@ -388,6 +433,20 @@ pub(crate) fn inspect_project(
         .as_u64()
         .filter(|n| *n <= 180)
         .ok_or_else(|| storage::bad_request("Invalid saved context padding"))?;
+    volley_media::preparation::verify_source_provenance(&plan.source, &rally["original_source"])
+        .map_err(storage::conflict)?;
+    if rally["original_source"] != touch["original_source"] {
+        return Err(storage::conflict(
+            "Rally and Touch original content differs",
+        ));
+    }
+    volley_media::preparation::verify_source_provenance(&plan.source, &rally["original_source"])
+        .map_err(storage::conflict)?;
+    if rally["original_source"] != touch["original_source"] {
+        return Err(storage::conflict(
+            "Rally and Touch original content differs",
+        ));
+    }
     let source_info = volley_media::probe(&plan.source).map_err(storage::bad_request)?;
     if frames as f64 / 30.0 > source_info.duration_sec + 0.067 {
         return Err(storage::bad_request(
@@ -684,43 +743,33 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
             }
             prior = Some(event.frame_index);
             raw_touch_count += 1;
-            let Some(track_id) = event.provisional_track_id else {
+            let Some(_) = event.provisional_track_id else {
                 continue;
             };
             let contextual = timeline_contexts.get(&event.frame_index);
-            if let Some((id, ignored, _)) = contextual {
-                if *id != event.provisional_track_id {
-                    return Err("Rally context references a foreign-frame Track ID".into());
-                }
-                if *ignored {
-                    continue;
-                }
-            }
             let rally_index =
                 intervals.partition_point(|interval| interval.end < event.frame_index);
-
-            touch_frames.push(event.frame_index);
             let in_rally = intervals
                 .get(rally_index)
                 .is_some_and(|interval| interval.start <= event.frame_index);
-            let pose_verified = event.body_contact_supported && event.contact_landmark.is_some();
-            let touch_attributed = in_rally
-                && retain_rally_touch(
-                    &mut last_attributed[rally_index],
-                    event.frame_index,
-                    track_id,
-                    pose_verified,
-                );
-            let verified_contact = touch_attributed && pose_verified;
-            let predicted_kind = if verified_contact {
-                if let Some((_, _, kind)) = contextual {
-                    *kind
+            let mut outside = BTreeMap::new();
+            let final_touch = finalize_touch(
+                &event,
+                in_rally,
+                contextual,
+                if in_rally {
+                    &mut last_attributed[rally_index]
                 } else {
-                    event.action_prediction().map(|prediction| prediction.kind)
-                }
-            } else {
-                None
-            };
+                    &mut outside
+                },
+            )?;
+            if contextual.is_some_and(|(_, ignored, _)| *ignored) {
+                continue;
+            }
+            touch_frames.push(event.frame_index);
+            let touch_attributed = final_touch.attributed;
+            let verified_contact = final_touch.pose_supported;
+            let predicted_kind = final_touch.kind;
             touch_annotations.push(json!({
                 "frame_index":event.frame_index,
                 "kind":predicted_kind.map(ActionKind::as_str),
@@ -757,6 +806,7 @@ fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewContent, String
                 "raw_touch_candidates": raw_touch_count,
                 "estimated_actions": estimated_actions,
                 "touch_annotations": touch_annotations,
+                "contextual_contacts":timeline_contexts,
                 "authoritative_game_events": false,
                 "source_rallies_sha256": run.rally_sha,
                 "source_touches_sha256": run.touch_sha,
@@ -1032,6 +1082,7 @@ pub(crate) fn verify_run_or_candidate(
 #[derive(Clone, Debug)]
 pub(crate) struct RallyWindows {
     pub(crate) intervals: Vec<(u64, u64)>,
+    pub(crate) contexts: BTreeMap<u64, ContactContext>,
 }
 impl RallyWindows {
     pub(crate) fn contains(&self, frame: u64) -> bool {
@@ -1058,7 +1109,239 @@ pub(crate) fn verified_track_windows(run: &ValidatedRun) -> Result<RallyWindows,
         }
         intervals.push((start, end));
     }
-    Ok(RallyWindows { intervals })
+    let contexts = serde_json::from_value(timeline["contextual_contacts"].clone())
+        .map_err(|e| format!("Invalid final contact context: {e}"))?;
+    Ok(RallyWindows {
+        intervals,
+        contexts,
+    })
+}
+
+fn montage_material(state: &AppState, run: &ValidatedRun) -> Result<Value, ApiError> {
+    let mut timeline = generate(run, Choice::Timeline)
+        .map_err(storage::bad_request)?
+        .value;
+    let manifest = read_manifest(
+        run.rally_file
+            .parent()
+            .ok_or_else(|| storage::bad_request("Rally folder missing"))?,
+        "Rally",
+    )
+    .map_err(storage::bad_request)?;
+    let geometry = crate::video_edits::court_snapshot(state, &run.project_id, &run.video)?;
+    if manifest["court_revision"] != json!(geometry.as_ref().map(|value| &value.revision)) {
+        return Err(storage::conflict(
+            "Geometry changed; rebuild CPU interpretation",
+        ));
+    }
+    let (owners, automatic) = crate::native_player_tracks::statistics_owners(
+        state,
+        &run.project_id,
+        &run.video,
+        &run.replay_id,
+    )?;
+    let reviewed_actions = crate::native_action_review::verified_actions(state, run)?;
+    if owners.source_sha != run.replay_sha {
+        return Err(storage::conflict("Timeline identity source changed"));
+    }
+    let annotations = timeline["touch_annotations"]
+        .as_array_mut()
+        .ok_or_else(|| storage::bad_request("Missing final contacts"))?;
+    for contact in annotations.iter_mut() {
+        let track = contact["provisional_track_id"].as_u64();
+        let owner = track.and_then(|id| owners.owners.get(&id));
+        contact["reviewed_action"] = reviewed_actions["reviewed_actions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|action| {
+                action["frame_index"] == contact["frame_index"]
+                    && action["provisional_track_id"] == contact["provisional_track_id"]
+            })
+            .cloned()
+            .unwrap_or(Value::Null);
+        contact["player_id"] = json!(owner);
+        contact["player_name"] = json!(owner.and_then(|id| owners.roster.get(id)));
+        contact["athlete_identity_verified"] =
+            json!(owner.is_some() && track.is_some_and(|id| !automatic.contains(&id)));
+        contact["automatic_identity"] = json!(track.is_some_and(|id| automatic.contains(&id)));
+    }
+    let attributed = annotations
+        .iter()
+        .filter(|row| row["touch_attributed"] == true)
+        .collect::<Vec<_>>();
+    let unknown = attributed
+        .iter()
+        .filter(|row| row["kind"].is_null())
+        .count();
+    let unidentified = attributed
+        .iter()
+        .filter(|row| row["player_id"].is_null())
+        .count();
+    let clips = timeline["rallies"]
+        .as_array()
+        .ok_or_else(|| storage::bad_request("Missing final rallies"))?
+        .iter()
+        .map(|row| {
+            let start = row["start_frame"]
+                .as_u64()
+                .unwrap_or(0)
+                .saturating_sub(run.context);
+            let end = row["end_frame"]
+                .as_u64()
+                .unwrap_or(start)
+                .saturating_add(run.context)
+                .min(run.frames.saturating_sub(1));
+            json!({"candidate_id":row["candidate_id"],"video":run.video,
+                "start_frame":start,"end_frame":end,"analysis_offset_sec":0.0,
+                "start_sec":start as f64 / 30.0,"end_sec":(end+1) as f64 / 30.0,
+                "render_source":"original_recording"})
+        })
+        .collect::<Vec<_>>();
+    let original = volley_media::preparation::source_provenance(&run.project_source)
+        .map_err(storage::bad_request)?;
+    let dependency = json!({"source_replay_id":run.replay_id,"source_replay_sha256":run.replay_sha,
+        "source_touch_id":run.touch_id,"source_touch_sha256":run.touch_sha,
+        "rally_run_id":run.run_id,"source_rallies_sha256":run.rally_sha,
+        "geometry_revision":manifest["court_revision"],"identity_revision":owners.revision,
+        "action_revision":reviewed_actions["revision"],
+        "owners":owners.owners,"automatic_ids":automatic,"roster":owners.roster,
+        "original_source":original,"analysis_original_verified":!manifest["original_source"].is_null()});
+    timeline["material_schema"] = json!("volley-montage-material/1");
+    timeline["dependencies"] = dependency;
+    timeline["montage_plan"] = json!(clips);
+    timeline["readiness"] = json!({"manual_montage_ready":!clips.is_empty(),
+        "personalized_selection_available":!owners.owners.is_empty(),
+        "unidentified_contacts":unidentified,"unknown_action_contacts":unknown,
+        "geometry_available":geometry.is_some(),"authoritative_game_events":false,
+        "original_verified_against_analysis":!manifest["original_source"].is_null()});
+    let bytes = serde_json::to_vec(&timeline)
+        .map_err(|e| storage::internal(format!("Timeline revision: {e}")))?;
+    timeline["material_revision"] = json!(crate::versioned_store::revision(Some(&bytes)));
+    Ok(timeline)
+}
+
+pub(crate) fn publish_material(
+    state: &AppState,
+    project: &str,
+    rally: &str,
+) -> Result<Value, ApiError> {
+    let _guard = project_guard::write_guard(state, project)?;
+    let run = inspect_project(state, project, rally)?;
+    let material = montage_material(state, &run)?;
+    let revision = material["material_revision"]
+        .as_str()
+        .ok_or_else(|| storage::bad_request("Missing timeline revision"))?;
+    let parent = run
+        .rally_file
+        .parent()
+        .ok_or_else(|| storage::bad_request("Rally folder missing"))?
+        .join("montage_timelines");
+    if parent.exists() {
+        safe_folder(&parent).map_err(storage::bad_request)?;
+    }
+    let path = parent.join(format!("{revision}.json"));
+    if let Some(bytes) = crate::versioned_store::read_optional_bounded(&path, 128 * 1024 * 1024)
+        .map_err(storage::bad_request)?
+    {
+        let existing: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| storage::bad_request("Corrupt montage timeline"))?;
+        if existing != material {
+            return Err(storage::conflict("Immutable montage timeline differs"));
+        }
+    } else {
+        crate::versioned_store::write_json_checked(&parent, &path, &material, 128 * 1024 * 1024)
+            .map_err(storage::internal)?;
+    }
+    Ok(
+        json!({"schema":"volley-montage-material/1","revision":revision,
+        "rally_run_id":rally,"readiness":material["readiness"]}),
+    )
+}
+
+pub(crate) async fn material_bindings(
+    state: Arc<AppState>,
+    project: String,
+    runs: Vec<String>,
+) -> Result<Vec<montage::MaterialBinding>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let mut bindings = Vec::new();
+        for run in runs.into_iter().collect::<BTreeSet<_>>() {
+            let published = publish_material(&state, &project, &run)?;
+            let revision = published["revision"]
+                .as_str()
+                .ok_or_else(|| storage::bad_request("Material revision missing"))?;
+            let root = projects::project_root(&state)
+                .join(&project)
+                .join("native_cpu_rallies")
+                .join(&run)
+                .join("montage_timelines");
+            safe_folder(&root).map_err(storage::bad_request)?;
+            let path = safe_file(&root, &format!("{revision}.json"), 128 * 1024 * 1024)
+                .map_err(storage::bad_request)?;
+            let material: Value = serde_json::from_slice(
+                &fs::read(path)
+                    .map_err(|e| storage::internal(format!("Read montage material: {e}")))?,
+            )
+            .map_err(|_| storage::bad_request("Invalid montage material"))?;
+            let mut content = material.clone();
+            content
+                .as_object_mut()
+                .ok_or_else(|| storage::bad_request("Invalid material object"))?
+                .remove("material_revision");
+            let encoded = serde_json::to_vec(&content)
+                .map_err(|e| storage::internal(format!("Material digest: {e}")))?;
+            if crate::versioned_store::revision(Some(&encoded)) != revision {
+                return Err(storage::conflict("Saved montage material digest differs"));
+            }
+            let intervals = material["montage_plan"]
+                .as_array()
+                .ok_or_else(|| storage::bad_request("Missing montage intervals"))?
+                .iter()
+                .map(|clip| {
+                    Ok((
+                        clip["start_frame"]
+                            .as_u64()
+                            .ok_or_else(|| storage::bad_request("Invalid montage start"))?,
+                        clip["end_frame"]
+                            .as_u64()
+                            .ok_or_else(|| storage::bad_request("Invalid montage end"))?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, ApiError>>()?;
+            bindings.push(montage::MaterialBinding {
+                project_id: project.clone(),
+                rally_run_id: run,
+                revision: revision.to_owned(),
+                video: material["video"].as_str().unwrap_or_default().to_owned(),
+                original_source: material["dependencies"]["original_source"].clone(),
+                intervals,
+            });
+        }
+        Ok(bindings)
+    })
+    .await
+    .map_err(|e| storage::internal(format!("Montage material worker: {e}")))?
+}
+
+pub(crate) fn validate_material_binding(
+    state: &AppState,
+    binding: &montage::MaterialBinding,
+) -> Result<(), ApiError> {
+    let run = inspect_project(state, &binding.project_id, &binding.rally_run_id)?;
+    let current = montage_material(state, &run)?;
+    if current["material_revision"] != binding.revision
+        || current["dependencies"]["original_source"] != binding.original_source
+    {
+        return Err(storage::conflict(
+            "Montage material changed; review the selection again",
+        ));
+    }
+    volley_media::preparation::verify_source_provenance(
+        &run.project_source,
+        &binding.original_source,
+    )
+    .map_err(storage::conflict)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1075,9 +1358,7 @@ pub async fn timeline(
 ) -> ApiResult<Value> {
     let result = tokio::task::spawn_blocking(move || -> Result<Value, ApiError> {
         let run = inspect_project(&state, &query.project_id, &query.rally_run_id)?;
-        Ok(generate(&run, Choice::Timeline)
-            .map_err(storage::bad_request)?
-            .value)
+        montage_material(&state, &run)
     })
     .await
     .map_err(|e| storage::internal(format!("Native rally timeline task: {e}")))??;
@@ -1430,10 +1711,13 @@ pub async fn start_manual_montage(
     })
     .await
     .map_err(|e| storage::internal(format!("Manual rally planning task: {e}")))??;
+    let materials =
+        material_bindings(state.clone(), project_id.clone(), vec![run_id.clone()]).await?;
     let output = montage::start_native_montage(
         State(state),
         headers,
         Json(montage::MontageRequest {
+            materials,
             project_id,
             clips,
             audio_file: request.audio_file,
@@ -1462,6 +1746,7 @@ mod tests {
     fn rally_windows_include_only_detected_play_not_inter_rally_frames() {
         let scope = RallyWindows {
             intervals: vec![(20, 45), (110, 185), (290, 310)],
+            contexts: BTreeMap::new(),
         };
         for frame in [20, 40, 45, 110, 185, 290, 310] {
             assert!(scope.contains(frame));
@@ -1469,7 +1754,11 @@ mod tests {
         for frame in [0, 19, 46, 109, 186, 289, 311, 400] {
             assert!(!scope.contains(frame));
         }
-        assert!(!RallyWindows { intervals: vec![] }.contains(100));
+        assert!(!RallyWindows {
+            intervals: vec![],
+            contexts: BTreeMap::new()
+        }
+        .contains(100));
     }
 
     #[test]

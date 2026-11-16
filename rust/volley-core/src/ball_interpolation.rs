@@ -51,8 +51,8 @@ pub fn interpolate_short_gaps(points: &mut [Option<[f64; 2]>]) -> Vec<bool> {
                     ];
                     // Long gaps need observed velocities from *both* sides; a
                     // chord alone does not determine the flight parabola.
-                    let enough_anchors = missing <= 12
-                        || (left_velocity.is_some() && right_velocity.is_some());
+                    let enough_anchors =
+                        missing <= 12 || (left_velocity.is_some() && right_velocity.is_some());
                     let compatible = enough_anchors
                         && acceleration[0].abs() <= MAX_HORIZONTAL_ACCEL
                         && acceleration[1] >= -0.0015

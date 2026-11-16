@@ -563,10 +563,20 @@ pub async fn highlights(
         "automatic_action_classification_verified":false,
         "source_video":"original_recording",
     });
+    let runs = planned.response["sources"]
+        .as_array()
+        .ok_or_else(|| storage::bad_request("Missing highlight sources"))?
+        .iter()
+        .filter_map(|source| source["rally_run_id"].as_str().map(str::to_owned))
+        .collect();
+    let materials =
+        crate::native_rally_preview::material_bindings(state.clone(), project_id.clone(), runs)
+            .await?;
     let Json(job) = montage::start_native_montage(
         State(state),
         headers,
         Json(montage::MontageRequest {
+            materials,
             project_id,
             clips: planned.clips,
             audio_file,

@@ -9,9 +9,10 @@ use std::{
 };
 use volley_media::{
     montage::{
-        can_stream_copy, compose_args, compose_args_for_layout, compose_follow_args, concat_playlist,
-        native_clip_format, output_profile, output_profile_for_layout, soundtrack_args,
-        verify_mp4_quality, verify_original_segment, CameraPoint, OriginalClip, VideoLayout,
+        can_stream_copy, compose_args, compose_args_for_layout, compose_follow_args,
+        concat_playlist, native_clip_format, output_profile, output_profile_for_layout,
+        soundtrack_args, verify_mp4_quality, verify_original_segment, CameraPoint, OriginalClip,
+        VideoLayout,
     },
     probe,
 };
@@ -385,40 +386,69 @@ fn portrait_native_source_needs_no_scaling_and_layout_is_explicit() {
 
 #[test]
 fn verified_moving_ball_camera_crops_landscape_to_portrait() {
-    if !ffmpeg_ready() {return;}
-    let root=temp_root();
-    let original=source(&root,"follow-original.mp4",640,360,30);
-    let clip=OriginalClip::from_analysis(&original,0,44,0.0).unwrap();
-    let segment=root.join("follow-segment.mp4");
-    let fmt=extract(&clip,&segment);
-    let track=vec![
-        CameraPoint{time_sec:0.0,x:0.22,y:0.43},
-        CameraPoint{time_sec:0.45,x:0.38,y:0.41},
-        CameraPoint{time_sec:1.0,x:0.65,y:0.50},
-        CameraPoint{time_sec:1.4,x:0.72,y:0.58},
+    if !ffmpeg_ready() {
+        return;
+    }
+    let root = temp_root();
+    let original = source(&root, "follow-original.mp4", 640, 360, 30);
+    let clip = OriginalClip::from_analysis(&original, 0, 44, 0.0).unwrap();
+    let segment = root.join("follow-segment.mp4");
+    let fmt = extract(&clip, &segment);
+    let track = vec![
+        CameraPoint {
+            time_sec: 0.0,
+            x: 0.22,
+            y: 0.43,
+        },
+        CameraPoint {
+            time_sec: 0.45,
+            x: 0.38,
+            y: 0.41,
+        },
+        CameraPoint {
+            time_sec: 1.0,
+            x: 0.65,
+            y: 0.50,
+        },
+        CameraPoint {
+            time_sec: 1.4,
+            x: 0.72,
+            y: 0.58,
+        },
     ];
-    let output=root.join("follow-9x16.mp4");
-    let args=compose_follow_args(
-        &[segment],&[fmt.clone()],&[track],1.5,&output,false
-    ).unwrap();
-    command("ffmpeg",&args);
-    let dims=probe(&output).unwrap();
-    assert_eq!((dims.width,dims.height),(202,360));
-    assert!((dims.duration_sec-1.5).abs()<0.2);
+    let output = root.join("follow-9x16.mp4");
+    let args =
+        compose_follow_args(&[segment], &[fmt.clone()], &[track], 1.5, &output, false).unwrap();
+    command("ffmpeg", &args);
+    let dims = probe(&output).unwrap();
+    assert_eq!((dims.width, dims.height), (202, 360));
+    assert!((dims.duration_sec - 1.5).abs() < 0.2);
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn camera_filter_rejects_untrusted_or_out_of_order_ball_points(){
-    let format=vec![(640,360,"h264".into(),30.0)];
-    let paths=vec![PathBuf::from("original.mp4")];
-    let output=PathBuf::from("portrait.mp4");
-    let invalid=vec![vec![
-        CameraPoint{time_sec:0.5,x:0.3,y:0.5},
-        CameraPoint{time_sec:0.3,x:0.7,y:0.5},
+fn camera_filter_rejects_untrusted_or_out_of_order_ball_points() {
+    let format = vec![(640, 360, "h264".into(), 30.0)];
+    let paths = vec![PathBuf::from("original.mp4")];
+    let output = PathBuf::from("portrait.mp4");
+    let invalid = vec![vec![
+        CameraPoint {
+            time_sec: 0.5,
+            x: 0.3,
+            y: 0.5,
+        },
+        CameraPoint {
+            time_sec: 0.3,
+            x: 0.7,
+            y: 0.5,
+        },
     ]];
-    assert!(compose_follow_args(&paths,&format,&invalid,1.5,&output,false).is_err());
-    let out_of_bounds=vec![vec![CameraPoint{time_sec:0.0,x:1.5,y:0.5}]];
-    assert!(compose_follow_args(&paths,&format,&out_of_bounds,1.5,&output,false).is_err());
-    assert!(compose_follow_args(&paths,&format,&out_of_bounds,3.0,&output,false).is_err());
+    assert!(compose_follow_args(&paths, &format, &invalid, 1.5, &output, false).is_err());
+    let out_of_bounds = vec![vec![CameraPoint {
+        time_sec: 0.0,
+        x: 1.5,
+        y: 0.5,
+    }]];
+    assert!(compose_follow_args(&paths, &format, &out_of_bounds, 1.5, &output, false).is_err());
+    assert!(compose_follow_args(&paths, &format, &out_of_bounds, 3.0, &output, false).is_err());
 }

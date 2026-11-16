@@ -136,11 +136,18 @@ fn serve_origin_seen(
     track_id: u64,
     court: &CourtTransform,
 ) -> bool {
-    frames.iter().rev().filter(|frame| {
-        frame.frame_index <= frame_index && frame_index - frame.frame_index <= 45
-    }).filter_map(|frame| frame.players.iter().find(|player| player.track_id == track_id))
-      .filter_map(|player| court.player_evidence(player.bbox_xyxy_norm))
-      .any(|evidence| evidence.in_serve_zone)
+    frames
+        .iter()
+        .rev()
+        .filter(|frame| frame.frame_index <= frame_index && frame_index - frame.frame_index <= 45)
+        .filter_map(|frame| {
+            frame
+                .players
+                .iter()
+                .find(|player| player.track_id == track_id)
+        })
+        .filter_map(|player| court.player_evidence(player.bbox_xyxy_norm))
+        .any(|evidence| evidence.in_serve_zone)
 }
 
 /// Annotate only same-frame valid Track IDs. Pose evidence is already applied,
@@ -178,14 +185,19 @@ pub(crate) fn annotate(
             continue;
         };
         // Original Python: above the head AND within 1.6 m of net -> block.
-        if evidence.near_net && prediction.depth_ratio < -0.05 {
+        if evidence.near_net
+            && prediction.depth_ratio < -0.05
+            && frame.selected_ball.as_ref().is_none_or(|ball| {
+                let [x1, y1, x2, y2] = ball.bbox_xyxy_norm;
+                court.supports_net_contact([(x1 + x2) * 0.5, (y1 + y2) * 0.5])
+            })
+        {
             prediction.kind = ActionKind::Block;
             prediction.method = PredictionMethod::CourtGeometryV1;
         }
         // Original Python: serving zone alone is not enough to call a serve.
         // There must be preparation, source-frame reach, and acceleration.
-        if (evidence.in_serve_zone
-            || serve_origin_seen(frames, event.frame_index, track_id, court))
+        if (evidence.in_serve_zone || serve_origin_seen(frames, event.frame_index, track_id, court))
             && event.speed_after_px_frame / event.speed_before_px_frame.max(0.1) >= 1.2
             && observed_serve_preparation(frames, event.frame_index, track_id)
         {
@@ -322,7 +334,10 @@ mod tests {
     #[test]
     fn serve_survives_short_ball_detection_holes() {
         let mut frames = (0..65).map(|i| frame(i, 0.09, true)).collect::<Vec<_>>();
-        for frame in frames.iter_mut().filter(|f| (27..=45).contains(&f.frame_index)) {
+        for frame in frames
+            .iter_mut()
+            .filter(|f| (27..=45).contains(&f.frame_index))
+        {
             frame.selected_ball.as_mut().unwrap().bbox_xyxy_norm = [0.65, 0.1, 0.67, 0.12];
         }
         for index in [4, 9, 15, 20, 29, 35, 41] {
@@ -330,7 +345,10 @@ mod tests {
         }
         let mut events = vec![event(52)];
         annotate(&mut events, &frames, &court());
-        assert_eq!(events[0].action_prediction.as_ref().unwrap().kind, ActionKind::Serve);
+        assert_eq!(
+            events[0].action_prediction.as_ref().unwrap().kind,
+            ActionKind::Serve
+        );
     }
 
     #[test]
@@ -347,7 +365,9 @@ mod tests {
         let mut events = vec![event(55)];
         annotate(&mut events, &frames, &court());
         assert!(!events[0].court.unwrap().in_serve_zone);
-        assert_eq!(events[0].action_prediction.as_ref().unwrap().kind, ActionKind::Serve);
+        assert_eq!(
+            events[0].action_prediction.as_ref().unwrap().kind,
+            ActionKind::Serve
+        );
     }
-
 }

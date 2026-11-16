@@ -225,7 +225,9 @@ impl RallySegmenter {
             return Ok(false);
         };
         if active.last_touch_track_id == Some(id)
-            && active.last_touch.is_some_and(|last| frame.saturating_sub(last) <= 6)
+            && active
+                .last_touch
+                .is_some_and(|last| frame.saturating_sub(last) <= 6)
         {
             // Deduplicate adjacent motion peaks, not separate toss/serve impacts.
             return Ok(false);

@@ -27,7 +27,7 @@ const profileInputs=[...markup.matchAll(/<input[^>]*id="(studio-(?:gpu|post)[^"]
     for(const attr of row[0].matchAll(/([\w-]+)="([^"]*)"/g))attrs[attr[1]]=attr[2];
     return attrs;
   });
-assert.equal(profileInputs.length,27,"GPU + CPU post-processing profile fields");
+assert.equal(profileInputs.length,30,"GPU + CPU post-processing profile fields");
 const profileSelects=[...markup.matchAll(/<select[^>]*id="(studio-(?:gpu|post)[^"]*)"[^>]*>/g)]
   .map(row=>Object.fromEntries([...row[0].matchAll(/([\w-]+)="([^"]*)"/g)]
     .map(attr=>[attr[1],attr[2]])));
@@ -97,7 +97,7 @@ for(const kind of ["preview","analysis","players","report","montage"])
 ids.push("studio-quick-open");
 const stored=new Map(),calls=[];
 function createTestEnvironment(initialHash="#preview",flags={}){
-  const nodes=new Map(ids.map(id=>[id,new Node()]));
+  const nodes=new Map([...new Set([...ids,...[...markup.matchAll(/id="([^"]+)"/g)].map(match=>match[1])])].map(id=>[id,new Node()]));
   const byId=id=>nodes.get(id);
   for(const attrs of profileInputs){
     const input=new Node("input");
@@ -284,9 +284,9 @@ const golden=JSON.parse(pipelineStarts()[0].options.body);
 assert.equal(golden.project_id,"1234abcdef01");
 assert.equal(golden.video,"rally.mp4");
 assert.equal(golden.mode,"full");
-assert.deepEqual(golden.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:8,pose_enabled:true,pose_stride:3});
+assert.deepEqual(golden.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:8,pose_enabled:true,pose_mode:"photo",pose_stride:10,interpolate_players:true,interpolate_pose:true});
 assert.equal(golden.post.pose_classification,true);
-assert.equal(golden.post.tracking.min_player_score,0.28);
+assert.equal(golden.post.tracking.min_player_score,0.25);
 assert.equal(golden.post.tracking.nms_iou,0.72);
 assert.equal(golden.post.tracking.min_track_observations,12);
 assert.equal(golden.post.touches.threshold,0.48);
@@ -307,8 +307,8 @@ a.nodes.get("studio-analysis-start").dispatch("click");
 await tick();
 assert.equal(pipelineStarts().length,2,"Second explicit pipeline launch only");
 const override=JSON.parse(pipelineStarts()[1].options.body);
-assert.deepEqual(override.gpu,{stride:3,gpu_memory_limit_mb:8192,cpu_threads:12,pose_enabled:true,pose_stride:3});
-assert.equal(override.post.tracking.min_player_score,0.28);
+assert.deepEqual(override.gpu,{stride:3,gpu_memory_limit_mb:8192,cpu_threads:12,pose_enabled:true,pose_mode:"photo",pose_stride:10,interpolate_players:true,interpolate_pose:true});
+assert.equal(override.post.tracking.min_player_score,0.25);
 a.nodes.get("studio-gpu-memory").value="-1";
 a.nodes.get("studio-gpu-memory").dispatch("input");
 assert.match(a.nodes.get("studio-analysis-profile-delta").textContent,/недопустимое значение/);
@@ -332,7 +332,7 @@ assert.equal(pipelineStarts().length,3,"GPU-only button must launch the pipeline
 const gpuOnly=JSON.parse(pipelineStarts()[2].options.body);
 assert.equal(gpuOnly.mode,"gpu");
 assert.equal(gpuOnly.post,undefined,"GPU-only must not include CPU settings");
-assert.deepEqual(gpuOnly.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:8,pose_enabled:true,pose_stride:3});
+assert.deepEqual(gpuOnly.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:8,pose_enabled:true,pose_mode:"photo",pose_stride:10,interpolate_players:true,interpolate_pose:true});
 a.nodes.get("studio-inference").value=JSON.stringify([
   "rally.mp4","fusion","b".repeat(32)]);
 a.window.dispatchEvent({type:"volley:chain-change",

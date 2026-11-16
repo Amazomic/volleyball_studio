@@ -24,6 +24,18 @@ pub struct VideoEdit {
     court: Vec<[f64; 2]>,
     #[serde(default)]
     net: Option<[[f64; 2]; 2]>,
+    #[serde(default)]
+    geometry_source: GeometryOrigin,
+    #[serde(default)]
+    expected_revision: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GeometryOrigin {
+    #[default]
+    Manual,
+    Automatic,
 }
 
 pub(crate) fn calibration_source(
@@ -146,11 +158,7 @@ pub async fn set(
             .trim_end_sec
             .is_some_and(|end| !end.is_finite() || end <= edit.trim_start_sec)
         || !court_is_valid(&edit.court)
-        || edit.net.is_some_and(|line| {
-            line.iter()
-                .flatten()
-                .any(|v| !v.is_finite() || !(-0.5..=1.5).contains(v))
-        })
+        || !volley_core::court_geometry::valid_net(edit.net)
     {
         return Err(storage::bad_request(
             "Invalid trim interval or court corners",
@@ -168,9 +176,23 @@ pub async fn set(
     if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink() || !m.is_file()) {
         return Err(storage::bad_request("Unsafe video edit file"));
     }
+    if let Some(expected) = &edit.expected_revision {
+        let current = storage::read_json(&path)?.unwrap_or_else(|| {
+            json!({
+                "schema":"volley-video-edit/1","project_id":edit.project_id,"video":edit.video,
+                "trim_start_sec":0.0,"trim_end_sec":null,"court":[],"net":null
+            })
+        });
+        if with_revision(&state, current)?["edit_revision"].as_str() != Some(expected) {
+            return Err(storage::conflict(
+                "Video geometry changed; reload before saving",
+            ));
+        }
+    }
     let record = json!({"schema":"volley-video-edit/1","project_id":edit.project_id,
         "video":edit.video,"trim_start_sec":edit.trim_start_sec,
-        "trim_end_sec":edit.trim_end_sec,"court":edit.court,"net":edit.net});
+        "trim_end_sec":edit.trim_end_sec,"court":edit.court,"net":edit.net,
+        "geometry_source":if edit.court.is_empty() && edit.net.is_none() {None} else {Some(edit.geometry_source)}});
     storage::write_json_atomic(&path, &record)?;
     Ok(Json(with_revision(&state, record)?))
 }
@@ -178,6 +200,28 @@ pub async fn set(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn net_changes_geometry_revision_and_empty_geometry_stays_absent() {
+        let base = json!({"court":[[0.1,0.2],[0.9,0.2],[0.9,0.8],[0.1,0.8]],"net":null});
+        let first = geometry_snapshot(&base).unwrap().unwrap();
+        let mut changed = base.clone();
+        changed["net"] = json!([[0.1, 0.4], [0.9, 0.45]]);
+        assert_ne!(
+            first.revision,
+            geometry_snapshot(&changed).unwrap().unwrap().revision
+        );
+        assert!(geometry_snapshot(&json!({"court":[],"net":null}))
+            .unwrap()
+            .is_none());
+        changed["net"] = json!([[0.1, 0.4], [0.1, 0.4]]);
+        assert!(geometry_snapshot(&changed).is_err());
+        let net_only = geometry_snapshot(&json!({"court":[],"net":[[0.1,0.4],[0.9,0.4]]}))
+            .unwrap()
+            .unwrap();
+        assert!(net_only.transform.is_none());
+        assert!(net_only.net.is_some());
+    }
     #[test]
     fn value_is_constrained() {
         let edit: VideoEdit = serde_json::from_value(json!({
@@ -253,8 +297,9 @@ mod tests {
 /// A source-scoped, immutable CPU calibration snapshot.
 #[derive(Clone, Debug)]
 pub(crate) struct CourtSnapshot {
-    pub(crate) transform: volley_core::court_geometry::CourtTransform,
+    pub(crate) transform: Option<volley_core::court_geometry::CourtTransform>,
     pub(crate) revision: String,
+    pub(crate) net: Option<[[f64; 2]; 2]>,
 }
 
 /// The CPU pipeline reads the same saved court.json-equivalent as the editor.
@@ -280,20 +325,39 @@ pub(crate) fn court_snapshot(
             "Court calibration has different source identity",
         ));
     }
+    geometry_snapshot(&record)
+}
+
+fn geometry_snapshot(record: &Value) -> Result<Option<CourtSnapshot>, storage::ApiError> {
     let points: Vec<[f64; 2]> = serde_json::from_value(record["court"].clone())
         .map_err(|_| storage::bad_request("Invalid saved court coordinates"))?;
-    if points.is_empty() {
+    let net: Option<[[f64; 2]; 2]> = serde_json::from_value(record["net"].clone())
+        .map_err(|_| storage::bad_request("Invalid saved net coordinates"))?;
+    if !court_is_valid(&points) || !volley_core::court_geometry::valid_net(net) {
+        return Err(storage::bad_request("Invalid saved court or net"));
+    }
+    if points.is_empty() && net.is_none() {
         return Ok(None);
     }
-    let corners: [[f64; 2]; 4] = points
-        .try_into()
-        .map_err(|_| storage::bad_request("Court calibration requires exactly four corners"))?;
-    let transform =
-        volley_core::court_geometry::CourtTransform::new(corners).map_err(storage::bad_request)?;
-    let bytes = serde_json::to_vec(&corners)
-        .map_err(|e| storage::internal(format!("Serialize court revision: {e}")))?;
+    let transform = if points.is_empty() {
+        None
+    } else {
+        let corners: [[f64; 2]; 4] = points
+            .clone()
+            .try_into()
+            .map_err(|_| storage::bad_request("Court calibration requires four corners"))?;
+        Some(
+            volley_core::court_geometry::CourtTransform::new(corners)
+                .and_then(|court| court.with_net(net))
+                .map_err(storage::bad_request)?,
+        )
+    };
+    let bytes = serde_json::to_vec(&json!({"version":2,"court":points,"net":net,
+        "geometry_source":record["geometry_source"]}))
+    .map_err(|e| storage::internal(format!("Serialize court revision: {e}")))?;
     Ok(Some(CourtSnapshot {
         transform,
-        revision: format!("{:x}", Sha256::digest(bytes)),
+        net,
+        revision: crate::versioned_store::revision(Some(&bytes)),
     }))
 }

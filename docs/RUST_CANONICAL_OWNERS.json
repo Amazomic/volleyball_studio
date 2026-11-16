@@ -13,6 +13,52 @@
                             "/api/project-archive/native"
                         ],
     "domains":  [
+{
+    "id": "geometry",
+    "owner": "rust/volley-core/src/court_geometry.rs",
+    "status": "partial",
+    "adapters": [
+        "rust/volley-core/src/court_detection.rs",
+        "rust/volley-app/src/video_edits.rs",
+        "rust/volley-app/src/court_detection.rs",
+        "rust/volley-app/src/court_touch.rs"
+    ],
+    "routes": [
+        {
+            "path": "/api/video-edit",
+            "handler": "video_edits::get"
+        },
+        {
+            "path": "/api/video-court/detect",
+            "handler": "court_detection::detect"
+        }
+    ],
+    "stores": [
+        {
+            "source": "native",
+            "path": "projects/<id>/video_edits/<video_sha256>.json"
+        }
+    ]
+},
+{
+    "id": "video_preparation",
+    "owner": "rust/volley-media/src/preparation.rs",
+    "status": "partial",
+    "adapters": [
+        "rust/volley-app/src/preparation.rs"
+    ],
+    "routes": [],
+    "stores": [
+        {
+            "source": "native",
+            "path": "prepared/<metadata_id>-<original_sha256>.mp4"
+        },
+        {
+            "source": "legacy",
+            "path": "prepared/<metadata_id>.mp4"
+        }
+    ]
+},
                     {
                         "id":  "reid",
                         "owner":  "rust/volley-core/src/reid.rs",
@@ -291,9 +337,7 @@
                                            "handler":  "native_report_montage::report"
                                        }
                                    ],
-                        "stores":  [
-
-                                   ]
+                        "stores":  [{"source":"native","path":"projects/<id>/native_cpu_rallies/<rally_id>/montage_timelines/<sha256>.json"}]
                     },
                     {
                         "id":  "versioned_sidecar",

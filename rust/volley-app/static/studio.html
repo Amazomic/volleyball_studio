@@ -384,7 +384,6 @@
                   <div class="analysis-field-heading"><label class="field-label" for="studio-gpu-person-stride">Игроки и позы · шаг, кадров</label><button class="analysis-help" type="button" aria-label="О частоте определения игроков и поз" aria-describedby="studio-person-step-help">i<span id="studio-person-step-help" class="analysis-tooltip" role="tooltip">Детектор игроков и RTMPose работают на одних кадрах, по реальным рамкам детектора. Промежуточные кадры не передаются в эти нейросети.<span id="studio-gpu-person-rate" class="analysis-tooltip-rate" role="status" aria-live="polite">Видео: 30 кадров в секунду (30 FPS). Каждый 10-й кадр → 3 раза/с.</span></span></button></div>
                   <input id="studio-gpu-person-stride" type="number" min="1" max="30" step="1" value="10" data-default="10" aria-describedby="studio-gpu-person-rate">
                 </div>
-                <div class="analysis-profile-toggle analysis-primary-interpolation"><label><input id="studio-gpu-interpolate-pose" type="checkbox" checked data-default="1"> Плавные скелеты в предпросмотре</label><button class="analysis-help" type="button" aria-label="Об интерполяции поз" aria-describedby="studio-pose-interpolation-help">i<span id="studio-pose-interpolation-help" class="analysis-tooltip" role="tooltip">Интерполяция точек позы между измерениями делает движение скелетов плавнее в предпросмотре. Дополнительный запуск нейросети не требуется.</span></button></div>
               </div>
               <details class="analysis-profile-advanced">
                 <summary>Дополнительные настройки</summary>
@@ -433,6 +432,7 @@
                 <div class="analysis-editor-actions">
                   <button type="button" class="secondary" id="studio-analysis-court-auto">Определить поле и сетку</button>
                   <button type="button" class="secondary" id="studio-analysis-court-mode">Разметить поле</button>
+                  <button type="button" class="secondary" id="studio-analysis-net-mode">Разметить сетку</button>
                   <div class="analysis-editor-zoom" role="group" aria-label="Масштаб изображения для разметки">
                     <button type="button" class="secondary" id="studio-analysis-zoom-out" aria-label="Уменьшить изображение">−</button>
                     <output id="studio-analysis-zoom-label" aria-live="off">84%</output>
@@ -465,6 +465,7 @@
                 <div class="analysis-profile-subtitle">Игроки и позы</div>
                 <div class="analysis-profile-fields">
                   <div class="analysis-profile-toggle"><label><input id="studio-gpu-interpolate-players" type="checkbox" checked data-default="1"> Интерполяция игроков в CPU</label></div>
+                <div class="analysis-profile-toggle analysis-primary-interpolation"><label><input id="studio-gpu-interpolate-pose" type="checkbox" checked data-default="1"> Плавные скелеты в предпросмотре</label><button class="analysis-help" type="button" aria-label="Об интерполяции поз" aria-describedby="studio-pose-interpolation-help">i<span id="studio-pose-interpolation-help" class="analysis-tooltip" role="tooltip">Интерполяция точек позы между измерениями делает движение скелетов плавнее в предпросмотре. Дополнительный запуск нейросети не требуется.</span></button></div>
                   <div>
                                   <label class="field-label" for="studio-post-pose-classify">Учитывать кисти, локти и плечи RTMPose</label>
                                   <select id="studio-post-pose-classify" data-default="1"><option value="1">Включено (геометрия — резерв)</option><option value="0">Только геометрия</option></select>

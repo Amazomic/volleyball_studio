@@ -250,10 +250,22 @@ async fn quick_montage(
         .and_then(|s| s.to_str())
         .ok_or("Quick Reel isolated soundtrack has no file name")?
         .to_owned();
+    let runs = videos
+        .iter()
+        .filter_map(|video| video["cpu_runs"]["rallies"].as_str().map(str::to_owned))
+        .collect();
+    let materials = crate::native_rally_preview::material_bindings(
+        work.app.clone(),
+        work.project_id.clone(),
+        runs,
+    )
+    .await
+    .map_err(reason)?;
     let Json(start) = montage::start_native_montage(
         State(work.app.clone()),
         HeaderMap::new(),
         Json(montage::MontageRequest {
+            materials,
             project_id: work.project_id.clone(),
             clips,
             audio_file: Some(audio),
@@ -446,6 +458,7 @@ pub(super) async fn run_native_pipeline(
                 fusion_id,
                 settings: None,
                 interpolate_players: true,
+                interpolate_pose: true,
             },
             &workspace,
             "CPU: Track ID",
