@@ -137,12 +137,19 @@
     zoomIn.disabled=!valid()||!marking||zoom>=maxZoom-0.001;
   };
   const setZoom=next=>{
-    zoom=clamp(Math.round(next*100)/100,minZoom,maxZoom);
+    zoom=clamp(Math.round(next*1000)/1000,minZoom,maxZoom);
     stage.style.setProperty("--editor-zoom",marking?String(zoom):"1");
     updateZoomControls();
     draw();
   };
+  // Two-finger pinch must not accidentally create or move court markers.
+  const touchPoints=new Map();
+  let pinch=null,touchSnapshot=null,pinchBlocked=false;
+  const resetTouchGesture=()=>{
+    touchPoints.clear();pinch=null;touchSnapshot=null;pinchBlocked=false;
+  };
   const setMarking=active=>{
+    resetTouchGesture();
     marking=Boolean(active);
     stage.classList.toggle("marking",marking);
     video.controls=!marking;
@@ -156,6 +163,63 @@
     for(const node of wrapper.querySelectorAll("button,input"))node.disabled=!valid();
     updateZoomControls();
   };
+  const zoomGestureEnabled=()=>marking&&valid();
+  // Wheel events also cover two-finger scrolling and Ctrl+wheel trackpad pinch.
+  // Keep the page scrollable outside the video or when not marking.
+  stage.addEventListener("wheel",event=>{
+    if(!zoomGestureEnabled()||event.target?.closest?.(".analysis-editor-zoom")||
+       !Number.isFinite(event.deltaY)||event.deltaY===0)return;
+    event.preventDefault();
+    const delta=event.deltaY*(event.deltaMode===1?16:
+      event.deltaMode===2?stage.clientHeight||600:1);
+    setZoom(zoom*Math.exp(-clamp(delta,-180,180)*0.0025));
+  },{passive:false});
+  const touchDistance=()=>{
+    const [[ax,ay],[bx,by]]=[...touchPoints.values()];
+    return Math.hypot(ax-bx,ay-by);
+  };
+  // Observe touch pointers in capture phase, before canvas corner/field dragging.
+  stage.addEventListener("pointerdown",event=>{
+    if(event.pointerType!=="touch"||!zoomGestureEnabled()||
+       event.target?.closest?.(".analysis-editor-zoom")||pinchBlocked)return;
+    if(touchPoints.size===0){
+      touchSnapshot={corners:corners.map(p=>[...p]),net:net?net.map(p=>[...p]):null,
+        netPoints:netPoints.map(p=>[...p]),markingNet,dirty,geometrySource};
+    }
+    touchPoints.set(event.pointerId,[event.clientX,event.clientY]);
+    if(touchPoints.size!==2)return;
+    // Restore any single-finger edit started before the second finger arrived.
+    if(touchSnapshot){
+      corners=touchSnapshot.corners;net=touchSnapshot.net;
+      netPoints=touchSnapshot.netPoints;markingNet=touchSnapshot.markingNet;
+      geometrySource=touchSnapshot.geometrySource;dirty=touchSnapshot.dirty;
+      if(draftTimer!==null){clearTimeout(draftTimer);draftTimer=null;}
+      if(dirty)draftTimer=setTimeout(flushDraft,250);
+      editEpoch++;draw();
+    }
+    drag=-1;netDrag=-1;courtDrag=null;canvas.style.cursor="crosshair";
+    pinchBlocked=true;
+    const distance=touchDistance();
+    pinch=distance>0?{distance,zoom}:null;
+    event.preventDefault();event.stopPropagation();
+  },true);
+  stage.addEventListener("pointermove",event=>{
+    if(event.pointerType!=="touch"||!touchPoints.has(event.pointerId))return;
+    touchPoints.set(event.pointerId,[event.clientX,event.clientY]);
+    if(!pinchBlocked)return;
+    event.preventDefault();event.stopPropagation();
+    if(pinch&&touchPoints.size===2)setZoom(pinch.zoom*touchDistance()/pinch.distance);
+  },true);
+  const finishTouch=event=>{
+    if(event.pointerType!=="touch"||!touchPoints.has(event.pointerId))return;
+    touchPoints.delete(event.pointerId);
+    if(pinchBlocked){event.preventDefault();event.stopPropagation();}
+    if(touchPoints.size<2)pinch=null;
+    if(touchPoints.size===0)resetTouchGesture();
+  };
+  stage.addEventListener("pointerup",finishTouch,true);
+  stage.addEventListener("pointercancel",finishTouch,true);
+
   // Three perspective-aware zones are derived from the four saved court corners
   // and the observed net top. Nothing extra or synthetic is persisted.
   const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
@@ -282,7 +346,7 @@
     if(valid())message("Есть несохранённые изменения");
   };
   canvas.addEventListener("pointerdown",event=>{
-    if(!marking||!valid()||!(stillMode?stillReady:video.videoWidth))return;
+    if(pinchBlocked||!marking||!valid()||!(stillMode?stillReady:video.videoWidth))return;
     const at=point(event),rect=canvas.getBoundingClientRect();
     const image=frame.getBoundingClientRect();
     if(markingNet){
@@ -310,6 +374,7 @@
     if(drag>=0)canvas.setPointerCapture(event.pointerId);
   });
   canvas.addEventListener("pointermove",event=>{
+    if(pinchBlocked)return;
     if(courtDrag){
       if(event.pointerId!==courtDrag.pointerId)return;
       const all=[...courtDrag.corners,...(courtDrag.net||[])];
@@ -328,6 +393,7 @@
     canvas.style.cursor=marking&&insideCourt(rawPoint(event))?"grab":"crosshair";
   });
   const finishDrag=event=>{
+    if(pinchBlocked)return;
     if(courtDrag&&event.pointerId!==courtDrag.pointerId)return;
     if(drag>=0||netDrag>=0||courtDrag?.moved){
       geometrySource="manual";markModified();

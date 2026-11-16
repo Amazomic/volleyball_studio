@@ -121,6 +121,23 @@ assert.equal(element("analysis-media-fixture").style["--frame-ratio"],"0.5625");
 
 await image.fire("load");
 await element("studio-analysis-court-mode").fire("click");
+const stage=element("studio-analysis-stage");
+// A first touch may begin adding a corner; a second touch must cancel that
+// pending single-finger edit and turn the gesture into an image-only pinch.
+let pinchPrevented=0,pinchStopped=0;
+const touch=(pointerId,x,y)=>({pointerId,pointerType:"touch",clientX:x,clientY:y,
+  preventDefault(){pinchPrevented++;},stopPropagation(){pinchStopped++;}});
+await stage.fire("pointerdown",touch(51,390,200));
+await canvas.fire("pointerdown",touch(51,390,200));
+await stage.fire("pointerdown",touch(52,590,200));
+await stage.fire("pointermove",touch(52,690,200));
+assert.ok(Number(element("studio-analysis-zoom-label").textContent.replace("%",""))>84);
+await canvas.fire("pointermove",touch(51,420,220)); // No corner motion mid-pinch.
+await stage.fire("pointermove",touch(52,590,200));
+assert.equal(element("studio-analysis-zoom-label").textContent,"84%");
+await stage.fire("pointerup",touch(52,590,200));
+await stage.fire("pointerup",touch(51,390,200));
+assert.ok(pinchPrevented>0&&pinchStopped>0);
 await canvas.fire("pointerdown",{clientX:270,clientY:220,pointerId:1});
 await canvas.fire("pointerup",{pointerId:1});
 element("studio-analysis-seek").value="31700";
@@ -217,6 +234,30 @@ assert.deepEqual(JSON.stringify(writes[0].court),JSON.stringify(limited.court));
 assert.deepEqual(JSON.stringify(writes[0].net),JSON.stringify(limited.net));
 console.log("PASS: entire field/net drag, separate point edits, bounded translation, saved coordinates, 10% zoom");
 
+// Mouse wheels and trackpad two-finger swipes act only over the video stage.
+const zoomNow=()=>Number(element("studio-analysis-zoom-label").textContent.replace("%",""));
+let wheelCancelled=0;
+const wheel=(deltaY,more={})=>({
+  deltaY,deltaMode:0,target:{closest:()=>null},
+  preventDefault(){wheelCancelled++;},...more
+});
+await stage.fire("wheel",wheel(-100)); // mouse wheel up
+assert.ok(zoomNow()>18);
+await stage.fire("wheel",wheel(90,{ctrlKey:true})); // trackpad pinch / two-finger scroll
+assert.ok(zoomNow()<23);
+assert.equal(wheelCancelled,2);
+const toolbarZoom=zoomNow();
+await stage.fire("wheel",wheel(-120,{target:{closest:()=>({})}}));
+assert.equal(zoomNow(),toolbarZoom,"Zooming over toolbar must leave buttons unaffected");
+assert.equal(wheelCancelled,2);
+for(let i=0;i<20;i++)await stage.fire("wheel",wheel(150));
+assert.equal(zoomNow(),10,"Wheel-out cannot pass the 10% limit");
+for(let i=0;i<30;i++)await stage.fire("wheel",wheel(-150));
+assert.equal(zoomNow(),124,"Wheel-in cannot pass the 124% limit");
+assert.deepEqual(JSON.stringify(writes[0].court),JSON.stringify(limited.court),
+  "Zoom gestures must not alter saved court coordinates");
+console.log("PASS: mouse wheel, two-finger trackpad gesture and touch pinch zoom without moving court points");
+
 
 
 // With focus on <summary>, Space is consumed and must not collapse the editor.
@@ -255,4 +296,8 @@ assert.equal(started,1);
 await dispatchSpace();
 assert.equal(paused,2,"Native video must pause on the second Space (once during load)");
 assert.equal(element("studio-analysis-editor").open,true);
+const beforeWheel=wheelCancelled;
+await stage.fire("wheel",wheel(-120));
+assert.equal(wheelCancelled,beforeWheel,"Outside marking, the page keeps its normal wheel scrolling");
+assert.equal(zoomNow(),100,"Inactive calibration view remains at 100%");
 console.log("PASS: Space starts/pauses HEVC frame playback and native video without collapsing the editor");

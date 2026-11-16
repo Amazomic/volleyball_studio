@@ -24,6 +24,7 @@ assert.match(style,/right:10px/);
 assert.match(style,/z-index:4/);
 assert.match(style,/pointer-events:auto/);
 assert.match(css,/\.analysis-editor-stage\.marking canvas\{pointer-events:auto\}/);
+assert.match(css,/\.analysis-editor-stage\.marking\{[^}]*touch-action:none/);
 assert.match(editor,/zoomOut\.addEventListener\("click"/);
 assert.match(editor,/zoomIn\.addEventListener\("click"/);
 console.log("PASS: zoom controls overlay top-right of video and retain click handlers above court canvas");
