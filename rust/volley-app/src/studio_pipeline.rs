@@ -1092,6 +1092,21 @@ fn selected_gpu(
     }))
 }
 
+/// The existing fusion evidence uses disjoint 9-frame model windows.
+#[cfg(unix)]
+fn shared_primary_requested(
+    flag: Option<&str>,
+    stride: usize,
+    pose_enabled: bool,
+    pose_mode: crate::pose_inference::PoseInputMode,
+) -> bool {
+    // The existing video-pose profile requires per-frame inference. Do not
+    // reinterpret it as sampled still frames in the experimental joint path.
+    flag == Some("1")
+        && stride == 9
+        && (!pose_enabled || pose_mode == crate::pose_inference::PoseInputMode::Photo)
+}
+
 // GPU stage coordinates (progress window, status document, cancellation)
 // stay explicit; a stage-context struct is planned for stage E.
 #[expect(clippy::too_many_arguments)]
@@ -1201,6 +1216,8 @@ async fn pipeline(
     path: &Path,
     status: &mut Value,
 ) -> Result<(), String> {
+    #[cfg(unix)]
+    let mut pending_shared_pose: Option<crate::pose_inference::PendingPose> = None;
     log_native(
         path,
         "Проверка исходного видео",
@@ -1371,30 +1388,120 @@ async fn pipeline(
                     person_detector_label()
                 ),
             )?;
-            let ball = gpu(
-                app,
-                request,
-                ModelKind::Ball,
-                cancel,
-                path,
-                status,
-                8.0,
-                36.0,
-            )
-            .await?;
+            // Opt-in only until full-match GPU/evidence/pose parity has been
+            // verified. The legacy pair remains the default and rollback.
+            #[cfg(unix)]
+            let shared = if shared_primary_requested(
+                std::env::var("VOLLEY_SHARED_PRIMARY").ok().as_deref(),
+                request.gpu.stride,
+                request.gpu.pose_enabled,
+                request.gpu.pose_mode,
+            ) {
+                progress(path, status, "GPU · общий поток VBallNet + игроки", 8.0)?;
+                log_native(
+                    path,
+                    "Общий GPU",
+                    "inference_full::run_joint_pair",
+                    json!({
+                        "project_id":request.project_id,
+                        "video":request.video,
+                        "stride":request.gpu.stride,
+                        "person_stride":request.gpu.pose_stride,
+                        "mode":"shared_decoder_experimental",
+                    }),
+                )?;
+                let plan = preparation::plan_for_analysis_async(
+                    app.clone(),
+                    &request.project_id,
+                    &request.video,
+                    None,
+                )
+                .await
+                .map_err(reason)?;
+                let source = preparation::ready_path_async(&plan)
+                    .await?
+                    .ok_or("Original video not ready for shared GPU analysis")?;
+                if source != plan.source {
+                    return Err("Shared GPU analysis requires the original video".into());
+                }
+                // A single permit covers both persistent model sessions. It
+                // also prevents a standalone GPU job from starting concurrently.
+                let _permit = app
+                    .inference_limit
+                    .acquire()
+                    .await
+                    .map_err(|e| format!("Shared GPU inference limit: {e}"))?;
+                let result = tokio::task::block_in_place(|| {
+                    inference_full::run_joint_pair(
+                        app,
+                        &request.project_id,
+                        &request.video,
+                        &plan.source,
+                        plan.duration_sec,
+                        request.gpu.pose_stride,
+                        request.gpu.pose_enabled,
+                        request.gpu.gpu_memory_limit_mb,
+                        request.gpu.cpu_threads,
+                        cancel,
+                        |fraction| {
+                            progress(
+                                path,
+                                status,
+                                "GPU · общий поток VBallNet + игроки",
+                                8.0 + 72.0 * fraction,
+                            )
+                        },
+                    )
+                })?;
+                log_event(
+                    path,
+                    "Общий GPU",
+                    "success",
+                    &format!(
+                        "Один декодер: {:?}, окон={}, кадров={}, fallback={}",
+                        result.backend,
+                        result.windows,
+                        result.decoded_frames,
+                        result.fallback_reason.as_deref().unwrap_or("none")
+                    ),
+                )?;
+                pending_shared_pose = result.pending_pose;
+                Some((result.ball_job_id, result.player_job_id))
+            } else {
+                None
+            };
+            #[cfg(not(unix))]
+            let shared: Option<(String, String)> = None;
+            let (ball, players) = if let Some(ids) = shared {
+                ids
+            } else {
+                let ball = gpu(
+                    app,
+                    request,
+                    ModelKind::Ball,
+                    cancel,
+                    path,
+                    status,
+                    8.0,
+                    36.0,
+                )
+                .await?;
+                status["gpu_jobs"]["ball"] = json!(ball);
+                save(path, status)?;
+                let players = gpu(
+                    app,
+                    request,
+                    ModelKind::Players,
+                    cancel,
+                    path,
+                    status,
+                    44.0,
+                    36.0,
+                )
+                .await?;
+                (ball, players)
+            };
             status["gpu_jobs"]["ball"] = json!(ball);
-            save(path, status)?;
-            let players = gpu(
-                app,
-                request,
-                ModelKind::Players,
-                cancel,
-                path,
-                status,
-                44.0,
-                36.0,
-            )
-            .await?;
             status["gpu_jobs"]["players"] = json!(players);
             save(path, status)?;
             if cancel.load(Ordering::Acquire) {
@@ -1428,6 +1535,26 @@ async fn pipeline(
                 "success",
                 &format!("GPU объединён: fusion_id={fusion_id}"),
             )?;
+            #[cfg(unix)]
+            if let Some(pending) = pending_shared_pose.take() {
+                if cancel.load(Ordering::Acquire) {
+                    return Err("cancelled".into());
+                }
+                // Pose evidence is invisible to reuse until its detector
+                // source and SHA-bound fusion are both immutable and verified.
+                let pose = pending.publish(&fusion, request.gpu.interpolate_pose, cancel)?;
+                status["gpu_jobs"]["pose"] = pose["pose_run_id"].clone();
+                save(path, status)?;
+                log_event(
+                    path,
+                    "GPU · RTMPose-M",
+                    "success",
+                    &format!(
+                        "Поза из общего RGB-потока: samples={}, players={}, fusion={fusion_id}",
+                        pose["sampled_frames"], pose["player_poses"]
+                    ),
+                )?;
+            }
             if cancel.load(Ordering::Acquire) {
                 return Err("cancelled".into());
             }
@@ -2204,6 +2331,19 @@ pub async fn cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn experimental_shared_decode_never_rewrites_gpu_stride() {
+        use crate::pose_inference::PoseInputMode::{Photo, Video};
+        assert!(!shared_primary_requested(None, 9, true, Photo));
+        assert!(!shared_primary_requested(Some("0"), 9, true, Photo));
+        assert!(!shared_primary_requested(Some("1"), 1, true, Photo));
+        assert!(!shared_primary_requested(Some("1"), 3, true, Photo));
+        assert!(!shared_primary_requested(Some("1"), 9, true, Video));
+        assert!(shared_primary_requested(Some("1"), 9, true, Photo));
+        assert!(shared_primary_requested(Some("1"), 9, false, Video));
+    }
     #[test]
     fn progress_records_stage_transitions_for_history() {
         let dir = std::env::temp_dir().join(format!("studio-history-{}", Uuid::new_v4()));

@@ -1,6 +1,15 @@
 //! One bounded FFmpeg raw-video stream feeding overlapped 9-frame Rust
 //! windows. Never seeks for every window or writes an analysis cache.
 //! Input paths must be validated by the calling project/preparation layer.
+#[cfg(unix)]
+mod shared;
+#[cfg(unix)]
+pub use shared::{
+    decode_full_video_shared, decode_full_video_shared_with_backend,
+    decode_full_video_shared_with_backend_and_tail, select_decode_backend, DecodeBackend,
+    DecodePreference, DecodeSelection, PrimaryDecodeSummary, PrimaryFrameBatch,
+};
+
 use crate::frame_windows::{FrameWindows, RawWindow, CLIP_FRAMES, MAX_FRAMES};
 use serde::Serialize;
 use std::{
@@ -68,7 +77,11 @@ impl Read for GuardedPipe<'_> {
         let mut last_activity = Instant::now();
         loop {
             if self.cancelled.load(Ordering::Acquire) {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+                // FrameWindows retries Interrupted (EINTR) but cancellation is terminal.
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "cancelled",
+                ));
             }
             if self.offset < self.pending.len() {
                 let count = (self.pending.len() - self.offset).min(buf.len());
@@ -514,7 +527,7 @@ mod tests {
         };
         let mut buffer = [0_u8; 16];
         let error = pipe.read(&mut buffer).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
     }
     #[test]
     fn guarded_pipe_preserves_bytes_across_chunk_and_buffer_boundaries() {
@@ -593,5 +606,34 @@ mod tests {
             .is_err()
         );
         let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn cancellation_during_partial_raw_frame_unblocks_the_window_reader() {
+        use std::sync::{mpsc, Arc};
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let reader_cancelled = Arc::clone(&cancelled);
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let (done_sender, done_receiver) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let pipe = GuardedPipe {
+                receiver,
+                cancelled: &reader_cancelled,
+                idle_limit: Duration::from_secs(120),
+                pending: Vec::new(),
+                offset: 0,
+            };
+            let mut windows = FrameWindows::new(pipe, 4, 1).unwrap();
+            let result = windows.next_window().unwrap_err().kind();
+            done_sender.send(result).unwrap();
+        });
+        // Half a frame has arrived; the pipe waits for its remainder.
+        sender.send(Ok(vec![1_u8, 2_u8])).unwrap();
+        thread::sleep(Duration::from_millis(30));
+        cancelled.store(true, Ordering::Release);
+        assert_eq!(
+            done_receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+            io::ErrorKind::ConnectionAborted
+        );
+        reader.join().unwrap();
     }
 }

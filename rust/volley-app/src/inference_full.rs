@@ -1,6 +1,8 @@
 //! Experimental full prepared-video ONNX processing with bounded memory.
 //! One model/video per job, immutable raw-detections JSONL, durable status.
 //! This is *not* a complete Studio GPU/CPU analysis or player Track ID result.
+#[cfg(unix)]
+mod joint;
 use crate::{
     inference_stream, preparation, project_guard, projects,
     storage::{self, ApiError, ApiResult},
@@ -11,6 +13,8 @@ use axum::{
     http::HeaderMap,
     Json,
 };
+#[cfg(unix)]
+pub(crate) use joint::run_joint_pair;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -291,98 +295,64 @@ fn window_error(model: ModelKind, first_frame: u64, failure: &str) -> String {
     )
 }
 
-fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
-    if context.cancelled.load(Ordering::Acquire) {
+// Shared inference kernels for both standalone diagnostics and the primary
+// co-scheduled decode path. RawDetector detections remain real observations:
+// never write interpolated boxes or synthetic pose data here.
+fn detect_player_window(
+    engine: &mut PersonEngine,
+    data: &[u8],
+    first_frame: u64,
+    stride: u64,
+    cancelled: &AtomicBool,
+) -> Result<Vec<RawDetection>, String> {
+    let mut detections = Vec::new();
+    engine.detect_frames_sampled(data, first_frame, stride, |offset, poses| {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        for (index, pose) in poses.into_iter().enumerate() {
+            detections.push(RawDetection {
+                frame_index: first_frame + offset as u64,
+                class_name: "player",
+                score: pose.score,
+                bbox_xyxy_norm: pose.bbox.map(|value| value as f32),
+                query_index: Some(index),
+                touch_probability: None,
+                head_point_norm: pose.head.map(|p| p.map(|value| value as f32)),
+            });
+        }
+        Ok(())
+    })?;
+    if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
-    volley_media::preparation::verify_source_provenance(
-        &context.original,
-        &context.original_source,
-    )?;
-    let before = inference_stream::source_stamp(&context.source)?;
-    // The player path never constructs or runs a RAVEL session.
-    let mut ball_engine = if context.config.model == ModelKind::Ball {
-        Some(Engine::load(&context.repo, &context.config)?)
-    } else {
-        None
-    };
-    let mut person_engine = if context.config.model == ModelKind::Players {
-        Some(PersonEngine::load_for_gpu_evidence(
-            &context.repo,
-            context.config.device,
-            context.config.cpu_threads,
-            context.config.gpu_memory_limit_mb,
-        )?)
-    } else {
-        None
-    };
-    let pixels = match context.config.model {
-        ModelKind::Ball => ModelPixels::BallGray,
-        ModelKind::Players => ModelPixels::PlayersRgb,
-    };
-    let (w, h, channels, _) = pixels.dimensions();
-    let mut sink = EvidenceWriter::create(&context.folder)?;
-    let estimated_frames = (context.duration_sec * 30.0).max(9.0);
-    let summary = decode_full_video(
-        &context.original,
-        pixels,
-        context.stride,
-        &context.cancelled,
-        |window| {
-            if context.cancelled.load(Ordering::Acquire) {
-                return Err("cancelled".into());
-            }
-            let records = if let Some(engine) = person_engine.as_mut() {
-                let mut detections = Vec::new();
-                // Sample real detector observations every configured N video
-                // frames (30 FPS source). Intermediate frames have no ONNX boxes.
-                engine.detect_frames_sampled(
-                    &window.data,
-                    window.first_frame,
-                    context.person_stride as u64,
-                    |offset, poses| {
-                        if context.cancelled.load(Ordering::Acquire) {
-                            return Err("cancelled".into());
-                        }
-                        for (index, pose) in poses.into_iter().enumerate() {
-                            detections.push(RawDetection {
-                                frame_index: window.first_frame + offset as u64,
-                                class_name: "player",
-                                score: pose.score,
-                                bbox_xyxy_norm: pose.bbox.map(|v| v as f32),
-                                query_index: Some(index),
-                                touch_probability: None,
-                                head_point_norm: pose.head.map(|p| p.map(|v| v as f32)),
-                            });
-                        }
-                        Ok(())
-                    },
-                )?;
-                detections
-            } else {
-                let input = normalized_model_window(&window.data, w, h, channels)?;
-                let engine = ball_engine
-                    .as_mut()
-                    .ok_or("Missing VBallNet inference session")?;
-                let tensors = engine.infer_clip(input).map_err(|error| {
-                    window_error(context.config.model, window.first_frame, &error)
-                })?;
-                decode_vball(&tensors, window.first_frame, 0.05)?
-            };
-            sink.push(window.first_frame, &records)?;
-            let windows = sink.count;
-            if windows % 20 == 0 {
-                update_progress(
-                    &context.status,
-                    windows,
-                    window.first_frame + 9,
-                    estimated_frames,
-                );
-                persist(&context.folder, &snapshot(&context.status))?;
-            }
-            Ok(())
-        },
-    )?;
+    Ok(detections)
+}
+
+fn detect_ball_window(
+    engine: &mut Engine,
+    data: &[u8],
+    first_frame: u64,
+    cancelled: &AtomicBool,
+) -> Result<Vec<RawDetection>, String> {
+    let (w, h, channels, _) = ModelPixels::BallGray.dimensions();
+    let input = normalized_model_window(data, w, h, channels)?;
+    let tensors = engine
+        .infer_clip(input)
+        .map_err(|error| window_error(ModelKind::Ball, first_frame, &error))?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("cancelled".into());
+    }
+    decode_vball(&tensors, first_frame, 0.05)
+}
+
+fn finalize_model_output(
+    context: &JobContext,
+    before: (u64, u128),
+    sink: EvidenceWriter,
+    summary: &DecodeSummary,
+    backend: Option<&str>,
+) -> Result<(), String> {
     if context.cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
@@ -400,7 +370,7 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
         &context.original,
         &context.original_source,
     )?;
-    let manifest = json!({
+    let mut manifest = json!({
         "schema":"volley-native-gpu-model-detections/1",
         "original_source":context.original_source,
         "working_stream":"original_rgb_fps30_v1",
@@ -430,8 +400,84 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
         "studio_gpu_run_complete":false,
         "cpu_processing_complete":false,
     });
+    if let Some(backend) = backend {
+        manifest["decode_backend"] = json!(backend);
+        manifest["decode_pipeline"] = json!("shared_primary_v1");
+    }
     storage::write_json_atomic(&context.folder.join(MANIFEST_FILE), &manifest)
         .map_err(|e| format!("Write immutable model manifest: {e:?}"))?;
+    Ok(())
+}
+
+fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
+    if context.cancelled.load(Ordering::Acquire) {
+        return Err("cancelled".into());
+    }
+    volley_media::preparation::verify_source_provenance(
+        &context.original,
+        &context.original_source,
+    )?;
+    let before = inference_stream::source_stamp(&context.source)?;
+    // The player path never constructs or runs a RAVEL session.
+    let mut ball_engine = if context.config.model == ModelKind::Ball {
+        Some(Engine::load(&context.repo, &context.config)?)
+    } else {
+        None
+    };
+    let mut person_engine = if context.config.model == ModelKind::Players {
+        Some(PersonEngine::load_for_gpu_evidence(
+            &context.repo,
+            context.config.device,
+            context.config.cpu_threads,
+            context.config.gpu_memory_limit_mb,
+        )?)
+    } else {
+        None
+    };
+    let pixels = match context.config.model {
+        ModelKind::Ball => ModelPixels::BallGray,
+        ModelKind::Players => ModelPixels::PlayersRgb,
+    };
+    let mut sink = EvidenceWriter::create(&context.folder)?;
+    let estimated_frames = (context.duration_sec * 30.0).max(9.0);
+    let summary = decode_full_video(
+        &context.original,
+        pixels,
+        context.stride,
+        &context.cancelled,
+        |window| {
+            if context.cancelled.load(Ordering::Acquire) {
+                return Err("cancelled".into());
+            }
+            let records = if let Some(engine) = person_engine.as_mut() {
+                detect_player_window(
+                    engine,
+                    &window.data,
+                    window.first_frame,
+                    context.person_stride as u64,
+                    &context.cancelled,
+                )?
+            } else {
+                let engine = ball_engine
+                    .as_mut()
+                    .ok_or("Missing VBallNet inference session")?;
+                detect_ball_window(engine, &window.data, window.first_frame, &context.cancelled)?
+            };
+            sink.push(window.first_frame, &records)?;
+            let windows = sink.count;
+            if windows % 20 == 0 {
+                update_progress(
+                    &context.status,
+                    windows,
+                    window.first_frame + 9,
+                    estimated_frames,
+                );
+                persist(&context.folder, &snapshot(&context.status))?;
+            }
+            Ok(())
+        },
+    )?;
+    finalize_model_output(context, before, sink, &summary, None)?;
     Ok(summary)
 }
 

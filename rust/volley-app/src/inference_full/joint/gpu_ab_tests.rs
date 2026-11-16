@@ -1,0 +1,580 @@
+use super::*;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::atomic::AtomicBool,
+    time::Instant,
+};
+
+struct IsolatedGpuFixture(PathBuf);
+impl Drop for IsolatedGpuFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn state(repo: PathBuf, data_root: PathBuf) -> AppState {
+    AppState {
+        repository_root: repo,
+        data_root,
+        writes_enabled: true,
+        montage: crate::montage::MontageManager::new(),
+        preparation: crate::preparation::PreparationManager::new(),
+        preview_limit: tokio::sync::Semaphore::new(1),
+        touch_limit: tokio::sync::Semaphore::new(1),
+        continuity_limit: tokio::sync::Semaphore::new(1),
+        reid_limit: tokio::sync::Semaphore::new(1),
+        identity_limit: tokio::sync::Semaphore::new(1),
+        statistics_limit: tokio::sync::Semaphore::new(1),
+        marks_limit: tokio::sync::Semaphore::new(1),
+        quick_reel: crate::quick_reel::QuickReelManager::new(),
+        inference_limit: tokio::sync::Semaphore::new(1),
+        full_inference: crate::inference_full::FullInferenceManager::new(),
+    }
+}
+
+fn manifest(root: &Path, category: &str, id: &str) -> Result<Value, String> {
+    let file = root
+        .join("projects")
+        .join("012345abcdef")
+        .join(category)
+        .join(id)
+        .join("manifest.json");
+    serde_json::from_slice(&fs::read(&file).map_err(|e| format!("Read {}: {e}", file.display()))?)
+        .map_err(|e| format!("Parse manifest: {e}"))
+}
+
+fn model_hash(root: &Path, id: &str) -> Result<String, String> {
+    manifest(root, "native_gpu_runs", id)?["sha256"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or("Missing model sha".into())
+}
+
+fn fusion_pair(state: &AppState, video: &str, ball: &str, people: &str) -> Result<Value, String> {
+    crate::inference_fusion::do_fusion(
+        state,
+        &crate::inference_fusion::FuseRequest {
+            project_id: "012345abcdef".to_owned(),
+            video: video.to_owned(),
+            person_job_id: people.to_owned(),
+            vball_job_id: ball.to_owned(),
+        },
+    )
+    .map_err(|e| format!("Fusion failed: {e:?}"))
+}
+
+fn pose_samples(state: &AppState, pose: &Value) -> Result<Vec<(u64, usize)>, String> {
+    let id = pose["pose_run_id"].as_str().ok_or("Missing pose run ID")?;
+    let file = state
+        .data_root
+        .join("projects/012345abcdef/native_gpu_pose_runs")
+        .join(id)
+        .join("poses.jsonl");
+    let bytes = fs::read(file).map_err(|e| format!("Read pose evidence: {e}"))?;
+    bytes
+        .split(|b| *b == b'\n')
+        .filter(|row| !row.is_empty())
+        .map(|row| {
+            let v: Value = serde_json::from_slice(row).map_err(|e| e.to_string())?;
+            Ok((
+                v["frame"].as_u64().ok_or("Pose frame missing")?,
+                v["players"]
+                    .as_array()
+                    .ok_or("Pose candidates missing")?
+                    .len(),
+            ))
+        })
+        .collect()
+}
+
+fn replay_touches_and_rallies(
+    app: &AppState,
+    video: &str,
+    fusion: &Value,
+) -> Result<(Value, Value, Value), String> {
+    let fusion_id = fusion["fusion_id"]
+        .as_str()
+        .ok_or("Missing fusion id for CPU A/B")?;
+    let replay = crate::cpu_retrack::process(
+        app,
+        &crate::cpu_retrack::ReplayRequest {
+            project_id: "012345abcdef".to_owned(),
+            video: video.to_owned(),
+            fusion_id: fusion_id.to_owned(),
+            settings: None,
+            interpolate_players: true,
+            interpolate_pose: true,
+        },
+    )
+    .map_err(|e| format!("CPU Track ID A/B: {e:?}"))?;
+    let replay_id = replay["replay_id"]
+        .as_str()
+        .ok_or("Missing CPU Replay ID")?;
+    let touch = crate::cpu_touches::process_discovery(
+        app,
+        &crate::cpu_touches::TouchRequest {
+            project_id: "012345abcdef".to_owned(),
+            video: video.to_owned(),
+            replay_id: replay_id.to_owned(),
+            settings: None,
+            pose_classification: true,
+        },
+    )
+    .map_err(|e| format!("CPU Touch A/B: {e:?}"))?;
+    let touch_id = touch["touch_id"].as_str().ok_or("Missing CPU Touch ID")?;
+    let rallies = crate::cpu_rallies::process(
+        app,
+        &crate::cpu_rallies::RallyRequest {
+            project_id: "012345abcdef".to_owned(),
+            video: video.to_owned(),
+            replay_id: replay_id.to_owned(),
+            touch_id: touch_id.to_owned(),
+            settings: None,
+        },
+    )
+    .map_err(|e| format!("CPU Rally A/B: {e:?}"))?;
+    Ok((replay, touch, rallies))
+}
+
+/// Run explicitly, never in routine CI:
+/// VOLLEY_AB_SOURCE=/path/to/uu/original.mp4
+/// VOLLEY_AB_MODEL_ROOT=/path/to/live/read-only/models/repository
+/// VOLLEY_PERSON_DETECTOR=rfdetr-medium
+/// VOLLEY_SHARED_PRIMARY_BACKEND=auto
+/// ORT_DYLIB_PATH=/path/to/libonnxruntime.so
+///
+/// The match video is opened read-only; FFmpeg creates an isolated six-second
+/// keyframe-aligned sample in /tmp; all GPU evidence is disposable.
+#[test]
+#[ignore = "requires real user's uu video and local GPU/ONNX Runtime; isolated read-only source"]
+fn real_uu_match_gpu_ab_legacy_vs_shared() -> Result<(), String> {
+    let original = PathBuf::from(
+        std::env::var("VOLLEY_AB_SOURCE").map_err(|_| "Set VOLLEY_AB_SOURCE explicitly")?,
+    );
+    let repository = PathBuf::from(
+        std::env::var("VOLLEY_AB_MODEL_ROOT").map_err(|_| "Set VOLLEY_AB_MODEL_ROOT explicitly")?,
+    );
+    if !original.is_file() || !repository.join("models/rf-detr-medium.onnx").is_file() {
+        return Err("Original match or read-only model directory missing".into());
+    }
+    if std::env::var("VOLLEY_PERSON_DETECTOR").as_deref() != Ok("rfdetr-medium") {
+        return Err("A/B GPU test requires RF-DETR Medium model selection".into());
+    }
+    let base = std::env::temp_dir().join(format!("volley-uu-gpu-ab-{}", Uuid::new_v4().simple()));
+    fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    let _cleanup = IsolatedGpuFixture(base.clone());
+    let data = base.join("sandbox");
+    let uploads = data.join("uploads/project_sources");
+    let project = data.join("projects/012345abcdef");
+    fs::create_dir_all(&uploads).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&project).map_err(|e| e.to_string())?;
+    let video = "uu-six-seconds.mp4";
+    let source = uploads.join(video);
+    let full_match = std::env::var("VOLLEY_AB_FULL_MATCH").as_deref() == Ok("1");
+    let duration = if full_match {
+        fs::copy(&original, &source)
+            .map_err(|e| format!("Copy isolated full-match fixture: {e}"))?;
+        println!("AB FULL MATCH: source copy in private /tmp, user original read-only");
+        58.166667
+    } else {
+        let extraction = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-ss",
+                "28",
+                "-i",
+            ])
+            .arg(&original)
+            .args([
+                "-t",
+                "6",
+                "-map",
+                "0:v:0",
+                "-an",
+                "-sn",
+                "-dn",
+                "-c:v",
+                "copy",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-y",
+            ])
+            .arg(&source)
+            .status()
+            .map_err(|e| format!("Sample ffmpeg: {e}"))?;
+        if !extraction.success() {
+            return Err(format!("Cannot extract the user's uu match: {extraction}"));
+        }
+        9.1
+    };
+    crate::storage::write_json_atomic(
+        &data.join("projects/projects.json"),
+        &json!({"schema":1,"projects":[{"id":"012345abcdef",
+            "name":"GPU A/B isolated uu","videos":[video]}]}),
+    )
+    .map_err(|e| format!("Seed isolated project: {e:?}"))?;
+    let source_info = volley_media::preparation::source_provenance(&source)?;
+    let identity = crate::inference_stream::source_stamp(&source)?;
+    let app = state(repository, data);
+    let abort = AtomicBool::new(false);
+    use sha2::{Digest, Sha256};
+    use volley_media::raw_decoder::{
+        decode_full_video, decode_full_video_shared_with_backend, DecodePreference, ModelPixels,
+    };
+    let mut cpu_rgb_hashes = Vec::new();
+    let mut cpu_gray_hashes = Vec::new();
+    decode_full_video(&source, ModelPixels::PlayersRgb, 9, &abort, |window| {
+        cpu_rgb_hashes.push(Sha256::digest(&window.data).to_vec());
+        Ok(())
+    })?;
+    decode_full_video(&source, ModelPixels::BallGray, 9, &abort, |window| {
+        cpu_gray_hashes.push(Sha256::digest(&window.data).to_vec());
+        Ok(())
+    })?;
+    let mut rgb_mismatch = Vec::new();
+    let mut gray_mismatch = Vec::new();
+    let mut n_windows = 0usize;
+    let pixel_summary = decode_full_video_shared_with_backend(
+        &source,
+        9,
+        DecodePreference::Auto,
+        &abort,
+        |window| {
+            if cpu_rgb_hashes.get(n_windows) != Some(&Sha256::digest(&window.rgb).to_vec()) {
+                rgb_mismatch.push(window.first_frame);
+            }
+            if cpu_gray_hashes.get(n_windows) != Some(&Sha256::digest(&window.gray).to_vec()) {
+                gray_mismatch.push(window.first_frame);
+            }
+            n_windows += 1;
+            Ok(())
+        },
+    )?;
+    println!(
+        "AB PIXEL: backend={:?} windows={} rgb_mismatch={:?} gray_mismatch={:?}",
+        pixel_summary.backend, n_windows, rgb_mismatch, gray_mismatch
+    );
+    assert!(
+        rgb_mismatch.is_empty() && gray_mismatch.is_empty(),
+        "NVDEC and CPU must produce identical model input pixels"
+    );
+    let memory = 6144u64;
+    let threads = 4usize;
+    let stride = 10usize;
+    let config = |model| Config {
+        model,
+        device: Device::Cuda,
+        gpu_device_id: 0,
+        gpu_memory_limit_mb: memory,
+        cpu_threads: threads,
+    };
+    let ball = super::new_context(
+        &app,
+        "012345abcdef",
+        video,
+        &source,
+        &source_info,
+        duration,
+        config(ModelKind::Ball),
+        1,
+    )?;
+    let people = super::new_context(
+        &app,
+        "012345abcdef",
+        video,
+        &source,
+        &source_info,
+        duration,
+        config(ModelKind::Players),
+        stride,
+    )?;
+    let start = Instant::now();
+    let old_ball = super::run_model(&ball)?;
+    let old_people = super::run_model(&people)?;
+    assert_eq!(old_ball.decoded_frames, old_people.decoded_frames);
+    let old_fusion = fusion_pair(&app, video, &ball.id, &people.id)?;
+    let baseline_pose = crate::pose_inference::process(
+        &app,
+        "012345abcdef",
+        video,
+        old_fusion["fusion_id"]
+            .as_str()
+            .ok_or("Old fusion ID missing")?,
+        memory,
+        threads,
+        true,
+        &abort,
+        |_, _| Ok(()),
+    )?;
+    let old_time = start.elapsed().as_secs_f64();
+    println!(
+        "AB LEGACY seconds={old_time:.3} frames={} windows={} people={} pose_samples={}",
+        old_ball.decoded_frames,
+        old_ball.windows,
+        old_fusion["player_proposals"],
+        baseline_pose["sampled_frames"]
+    );
+
+    let start = Instant::now();
+    let joint = super::run_joint_pair(
+        &app,
+        "012345abcdef",
+        video,
+        &source,
+        duration,
+        stride,
+        true,
+        memory,
+        threads,
+        &abort,
+        |_| Ok(()),
+    )?;
+    let shared_fusion = fusion_pair(&app, video, &joint.ball_job_id, &joint.player_job_id)?;
+    let shared_pose = joint
+        .pending_pose
+        .ok_or("Joint GPU failed to produce pose evidence")?
+        .publish(&shared_fusion, true, &abort)?;
+    let shared_time = start.elapsed().as_secs_f64();
+    println!("AB SHARED seconds={shared_time:.3} backend={:?} frames={} windows={} people={} pose_samples={}",
+        joint.backend,joint.decoded_frames,joint.windows,
+        shared_fusion["player_proposals"],shared_pose["sampled_frames"]);
+    println!(
+        "AB SPEEDUP x{:.3}; source={} bytes; mtime_ns={}",
+        old_time / shared_time,
+        identity.0,
+        identity.1
+    );
+    println!(
+        "AB BALL sha_old={} sha_new={}",
+        model_hash(&app.data_root, &ball.id)?,
+        model_hash(&app.data_root, &joint.ball_job_id)?
+    );
+    println!(
+        "AB PLAYERS sha_old={} sha_new={}",
+        model_hash(&app.data_root, &people.id)?,
+        model_hash(&app.data_root, &joint.player_job_id)?
+    );
+
+    if old_fusion["emitted_frames"] != shared_fusion["emitted_frames"]
+        || old_fusion["decoded_frames"] != shared_fusion["decoded_frames"]
+    {
+        return Err("A/B fusion frame sequence differs".into());
+    }
+    if old_fusion["source_identity"] != shared_fusion["source_identity"]
+        || shared_fusion["source_identity"] != json!({"bytes":identity.0,"mtime_ns":identity.1})
+    {
+        return Err("A/B source identity differs".into());
+    }
+    if shared_pose["source_identity"] != shared_fusion["source_identity"]
+        || shared_pose["original_source"] != shared_fusion["original_source"]
+    {
+        return Err("Shared pose metadata do not match fusion identity".into());
+    }
+    let old_samples = pose_samples(&app, &baseline_pose)?;
+    let new_samples = pose_samples(&app, &shared_pose)?;
+    println!(
+        "AB POSE sampled={}; first={:?}; last={:?}",
+        new_samples.len(),
+        new_samples.first(),
+        new_samples.last()
+    );
+    if old_samples != new_samples {
+        let mismatch = old_samples.iter().zip(&new_samples).find(|(a, b)| a != b);
+        return Err(format!(
+            "A/B pose indices/counts differ: old={} new={} first={mismatch:?}",
+            old_samples.len(),
+            new_samples.len()
+        ));
+    }
+    if model_hash(&app.data_root, &ball.id)? != model_hash(&app.data_root, &joint.ball_job_id)? {
+        return Err("A/B ball detector raw evidence SHA differs".into());
+    }
+    if model_hash(&app.data_root, &people.id)? != model_hash(&app.data_root, &joint.player_job_id)?
+    {
+        return Err("A/B player detector raw evidence SHA differs".into());
+    }
+
+    if baseline_pose["sha256"] != shared_pose["sha256"] {
+        let read_rows = |id: &str| -> Result<Vec<Value>, String> {
+            let file = app
+                .data_root
+                .join("projects/012345abcdef/native_gpu_pose_runs")
+                .join(id)
+                .join("poses.jsonl");
+            fs::read_to_string(file)
+                .map_err(|e| e.to_string())?
+                .lines()
+                .map(|row| serde_json::from_str::<Value>(row).map_err(|e| e.to_string()))
+                .collect()
+        };
+        let old_rows = read_rows(baseline_pose["pose_run_id"].as_str().ok_or("old pose id")?)?;
+        let new_rows = read_rows(shared_pose["pose_run_id"].as_str().ok_or("new pose id")?)?;
+        let mut mismatched_rows = 0usize;
+        let mut mismatched_boxes = 0usize;
+        let mut mismatched_kpts = 0usize;
+        let mut max_abs = 0f64;
+        let mut max_xy = 0f64;
+        let mut max_confidence = 0f64;
+        let mut first_difference = None;
+        for (a, b) in old_rows.iter().zip(&new_rows) {
+            if a == b {
+                continue;
+            }
+            mismatched_rows += 1;
+            if first_difference.is_none() {
+                first_difference = Some((a["frame"].clone(), a.clone(), b.clone()));
+            }
+            let a_people = a["players"].as_array().ok_or("Old pose players missing")?;
+            let b_people = b["players"].as_array().ok_or("New pose players missing")?;
+            for (ap, bp) in a_people.iter().zip(b_people) {
+                if ap["box"] != bp["box"] {
+                    mismatched_boxes += 1;
+                }
+                let aa = ap["keypoints"].as_array().ok_or("Missing old keypoints")?;
+                let bb = bp["keypoints"].as_array().ok_or("Missing new keypoints")?;
+                for (kp1, kp2) in aa.iter().zip(bb) {
+                    if kp1 != kp2 {
+                        mismatched_kpts += 1;
+                    }
+                    for (index, (n1, n2)) in kp1
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .zip(kp2.as_array().unwrap())
+                        .enumerate()
+                    {
+                        if let (Some(x), Some(y)) = (n1.as_f64(), n2.as_f64()) {
+                            let delta = (x - y).abs();
+                            max_abs = max_abs.max(delta);
+                            if index == 2 {
+                                max_confidence = max_confidence.max(delta);
+                            } else {
+                                max_xy = max_xy.max(delta);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!("AB POSE mismatch rows={} boxes={} keypoints={} max_abs={:.12} max_xy={:.12} max_confidence={:.12} total_rows={}",
+            mismatched_rows,mismatched_boxes,mismatched_kpts,max_abs,max_xy,max_confidence,old_rows.len());
+        if let Some((frame, a, b)) = first_difference {
+            println!(
+                "AB FIRST mismatch frame={} old_box={:?} new_box={:?}",
+                frame, a["players"][0]["box"], b["players"][0]["box"]
+            );
+            println!(
+                "AB FIRST mismatch old_point={:?} new_point={:?}",
+                a["players"][0]["keypoints"][0], b["players"][0]["keypoints"][0]
+            );
+        }
+        if old_rows.len() != new_rows.len()
+            || mismatched_boxes != 0
+            || max_xy > 0.00001
+            || max_confidence > 0.001
+        {
+            return Err(format!(
+                "A/B pose numeric guard exceeded: xy={max_xy}, confidence={max_confidence}"
+            ));
+        }
+        println!("AB POSE numerically equivalent: coordinate tolerance <= 0.00001, confidence <= 0.001; evidence SHA differs");
+    }
+    let cpu_old = replay_touches_and_rallies(&app, video, &old_fusion)?;
+    let cpu_new = replay_touches_and_rallies(&app, video, &shared_fusion)?;
+    let fields = [
+        ("track_frames", &cpu_old.0["frames"], &cpu_new.0["frames"]),
+        (
+            "tracks",
+            &cpu_old.0["provisional_track_count"],
+            &cpu_new.0["provisional_track_count"],
+        ),
+        (
+            "pose_measured",
+            &cpu_old.0["pose_measured_track_proposals"],
+            &cpu_new.0["pose_measured_track_proposals"],
+        ),
+        (
+            "touch_candidates",
+            &cpu_old.1["touch_candidates"],
+            &cpu_new.1["touch_candidates"],
+        ),
+        (
+            "touch_motion",
+            &cpu_old.1["motion_supported_proposals_before_dedup"],
+            &cpu_new.1["motion_supported_proposals_before_dedup"],
+        ),
+        (
+            "rally_candidates",
+            &cpu_old.2["rally_candidates"],
+            &cpu_new.2["rally_candidates"],
+        ),
+        (
+            "rally_ingested_touches",
+            &cpu_old.2["touch_candidates_ingested"],
+            &cpu_new.2["touch_candidates_ingested"],
+        ),
+    ];
+    for (label, previous, current) in fields {
+        println!("AB CPU {label}: legacy={} shared={}", previous, current);
+        if previous != current {
+            return Err(format!(
+                "CPU A/B mismatch in {label}: legacy={previous}, shared={current}"
+            ));
+        }
+    }
+    println!(
+        "AB CPU touch_evidence_sha: legacy={} shared={}",
+        cpu_old.1["sha256"], cpu_new.1["sha256"]
+    );
+    if cpu_old.1["sha256"] != cpu_new.1["sha256"] {
+        return Err("CPU A/B touch proposal JSONL differs".into());
+    }
+    let rally_rows = |run: &Value| -> Result<Vec<Value>, String> {
+        let id = run["rally_run_id"].as_str().ok_or("Missing rally ID")?;
+        let file = app
+            .data_root
+            .join("projects/012345abcdef/native_cpu_rallies")
+            .join(id)
+            .join("rally_candidates.jsonl");
+        let mut rows = Vec::new();
+        for line in fs::read_to_string(&file)
+            .map_err(|e| format!("Read rally candidates {}: {e}", file.display()))?
+            .lines()
+        {
+            let mut row: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
+            if let Some(object) = row.as_object_mut() {
+                // candidate_id is SHA(replay_id:touch_id:start:end), and
+                // thus intentionally differs between immutable runs.
+                object.remove("candidate_id");
+            }
+            rows.push(row);
+        }
+        Ok(rows)
+    };
+    let old_rallies = rally_rows(&cpu_old.2)?;
+    let new_rallies = rally_rows(&cpu_new.2)?;
+    println!(
+        "AB CPU rally rows: old={} new={} raw_sha_equal={}",
+        old_rallies.len(),
+        new_rallies.len(),
+        cpu_old.2["sha256"] == cpu_new.2["sha256"]
+    );
+    if old_rallies != new_rallies {
+        let differing = old_rallies
+            .iter()
+            .zip(&new_rallies)
+            .position(|(a, b)| a != b);
+        return Err(format!(
+            "CPU A/B rally temporal/content mismatch at {differing:?}; candidate_id excluded"
+        ));
+    }
+    println!(
+        "AB PASS: exact input pixels and ball/person evidence; pose within strict numerical tolerance; CPU tracking, touches and rallies agree"
+    );
+    Ok(())
+}

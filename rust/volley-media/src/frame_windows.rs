@@ -126,6 +126,20 @@ impl<R: Read> FrameWindows<R> {
     pub fn decoded_frames(&self) -> u64 {
         self.decoded
     }
+
+    /// Raw trailing frames after EOF, excluded from model windows. For
+    /// stride=9 these are exactly the final 0..8 source frames. Pose evidence
+    /// uses them as lookahead without running detector inference on the tail.
+    pub fn trailing_frame_bytes(&self) -> Option<Vec<u8>> {
+        if !self.eof || self.queue.len() >= CLIP_FRAMES {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(self.queue.len() * self.frame_bytes);
+        for frame in &self.queue {
+            bytes.extend_from_slice(frame);
+        }
+        Some(bytes)
+    }
 }
 
 /// Pixel-normalization contract shared by clip diagnostics and future full
@@ -220,6 +234,18 @@ mod tests {
     }
 
     #[test]
+    fn disjoint_windows_expose_only_the_incomplete_tail_after_eof() {
+        let mut stream =
+            FrameWindows::new(Cursor::new((0u8..22).collect::<Vec<_>>()), 1, 9).unwrap();
+        assert!(stream.trailing_frame_bytes().is_none());
+        assert_eq!(stream.next_window().unwrap().unwrap().first_frame, 0);
+        assert_eq!(stream.next_window().unwrap().unwrap().first_frame, 9);
+        assert!(stream.next_window().unwrap().is_none());
+        assert_eq!(stream.decoded_frames(), 22);
+        assert_eq!(stream.trailing_frame_bytes().unwrap(), vec![18, 19, 20, 21]);
+        assert!(stream.next_window().unwrap().is_none());
+    }
+    #[test]
     fn truncated_last_frame_is_not_silently_discarded() {
         let bytes = vec![0u8; 3 * 9 + 1];
         let mut stream = FrameWindows::new(Cursor::new(bytes), 3, 1).unwrap();
@@ -249,5 +275,27 @@ mod tests {
             vec![1.0; 9]
         );
         assert!(normalized_model_window(&[0; 8], 1, 1, 1).is_err());
+    }
+    #[test]
+    fn retries_only_temporary_read_interruption() {
+        struct InterruptedOnce {
+            once: bool,
+            bytes: std::io::Cursor<Vec<u8>>,
+        }
+        impl Read for InterruptedOnce {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if !self.once {
+                    self.once = true;
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                self.bytes.read(buffer)
+            }
+        }
+        let source = InterruptedOnce {
+            once: false,
+            bytes: std::io::Cursor::new(vec![7; 9]),
+        };
+        let mut windows = FrameWindows::new(source, 1, 1).unwrap();
+        assert_eq!(windows.next_window().unwrap().unwrap().data, vec![7; 9]);
     }
 }
