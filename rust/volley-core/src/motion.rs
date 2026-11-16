@@ -2,6 +2,9 @@
 //! velocity after subtracting gravity.  This mirrors _ball_motion_change
 //! in scripts/volleyball_studio/reprocess.py and never performs inference.
 
+mod trajectory;
+pub use trajectory::{trajectory_breaks, trajectory_breaks_in_rallies, TrajectoryBreak};
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct BallObservation {
@@ -33,7 +36,7 @@ pub const TOUCH_MOTION_CONFIG: MotionConfig = MotionConfig {
     gravity: 1.0,
 };
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub struct MotionEvidence {
     pub motion_frame: i64,
     pub speed_before: f64,

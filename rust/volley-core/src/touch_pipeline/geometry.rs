@@ -3,7 +3,7 @@
 //! It is deliberately conservative: a ball flight near a person alone is not a Touch.
 
 use super::{center, pixel_bbox, standing_height, TouchFrame};
-use crate::motion::{ball_motion_change, BallObservation, MotionEvidence, TOUCH_MOTION_CONFIG};
+use crate::motion::{BallObservation, MotionEvidence};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct GeometryContact {
@@ -252,11 +252,14 @@ pub(super) fn detect(
         return Vec::new();
     }
     let mut result = Vec::new();
-    for (index, frame) in frames.iter().enumerate() {
-        // A one-frame outlier also contaminates neighboring velocity estimates.
-        if !stable_ball_source(frames, index)
-            || motion_window_has_outlier(frames, index, width, height)
-        {
+    for change in crate::motion::trajectory_breaks(balls) {
+        let Ok(index) = usize::try_from(change.frame) else {
+            continue;
+        };
+        let Some(frame) = frames.get(index) else {
+            continue;
+        };
+        if !stable_ball_source(frames, index) {
             continue;
         }
         let Some(ball) = frame
@@ -266,9 +269,7 @@ pub(super) fn detect(
         else {
             continue;
         };
-        let Some(motion) = ball_motion_change(balls, index as i64, 0, TOUCH_MOTION_CONFIG) else {
-            continue;
-        };
+        let motion = change.motion;
         let speed = motion.speed_before.max(motion.speed_after);
         // An observed ball settling on the ground is an endpoint, not a
         // second player contact. Never discard a real body-confirmed hit here.
@@ -624,9 +625,62 @@ pub(super) fn detect_gap_rebounds(
 #[cfg(test)]
 mod gap_tests {
     use super::*;
+    use crate::motion::{ball_motion_change, TOUCH_MOTION_CONFIG};
     use crate::touch_pipeline::{
         evaluate_block, exclude_ball_teleports, TouchBall, TouchPlayer, TouchSettings,
     };
+
+    #[test]
+    fn irek_33s_flight_break_is_associated_after_trajectory_detection() {
+        let positions: Vec<(u64, f64, f64)> =
+            serde_json::from_str(include_str!("../../tests/fixtures/irek_rebound_33s.json"))
+                .unwrap();
+        let frames: Vec<_> = positions
+            .into_iter()
+            .map(|(frame_index, x, y)| TouchFrame {
+                frame_index,
+                players: vec![TouchPlayer {
+                    track_id: 14,
+                    score: 0.6,
+                    touch_probability: None,
+                    bbox_xyxy_norm: [0.54, 0.425, 0.565, 0.537],
+                }],
+                selected_ball: Some(TouchBall {
+                    source_model: "vballnet".into(),
+                    score: 0.6,
+                    bbox_xyxy_norm: [
+                        (x - 5.0) / 1280.0,
+                        (y - 5.0) / 720.0,
+                        (x + 5.0) / 1280.0,
+                        (y + 5.0) / 720.0,
+                    ],
+                }),
+            })
+            .collect();
+        let events =
+            evaluate_block(&frames, 1280, 720, 980, 1006, TouchSettings::default()).unwrap();
+        assert!(events.iter().any(|e| (990..=994).contains(&e.frame_index) && e.provisional_track_id==Some(14)),"{events:?}");
+        assert!(crate::touch_pipeline::evaluate_rally_blocks(
+            &frames,
+            1280,
+            720,
+            980,
+            1006,
+            TouchSettings::default(),
+            &[992]
+        )
+        .unwrap()
+        .is_empty());
+        let mut no_players = frames;
+        for row in &mut no_players {
+            row.players.clear();
+        }
+        assert!(
+            evaluate_block(&no_players, 1280, 720, 980, 1006, TouchSettings::default())
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn observed_far_court_reversal_at_31_4s_is_a_touch_candidate() {
