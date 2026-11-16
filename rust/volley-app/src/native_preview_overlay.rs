@@ -605,13 +605,26 @@ fn extract_frames(
         })
         .collect::<Vec<_>>();
     let track_ids = &ball_mask.track_ids[read_start as usize..read_end as usize];
-    let (gated, synthetic) = volley_core::touch_pipeline::repair_accepted_vballnet_trajectory(
-        &accepted,
-        &player_boxes,
-        track_ids,
-        width,
-        height,
-    );
+    let mut gated = accepted.clone();
+    let mut synthetic = vec![false; accepted.len()];
+    for &(rally_start, rally_end) in &scope.intervals {
+        let begin = rally_start.max(read_start);
+        let end = rally_end.saturating_add(1).min(read_end);
+        if begin >= end {
+            continue;
+        }
+        let begin = (begin - read_start) as usize;
+        let end = (end - read_start) as usize;
+        let (points, inferred) = volley_core::touch_pipeline::repair_accepted_vballnet_trajectory(
+            &accepted[begin..end],
+            &player_boxes[begin..end],
+            &track_ids[begin..end],
+            width,
+            height,
+        );
+        gated[begin..end].copy_from_slice(&points);
+        synthetic[begin..end].copy_from_slice(&inferred);
+    }
     for ((row, ball), inferred) in output.iter_mut().zip(gated).zip(synthetic) {
         // Reject outliers even if their model confidence is high; distinguish
         // every inferred position from an actual VBallNet detection.
@@ -1406,6 +1419,63 @@ mod tests {
         }
         assert!((frames[0]["ball"][0].as_f64().unwrap() - 0.35).abs() < 1e-12);
         assert!((frames[1]["ball"][0].as_f64().unwrap() - 0.45).abs() < 1e-12);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn processed_ball_interpolation_stays_within_saved_rally_boundaries() {
+        let root = std::env::temp_dir().join(format!("volley-rally-gap-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("tracked_frames.jsonl");
+        let mut data = Vec::new();
+        for frame in 0..12 {
+            let x = 0.20 + f64::from(frame) * 0.01;
+            let ball = (!(4..=5).contains(&frame)).then(|| {
+                json!({
+                    "source_model":"vballnet",
+                    "detection":{"score":0.95,"bbox_xyxy_norm":[x,0.39,x+0.01,0.41]}
+                })
+            });
+            let row = json!({
+                "frame_index":frame,"track_ids_provisional":true,
+                "confirmed_athlete_identities":false,"touches_confirmed":false,
+                "selected_ball":ball,"tracked_players":[]
+            });
+            data.extend(serde_json::to_vec(&row).unwrap());
+            data.push(b'\n');
+        }
+        fs::write(&path, &data).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&data));
+        for (intervals, filled) in [
+            (vec![(0, 11)], true),
+            (vec![(0, 4), (5, 11)], false),
+            (vec![(0, 3), (6, 11)], false),
+            (vec![], false),
+        ] {
+            let scope = native_rally_preview::RallyWindows { intervals };
+            let frames = extract_frames(
+                &path,
+                &sha,
+                12,
+                4,
+                6,
+                &scope,
+                1280,
+                720,
+                0.35,
+                None,
+                Some((&[0], 0.35)),
+            )
+            .unwrap();
+            for row in frames {
+                assert_eq!(row["ball_interpolated"], filled);
+                assert_eq!(row["ball"].is_array(), filled);
+                if filled {
+                    let expected = if row["frame"] == 4 { 0.245 } else { 0.255 };
+                    assert!((row["ball"][0].as_f64().unwrap() - expected).abs() < 1e-12);
+                }
+            }
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

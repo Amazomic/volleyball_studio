@@ -328,6 +328,36 @@ pub fn repair_accepted_vballnet_trajectory(
             for (flag, fitted) in synthetic[begin..end].iter_mut().zip(ballistic) {
                 *flag |= fitted;
             }
+            let mut left = begin;
+            while left + 1 < end {
+                if points[left].is_none() || synthetic[left] {
+                    left += 1;
+                    continue;
+                }
+                let mut right = left + 1;
+                while right < end && points[right].is_none() {
+                    right += 1;
+                }
+                if right == end {
+                    break;
+                }
+                if (1..=6).contains(&(right - left - 1)) && !synthetic[right] {
+                    if let (Some(a), Some(b)) = (points[left], points[right]) {
+                        let duration = (right - left) as f64;
+                        let displacement = ((b[0] - a[0]) * f64::from(width))
+                            .hypot((b[1] - a[1]) * f64::from(height));
+                        if displacement <= f64::from(width) * 0.12 * duration {
+                            for index in left + 1..right {
+                                let t = (index - left) as f64 / duration;
+                                points[index] =
+                                    Some([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+                                synthetic[index] = true;
+                            }
+                        }
+                    }
+                }
+                left = right;
+            }
             let mut tracker = LeadingBallTracker::new(width, height);
             for index in begin..end {
                 if synthetic[index] {
@@ -436,6 +466,51 @@ mod tests {
             720,
         );
         assert!(points[3].is_none() && !inferred[3]);
+    }
+
+    #[test]
+    fn accepted_preview_fills_short_dropouts_despite_endpoint_velocity_noise() {
+        for missing in 1..=6 {
+            let mut samples = vec![Some([0.40, 0.48]), Some([0.41, 0.43])];
+            samples.extend(vec![None; missing]);
+            samples.extend([Some([0.43, 0.41]), Some([0.44, 0.44])]);
+            let (points, inferred) = repair_accepted_vballnet_trajectory(
+                &samples,
+                &vec![Vec::new(); samples.len()],
+                &vec![2; samples.len()],
+                1280,
+                720,
+            );
+            for index in 2..2 + missing {
+                let t = (index - 1) as f64 / (missing + 1) as f64;
+                let point = points[index].expect("short dropout restored");
+                assert!((point[0] - (0.41 + 0.02 * t)).abs() < 1e-12);
+                assert!((point[1] - (0.43 - 0.02 * t)).abs() < 1e-12);
+                assert!(inferred[index]);
+            }
+            for index in [0, 1, missing + 2, missing + 3] {
+                assert_eq!(points[index], samples[index]);
+                assert!(!inferred[index]);
+            }
+        }
+    }
+
+    #[test]
+    fn accepted_preview_does_not_join_long_ambiguous_or_remote_dropouts() {
+        for (missing, end) in [(7, [0.43, 0.41]), (1, [0.95, 0.95])] {
+            let mut samples = vec![Some([0.40, 0.48]), Some([0.41, 0.43])];
+            samples.extend(vec![None; missing]);
+            samples.extend([Some(end), Some([0.44, 0.44])]);
+            let (points, inferred) = repair_accepted_vballnet_trajectory(
+                &samples,
+                &vec![Vec::new(); samples.len()],
+                &vec![2; samples.len()],
+                1280,
+                720,
+            );
+            assert!(points[2..2 + missing].iter().all(Option::is_none));
+            assert!(inferred.iter().all(|flag| !flag));
+        }
     }
 
     fn sample(i: u64, x: f64) -> TouchFrame {
