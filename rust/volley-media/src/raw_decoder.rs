@@ -1,6 +1,11 @@
 //! One bounded FFmpeg raw-video stream feeding overlapped 9-frame Rust
 //! windows. Never seeks for every window or writes an analysis cache.
 //! Input paths must be validated by the calling project/preparation layer.
+#[cfg(unix)]
+mod shared;
+#[cfg(unix)]
+pub use shared::{decode_full_video_shared, PrimaryFrameBatch};
+
 use crate::frame_windows::{FrameWindows, RawWindow, CLIP_FRAMES, MAX_FRAMES};
 use serde::Serialize;
 use std::{
