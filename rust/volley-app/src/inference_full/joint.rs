@@ -102,6 +102,18 @@ fn backend_preference() -> Result<DecodePreference, String> {
     }
 }
 
+/// Keep immutable content provenance distinct from the prepared file stamp.
+/// Fusion and CPU pose lineage validate these independent JSON contracts.
+fn pose_manifest_identities(
+    original_provenance: &Value,
+    source_stamp: (u64, u128),
+) -> (Value, Value) {
+    (
+        original_provenance.clone(),
+        json!({"bytes":source_stamp.0,"mtime_ns":source_stamp.1}),
+    )
+}
+
 /// Both model sessions consume exactly the same nine-frame timeline. The
 /// CUDA arena limit is divided between persistent sessions (not a hard cap on
 /// total GPU allocations). An error or cancellation removes both incomplete
@@ -136,8 +148,8 @@ pub(crate) fn run_joint_pair(
     if gpu_memory_limit_mb > 0 && gpu_memory_limit_mb < session_count {
         return Err("GPU memory limit too small for shared sessions".into());
     }
-    let source_identity = volley_media::preparation::source_provenance(original)?;
-    volley_media::preparation::verify_source_provenance(original, &source_identity)?;
+    let original_provenance = volley_media::preparation::source_provenance(original)?;
+    volley_media::preparation::verify_source_provenance(original, &original_provenance)?;
     let before = inference_stream::source_stamp(original)?;
     let session_memory = if gpu_memory_limit_mb == 0 {
         0
@@ -173,7 +185,7 @@ pub(crate) fn run_joint_pair(
         project_id,
         video,
         original,
-        &source_identity,
+        &original_provenance,
         duration,
         ball_config,
         1,
@@ -184,7 +196,7 @@ pub(crate) fn run_joint_pair(
         project_id,
         video,
         original,
-        &source_identity,
+        &original_provenance,
         duration,
         person_config,
         person_stride,
@@ -194,12 +206,13 @@ pub(crate) fn run_joint_pair(
     let mut ball_writer = EvidenceWriter::create(&ball.folder)?;
     let mut person_writer = EvidenceWriter::create(&players.folder)?;
     let pose = if pose_enabled {
+        let (pose_original, pose_source) = pose_manifest_identities(&original_provenance, before);
         Some(PoseStream::new(
             state,
             project_id,
             video,
-            source_identity.clone(),
-            json!({"bytes":before.0,"mtime_ns":before.1}),
+            pose_original,
+            pose_source,
             person_stride,
             session_memory,
             cpu_threads,
@@ -300,6 +313,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pose_provenance_does_not_swap_original_content_and_file_stamp() {
+        let original = json!({"sha256":"a".repeat(64),"size_bytes":262927597u64});
+        let (content, stamp) =
+            pose_manifest_identities(&original, (262927597, 1794865957038721051));
+        assert_eq!(content, original);
+        assert_eq!(
+            stamp,
+            json!({"bytes":262927597u64,"mtime_ns":1794865957038721051u64})
+        );
+        assert_ne!(content, stamp);
+    }
+
+    #[test]
     fn uncommitted_joint_gpu_runs_are_removed_on_failure() {
         let dir = std::env::temp_dir().join(format!("volley-joint-clean-{}", Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
@@ -312,3 +338,6 @@ mod tests {
         fs::remove_dir(dir).unwrap();
     }
 }
+
+#[cfg(test)]
+mod gpu_ab_tests;
