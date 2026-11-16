@@ -99,12 +99,15 @@ pub fn trajectory_breaks(points: &[BallObservation]) -> Vec<TrajectoryBreak> {
         return Vec::new();
     }
     let mut found = Vec::<TrajectoryBreak>::new();
+    let mut times = std::collections::BTreeSet::new();
     for i in 4..points.len() - 4 {
-        let at = if points[i + 1].frame - points[i].frame == 2 {
-            points[i].frame + 1
-        } else {
-            points[i].frame
-        };
+        times.insert(points[i].frame);
+        let gap = points[i + 1].frame - points[i].frame;
+        if (2..=4).contains(&gap) {
+            times.insert(points[i].frame + gap / 2);
+        }
+    }
+    for at in times {
         let left_end = points.partition_point(|p| p.frame < at);
         let right_begin = points.partition_point(|p| p.frame <= at);
         let left = &points[left_end.saturating_sub(7)..left_end];
@@ -271,6 +274,15 @@ mod tests {
         let mut points = flight(false);
         points[30].y += 45.0;
         assert!(trajectory_breaks(&points).is_empty());
+    }
+
+    #[test]
+    fn missing_sample_after_observed_contact_does_not_shift_or_duplicate_it() {
+        let mut points = flight(true);
+        points.retain(|p| p.frame != 31);
+        let found = trajectory_breaks(&points);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!((found[0].frame - 30).abs() <= 1, "{found:?}");
     }
 
     #[test]

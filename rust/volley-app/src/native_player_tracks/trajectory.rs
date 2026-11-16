@@ -147,6 +147,7 @@ pub async fn ball_trajectory(
         )
         .map_err(storage::bad_request)?;
         let extrema = ball_motion_extrema(&samples, 8).map_err(storage::bad_request)?;
+        let trajectory_breaks = volley_core::motion::trajectory_breaks(&samples);
         Ok(json!({
             "schema":"volley-native-ball-extrema/1",
             "project_id":req.project_id,"video":req.video,"replay_id":req.replay_id,
@@ -154,6 +155,8 @@ pub async fn ball_trajectory(
             "selected_ball_source":source_model,
             "window_start_frame":req.start_frame,"window_frames":req.count,
             "observations":samples.len(),"motion_extrema":extrema,
+            "trajectory_breaks":trajectory_breaks,
+            "trajectory_detector_version":volley_core::touch_pipeline::TRAJECTORY_DETECTOR_VERSION,
             "method":"gravity_compensated_rust_ball_motion",
             "touches_confirmed":false,"athlete_identities_verified":false,
             "gpu_inference_rerun":false
