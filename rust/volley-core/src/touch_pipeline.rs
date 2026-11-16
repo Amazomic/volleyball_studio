@@ -256,18 +256,10 @@ pub fn evaluate_rally_blocks(
     {
         return Err("Invalid rally touch emission window".into());
     }
-    let mut boundaries = vec![0];
-    boundaries.extend(
-        rally_starts
-            .iter()
-            .map(|start| frames.partition_point(|f| f.frame_index < *start))
-            .filter(|&i| i > 0 && i < frames.len()),
-    );
-    boundaries.push(frames.len());
-    boundaries.dedup();
+    let ranges = rally_frame_ranges(frames, rally_starts)?;
     let mut events = Vec::new();
-    for pair in boundaries.windows(2) {
-        let segment = &frames[pair[0]..pair[1]];
+    for range in ranges {
+        let segment = &frames[range];
         let start = emit_start.max(segment[0].frame_index);
         let end = emit_end.min(segment.last().unwrap().frame_index + 1);
         if start < end {
@@ -277,6 +269,29 @@ pub fn evaluate_rally_blocks(
         }
     }
     Ok(events)
+}
+
+pub fn rally_frame_ranges(
+    frames: &[TouchFrame],
+    rally_starts: &[u64],
+) -> Result<Vec<std::ops::Range<usize>>, String> {
+    if rally_starts.windows(2).any(|p| p[0] >= p[1]) {
+        return Err("Rally boundaries must be ordered".into());
+    }
+    let mut boundaries = vec![0];
+    boundaries.extend(
+        rally_starts
+            .iter()
+            .map(|start| frames.partition_point(|f| f.frame_index < *start))
+            .filter(|&i| i > 0 && i < frames.len()),
+    );
+    boundaries.push(frames.len());
+    boundaries.dedup();
+    Ok(boundaries
+        .windows(2)
+        .filter(|p| p[0] < p[1])
+        .map(|p| p[0]..p[1])
+        .collect())
 }
 
 pub fn evaluate_block(
