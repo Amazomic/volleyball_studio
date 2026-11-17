@@ -1,5 +1,8 @@
 # Разделение инференса и постобработки (экспериментально)
 
+> **Исторический документ Python-эпохи.** Сохранён для объяснения прежних алгоритмов, форматов и измерений. Команды, пути, настройки и статусы ниже не являются инструкцией для действующей Rust Studio. Актуальные руководства: [индекс документации](README.md).
+
+
 ## Проверенный конвейер
 Подготовка видео: scripts/volleyball_ui/prepared_videos.py и scripts/volleyball_studio/video_inputs.py.
 GPU: src/inference_onnx_seq_gray_v2.py (VballNet) и src/inference_player_ball_openvino.py (RAVEL).

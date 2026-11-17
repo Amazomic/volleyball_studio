@@ -1,5 +1,8 @@
 # Volley Studio — client-side performance audit
 
+> **Исторический документ Python-эпохи.** Сохранён для объяснения прежних алгоритмов, форматов и измерений. Команды, пути, настройки и статусы ниже не являются инструкцией для действующей Rust Studio. Актуальные руководства: [индекс документации](README.md).
+
+
 Measured 2026-11-02 on HOME-PC in headless Chrome. Synthetic UI workloads do not measure inference FPS or video decoding.
 
 | Bottleneck | Change | Acceptance target |

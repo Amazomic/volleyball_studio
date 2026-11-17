@@ -1,5 +1,8 @@
 # Native player tracking: Track ID continuity
 
+> **Версионная техническая заметка Rust.** Описанные частоты наблюдений, настройки и детали этапов могут относиться к прежней версии. Для конкретного анализа проверяй сохранённый профиль и манифесты; текущего владельца ищи в [карте](RUST_CANONICAL_OWNERS.json). Навигация: [индекс](README.md).
+
+
 ## Processing contract
 
 - Source: decoded RAVEL player_candidates from the immutable GPU fusion.

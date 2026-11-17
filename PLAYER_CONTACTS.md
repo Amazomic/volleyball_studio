@@ -1,5 +1,8 @@
 # Player-aware rally analysis
 
+> **Исторический документ Python-эпохи.** Сохранён для объяснения прежних алгоритмов, форматов и измерений. Команды, пути, настройки и статусы ниже не являются инструкцией для действующей Rust Studio. Актуальные руководства: [индекс документации](docs/README.md).
+
+
 `src/track_calculator_with_court.py` can combine the ball trajectory with player
 detections. This separates real play from a player simply passing the ball over
 for the next serve, and labels every ball touch with the technique used.
