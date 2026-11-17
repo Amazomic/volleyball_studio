@@ -3,7 +3,7 @@ import {runInNewContext} from "node:vm";
 import assert from "node:assert/strict";
 
 const source=readFileSync(new URL("../../rust/volley-app/static/studio_tracks.js",import.meta.url),"utf8");
-const start=source.indexOf("  const bindSelected=async (ids,playerId)=>{");
+const start=source.indexOf("  const photoEnrollmentQueues=new Map();");
 const end=source.indexOf("  // Native appearance matches",start);
 assert.ok(start>=0&&end>start);
 const calls=[],messages=[],events=[];

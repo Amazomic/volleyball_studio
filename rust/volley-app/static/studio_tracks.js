@@ -409,11 +409,11 @@
       ui.excluded.textContent=String(result.excluded_count||0);
       publishTrackCovers(result.player_track_counts);
       showPlayerChoices();
-      if(preserveCards&&reviewReady())await reviewLoad({deferRender:true});
-      if(token!==state.token||project!==state.project||video!==state.video||replay!==state.replay)return;
       const updateCards=()=>{renderRosterBar();renderRows();renderGroupCards();unlock();};
       if(preserveCards)animateTrackCards(updateCards);else updateCards();
-      if(!preserveCards&&!state.groupLoaded&&reviewReady())await reviewLoad();
+      // ReID group calculation is a secondary read, not part of the gallery
+      // response. Never block card interaction while it is being refreshed.
+      if(reviewReady()&&(preserveCards||!state.groupLoaded))void reviewLoad();
       note(state.roster.length?
         "Track ID получены. Выберите ID и вручную назначьте игрока из состава проекта.":
         "Добавьте игроков в состав проекта через управление проектом, чтобы разрешить ручную привязку.");
@@ -585,13 +585,51 @@
       ui.list.append(card);
     }
   };
+  // Apply the authoritative edit to visible cards immediately. A subsequent
+  // read reconciles filtered pages and concurrent edits without blocking UI.
+  const applyLocalTrackEdit=(action,ids,owner,result)=>{
+    const changed=new Set(ids.map(Number));
+    const ownerName=state.roster.find(p=>p.id===owner)?.name||"";
+    for(const row of state.rows){
+      if(!changed.has(Number(row.track_id)))continue;
+      if(action==="assign"){
+        row.assigned_player_id=owner;
+        row.assigned_player_name=ownerName;
+        row.identity_source="manual";
+        row.identity_conflict=false;
+      }else if(action==="unassign"){
+        row.assigned_player_id=null;
+        row.assigned_player_name=null;
+        row.identity_source="none";
+      }else if(action==="exclude")row.excluded=true;
+      else if(action==="restore")row.excluded=false;
+    }
+    if(Array.isArray(result.unassigned_track_ids))
+      state.unassignedIds=new Set(result.unassigned_track_ids.map(Number));
+    if(Array.isArray(result.comparison_track_ids))
+      state.comparisonIds=new Set(result.comparison_track_ids.map(Number));
+    if(!state.viewPlayer&&!state.viewConflicts){
+      state.filteredTotal=state.unassignedIds.size;
+      state.rows=state.rows.filter(row=>state.unassignedIds.has(Number(row.track_id)));
+      if(state.filteredTotal&&state.offset>=state.filteredTotal)
+        state.offset=Math.floor((state.filteredTotal-1)/state.limit)*state.limit;
+      if(!state.filteredTotal)state.offset=0;
+    }else if(state.viewPlayer){
+      state.rows=state.rows.filter(row=>row.assigned_player_id===state.viewPlayer);
+    }
+    updateUnassignedLabel();
+    ui.assigned.textContent=String(result.assigned_count||0);
+    ui.excluded.textContent=String(result.excluded_count||0);
+    animateTrackCards(()=>{renderRows();renderGroupCards();unlock();});
+  };
   const edit=async (action,chosenIds=null,chosenOwner=null)=>{
     const ids=chosenIds||Array.from(state.selected);
     const owner=chosenOwner||ui.player.value;
-    if(state.busy||!ids.length||ids.length>200||!state.replay)return;
-    if(action==="assign"&&!owner){note("Выберите игрока.",true);return;}
+    if(state.busy||!ids.length||ids.length>200||!state.replay)return false;
+    if(action==="assign"&&!owner){note("Выберите игрока.",true);return false;}
     const project=state.project,video=state.video,replay=state.replay;
     const revision=state.revision,offset=state.offset;
+    let confirmed=false;
     state.busy=true;unlock();
     try{
       const payload={project_id:project,video,replay_id:replay,
@@ -599,24 +637,39 @@
         action,track_ids:ids,expected_revision:revision,offset,limit:state.limit};
       if(action==="assign")payload.player_id=owner;
       const result=await post("/api/players/native/tracks",payload);
-      if(project!==state.project||video!==state.video||replay!==state.replay)return;
+      if(project!==state.project||video!==state.video||replay!==state.replay)return false;
       state.revision=String(result.revision);
+      state.selected.clear();
+      applyLocalTrackEdit(action,ids,owner,result);
       window.dispatchEvent(new CustomEvent("volley:track-assignments-updated",{detail:{
         project_id:project,video,replay_id:replay
       }}));
-      state.selected.clear();
-      state.rows=Array.isArray(result.tracks)?result.tracks:[];
-      ui.assigned.textContent=String(result.assigned_count||0);
-      ui.excluded.textContent=String(result.excluded_count||0);
-      state.offset=0;
-      await loadPage({preserveCards:true});
-      note("Привязки обновлены. Исходные GPU/CPU данные не изменены.");
+      confirmed=true;
+      note("Привязки сохранены. Обновляем карточки без блокировки.");
       return true;
     }catch(e){
-      note(e.message,true);
-      // Preserve refusal, and refetch canonical state on conflict rather than
-      // performing an optimistic hidden reassignment.
-    }finally{state.busy=false;unlock();}
+      if(project===state.project&&video===state.video&&replay===state.replay)
+        note(e.message,true);
+      return false;
+    }finally{
+      // Only the assignment POST owns the global mutation lock. Heavy
+      // gallery/ReID reads and photo enrollment do not.
+      state.busy=false;unlock();
+      if(confirmed&&project===state.project&&video===state.video&&replay===state.replay)
+        void loadPage({preserveCards:true});
+    }
+  };
+  // Multiple photo saves for the same athlete need ordered album revisions.
+  // This queue does not hold the global Track ID edit lock.
+  const photoEnrollmentQueues=new Map();
+  const enqueuePhotoEnrollment=(playerId,work)=>{
+    const previous=photoEnrollmentQueues.get(playerId)||Promise.resolve();
+    const pending=previous.catch(()=>{}).then(work);
+    photoEnrollmentQueues.set(playerId,pending);
+    void pending.finally(()=>{
+      if(photoEnrollmentQueues.get(playerId)===pending)photoEnrollmentQueues.delete(playerId);
+    }).catch(()=>{});
+    return pending;
   };
   const bindSelected=async (ids,playerId)=>{
     if(!playerId||state.busy||state.rosterBusy||!ids.length||
@@ -631,49 +684,50 @@
     }));
     if(!await edit("assign",ids,playerId))return;
     if(scope.project_id!==state.project||scope.replay_id!==state.replay)return;
-    state.busy=true;unlock();
-    let saved=0,alreadySaved=0;
-    const failures=[];
-    try{
-      const album=await post("/api/players/native/references",{
-        project_id:scope.project_id,player_id:playerId,action:"read"
-      });
-      let revision=album.revision;
-      let photos=Array.isArray(album.photos)?album.photos:[];
-      for(const {trackId,photoIndex} of samples){
-        if(scope.project_id!==state.project||scope.replay_id!==state.replay)break;
-        const existing=photos.some(photo=>
-          photo.project_id===scope.project_id&&photo.video===scope.video&&
-          photo.replay_id===scope.replay_id&&photo.track_id===trackId&&
-          photo.rally_run_id===scope.rally_run_id&&
-          (photo.photo_index||0)===photoIndex&&
-          photo.source_replay_sha256===scope.expected_source_sha256);
-        if(existing){alreadySaved++;continue;}
-        try{
-          const updated=await post("/api/players/native/references",{
-            ...scope,action:"enroll",track_id:trackId,photo_index:photoIndex,
-            expected_revision:revision
-          });
-          // Each append changes the optimistic album revision.
-          revision=updated.revision;
-          photos=Array.isArray(updated.photos)?updated.photos:photos;
-          saved++;
-        }catch(error){
-          failures.push("ID "+trackId+": "+error.message);
-          // A missing crop must not block other group members.
+    note("Track ID привязаны. Фото сохраняются отдельно; можно продолжать работу.");
+    return enqueuePhotoEnrollment(playerId,async()=>{
+      let saved=0,alreadySaved=0;
+      const failures=[];
+      try{
+        const album=await post("/api/players/native/references",{
+          project_id:scope.project_id,player_id:playerId,action:"read"
+        });
+        let revision=album.revision;
+        let photos=Array.isArray(album.photos)?album.photos:[];
+        for(const {trackId,photoIndex} of samples){
+          if(scope.project_id!==state.project||scope.replay_id!==state.replay)break;
+          const existing=photos.some(photo=>
+            photo.project_id===scope.project_id&&photo.video===scope.video&&
+            photo.replay_id===scope.replay_id&&photo.track_id===trackId&&
+            photo.rally_run_id===scope.rally_run_id&&
+            (photo.photo_index||0)===photoIndex&&
+            photo.source_replay_sha256===scope.expected_source_sha256);
+          if(existing){alreadySaved++;continue;}
+          try{
+            const updated=await post("/api/players/native/references",{
+              ...scope,action:"enroll",track_id:trackId,photo_index:photoIndex,
+              expected_revision:revision
+            });
+            revision=updated.revision;
+            photos=Array.isArray(updated.photos)?updated.photos:photos;
+            saved++;
+          }catch(error){
+            failures.push("ID "+trackId+": "+error.message);
+            // A missing crop must not block other group members.
+          }
         }
+        if(saved)window.dispatchEvent(new Event("volley:player-photo-saved"));
+        if(scope.project_id===state.project&&scope.replay_id===state.replay){
+          const summary="Track ID привязаны. Сохранено фото: "+saved+
+            (alreadySaved?" · уже было: "+alreadySaved:"");
+          note(failures.length?summary+" · ошибки: "+failures.join("; "):summary,
+            failures.length>0);
+        }
+      }catch(error){
+        if(scope.project_id===state.project&&scope.replay_id===state.replay)
+          note("Track ID привязаны, но фото не сохранены: "+error.message,true);
       }
-      if(saved)window.dispatchEvent(new Event("volley:player-photo-saved"));
-      if(scope.project_id===state.project&&scope.replay_id===state.replay){
-        const summary="Track ID привязаны. Сохранено фото: "+saved+
-          (alreadySaved?" · уже было: "+alreadySaved:"");
-        note(failures.length?summary+" · ошибки: "+failures.join("; "):summary,
-          failures.length>0);
-      }
-    }catch(error){
-      if(scope.project_id===state.project&&scope.replay_id===state.replay)
-        note("Track ID привязаны, но фото не сохранены: "+error.message,true);
-    }finally{state.busy=false;unlock();}
+    });
   };
   // Native appearance matches are only reviewed proposals, never athletes.
   window.addEventListener("volley:enroll-selected-photo",event=>{

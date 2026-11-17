@@ -2176,3 +2176,11 @@ Studio показывает кнопку перехода между debug и re
 - Первый параллельный cargo test workspace: 340 passed, 1 failed, 9 ignored в volley-app; runtime::tests::idle_or_busy_server_report_guards_graceful_shutdown получил дополнительный studio_analysis от другого теста. Последовательный cargo test --workspace --offline -- --test-threads=1: 654 passed, 0 failed, 17 ignored по workspace.
 - Имеющиеся test_studio_overlay_continuity.mjs и test_studio_raw_gpu_preview.mjs останавливаются на неполных заглушках ctx.save и setTimeout. Визуальная проверка заблокирована Computer Use: не удалось уверенно определить URL вкладки Brave. Реальный GPU/матч не запускался.
 - Release-сборка успешна; штатный /api/studio/restart отказался прерывать активную reid_processing (shutdown_safe=false). Для применения после её завершения нужен безопасный перезапуск Studio и обновление страницы.
+
+### 2026-11-17 — Привязка Track ID не блокирует продолжение работы
+
+- \`rust/volley-app/static/studio_tracks.js\`: общий флаг редактирования занят только до подтверждения POST \`/api/players/native/tracks\`. Подтверждённая привязка сразу отражается в карточках и сохраняет следующую серверную ревизию; сверка страниц и ReID-групп запускается отдельно без ожидания.
+- Сохранение reference-photo для привязанного игрока больше не блокирует остальные кнопки. Очередь сериализует обновления одного альбома по \`expected_revision\`, сохраняет выбранный кадр каждого ID группы и оставляет понятные сообщения об ошибках.
+- Регрессия \`scripts/ci/test_studio_track_assignment_nonblocking.mjs\` моделирует остановившийся GET альбома и не завершающуюся вторичную загрузку карточек: следующий Track ID успешно привязывается, а оба фото позднее сохраняются с правильными ревизиями.
+- Проверены тесты \`test_studio_track_assignment.mjs\`, \`test_studio_track_assignment_busy.mjs\`, \`test_studio_track_assignment_nonblocking.mjs\`, \`test_studio_tracks_loading.mjs\` и синтаксис JavaScript. Существующий \`test_studio_player_remove_track.mjs\` падает также на исходной версии: устаревшее ожидание текста кнопки «Удалить ID у игрока».
+- Реальные пользовательские данные, GPU/CPU-постобработки, ручные ID и альбомы тестами не изменялись.
