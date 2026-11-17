@@ -579,20 +579,25 @@
       }
     });
   };
+  // Rapid rally navigation should not launch two expensive replay reads per
+  // click. Coalesce seeks and request the destination first; drawOverlay()
+  // fetches the next window only when playback approaches its boundary.
+  let overlaySeekTimer=null;
   const prefetchOverlayAtFrame=frame=>{
-    const sourceId=overlaySourceId();
-    if(!s.project||!sourceId||!s.video||!Number.isSafeInteger(frame)||frame<0)return;
-    const total=overlay.raw?rawFrameLimit(s.project,sourceId,s.video):
-      timeline.data?.project_id===s.project&&
-      timeline.data?.rally_run_id===s.run?timeline.data.total_frames:null;
-    const start=overlayWindowStart(frame);
-    if(!Number.isSafeInteger(total)||start<total)
-      requestOverlayWindow(s.project,sourceId,s.video,start);
-    // Two adjacent windows cover seeking and the first seconds of playback.
-    const next=overlayWindowStart((Math.floor(frame/90)+1)*90);
-    if(next!==start&&(!overlay.raw||Number.isSafeInteger(total))&&
-       (!Number.isSafeInteger(total)||next<total))
-      requestOverlayWindow(s.project,sourceId,s.video,next);
+    if(overlaySeekTimer!==null)clearTimeout(overlaySeekTimer);
+    const project=s.project,sourceId=overlaySourceId(),video=s.video,raw=overlay.raw;
+    if(!project||!sourceId||!video||!Number.isSafeInteger(frame)||frame<0)return;
+    overlaySeekTimer=setTimeout(()=>{
+      overlaySeekTimer=null;
+      if(s.project!==project||s.video!==video||overlay.raw!==raw||
+         overlaySourceId()!==sourceId)return;
+      const total=raw?rawFrameLimit(project,sourceId,video):
+        timeline.data?.project_id===project&&
+        timeline.data?.rally_run_id===sourceId?timeline.data.total_frames:null;
+      const start=overlayWindowStart(frame);
+      if(!Number.isSafeInteger(total)||start<total)
+        requestOverlayWindow(project,sourceId,video,start);
+    },120);
   };
   const cpuTouchStyle={
     attack:["#ff6b6b","≈ Атака"],
