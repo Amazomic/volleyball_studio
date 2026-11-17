@@ -358,8 +358,8 @@
     if(!project||!video||!replay)return;
     const token=++state.token;
     state.selected.clear();unlock();
-    if(!preserveCards)ui.list.replaceChildren(node("div","empty-state","Проверка SHA-256 и загрузка Track ID…"));
-    note("Проверяем исходный CPU-трекинг, получаем имена игроков…");
+    if(!preserveCards)ui.list.replaceChildren(node("div","empty-state","Загрузка сохранённого индекса Track ID…"));
+    note("Получаем Track ID и сохранённые привязки игроков…");
     try{
       const result=await read(path("/api/players/native/tracks",{
         project_id:project,video,replay_id:replay,rally_run_id:state.rallyRun,

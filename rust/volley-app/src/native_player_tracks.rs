@@ -85,7 +85,7 @@ pub struct TrackEdit {
     #[serde(default = "default_limit")]
     limit: usize,
 }
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 struct Aggregate {
     first: u64,
     last: u64,
@@ -97,7 +97,7 @@ struct Aggregate {
     visible_spans: Vec<(u64, u64)>,
     observed_pairs: BTreeMap<(u64, u64), PairGeometry>,
 }
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 struct PairGeometry {
     same_position: u32,
     distinct_position: u32,
@@ -105,7 +105,7 @@ struct PairGeometry {
     // positions. Never inferred from interpolated or overlapping lifespans.
     first_distinct_frame: Option<u64>,
 }
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PhotoSample {
     frame: u64,
     bbox: [f64; 4],
@@ -148,6 +148,7 @@ pub(crate) use volley_core::contracts::player_id as valid_player_id;
 pub(crate) use volley_core::contracts::sha256 as valid_sha;
 mod source_index;
 use source_index::*;
+pub(crate) use source_index::{prepare_rally_index, prepare_replay_index};
 mod assignments;
 pub(crate) use assignments::*;
 
