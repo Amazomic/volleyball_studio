@@ -115,8 +115,15 @@ pub(crate) fn plan_for(
     }
     // FFprobe is expensive on long videos. Cache a probe plan while the
     // original file identity (path, size, nanosecond mtime) remains unchanged.
-    let source_proof =
-        volley_media::preparation::source_provenance(&source).map_err(storage::bad_request)?;
+    // Reuse a durable SHA-verified source receipt across Studio restarts.
+    // The receipt is outside the original video and is invalidated by a
+    // reliable filesystem change stamp; read-only instances remain read-only.
+    let source_proof = if state.writes_enabled {
+        volley_media::preparation::source_provenance_cached(&source, &state.data_root)
+    } else {
+        volley_media::preparation::source_provenance(&source)
+    }
+    .map_err(storage::bad_request)?;
     let metadata = source
         .metadata()
         .map_err(|error| storage::internal(format!("Video metadata: {error}")))?;

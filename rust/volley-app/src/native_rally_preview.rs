@@ -492,13 +492,6 @@ pub(crate) fn inspect_project(
             "Rally and Touch original content differs",
         ));
     }
-    volley_media::preparation::verify_source_provenance(&plan.source, &rally["original_source"])
-        .map_err(storage::conflict)?;
-    if rally["original_source"] != touch["original_source"] {
-        return Err(storage::conflict(
-            "Rally and Touch original content differs",
-        ));
-    }
     let source_info = volley_media::probe(&plan.source).map_err(storage::bad_request)?;
     if frames as f64 / 30.0 > source_info.duration_sec + 0.067 {
         return Err(storage::bad_request(

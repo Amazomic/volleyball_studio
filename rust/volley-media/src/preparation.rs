@@ -117,9 +117,9 @@ pub fn prepared_file_sha256(path: &Path) -> io::Result<(u64, String)> {
 }
 
 type SourceProof = (u64, SystemTime, (u64, u64, i64, i64), Value);
+static SOURCES: OnceLock<Mutex<HashMap<PathBuf, SourceProof>>> = OnceLock::new();
 
 pub fn source_provenance(path: &Path) -> Result<Value, String> {
-    static SOURCES: OnceLock<Mutex<HashMap<PathBuf, SourceProof>>> = OnceLock::new();
     let meta = fs::symlink_metadata(path).map_err(|e| format!("Original metadata: {e}"))?;
     if !meta.is_file() || meta.file_type().is_symlink() {
         return Err("Unsafe original video".into());
@@ -177,6 +177,186 @@ pub fn verify_source_provenance(path: &Path, expected: &Value) -> Result<(), Str
     }
     Ok(())
 }
+
+// An analysis records the full SHA above. Save that verified proof OUTSIDE the
+// original-video directory so a fresh Studio process can reuse it. A receipt
+// without a reliable kernel change stamp is never trusted.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OriginalSourceReceipt {
+    schema: String,
+    path: String,
+    size: u64,
+    modified_ns: u128,
+    change: (u64, u64, i64, i64),
+    proof: Value,
+}
+
+fn original_receipt_file(path: &Path, root: &Path) -> Option<PathBuf> {
+    let name = path.to_str()?;
+    let key = format!("{:x}", Sha256::digest(name.as_bytes()));
+    Some(
+        root.join("verified-original-sources-v1")
+            .join(format!("{key}.json")),
+    )
+}
+
+fn receipt_matches(
+    receipt: &OriginalSourceReceipt,
+    path: &Path,
+    meta: &fs::Metadata,
+    change: (u64, u64, i64, i64),
+) -> bool {
+    let modified_ns = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|time| time.as_nanos());
+    let digest = receipt.proof["sha256"].as_str().unwrap_or("");
+    receipt.schema == "volley-verified-original-source/1"
+        && path.to_str() == Some(receipt.path.as_str())
+        && receipt.size == meta.len()
+        && Some(receipt.modified_ns) == modified_ns
+        && receipt.change == change
+        && receipt.proof["schema"] == "volley-original-source/1"
+        && receipt.proof["size_bytes"].as_u64() == Some(meta.len())
+        && digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+/// SHA-verified content receipt, persisted in the isolated data root. A cached
+/// proof is rejected if inode/USN/ctime, length, or mtime changed; without a
+/// reliable OS change stamp we fall back to the complete SHA on every access.
+pub fn source_provenance_cached(path: &Path, cache_root: &Path) -> Result<Value, String> {
+    type Slot = std::sync::Weak<Mutex<()>>;
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Slot>>> = OnceLock::new();
+    let lock = {
+        let mut slots = LOCKS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .map_err(|_| "Original source locks poisoned")?;
+        slots.retain(|_, slot| slot.strong_count() > 0);
+        if let Some(existing) = slots.get(path).and_then(Slot::upgrade) {
+            existing
+        } else {
+            let new = Arc::new(Mutex::new(()));
+            slots.insert(path.to_owned(), Arc::downgrade(&new));
+            new
+        }
+    };
+    let _guard = lock.lock().map_err(|_| "Original source lock poisoned")?;
+    let meta = fs::symlink_metadata(path).map_err(|e| format!("Original metadata: {e}"))?;
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err("Unsafe original video".into());
+    }
+    let change = file_change_stamp(path, &meta);
+    let receipt_file = original_receipt_file(path, cache_root);
+    if let (Some(stamp), Some(file)) = (change, receipt_file.as_ref()) {
+        let safe = file
+            .parent()
+            .and_then(|parent| fs::symlink_metadata(parent).ok())
+            .is_some_and(|m| m.is_dir() && !m.file_type().is_symlink());
+        let file_meta = fs::symlink_metadata(file).ok();
+        if safe
+            && file_meta
+                .is_some_and(|m| m.is_file() && !m.file_type().is_symlink() && m.len() <= 16 * 1024)
+        {
+            if let Ok(bytes) = fs::read(file) {
+                if let Ok(receipt) = serde_json::from_slice::<OriginalSourceReceipt>(&bytes) {
+                    if receipt_matches(&receipt, path, &meta, stamp)
+                        && fs::symlink_metadata(path).ok().is_some_and(|after| {
+                            after.is_file()
+                                && !after.file_type().is_symlink()
+                                && after.len() == meta.len()
+                                && after.modified().ok() == meta.modified().ok()
+                                && file_change_stamp(path, &after) == Some(stamp)
+                        })
+                    {
+                        let cache = SOURCES.get_or_init(|| Mutex::new(HashMap::new()));
+                        let mut entries =
+                            cache.lock().map_err(|_| "Original proof lock poisoned")?;
+                        if entries.len() >= 32 {
+                            entries.clear();
+                        }
+                        entries.insert(
+                            path.to_owned(),
+                            (
+                                meta.len(),
+                                meta.modified().map_err(|e| e.to_string())?,
+                                stamp,
+                                receipt.proof.clone(),
+                            ),
+                        );
+                        return Ok(receipt.proof);
+                    }
+                }
+            }
+        }
+    }
+    // First access for an existing analysis hashes once, then publishes a
+    // receipt. A changed source cannot inherit an earlier receipt.
+    let proof = source_provenance(path)?;
+    if let (Some(stamp), Some(file)) = (change, receipt_file) {
+        if let Ok(after) = fs::symlink_metadata(path) {
+            if after.is_file()
+                && !after.file_type().is_symlink()
+                && after.len() == meta.len()
+                && after.modified().ok() == meta.modified().ok()
+                && file_change_stamp(path, &after) == Some(stamp)
+            {
+                let parent = file.parent().ok_or("Invalid receipt path")?;
+                if fs::create_dir_all(parent).is_ok()
+                    && fs::symlink_metadata(parent)
+                        .ok()
+                        .is_some_and(|m| m.is_dir() && !m.file_type().is_symlink())
+                {
+                    let receipt = OriginalSourceReceipt {
+                        schema: "volley-verified-original-source/1".to_owned(),
+                        path: path.to_string_lossy().into_owned(),
+                        size: meta.len(),
+                        modified_ns: meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map(|t| t.as_nanos())
+                            .unwrap_or(0),
+                        change: stamp,
+                        proof: proof.clone(),
+                    };
+                    if let Ok(bytes) = serde_json::to_vec(&receipt) {
+                        if bytes.len() <= 16 * 1024 {
+                            let suffix = format!(
+                                "{}.{}.tmp",
+                                std::process::id(),
+                                SOURCE_RECEIPT_SERIAL
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            );
+                            let temporary = file.with_extension(suffix);
+                            if fs::OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .open(&temporary)
+                                .and_then(|mut output| {
+                                    use std::io::Write;
+                                    output.write_all(&bytes)?;
+                                    output.sync_all()
+                                })
+                                .is_ok()
+                            {
+                                let _ = fs::rename(&temporary, &file);
+                            }
+                            let _ = fs::remove_file(temporary);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(proof)
+}
+static SOURCE_RECEIPT_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 // A finished prepared MP4 can be gigabytes. Verify its receipt once per
 // process/file stamp, not once per API request. The receipt is still read from
 // the manifest every time, and changes in size, mtime, the expected SHA or the
@@ -566,11 +746,29 @@ mod tests {
         let legacy_plan = super::PreparationPlan::new(&source, &root, None).unwrap();
         let bound_before = legacy_plan.clone().bind_source().unwrap();
         assert_ne!(legacy_plan.output, bound_before.output);
-        let first = super::source_provenance(&source).unwrap();
+        let first = super::source_provenance_cached(&source, &root).unwrap();
         assert_eq!(
             first["sha256"],
             super::prepared_file_sha256(&source).unwrap().1
         );
+        if super::file_change_stamp(&source, &std::fs::metadata(&source).unwrap()).is_some() {
+            let receipt = super::original_receipt_file(&source, &root).unwrap();
+            assert!(
+                receipt.is_file(),
+                "verified proof should survive a process restart"
+            );
+            super::SOURCES
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .remove(&source);
+            assert_eq!(
+                super::source_provenance_cached(&source, &root).unwrap(),
+                first,
+                "a cold process reuses the durable proof for an unchanged file"
+            );
+        }
         assert_eq!(first["timeline"]["analysis_fps"], 30);
         assert_eq!(first["timeline"]["origin"], "original_relative_seconds");
         let mut bytes = std::fs::read(&source).unwrap();
@@ -590,7 +788,7 @@ mod tests {
         );
         assert_ne!(
             first["sha256"],
-            super::source_provenance(&source).unwrap()["sha256"]
+            super::source_provenance_cached(&source, &root).unwrap()["sha256"]
         );
         std::fs::remove_dir_all(root).unwrap();
     }
