@@ -602,7 +602,7 @@ fn folder(state: &AppState, project_id: &str, create: bool) -> Result<PathBuf, A
     storage::project_id(project_id)?;
     projects::existing_project(state, project_id)?;
     let project = projects::project_root(state).join(project_id);
-    cpu_retrack::safe_folder(&project).map_err(storage::bad_request)?;
+    storage::safe_folder(&project).map_err(storage::bad_request)?;
     let root = project.join("native_studio_pipelines");
     match fs::symlink_metadata(&root) {
         Ok(info) => {
@@ -639,7 +639,7 @@ fn status_path(root: &Path, id: &str) -> Result<PathBuf, ApiError> {
         return Err(storage::bad_request("Неверный идентификатор запуска"));
     }
     let run = root.join(id);
-    cpu_retrack::safe_folder(&run).map_err(storage::bad_request)?;
+    storage::safe_folder(&run).map_err(storage::bad_request)?;
     Ok(run.join("status.json"))
 }
 fn epoch_ms() -> u64 {
@@ -744,12 +744,12 @@ fn saved_stage(project: &Path, directory: &str, id: &str, file: &str) -> Option<
         return None;
     }
     let parent = project.join(directory);
-    cpu_retrack::safe_folder(&parent).ok()?;
+    storage::safe_folder(&parent).ok()?;
     let dir = parent.join(id);
-    cpu_retrack::safe_folder(&dir).ok()?;
-    let manifest_file = cpu_retrack::safe_file(&dir, "manifest.json", MAX_SOURCE_MANIFEST).ok()?;
+    storage::safe_folder(&dir).ok()?;
+    let manifest_file = storage::safe_file(&dir, "manifest.json", MAX_SOURCE_MANIFEST).ok()?;
     let manifest: Value = serde_json::from_slice(&fs::read(manifest_file).ok()?).ok()?;
-    let evidence = cpu_retrack::safe_file(&dir, file, MAX_SOURCE_EVIDENCE).ok()?;
+    let evidence = storage::safe_file(&dir, file, MAX_SOURCE_EVIDENCE).ok()?;
     if fs::metadata(evidence).ok()?.len() == 0 || !valid_sha(&manifest["sha256"]) {
         return None;
     }

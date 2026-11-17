@@ -5,7 +5,7 @@
 use crate::{
     analysis_runs, projects, rallies, reid_native,
     storage::{self, ApiError, ApiResult},
-    AppState,
+    versioned_store, AppState,
 };
 use axum::{extract::State, http::HeaderMap, Json};
 use fs2::FileExt;
@@ -14,8 +14,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    fs::{self, File, OpenOptions},
-    io::Read,
+    fs::{self, OpenOptions},
     path::{Path, PathBuf},
     sync::Arc,
     time::UNIX_EPOCH,
@@ -46,31 +45,26 @@ fn preview_mode() -> String {
 }
 
 fn read_raw(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, ApiError> {
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > limit {
-            return Err(storage::bad_request(
-                "Файл CPU-статистики слишком большой или небезопасен",
-            ));
+    match storage::read_optional_bounded(path, limit) {
+        Ok(bytes) => Ok(bytes),
+        Err(storage::BoundedReadError::Open(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(None)
+        }
+        Err(storage::BoundedReadError::Unsafe) => Err(storage::bad_request(
+            "Файл CPU-статистики слишком большой или небезопасен",
+        )),
+        Err(storage::BoundedReadError::TooLarge) => {
+            Err(storage::bad_request("CPU-данные превышают лимит"))
+        }
+        Err(
+            storage::BoundedReadError::Metadata(error) | storage::BoundedReadError::Open(error),
+        ) => Err(storage::internal(format!("Cannot open CPU stats: {error}"))),
+        Err(storage::BoundedReadError::Read(error)) => {
+            Err(storage::internal(format!("Cannot read CPU stats: {error}")))
         }
     }
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(storage::internal(format!("Cannot open CPU stats: {e}"))),
-    };
-    let mut data = Vec::new();
-    file.take(limit + 1)
-        .read_to_end(&mut data)
-        .map_err(|e| storage::internal(format!("Cannot read CPU stats: {e}")))?;
-    if data.len() as u64 > limit {
-        return Err(storage::bad_request("CPU-данные превышают лимит"));
-    }
-    Ok(Some(data))
-}
-fn digest(bytes: Option<&[u8]>) -> String {
-    bytes
-        .map(|b| format!("{:x}", Sha256::digest(b)))
-        .unwrap_or_else(|| "absent".into())
 }
 pub(crate) fn read_document(
     path: &Path,
@@ -84,7 +78,7 @@ pub(crate) fn read_document(
             path.display()
         )));
     }
-    let revision = digest(data.as_deref());
+    let revision = versioned_store::revision(data.as_deref());
     let value = data
         .as_deref()
         .map(|data| {
@@ -510,7 +504,7 @@ fn persist(
     lock.lock_exclusive()
         .map_err(|e| storage::internal(format!("Stats identity lock: {e}")))?;
     let bytes = read_raw(&project.join("player_identities.json"), MAX_IDS)?;
-    if digest(bytes.as_deref()) != identity_revision {
+    if versioned_store::revision(bytes.as_deref()) != identity_revision {
         return Err(storage::conflict(
             "Ручные привязки изменились во время CPU-пересчёта",
         ));
