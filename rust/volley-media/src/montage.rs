@@ -791,7 +791,7 @@ pub fn soundtrack_is_audio(path: &Path) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{concat_playlist, soundtrack_args, SelectedClip};
+    use super::{concat_playlist, soundtrack_args, OriginalClip, SelectedClip};
     use std::path::Path;
 
     #[test]
@@ -802,6 +802,28 @@ mod tests {
         assert_eq!(request.end_frame - request.start_frame + 1, 100);
     }
 
+    #[test]
+    fn original_montage_reads_source_media_without_analysis_resize() {
+        let clip = OriginalClip {
+            source: std::path::PathBuf::from("/recordings/original_match.mkv"),
+            start_frame: 60,
+            end_frame: 119,
+            analysis_offset_sec: 0.0,
+            native_fps: 60.0,
+            native_rate: "60/1".into(),
+            native_width: 1920,
+            native_height: 1080,
+        };
+        let args = clip.extract_args(Path::new("/output/segment.mp4"), false);
+        let input = args.windows(2).find(|pair| pair[0] == "-i").unwrap();
+        assert_eq!(input[1], clip.source.to_string_lossy());
+        let filter = args.windows(2).find(|pair| pair[0] == "-vf").unwrap();
+        assert_eq!(filter[1], "fps=60/1,setsar=1");
+        assert!(!args.iter().any(|arg| arg.contains("scale=")));
+        let receipt = clip.receipt();
+        assert!(receipt.original_resolution);
+        assert_eq!((receipt.native_width, receipt.native_height), (1920, 1080));
+    }
     #[test]
     fn soundtrack_rejects_invalid_volume() {
         assert!(soundtrack_args(

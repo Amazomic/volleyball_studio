@@ -1196,12 +1196,10 @@ fn montage_material(state: &AppState, run: &ValidatedRun) -> Result<Value, ApiEr
         "Rally",
     )
     .map_err(storage::bad_request)?;
-    let geometry = crate::video_edits::court_snapshot(state, &run.project_id, &run.video)?;
-    if manifest["court_revision"] != json!(geometry.as_ref().map(|value| &value.revision)) {
-        return Err(storage::conflict(
-            "Geometry changed; rebuild CPU interpretation",
-        ));
-    }
+    // A montage replays the immutable CPU run, not the latest editable court.
+    // The geometry revision recorded in the run remains authoritative.
+    // Later manual court edits must not invalidate saved original-video clips.
+    let geometry_available = !manifest["court_revision"].is_null();
     let (owners, automatic) = crate::native_player_tracks::statistics_owners(
         state,
         &run.project_id,
@@ -1281,7 +1279,7 @@ fn montage_material(state: &AppState, run: &ValidatedRun) -> Result<Value, ApiEr
     timeline["readiness"] = json!({"manual_montage_ready":!clips.is_empty(),
         "personalized_selection_available":!owners.owners.is_empty(),
         "unidentified_contacts":unidentified,"unknown_action_contacts":unknown,
-        "geometry_available":geometry.is_some(),"authoritative_game_events":false,
+        "geometry_available":geometry_available,"authoritative_game_events":false,
         "original_verified_against_analysis":!manifest["original_source"].is_null()});
     let bytes = serde_json::to_vec(&timeline)
         .map_err(|e| storage::internal(format!("Timeline revision: {e}")))?;
