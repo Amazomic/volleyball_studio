@@ -10,6 +10,55 @@ pub(super) struct TrackIndex {
     change: Option<(u64, u64, i64, i64)>,
     tracks: BTreeMap<u64, Aggregate>,
 }
+/// The in-memory map uses tuple keys. JSON object keys must be strings;
+/// serialize each measured pair as a canonical "first:second" key.
+pub(super) mod pair_geometry_keys {
+    use super::{BTreeMap, PairGeometry};
+    use serde::de::Error as _;
+    use serde::ser::SerializeMap;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(
+        pairs: &BTreeMap<(u64, u64), PairGeometry>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(pairs.len()))?;
+        for (&(first, second), geometry) in pairs {
+            map.serialize_entry(&format!("{first}:{second}"), geometry)?;
+        }
+        map.end()
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<BTreeMap<(u64, u64), PairGeometry>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let keys = BTreeMap::<String, PairGeometry>::deserialize(deserializer)?;
+        let mut pairs = BTreeMap::new();
+        for (key, geometry) in keys {
+            let (first, second) = key
+                .split_once(':')
+                .ok_or_else(|| D::Error::custom("Invalid observed pair key"))?;
+            let first = first
+                .parse::<u64>()
+                .map_err(|_| D::Error::custom("Invalid first observed ID"))?;
+            let second = second
+                .parse::<u64>()
+                .map_err(|_| D::Error::custom("Invalid second observed ID"))?;
+            if first == 0 || first >= second || format!("{first}:{second}") != key {
+                return Err(D::Error::custom("Invalid canonical observed pair"));
+            }
+            pairs.insert((first, second), geometry);
+        }
+        Ok(pairs)
+    }
+}
+
 const INDEX_CACHE_SCHEMA: &str = "volley-native-track-index/1";
 const MAX_INDEX_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 
@@ -135,19 +184,79 @@ fn store_index(
         change,
         tracks: tracks.clone(),
     };
-    let value =
-        serde_json::to_value(record).map_err(|e| format!("Serialize Track ID index: {e}"))?;
-    storage::write_json_atomic(&target, &value)
-        .map_err(|e| format!("Persist Track ID index: {e:?}"))
+    // Large replay indices may exceed the generic 32 MiB settings/sidecar
+    // limit. Use a bounded, compact, atomic index-specific writer (128 MiB).
+    let bytes =
+        serde_json::to_vec(&record).map_err(|e| format!("Serialize Track ID index: {e}"))?;
+    if bytes.len() as u64 > MAX_INDEX_CACHE_BYTES {
+        return Err(format!(
+            "Persistent Track ID index is too large ({} bytes; limit {} bytes)",
+            bytes.len(),
+            MAX_INDEX_CACHE_BYTES
+        ));
+    }
+    match fs::symlink_metadata(&target) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+            return Err("Unsafe persistent Track ID index output".into());
+        }
+        Ok(_) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => return Err(format!("Inspect Track ID index output: {e}")),
+    }
+    let temp = cache_dir.join(format!(
+        ".{}.{}.tmp",
+        target.file_name().unwrap_or_default().to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+    let written = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp, &target)
+    })();
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("Persist Track ID index: {error}"));
+    }
+    Ok(())
 }
 
 static TRACK_INDEX_GATES: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
 
 pub(crate) fn prepare_replay_index(path: &Path, sha: &str, frames: u64) -> Result<(), String> {
-    index_replay(path, sha, frames)?;
+    let tracks = index_replay(path, sha, frames)?;
     if let Some(target) = stored_index_path(path, None) {
-        if !target.is_file() {
-            return Err("Persistent Track ID index was not written".into());
+        // An earlier read may have cached an index in memory while the disk
+        // write failed. Ensure persistence for the CPU analysis boundary.
+        let meta = fs::metadata(path).map_err(|e| format!("Track index source: {e}"))?;
+        let modified = meta.modified().ok();
+        let change = volley_media::preparation::file_change_stamp(path, &meta);
+        if read_stored_index(path, sha, frames, meta.len(), modified, change, None).is_none() {
+            if change.is_none() || modified.is_none() {
+                return Err(
+                    "Persistent Track ID index requires a reliable source change stamp".into(),
+                );
+            }
+            store_index(
+                path,
+                sha,
+                frames,
+                meta.len(),
+                modified,
+                change,
+                None,
+                &tracks,
+            )?;
+            if read_stored_index(path, sha, frames, meta.len(), modified, change, None).is_none() {
+                return Err(format!(
+                    "Persistent Track ID index failed verification: {}",
+                    target.display()
+                ));
+            }
         }
     }
     Ok(())
@@ -984,6 +1093,52 @@ mod persistent_index_tests {
     use uuid::Uuid;
 
     #[test]
+    fn multiple_covisible_players_are_persisted_with_json_pair_keys() {
+        let root = std::env::temp_dir().join(format!("volley-multiple-tracks-{}", Uuid::new_v4()));
+        let replay = root.join("native_cpu_replays").join("a".repeat(32));
+        fs::create_dir_all(&replay).unwrap();
+        let path = replay.join("tracked_frames.jsonl");
+        let mut bytes = Vec::new();
+        for frame in 0..4 {
+            let tracked = |id: u64, bbox| {
+                json!({
+                    "track_id":id,
+                    "is_verified_athlete":false,
+                    "detection":{
+                        "frame_index":frame,"class_name":"player","score":0.92,
+                        "bbox_xyxy_norm":bbox,"query_index":id
+                    }
+                })
+            };
+            let row = json!({
+                "frame_index":frame,"selected_ball":null,
+                "interpolated_track_ids":[],
+                "track_ids_provisional":true,
+                "confirmed_athlete_identities":false,
+                "touches_confirmed":false,
+                "tracked_players":[tracked(7,[0.10,0.15,0.30,0.80]),
+                                   tracked(8,[0.60,0.15,0.80,0.80])]
+            });
+            bytes.extend(serde_json::to_vec(&row).unwrap());
+            bytes.push(b'\n');
+        }
+        fs::write(&path, &bytes).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        prepare_replay_index(&path, &sha, 4).unwrap();
+        let cached = stored_index_path(&path, None).unwrap();
+        let on_disk = fs::read_to_string(&cached).unwrap();
+        assert!(
+            on_disk.contains(r#""7:8""#),
+            "Measured pair tuple keys must survive JSON storage"
+        );
+        TRACK_INDICES.get().unwrap().lock().unwrap().clear();
+        let reloaded = index_replay(&path, &sha, 4).unwrap();
+        assert_eq!(reloaded[&7].observed_pairs[&(7, 8)].distinct_position, 4);
+        assert_eq!(reloaded[&8].observed_pairs[&(7, 8)].distinct_position, 4);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn index_is_saved_reused_and_reverified_when_source_changes() {
         let root = std::env::temp_dir().join(format!("volley-persisted-tracks-{}", Uuid::new_v4()));
         let replay_id = "a".repeat(32);
@@ -1018,6 +1173,10 @@ mod persistent_index_tests {
         let sha = format!("{:x}", Sha256::digest(&bytes));
         prepare_replay_index(&path, &sha, 3).unwrap();
         let cache_path = stored_index_path(&path, None).unwrap();
+        assert!(cache_path.is_file());
+        // Even a warm in-memory cache must re-create a missing durable index.
+        fs::remove_file(&cache_path).unwrap();
+        prepare_replay_index(&path, &sha, 3).unwrap();
         assert!(cache_path.is_file());
         TRACK_INDICES.get().unwrap().lock().unwrap().clear();
         assert_eq!(index_replay(&path, &sha, 3).unwrap()[&7].observed, 3);
