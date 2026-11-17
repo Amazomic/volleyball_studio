@@ -248,6 +248,7 @@
   // Hidden selects remain as existing internal adapters, never alternate choices.
   const loadVideos=async()=>{
     const project=ui.project.value,selected=get("studio-run")?.value||"";
+    const selectionKey=()=>JSON.stringify([ui.project.value,get("studio-run")?.value||""]);
     const loadingKey=JSON.stringify([project,selected]);
     if(state.loadingKey===loadingKey)return;
     if(project&&state.project===project&&state.replay&&state.tracksLoaded&&
@@ -269,11 +270,14 @@
       state.loadingKey=null;note("Выберите проект в верхней панели.");return;
     }
     const token=state.token;
+    let retryStale=false;
     note("Проверка CPU-источника выбранной постобработки…");
     try{
       const response=await read(path("/api/cpu/native/rallies/runs",{project_id:project}));
-      if(token!==state.token||project!==ui.project.value||
-          selected!==get("studio-run")?.value)return;
+      if(token!==state.token||selectionKey()!==loadingKey){
+        retryStale=true;
+        return;
+      }
       const runs=(Array.isArray(response.runs)?response.runs:[]).filter(item=>
         typeof item.video==="string"&&
         /^[a-f0-9]{32}$/.test(String(item.rally_run_id||""))&&
@@ -305,7 +309,12 @@
         (state.fallback?" · источник не выбран в шапке":"");
       await loadPage();
     }catch(error){if(token===state.token)note(error.message,true);}
-    finally{if(token===state.token)state.loadingKey=null;}
+    finally{
+      if(state.loadingKey===loadingKey){
+        state.loadingKey=null;
+        if(retryStale&&active())queueMicrotask(()=>void loadVideos());
+      }
+    }
   };
   const publishTrackCovers=playerTrackCounts=>{
     if(!state.project||!state.video||!state.replay)return;
