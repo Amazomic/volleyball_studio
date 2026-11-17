@@ -598,9 +598,10 @@ fn refine_pose_events_policy(
             }
         }
     }
-    // Preserve unconfirmed, motion-supported proposals when RTMPose is sparse or occluded.
-    // Strict mode still requires an independently confirmed same-player body contact.
-    if settings.require_pose || settings.algorithm == TouchAlgorithm::PoseMotion {
+    // PoseMotion supplements physical motion with RTMPose, but does not imply
+    // mandatory pose evidence. Keep unconfirmed physical proposals when body
+    // keypoints are sparse at impact; only explicit strict mode rejects them.
+    if settings.require_pose {
         let mut index = 0;
         events.retain(|_| {
             let keep = supported[index];
@@ -1254,7 +1255,7 @@ pub(crate) fn process_with_ball_scope(
             "human_training_touch_sha256":training_sha,
             "pose_source_fusion_id": if pose_requested {json!(fusion_id)} else {Value::Null},
             "pose_source":pose_info.as_ref().map(|(id, sha, stride)| json!({"pose_run_id":id,"sha256":sha,"stride":stride})),
-            "body_trajectory_intersection_required":settings.algorithm == TouchAlgorithm::PoseMotion || settings.require_pose,
+            "body_trajectory_intersection_required":settings.require_pose,
             "ball_source_switch_guard":true,
             "file":OUTPUT_FILE,
             "sha256":digest,
@@ -1604,6 +1605,7 @@ mod tests {
             inferred_body_reach_supported: false,
             athlete_identity_verified: false,
         }];
+        let unconfirmed_motion = events[0].clone();
         refine_pose_events(
             &mut events,
             &block,
@@ -1617,6 +1619,28 @@ mod tests {
         let changed = events[0].action_prediction.as_ref().unwrap();
         assert_eq!(changed.kind, ActionKind::OverheadPass);
         assert_eq!(changed.method, PredictionMethod::PoseKeypointsV1);
+        let mut pose_optional = vec![unconfirmed_motion];
+        pose_optional[0].ball_x_px = 620.0;
+        refine_pose_events(
+            &mut pose_optional,
+            &block,
+            640,
+            360,
+            &root,
+            &fusion,
+            TouchSettings {
+                algorithm: TouchAlgorithm::PoseMotion,
+                require_pose: false,
+                ..TouchSettings::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            pose_optional.len(),
+            1,
+            "motion evidence must survive missing pose"
+        );
+        assert!(!pose_optional[0].body_contact_supported);
         let mut distant = events.clone();
         distant[0].ball_x_px = 620.0;
         refine_pose_events(

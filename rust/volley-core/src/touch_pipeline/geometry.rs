@@ -438,6 +438,97 @@ pub(super) fn detect_observed_vertical_rebounds(
 /// segments independently; only a strong velocity reversal whose extrapolated
 /// paths intersect near the same player becomes a contact proposal. The event
 /// is anchored to the last observed VBallNet frame, not a fabricated ball box.
+/// Recover an *unverified* strike when a brief player occlusion accompanies a
+/// sharp ball-flight discontinuity. The candidate is anchored to a genuine
+/// earlier frame containing both the ball and the SAME observed Track ID; no
+/// inferred Track ID or synthesized ball is published to downstream stages.
+fn witnessed_strike_before_gap(
+    frames: &[TouchFrame],
+    before: usize,
+    after: usize,
+    predicted: [f64; 2],
+    ball_radius: f64,
+    width: f64,
+    height: f64,
+) -> Option<(usize, u64, f64, f64)> {
+    let mut best: Option<(f64, usize, u64, f64, f64)> = None;
+    for anchor in before.saturating_sub(5)..before {
+        let Some(ball) = frames[anchor]
+            .selected_ball
+            .as_ref()
+            .filter(|ball| ball.source_model == "vballnet" && ball.score >= 0.35)
+        else {
+            continue;
+        };
+        let observed = center(ball.bbox_xyxy_norm);
+        let observed = [observed[0] * width, observed[1] * height];
+        if (observed[0] - predicted[0]).hypot(observed[1] - predicted[1])
+            > (ball_radius * 9.0).max(85.0)
+        {
+            continue;
+        }
+        for player in &frames[anchor].players {
+            if player.score < 0.25
+                || frames[before]
+                    .players
+                    .iter()
+                    .any(|p| p.track_id == player.track_id)
+                || frames[after]
+                    .players
+                    .iter()
+                    .any(|p| p.track_id == player.track_id)
+            {
+                continue;
+            }
+            // Independent observations of this ID must bracket its dropout.
+            let Some(next) = frames[after + 1..(after + 7).min(frames.len())]
+                .iter()
+                .flat_map(|row| &row.players)
+                .find(|p| p.track_id == player.track_id && p.score >= 0.25)
+            else {
+                continue;
+            };
+            let bbox = pixel_bbox(player.bbox_xyxy_norm, width, height);
+            let next_box = pixel_bbox(next.bbox_xyxy_norm, width, height);
+            let (bw, bh) = (bbox[2] - bbox[0], bbox[3] - bbox[1]);
+            let (nw, nh) = (next_box[2] - next_box[0], next_box[3] - next_box[1]);
+            if bw < 10.0
+                || bh < 35.0
+                || nw < 10.0
+                || nh < 35.0
+                || bh.max(nh) / bh.min(nh) > 2.2
+                || ((bbox[0] + bbox[2] - next_box[0] - next_box[2]) * 0.5)
+                    .hypot((bbox[1] + bbox[3] - next_box[1] - next_box[3]) * 0.5)
+                    > bh.max(nh) * 0.75
+            {
+                continue;
+            }
+            let standing = standing_height(frames, anchor, player.track_id, height)
+                .unwrap_or(bh)
+                .max(bh);
+            let center_x = (bbox[0] + bbox[2]) * 0.5;
+            let reach_x = (bw * 0.75).max(standing * 0.48) + ball_radius;
+            let reach_top = bbox[3] - standing * 1.90 - ball_radius;
+            let reach_bottom = bbox[3] + standing * 0.12 + ball_radius;
+            if (predicted[0] - center_x).abs() > reach_x
+                || predicted[1] < reach_top
+                || predicted[1] > reach_bottom
+            {
+                continue;
+            }
+            let cost = ((predicted[0] - center_x).abs() / reach_x
+                + ((predicted[1] - (reach_top + reach_bottom) * 0.5).abs()
+                    / ((reach_bottom - reach_top) * 0.5).max(1.0)))
+                * 0.5;
+            let rank = cost + (before - anchor) as f64 * 0.025;
+            if best.as_ref().is_none_or(|old| rank < old.0) {
+                best = Some((rank, anchor, player.track_id, cost, player.score));
+            }
+        }
+    }
+    best.map(|(_, frame, track_id, cost, score)| (frame, track_id, cost, score))
+}
+
 pub(super) fn detect_gap_rebounds(
     frames: &[TouchFrame],
     width: f64,
@@ -571,27 +662,41 @@ pub(super) fn detect_gap_rebounds(
         let Some((error, impact, predicted)) = best else {
             continue;
         };
-        if error > (radius * 3.0).max(22.0) {
-            continue;
-        }
-        let Some((track_id, cost, player_score)) = touching_player(
-            frames,
-            impact,
-            ReachEvidence {
-                width,
-                height,
-                ball_x: predicted[0],
-                ball_y: predicted[1],
-                ball_radius: radius,
-                max_reach_ratio,
-                strong_reversal: angle >= 120.0,
-            },
-        ) else {
+        let direct = error <= (radius * 3.0).max(22.0);
+        let contact = if direct {
+            touching_player(
+                frames,
+                impact,
+                ReachEvidence {
+                    width,
+                    height,
+                    ball_x: predicted[0],
+                    ball_y: predicted[1],
+                    ball_radius: radius,
+                    max_reach_ratio,
+                    strong_reversal: angle >= 120.0,
+                },
+            )
+            .map(|(id, cost, score)| (before, id, cost, score))
+        } else if after - before <= 4
+            && angle >= 95.0
+            && residual >= 18.0
+            && speed_after >= 12.0
+            && error <= (radius * 11.0).max(85.0)
+        {
+            // A sharp departure with one or two missing VBallNet positions
+            // may not extrapolate to the same pixel. Only a source-observed
+            // athlete that disappears at impact AND reappears on the
+            // outbound flight can support this weaker proposal.
+            witnessed_strike_before_gap(frames, before, after, predicted, radius, width, height)
+        } else {
+            None
+        };
+        let Some((anchor, track_id, cost, player_score)) = contact else {
             continue;
         };
-        // The annotated event must reference a real same-frame player and
-        // ball. Never invent a Track ID or add a synthetic ball observation.
-        if !frames[before]
+        // Never publish a Touch assigned to a reconstructed-only Track ID.
+        if !frames[anchor]
             .players
             .iter()
             .any(|p| p.track_id == track_id)
@@ -604,8 +709,9 @@ pub(super) fn detect_gap_rebounds(
             + 0.12 * ball_before.score
             + 0.10 * player_score)
             .clamp(0.0, 0.87);
+        let anchor_ball = center_px(anchor).expect("source-observed contact anchor");
         result.push(GeometryContact {
-            frame: before,
+            frame: anchor,
             track_id,
             probability,
             motion: MotionEvidence {
@@ -615,8 +721,8 @@ pub(super) fn detect_gap_rebounds(
                 angle,
                 residual,
             },
-            ball_x: a[0],
-            ball_y: a[1],
+            ball_x: anchor_ball[0],
+            ball_y: anchor_ball[1],
         });
     }
     result
@@ -625,6 +731,130 @@ pub(super) fn detect_gap_rebounds(
 #[cfg(test)]
 mod gap_tests {
     use super::*;
+    #[test]
+    fn nearby_striker_reappears_after_short_ball_gap_without_inventing_track_ids() {
+        // Rounded source-backed centers around a 30-FPS 23.2s net attack.
+        // A spurious far-right VBallNet box is discarded before this stage.
+        let observed: &[(u64, f64, f64)] = &[
+            (690, 918.8, 333.8),
+            (691, 918.8, 345.0),
+            (692, 918.8, 360.0),
+            (693, 918.8, 375.0),
+            (694, 918.8, 390.0),
+            (695, 915.0, 401.3),
+            (696, 911.2, 412.5),
+            (697, 918.8, 420.0),
+            (698, 922.5, 427.5),
+            (701, 847.5, 382.5),
+            (702, 828.8, 375.0),
+            (703, 817.5, 371.2),
+            (704, 798.8, 371.2),
+            (705, 791.2, 367.5),
+            (706, 776.2, 367.5),
+            (707, 757.5, 360.0),
+        ];
+        let frames = (680..715u64)
+            .map(|frame_index| {
+                let players = if frame_index == 695 || (703..=707).contains(&frame_index) {
+                    vec![
+                        TouchPlayer {
+                            track_id: 4,
+                            score: 0.67,
+                            touch_probability: None,
+                            bbox_xyxy_norm: [0.45, 0.46, 0.49, 0.60],
+                        },
+                        TouchPlayer {
+                            track_id: 6,
+                            score: 0.35,
+                            touch_probability: None,
+                            bbox_xyxy_norm: if frame_index == 695 {
+                                [0.473, 0.446, 0.490, 0.503]
+                            } else {
+                                [0.472, 0.426, 0.497, 0.497]
+                            },
+                        },
+                    ]
+                } else {
+                    vec![TouchPlayer {
+                        track_id: 4,
+                        score: 0.67,
+                        touch_probability: None,
+                        bbox_xyxy_norm: [0.45, 0.46, 0.49, 0.60],
+                    }]
+                };
+                let selected_ball =
+                    observed
+                        .iter()
+                        .find(|r| r.0 == frame_index)
+                        .map(|r| TouchBall {
+                            source_model: "vballnet".into(),
+                            score: 0.65,
+                            bbox_xyxy_norm: [
+                                (r.1 - 8.0) / 1920.0,
+                                (r.2 - 8.0) / 1080.0,
+                                (r.1 + 8.0) / 1920.0,
+                                (r.2 + 8.0) / 1080.0,
+                            ],
+                        });
+                TouchFrame {
+                    frame_index,
+                    players,
+                    selected_ball,
+                }
+            })
+            .collect::<Vec<_>>();
+        let detected = detect_gap_rebounds(&frames, 1920.0, 1080.0, 0.75);
+        assert!(
+            detected.iter().any(|v| v.frame == (695 - 680)
+                && v.track_id == 6
+                && v.motion.motion_frame >= (699 - 680)),
+            "{detected:?}"
+        );
+        let proposals =
+            evaluate_block(&frames, 1920, 1080, 680, 715, TouchSettings::default()).unwrap();
+        assert!(
+            proposals.iter().any(|v| v.frame_index == 695
+                && v.provisional_track_id == Some(6)
+                && v.physical_motion_supported),
+            "{proposals:?}"
+        );
+        let mut no_reappearance = frames.clone();
+        for frame in &mut no_reappearance {
+            if frame.frame_index > 700 {
+                frame.players.retain(|player| player.track_id != 6);
+            }
+        }
+        assert!(
+            detect_gap_rebounds(&no_reappearance, 1920.0, 1080.0, 0.75)
+                .iter()
+                .all(|event| event.track_id != 6),
+            "An unbracketed player must not get a contact"
+        );
+        let mut uninterrupted_flight = frames;
+        for row in &mut uninterrupted_flight {
+            if row.frame_index > 700 {
+                let dt = (row.frame_index - 698) as f64;
+                let (x, y) = (922.5 + 1.125 * dt, 427.5 + 9.375 * dt);
+                row.selected_ball = Some(TouchBall {
+                    source_model: "vballnet".into(),
+                    score: 0.65,
+                    bbox_xyxy_norm: [
+                        (x - 8.0) / 1920.0,
+                        (y - 8.0) / 1080.0,
+                        (x + 8.0) / 1920.0,
+                        (y + 8.0) / 1080.0,
+                    ],
+                });
+            }
+        }
+        assert!(
+            detect_gap_rebounds(&uninterrupted_flight, 1920.0, 1080.0, 0.75)
+                .iter()
+                .all(|event| event.track_id != 6),
+            "Player dropout alone must not produce an impact during uninterrupted flight"
+        );
+    }
+
     use crate::motion::{ball_motion_change, TOUCH_MOTION_CONFIG};
     use crate::touch_pipeline::{
         evaluate_block, exclude_ball_teleports, TouchBall, TouchPlayer, TouchSettings,
