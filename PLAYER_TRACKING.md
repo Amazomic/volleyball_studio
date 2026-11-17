@@ -1,5 +1,8 @@
 # Player Tracking on Volleyball Court
 
+> **Исторический документ Python-эпохи.** Сохранён для объяснения прежних алгоритмов, форматов и измерений. Команды, пути, настройки и статусы ниже не являются инструкцией для действующей Rust Studio. Актуальные руководства: [индекс документации](docs/README.md).
+
+
 This document describes the implementation of player tracking functionality using YOLO model for detecting volleyball players and mapping their positions to a volleyball court schematic.
 
 ## Overview
@@ -15,12 +18,12 @@ The player tracking system performs the following tasks:
 
 ## Files
 
-- [src/player_tracker.py](src/player_tracker.py) - Main player tracking class with DeepSORT-like tracking
-- [src/court_coordinates.py](src/court_coordinates.py) - Modified coordinate mapping script with player tracking integration
-- [src/demo_player_tracking.py](src/demo_player_tracking.py) - Original demonstration script
-- [src/demo_player_tracking_v2.py](src/demo_player_tracking_v2.py) - Updated demonstration script with tracking features
-- [src/test_player_tracker.py](src/test_player_tracker.py) - Test script
-- [src/check_setup.py](src/check_setup.py) - Utility to verify required files
+- `src/player_tracker.py` - Main player tracking class with DeepSORT-like tracking
+- `src/court_coordinates.py` - Modified coordinate mapping script with player tracking integration
+- `src/demo_player_tracking.py` - Original demonstration script
+- `src/demo_player_tracking_v2.py` - Updated demonstration script with tracking features
+- `src/test_player_tracker.py` - Test script
+- `src/check_setup.py` - Utility to verify required files
 
 ## Implementation Details
 
@@ -85,7 +88,7 @@ To use the player tracking functionality:
 
 ## Integration with Existing Code
 
-The player tracking functionality has been integrated into the existing coordinate mapping system in [src/court_coordinates.py](src/court_coordinates.py). This allows for seamless use of both ball tracking and player tracking in the same workflow.
+The player tracking functionality has been integrated into the existing coordinate mapping system in `src/court_coordinates.py`. This allows for seamless use of both ball tracking and player tracking in the same workflow.
 
 ## Key Features Implemented
 
@@ -113,3 +116,5 @@ The player tracking functionality requires the following dependencies (already i
 - `opencv-python` - For image processing and visualization
 - `numpy` - For numerical computations
 - `scipy` - For distance calculations in tracking
+
+Исторические имена выше не являются ссылками на файлы этой ветки. В локальном защищённом checkpoint `aeaf7704ac4228affe04f8e50fbc52769c44b725` проверено наличие `src/court_coordinates.py` и `src/check_setup.py`; остальные перечисленные здесь файлы в этом checkpoint отсутствуют. Просмотр найденного файла без checkout: `git show aeaf7704ac4228affe04f8e50fbc52769c44b725:src/court_coordinates.py`.

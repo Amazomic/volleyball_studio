@@ -1,5 +1,8 @@
 # Volley Studio — проекты, анализ и просмотр розыгрышей
 
+> **Смешанная версионная заметка.** Начало содержит запуск Rust Studio; оставшиеся Python-команды, описания старых экранов и бенчмарков относятся к прежним версиям. Для выполнения текущих сценариев используй [действующий интерфейс](../.agents/skills/volleyball-reels-studio/references/current-runtime.md) и [локальные проверки](TESTING.md). Общая навигация: [индекс](README.md).
+
+
 Локальный адрес: http://127.0.0.1:8875
 
 Запуск Windows: `start-volley-ui.cmd`; PowerShell: `scripts/start-volley-rust-dev.ps1`

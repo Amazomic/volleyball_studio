@@ -1,5 +1,8 @@
 # Проверка Volleyball Reels Studio — 29 октября 2026
 
+> **Исторический документ Python-эпохи.** Сохранён для объяснения прежних алгоритмов, форматов и измерений. Команды, пути, настройки и статусы ниже не являются инструкцией для действующей Rust Studio. Актуальные руководства: [индекс документации](README.md).
+
+
 ## Окружение
 
 Windows PowerShell 5.1 → WSL Ubuntu-25.04, Linux 6.18.33.2, Python 3.14.7, OpenCV 5.0.0, ONNX Runtime 1.31.1, OpenVINO 2026.2.1, FFmpeg 7.1.1. NVIDIA GPU: 12227 MiB по nvidia-smi; driver 615.71.08, KMD 616.92. CUDA smoke test выполнил три настоящих вызова VballNetV4c. Сессия использовала CUDAExecutionProvider и CPUExecutionProvider. Проверка NVENC настоящим кодированием кадра прошла. OpenVINO обнаружил только CPU.

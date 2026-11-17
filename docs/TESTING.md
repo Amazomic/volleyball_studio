@@ -41,7 +41,14 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --offline --locked -- -D warnings
 cargo test --workspace --offline --locked
 cd ..
-for gate in scripts/ci/*.mjs; do node "$gate" || exit 1; done  # кроме stage84, см. ниже
+for gate in scripts/ci/*.mjs; do
+  case "${gate##*/}" in
+    test_rust_parity_84.mjs|test_rust_benchmark_84.mjs|benchmark_rust_parity_84.mjs|audit_python_baseline_84.mjs|test_rust_real_media_84.mjs) continue ;;
+    check_rust_ownership.mjs) node "$gate" --self-test || exit 1 ;;
+    check_rust_roadmap.mjs) node "$gate" --check --self-test || exit 1 ;;
+    *) node "$gate" || exit 1 ;;
+  esac
+done
 ```
 
 ## Отдельные проверки (не входят в check-all)
@@ -51,12 +58,14 @@ for gate in scripts/ci/*.mjs; do node "$gate" || exit 1; done  # кроме stag
 | `scripts/ci/test_rust_lifecycle.sh` (WSL) | свободный репозиторный lock: живой сервер на 8875 должен быть остановлен | изменения lifecycle/lock/shutdown |
 | `scripts/ci/test_rust_faults.sh`, `test_rust_shutdown_race.sh` (WSL) | изолированный /tmp, тестовые порты | изменения обработки ошибок/остановки |
 | `scripts/ci/test_rust_cuda_runtime.sh`, `smoke_rust_ort.sh` (WSL) | `libonnxruntime.so` + CUDA provider (`scripts/setup_rust_ort_cuda.sh`, `ORT_DYLIB_PATH`) | изменения GPU-инференса |
-| `scripts/ci/test_rust_real_media_84.mjs`, `test_rust_parity_84.mjs`, `test_rust_benchmark_84.mjs`, `benchmark_rust_parity_84.mjs`, `audit_python_baseline_84.mjs` | реальные видео, ffmpeg, GPU, замороженный Python-чекпойнт | изменения распознавания/качества; приёмка этапа 84/85 |
+| `scripts/ci/test_rust_real_media_84.mjs`, `test_rust_benchmark_84.mjs`, `benchmark_rust_parity_84.mjs`, `audit_python_baseline_84.mjs` | реальные видео, ffmpeg, GPU, замороженный Python-чекпойнт | изменения распознавания/качества; приёмка этапа 84/85 |
+| `scripts/ci/test_rust_parity_84.mjs` | Node.js; синтетические временные фикстуры, без GPU и реального матча | математика и строгие контракты оценщика; не измерение точности |
 | `scripts/ci/test_rust_docker_smoke.sh` | Docker | изменения Dockerfile/упаковки |
 
-Известные средовые блокеры этой машины: в WSL отсутствует
-`libonnxruntime.so` (GPU-тесты не готовы), длинные GPU-прогоны падают с
-«CUDA failure 999» на RTX 5070 Ti. Пропуск GPU/медиа-проверок обязательно
+Прежние приёмочные прогоны фиксировали отсутствие `libonnxruntime.so`
+в WSL и «CUDA failure 999» на RTX 5070 Ti. Это исторические наблюдения,
+не текущий диагноз машины. Перед GPU-проверкой выполнить
+`start-volley-ui.cmd /doctor` и отдельно подтвердить работу CUDA provider. Пропуск GPU/медиа-проверок обязательно
 фиксировать в журнале как **NOT TESTED**, а не как PASS.
 
 ## Матрица проверки

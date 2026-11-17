@@ -1,5 +1,8 @@
 # RTMPose in Volley Studio
 
+> **Версионная техническая заметка Rust.** Описанные частоты наблюдений, настройки и детали этапов могут относиться к прежней версии. Для конкретного анализа проверяй сохранённый профиль и манифесты; текущего владельца ищи в [карте](RUST_CANONICAL_OWNERS.json). Навигация: [индекс](README.md).
+
+
 RTMPose-M Body7 (official ONNX, 256 x 192, 17 COCO joints) runs as an independent CUDA stage
 AFTER VballNet/RF-DETR GPU fusion. It operates on saved player proposals and prepared RGB frames.
 It stores immutable JSONL evidence under native_gpu_pose_runs/<id>/ with a content digest and

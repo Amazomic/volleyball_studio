@@ -4,6 +4,8 @@
 
 **English** | [Русский](README.ru.md)
 
+Documentation: [Index](docs/README.md).
+
 План разработки: 84/85; следующий 85/85
 
 ---

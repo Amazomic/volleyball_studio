@@ -1,5 +1,8 @@
 # Reels and player action statistics
 
+> **Исторический документ Python-эпохи.** Сохранён для объяснения прежних алгоритмов, форматов и измерений. Команды, пути, настройки и статусы ниже не являются инструкцией для действующей Rust Studio. Актуальные руководства: [индекс документации](README.md).
+
+
 Source videos: `project/*.mp4`.
 
 All generated files: `results/`. Existing cached analysis remains in `results/analysis/<cache-id>/`.
