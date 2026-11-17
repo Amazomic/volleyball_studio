@@ -846,6 +846,8 @@ fn gpu_lineage_valid(
                 || pose["interpolate_players"] != false
                 || pose["stride"] != request.gpu.pose_stride
                 || !pose["crop_plan_file"].is_null()
+                || pose["pixel_source_version"] != "original_full_resolution_rgb24_v1"
+                || pose["coordinate_system"] != "normalized_original_display_v1"
             {
                 return false;
             }
@@ -942,7 +944,7 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
 // Changing the original-video 30 FPS source and detector-to-pose alignment
 // together must invalidate both earlier GPU evidence versions.
 const RFDETR_GPU_MODEL_STACK: &str =
-    "vballnet_rfdetr_medium_18250b5a_original30_detboxes_aligned_observed_pose_v5";
+    "vballnet_rfdetr_medium_18250b5a_original30_native_pose_pixels_v6";
 
 /// The GPU-evidence cache must not be shared by different detector weights
 /// or detector-to-pose box policies.
@@ -1498,7 +1500,7 @@ async fn pipeline(
                         &plan.source,
                         plan.duration_sec,
                         request.gpu.pose_stride,
-                        request.gpu.pose_enabled,
+                        false,
                         request.gpu.gpu_memory_limit_mb,
                         request.gpu.cpu_threads,
                         cancel,

@@ -447,10 +447,159 @@ pub fn decode_full_video(
     })
 }
 
+pub fn decode_original_frames(
+    source: &Path,
+    expected_frames: u64,
+    cancelled: &AtomicBool,
+    mut consume: impl FnMut(u64, &[u8], usize, usize) -> Result<(), String>,
+) -> Result<(), String> {
+    if expected_frames == 0 || expected_frames > MAX_FRAMES as u64 {
+        return Err("Invalid original RGB frame count".into());
+    }
+    if cancelled.load(Ordering::Acquire) {
+        return Err("cancelled".into());
+    }
+    let info = crate::probe(source)?;
+    let (width, height) = (info.width as usize, info.height as usize);
+    if width < 2 || height < 2 || width > 8192 || height > 8192 {
+        return Err("Original RGB dimensions exceed the bounded decoder".into());
+    }
+    let frame_bytes = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or("Original RGB frame size overflow")?;
+    let (mut ff, prefix) = auto_decode_input(source, cancelled)?;
+    ff.args(["-map", "0:v:0", "-an", "-sn", "-dn"])
+        .args(["-vf", &format!("{prefix}fps=30,format=rgb24")])
+        .args(["-frames:v", &expected_frames.to_string()])
+        .args(["-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]);
+    ff.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = ManagedChild(
+        ff.spawn()
+            .map_err(|error| format!("Original RGB FFmpeg launch failed: {error}"))?,
+    );
+    let mut stdout = child.0.stdout.take().ok_or("Original RGB stdout missing")?;
+    let stderr = child.0.stderr.take().ok_or("Original RGB stderr missing")?;
+    let errors_reader = stderr_tail(stderr);
+    let result = thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<io::Result<Vec<u8>>>(8);
+        scope.spawn(move || {
+            let mut chunk = vec![0_u8; 64 * 1024];
+            loop {
+                match stdout.read(&mut chunk) {
+                    Ok(0) => {
+                        let _ = sender.send(Ok(Vec::new()));
+                        break;
+                    }
+                    Ok(count) => {
+                        if sender.send(Ok(chunk[..count].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        break;
+                    }
+                }
+            }
+        });
+        let mut pipe = GuardedPipe {
+            receiver,
+            cancelled,
+            idle_limit: DECODER_IDLE_LIMIT,
+            pending: Vec::new(),
+            offset: 0,
+        };
+        let outcome = (|| -> Result<(), String> {
+            let mut frame = vec![0_u8; frame_bytes];
+            for index in 0..expected_frames {
+                if cancelled.load(Ordering::Acquire) {
+                    return Err("cancelled".into());
+                }
+                pipe.read_exact(&mut frame)
+                    .map_err(|error| format!("Original RGB frame {index}: {error}"))?;
+                consume(index, &frame, width, height)?;
+            }
+            let mut extra = [0_u8; 1];
+            if pipe.read(&mut extra).map_err(|error| error.to_string())? != 0 {
+                return Err("Original RGB produced more frames than the GPU evidence".into());
+            }
+            if cancelled.load(Ordering::Acquire) {
+                return Err("cancelled".into());
+            }
+            let status = child.0.wait().map_err(|error| error.to_string())?;
+            if !status.success() {
+                return Err(format!("Original RGB FFmpeg exited with {status}"));
+            }
+            Ok(())
+        })();
+        if outcome.is_err() {
+            let _ = child.0.kill();
+            let _ = child.0.wait();
+        }
+        outcome
+    });
+    let errors = errors_reader
+        .join()
+        .unwrap_or_else(|_| "Original RGB FFmpeg stderr reader panicked".into());
+    result.map_err(|error| {
+        if errors.trim().is_empty() {
+            error
+        } else {
+            format!(
+                "{error}: {}",
+                errors.trim().chars().take(500).collect::<String>()
+            )
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{fs, process::Command};
+    #[test]
+    fn original_rgb_stream_preserves_native_resolution_and_frame_order() {
+        if Command::new("ffmpeg").arg("-version").output().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("volley-original-rgb-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("input.mp4");
+        let created = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=192x108:rate=60:duration=0.6",
+                "-an",
+                "-c:v",
+                "mpeg4",
+                "-y",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(created.success());
+        let cancelled = AtomicBool::new(false);
+        let mut indices = Vec::new();
+        decode_original_frames(&source, 18, &cancelled, |index, frame, w, h| {
+            assert_eq!((w, h), (192, 108));
+            assert_eq!(frame.len(), 192 * 108 * 3);
+            indices.push(index);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(indices, (0..18).collect::<Vec<_>>());
+        assert!(decode_original_frames(&source, 19, &cancelled, |_, _, _, _| Ok(())).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn full_video_stream_covers_complete_windows_only_and_can_cancel() {
         if Command::new("ffmpeg").arg("-version").output().is_err() {

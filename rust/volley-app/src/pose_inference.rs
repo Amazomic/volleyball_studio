@@ -20,7 +20,7 @@ use volley_inference::{
     pose::{PoseEngine, MODEL_FILE, MODEL_SHA256},
     Device,
 };
-use volley_media::raw_decoder::{decode_full_video, ModelPixels};
+use volley_media::raw_decoder::decode_original_frames;
 
 const MAX_FUSION: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_LINE: u64 = 512 * 1024;
@@ -259,13 +259,20 @@ pub fn process(
             .as_u64()
             .filter(|v| *v > 0)
             .unwrap_or(1);
-        let decode = decode_full_video(
+        let decoded_frames = manifest["decoded_frames"]
+            .as_u64()
+            .filter(|n| *n >= frames_expected && *n <= frames_expected + 8)
+            .ok_or("GPU fusion decoded frame count is invalid")?;
+        let native_video = volley_media::probe(&plan.source)?;
+        decode_original_frames(
             &plan.source,
-            ModelPixels::PlayersRgb,
-            stride,
+            decoded_frames,
             cancel,
-            |window| {
-                while current_index <= window.first_frame {
+            |index, rgb, width, height| {
+                if index >= frames_expected || index % stride as u64 != 0 {
+                    return Ok(());
+                }
+                while current_index <= index {
                     line.clear();
                     let n = reader
                         .read_until(b'\n', &mut line)
@@ -278,7 +285,7 @@ pub fn process(
                     if frame["frame_index"].as_u64() != Some(current_index) {
                         return Err("GPU fusion frame index mismatch".into());
                     }
-                    if current_index < window.first_frame {
+                    if current_index < index {
                         current_index += 1;
                         continue;
                     }
@@ -286,16 +293,19 @@ pub fn process(
                         return Err("RTMPose sample exceeds fusion frame range".into());
                     }
                     let pose_boxes = sampled_boxes(&frame, current_index, stride)?;
-                    let rgb = window
-                        .data
-                        .get(..640 * 360 * 3)
-                        .ok_or("Pose decoder RGB frame too short")?;
                     let mut poses = Vec::with_capacity(pose_boxes.len());
-                    for bb in pose_boxes {
-                        let points = engine.infer(rgb, bb)?;
-                        let keypoints = points.map(|p| [p.x as f64, p.y as f64, p.score as f64]);
-                        poses
-                            .push(json!({"box":bb,"keypoints":keypoints,"crop_origin":"observed"}));
+                    for candidates in pose_boxes.chunks(8) {
+                        let measured =
+                            engine.infer_batch_original(rgb, width, height, candidates)?;
+                        for (&bb, points) in candidates.iter().zip(measured) {
+                            let keypoints =
+                                points.map(|p| [p.x as f64, p.y as f64, p.score as f64]);
+                            poses.push(json!({
+                                "box":bb,
+                                "keypoints":keypoints,
+                                "crop_origin":"observed"
+                            }));
+                        }
                     }
                     players += poses.len() as u64;
                     samples += 1;
@@ -315,10 +325,7 @@ pub fn process(
                     current_index += 1;
                 }
                 if samples.is_multiple_of(40) {
-                    on_progress(
-                        "pose",
-                        (window.first_frame as f64 / estimated as f64).clamp(0.0, 1.0),
-                    )?;
+                    on_progress("pose", (index as f64 / estimated as f64).clamp(0.0, 1.0))?;
                 }
                 Ok(())
             },
@@ -326,8 +333,9 @@ pub fn process(
         if cancel.load(Ordering::Acquire) {
             return Err("cancelled".into());
         }
-        if decode.decoded_frames != manifest["decoded_frames"].as_u64().unwrap_or_default() {
-            return Err("RTMPose decoded timeline differs from RF-DETR".into());
+        let expected_samples = (frames_expected + stride as u64 - 1) / stride as u64;
+        if samples != expected_samples {
+            return Err("RTMPose sample timeline differs from RF-DETR".into());
         }
         if inference_stream::source_stamp(prepared)? != source {
             return Err("Prepared video changed during RTMPose analysis".into());
@@ -349,7 +357,7 @@ pub fn process(
             "pose_run_id":run_id, "fusion_id":fusion_id,
             "project_id":project_id, "video":video, "fps":30,
             "stride":stride, "pose_mode":"photo", "photo_stride":stride,
-            "decoded_frames":decode.decoded_frames,
+            "decoded_frames":decoded_frames,
             "sampled_frames":samples, "player_poses":players,
             "model":"RTMPose-M-Body7","model_sha256":hash,
             "original_source":manifest["original_source"],
@@ -357,6 +365,9 @@ pub fn process(
             "original_source":manifest["original_source"],
             "source_fusion_sha256":manifest["sha256"], "source_identity":manifest["source_identity"],
             "box_source_version":"detector_observed_sampling_v1",
+            "pixel_source_version":"original_full_resolution_rgb24_v1",
+            "pixel_dimensions":[native_video.width,native_video.height],
+            "coordinate_system":"normalized_original_display_v1",
             "source_person_sampling_period_frames":stride,
             "interpolate_players":false,
             "file":POSE_FILE, "sha256":format!("{:x}",checksum.finalize())

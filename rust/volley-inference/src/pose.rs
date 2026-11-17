@@ -99,7 +99,17 @@ impl PoseEngine {
     }
 
     pub fn infer(&mut self, rgb: &[u8], bbox: [f64; 4]) -> Result<[Keypoint; KPT_COUNT], String> {
-        let crop = crop_and_normalize(rgb, bbox)?;
+        self.infer_original(rgb, IMAGE_WIDTH, IMAGE_HEIGHT, bbox)
+    }
+
+    pub fn infer_original(
+        &mut self,
+        rgb: &[u8],
+        width: usize,
+        height: usize,
+        bbox: [f64; 4],
+    ) -> Result<[Keypoint; KPT_COUNT], String> {
+        let crop = crop_and_normalize_at(rgb, width, height, bbox)?;
         let tensor = Tensor::from_array((vec![1_i64, 3, 256, 192], crop))
             .map_err(|e| format!("RTMPose input tensor: {e}"))?;
         let result = self
@@ -121,12 +131,22 @@ impl PoseEngine {
         {
             return Err(format!("Unexpected RTMPose SimCC shapes: {dx:?}, {dy:?}"));
         }
-        decode_simcc(sx, sy, bbox)
+        decode_simcc_at(sx, sy, bbox, width, height)
     }
 
     pub fn infer_batch(
         &mut self,
         rgb: &[u8],
+        boxes: &[[f64; 4]],
+    ) -> Result<Vec<[Keypoint; KPT_COUNT]>, String> {
+        self.infer_batch_original(rgb, IMAGE_WIDTH, IMAGE_HEIGHT, boxes)
+    }
+
+    pub fn infer_batch_original(
+        &mut self,
+        rgb: &[u8],
+        width: usize,
+        height: usize,
         boxes: &[[f64; 4]],
     ) -> Result<Vec<[Keypoint; KPT_COUNT]>, String> {
         if boxes.is_empty() {
@@ -137,7 +157,7 @@ impl PoseEngine {
         }
         let mut crops = Vec::with_capacity(boxes.len() * 3 * 256 * 192);
         for &bbox in boxes {
-            crops.extend(crop_and_normalize(rgb, bbox)?);
+            crops.extend(crop_and_normalize_at(rgb, width, height, bbox)?);
         }
         let tensor = Tensor::from_array((vec![boxes.len() as i64, 3, 256, 192], crops))
             .map_err(|e| e.to_string())?;
@@ -164,17 +184,26 @@ impl PoseEngine {
             .iter()
             .enumerate()
             .map(|(i, &bbox)| {
-                decode_simcc(
+                decode_simcc_at(
                     &sx[i * 17 * 384..(i + 1) * 17 * 384],
                     &sy[i * 17 * 512..(i + 1) * 17 * 512],
                     bbox,
+                    width,
+                    height,
                 )
             })
             .collect()
     }
 }
 
-fn crop_geometry(bbox: [f64; 4]) -> Result<(f64, f64, f64, f64), String> {
+fn crop_geometry_at(
+    bbox: [f64; 4],
+    width: usize,
+    height: usize,
+) -> Result<(f64, f64, f64, f64), String> {
+    if width < 2 || height < 2 || width > 8192 || height > 8192 {
+        return Err("Invalid RTMPose source dimensions".into());
+    }
     let [left, top, right, bottom] = bbox;
     if !bbox
         .iter()
@@ -184,30 +213,35 @@ fn crop_geometry(bbox: [f64; 4]) -> Result<(f64, f64, f64, f64), String> {
     {
         return Err("Invalid RTMPose player bbox".into());
     }
-    let box_w = (right - left) * IMAGE_WIDTH as f64;
-    let box_h = (bottom - top) * IMAGE_HEIGHT as f64;
+    let box_w = (right - left) * width as f64;
+    let box_h = (bottom - top) * height as f64;
     if box_w < 8.0 || box_h < 20.0 {
         return Err("Player bbox too small for reliable RTMPose crop".into());
     }
     let crop_w = box_w.max(box_h * 0.75) * 1.25;
     let crop_h = crop_w / 0.75;
-    let cx = (left + right) * IMAGE_WIDTH as f64 * 0.5;
-    let cy = (top + bottom) * IMAGE_HEIGHT as f64 * 0.5;
+    let cx = (left + right) * width as f64 * 0.5;
+    let cy = (top + bottom) * height as f64 * 0.5;
     Ok((cx, cy, crop_w, crop_h))
 }
 
-fn pixel(rgb: &[u8], x: isize, y: isize, c: usize) -> f32 {
-    if x < 0 || y < 0 || x >= IMAGE_WIDTH as isize || y >= IMAGE_HEIGHT as isize {
+fn pixel(rgb: &[u8], width: usize, height: usize, x: isize, y: isize, c: usize) -> f32 {
+    if x < 0 || y < 0 || x >= width as isize || y >= height as isize {
         return 0.0;
     }
-    rgb[(y as usize * IMAGE_WIDTH + x as usize) * 3 + c] as f32
+    rgb[(y as usize * width + x as usize) * 3 + c] as f32
 }
 
-fn crop_and_normalize(rgb: &[u8], bbox: [f64; 4]) -> Result<Vec<f32>, String> {
-    if rgb.len() != IMAGE_WIDTH * IMAGE_HEIGHT * 3 {
-        return Err("RTMPose RGB input is not a 640x360 frame".into());
+fn crop_and_normalize_at(
+    rgb: &[u8],
+    width: usize,
+    height: usize,
+    bbox: [f64; 4],
+) -> Result<Vec<f32>, String> {
+    let (cx, cy, crop_w, crop_h) = crop_geometry_at(bbox, width, height)?;
+    if rgb.len() != width * height * 3 {
+        return Err("RTMPose RGB input dimensions do not match the source frame".into());
     }
-    let (cx, cy, crop_w, crop_h) = crop_geometry(bbox)?;
     let mut data = vec![0f32; 3 * INPUT_HEIGHT * INPUT_WIDTH];
     for y in 0..INPUT_HEIGHT {
         let fy = cy + ((y as f64 + 0.5) / INPUT_HEIGHT as f64 - 0.5) * crop_h - 0.5;
@@ -218,8 +252,10 @@ fn crop_and_normalize(rgb: &[u8], bbox: [f64; 4]) -> Result<Vec<f32>, String> {
             let x0 = fx.floor() as isize;
             let wx = (fx - x0 as f64) as f32;
             for c in 0..3 {
-                let a = pixel(rgb, x0, y0, c) * (1.0 - wx) + pixel(rgb, x0 + 1, y0, c) * wx;
-                let b = pixel(rgb, x0, y0 + 1, c) * (1.0 - wx) + pixel(rgb, x0 + 1, y0 + 1, c) * wx;
+                let a = pixel(rgb, width, height, x0, y0, c) * (1.0 - wx)
+                    + pixel(rgb, width, height, x0 + 1, y0, c) * wx;
+                let b = pixel(rgb, width, height, x0, y0 + 1, c) * (1.0 - wx)
+                    + pixel(rgb, width, height, x0 + 1, y0 + 1, c) * wx;
                 data[c * INPUT_HEIGHT * INPUT_WIDTH + y * INPUT_WIDTH + x] =
                     ((1.0 - wy) * a + wy * b - MEAN[c]) / STD[c];
             }
@@ -243,11 +279,17 @@ fn argmax_finite(values: &[f32]) -> Result<(usize, f32), String> {
     Ok((best, max))
 }
 
-fn decode_simcc(x: &[f32], y: &[f32], bbox: [f64; 4]) -> Result<[Keypoint; KPT_COUNT], String> {
+fn decode_simcc_at(
+    x: &[f32],
+    y: &[f32],
+    bbox: [f64; 4],
+    width: usize,
+    height: usize,
+) -> Result<[Keypoint; KPT_COUNT], String> {
     if x.len() != KPT_COUNT * 384 || y.len() != KPT_COUNT * 512 {
         return Err("Unexpected RTMPose SimCC lengths".into());
     }
-    let (cx, cy, crop_w, crop_h) = crop_geometry(bbox)?;
+    let (cx, cy, crop_w, crop_h) = crop_geometry_at(bbox, width, height)?;
     let mut points = [Keypoint {
         x: 0.0,
         y: 0.0,
@@ -258,8 +300,8 @@ fn decode_simcc(x: &[f32], y: &[f32], bbox: [f64; 4]) -> Result<[Keypoint; KPT_C
         let (iy, sy) = argmax_finite(&y[i * 512..(i + 1) * 512])?;
         let px = cx + (ix as f64 / 2.0 / INPUT_WIDTH as f64 - 0.5) * crop_w;
         let py = cy + (iy as f64 / 2.0 / INPUT_HEIGHT as f64 - 0.5) * crop_h;
-        let x_norm = (px / IMAGE_WIDTH as f64) as f32;
-        let y_norm = (py / IMAGE_HEIGHT as f64) as f32;
+        let x_norm = (px / width as f64) as f32;
+        let y_norm = (py / height as f64) as f32;
         point.score = if !(0.0..=1.0).contains(&x_norm) || !(0.0..=1.0).contains(&y_norm) {
             0.0
         } else {
@@ -321,10 +363,33 @@ mod tests {
     #[test]
     fn pose_crop_guards_invalid_box_and_rgb_size() {
         let box_ok = [0.2, 0.1, 0.4, 0.8];
-        assert!(crop_and_normalize(&[], box_ok).is_err());
-        assert!(crop_geometry([0.5, 0.1, 0.2, 0.3]).is_err());
-        assert!(crop_geometry([0.1, 0.1, 0.11, 0.12]).is_err());
+        assert!(crop_and_normalize_at(&[], IMAGE_WIDTH, IMAGE_HEIGHT, box_ok).is_err());
+        assert!(crop_geometry_at([0.5, 0.1, 0.2, 0.3], IMAGE_WIDTH, IMAGE_HEIGHT).is_err());
+        assert!(crop_geometry_at([0.1, 0.1, 0.11, 0.12], IMAGE_WIDTH, IMAGE_HEIGHT).is_err());
     }
+    #[test]
+    fn original_resolution_crops_keep_normalized_body_coordinates() {
+        let mut x = vec![0f32; 17 * 384];
+        let mut y = vec![0f32; 17 * 512];
+        for joint in 0..17 {
+            x[joint * 384 + 192] = 0.92;
+            y[joint * 512 + 256] = 0.88;
+        }
+        let bbox = [0.2, 0.1, 0.4, 0.8];
+        for (width, height) in [(640, 360), (1920, 1080), (3840, 2160), (1080, 1920)] {
+            let joints = decode_simcc_at(&x, &y, bbox, width, height).unwrap();
+            for joint in joints {
+                assert!((joint.x - 0.3).abs() < 0.00001);
+                assert!((joint.y - 0.45).abs() < 0.00001);
+                assert!((joint.score - 0.88).abs() < 0.00001);
+            }
+        }
+        let rgb = vec![100_u8; 1920 * 1080 * 3];
+        let crop = crop_and_normalize_at(&rgb, 1920, 1080, bbox).unwrap();
+        assert_eq!(crop.len(), 3 * INPUT_WIDTH * INPUT_HEIGHT);
+        assert!(crop_and_normalize_at(&rgb, 640, 360, bbox).is_err());
+    }
+
     #[test]
     fn simcc_decodes_center_of_crop() {
         let mut x = vec![0f32; 17 * 384];
@@ -333,7 +398,8 @@ mod tests {
             x[i * 384 + 192] = 0.8;
             y[i * 512 + 256] = 0.9;
         }
-        let points = decode_simcc(&x, &y, [0.2, 0.1, 0.4, 0.8]).unwrap();
+        let points =
+            decode_simcc_at(&x, &y, [0.2, 0.1, 0.4, 0.8], IMAGE_WIDTH, IMAGE_HEIGHT).unwrap();
         assert!((points[0].x - 0.3).abs() < 1e-4);
         assert!((points[0].y - 0.45).abs() < 1e-4);
         assert!((points[0].score - 0.8).abs() < 1e-4);
