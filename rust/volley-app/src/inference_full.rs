@@ -1232,7 +1232,7 @@ mod tests {
             "Native {device:?} full GPU -> fusion -> tracks -> Touch -> rally proposals: {}",
             rally_run["rally_candidates"]
         );
-        let material = crate::native_rally_preview::publish_material(
+        let material = crate::montage_material::publish_material(
             &state,
             id,
             rally_run["rally_run_id"].as_str().unwrap(),
@@ -1243,7 +1243,7 @@ mod tests {
             material["readiness"]["original_verified_against_analysis"],
             true
         );
-        let repeated = crate::native_rally_preview::publish_material(
+        let repeated = crate::montage_material::publish_material(
             &state,
             id,
             rally_run["rally_run_id"].as_str().unwrap(),
@@ -1271,7 +1271,7 @@ mod tests {
         assert_eq!(read_only_preview["items"].as_array().unwrap().len(), 0);
         println!("Native {device:?} CPU rally preview loaded and SHA-verified");
         assert_eq!(fs::metadata(&original).unwrap().len(), source_size);
-        let bindings = crate::native_rally_preview::material_bindings(
+        let bindings = crate::montage_material::material_bindings(
             state.clone(),
             id.into(),
             vec![rally_run["rally_run_id"].as_str().unwrap().into()],
@@ -1279,7 +1279,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(bindings.len(), 1);
-        crate::native_rally_preview::validate_material_binding(&state, &bindings[0]).unwrap();
+        crate::montage_material::validate_material_binding(&state, &bindings[0]).unwrap();
         use std::io::Write;
         std::fs::OpenOptions::new()
             .append(true)
@@ -1287,9 +1287,7 @@ mod tests {
             .unwrap()
             .write_all(&[0, 0, 0, 9, b'f', b'r', b'e', b'e', 1])
             .unwrap();
-        assert!(
-            crate::native_rally_preview::validate_material_binding(&state, &bindings[0]).is_err()
-        );
+        assert!(crate::montage_material::validate_material_binding(&state, &bindings[0]).is_err());
         assert!(!repo.join("results").exists());
         fs::remove_dir_all(root).unwrap();
     }

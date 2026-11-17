@@ -2,7 +2,7 @@
 //! This is NOT the legacy confirmed-CPU-run gold marks format.
 use crate::{
     cpu_retrack::opaque_id,
-    native_rally_preview, project_guard, projects,
+    native_rally_evidence, project_guard, projects,
     storage::{self, safe_folder, ApiError, ApiResult},
     versioned_store::{self, revision as digest},
     AppState,
@@ -130,7 +130,7 @@ pub(crate) fn read_status(
     // Listing bookmarks is metadata-only. The immutable run and its source
     // lineage are validated here; a full SHA pass over the (potentially huge)
     // Touch JSONL belongs to candidate edits and montage, not every refresh.
-    native_rally_preview::inspect_project(state, project_id, run_id)?;
+    native_rally_evidence::inspect_project(state, project_id, run_id)?;
     let root = projects::project_root(state)
         .join(project_id)
         .join("native_rally_marks");
@@ -164,7 +164,7 @@ fn change(state: &AppState, request: &SetMark) -> Result<Value, ApiError> {
         return Err(storage::bad_request("Invalid gold marks revision"));
     }
     let _guard = project_guard::write_guard(state, &request.project_id)?;
-    native_rally_preview::verify_run_or_candidate(
+    native_rally_evidence::verify_run_or_candidate(
         state,
         &request.project_id,
         &request.rally_run_id,

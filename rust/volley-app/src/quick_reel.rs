@@ -5,7 +5,7 @@
 
 use crate::{
     cpu_rallies, cpu_retrack, cpu_touches, inference_full, inference_fusion, montage,
-    native_rally_preview, preparation,
+    native_rally_evidence, preparation,
     storage::{self, ApiError, ApiResult},
     AppState,
 };

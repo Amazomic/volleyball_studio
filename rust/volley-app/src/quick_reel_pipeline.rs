@@ -254,13 +254,10 @@ async fn quick_montage(
         .iter()
         .filter_map(|video| video["cpu_runs"]["rallies"].as_str().map(str::to_owned))
         .collect();
-    let materials = crate::native_rally_preview::material_bindings(
-        work.app.clone(),
-        work.project_id.clone(),
-        runs,
-    )
-    .await
-    .map_err(reason)?;
+    let materials =
+        crate::montage_material::material_bindings(work.app.clone(), work.project_id.clone(), runs)
+            .await
+            .map_err(reason)?;
     let Json(start) = montage::start_native_montage(
         State(work.app.clone()),
         HeaderMap::new(),
@@ -535,8 +532,8 @@ pub(super) async fn run_native_pipeline(
         let project = workspace.project_id.clone();
         let runid = rally_id.clone();
         let scored = tokio::task::spawn_blocking(move || {
-            let validated = native_rally_preview::inspect_project(&state, &project, &runid)?;
-            native_rally_preview::verified_quick_rally_candidates(&validated)
+            let validated = native_rally_evidence::inspect_project(&state, &project, &runid)?;
+            native_rally_evidence::verified_quick_rally_candidates(&validated)
                 .map_err(storage::bad_request)
         })
         .await
@@ -593,9 +590,9 @@ pub(super) async fn run_native_pipeline(
         let clip_ids = ids.clone();
         let clips = tokio::task::spawn_blocking(move || {
             let validated =
-                native_rally_preview::inspect_project(&clip_state, &clip_project, &clip_run)
+                native_rally_evidence::inspect_project(&clip_state, &clip_project, &clip_run)
                     .map_err(reason)?;
-            native_rally_preview::verified_manual_clips(&validated, clip_ids)
+            native_rally_evidence::verified_manual_clips(&validated, clip_ids)
         })
         .await
         .map_err(|e| format!("Quick Reel clip verify task: {e}"))??;

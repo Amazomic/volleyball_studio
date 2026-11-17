@@ -5,7 +5,7 @@ use crate::native_player_tracks::NativeReviewedOwners;
 use crate::{
     inference_stream,
     native_player_tracks::{self},
-    native_preview_pose, native_rally_preview, preparation, projects,
+    native_preview_pose, native_rally_evidence, preparation, projects,
     storage::{self, safe_file, safe_folder, ApiResult},
     AppState,
 };
@@ -77,7 +77,7 @@ pub async fn player_labels(
 ) -> ApiResult<Value> {
     let result = tokio::task::spawn_blocking(move || {
         let run =
-            native_rally_preview::inspect_project(&state, &query.project_id, &query.rally_run_id)?;
+            native_rally_evidence::inspect_project(&state, &query.project_id, &query.rally_run_id)?;
         let (source_sha, assignment_revision, names, manual_track_ids) =
             native_player_tracks::display_player_names(
                 &state,
@@ -512,7 +512,7 @@ fn extract_frames(
     total: u64,
     start: u64,
     end: u64,
-    scope: &native_rally_preview::RallyWindows,
+    scope: &native_rally_evidence::RallyWindows,
     width: u32,
     height: u32,
     min_ball_score: f64,
@@ -671,7 +671,7 @@ pub async fn get(
     let project_id = query.project_id.clone();
     let run_id = query.rally_run_id.clone();
     let run = tokio::task::spawn_blocking(move || {
-        native_rally_preview::inspect_project(&inspect_state, &project_id, &run_id)
+        native_rally_evidence::inspect_project(&inspect_state, &project_id, &run_id)
     })
     .await
     .map_err(|e| storage::internal(format!("Overlay inspect task: {e}")))??;
@@ -748,7 +748,7 @@ pub async fn get(
     let pose_root = projects::project_root(&state).join(&query.project_id);
     let continuity_state = state.clone();
     let (frames, poses_available) = tokio::task::spawn_blocking(move || {
-        let windows = native_rally_preview::verified_track_windows(&preview_run)
+        let windows = native_rally_evidence::verified_track_windows(&preview_run)
             .map_err(|e| format!("Unverified rally scope: {e}"))?;
         let rally_dir = preview_run
             .rally_file
@@ -1394,7 +1394,7 @@ mod tests {
         }
         fs::write(&path, &bytes).unwrap();
         let sha = format!("{:x}", Sha256::digest(&bytes));
-        let scope = native_rally_preview::RallyWindows {
+        let scope = native_rally_evidence::RallyWindows {
             intervals: vec![(0, 499)],
             contexts: std::collections::BTreeMap::new(),
         };
@@ -1443,7 +1443,7 @@ mod tests {
         }
         fs::write(&path, &data).unwrap();
         let sha = format!("{:x}", Sha256::digest(&data));
-        let scope = native_rally_preview::RallyWindows {
+        let scope = native_rally_evidence::RallyWindows {
             intervals: vec![(0, 7)],
             contexts: std::collections::BTreeMap::new(),
         };
@@ -1505,7 +1505,7 @@ mod tests {
             (vec![(0, 3), (6, 11)], false),
             (vec![], false),
         ] {
-            let scope = native_rally_preview::RallyWindows {
+            let scope = native_rally_evidence::RallyWindows {
                 intervals,
                 contexts: std::collections::BTreeMap::new(),
             };
@@ -1583,7 +1583,7 @@ mod tests {
         }
         fs::write(&input, &data).unwrap();
         let sha = format!("{:x}", Sha256::digest(&data));
-        let active = native_rally_preview::RallyWindows {
+        let active = native_rally_evidence::RallyWindows {
             intervals: vec![(2, 4)],
             contexts: std::collections::BTreeMap::new(),
         };

@@ -3,7 +3,7 @@
 //! its label. No unlabeled tracks or contacts outside rallies produce clips.
 use crate::{
     montage, native_action_review, native_player_statistics, native_player_tracks,
-    native_rally_preview::{self, ValidatedRun},
+    native_rally_evidence::{self, ValidatedRun},
     project_guard, projects,
     storage::{self, ApiError, ApiResult},
     AppState,
@@ -269,7 +269,7 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
     let mut source_ids = request.rally_run_ids.clone();
     source_ids.sort();
     for run_id in &source_ids {
-        let run = native_rally_preview::inspect_project(state, &request.project_id, run_id)?;
+        let run = native_rally_evidence::inspect_project(state, &request.project_id, run_id)?;
         if !videos.insert(run.video.clone()) {
             return Err(storage::conflict(
                 "More than one CPU version selected for the same video",
@@ -314,7 +314,7 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
             ));
         }
         let intervals =
-            native_rally_preview::verified_rally_intervals(&run).map_err(storage::bad_request)?;
+            native_rally_evidence::verified_rally_intervals(&run).map_err(storage::bad_request)?;
         let manual_labels = reviewed_action_labels(&reviewed).map_err(storage::conflict)?;
         let mut per_rally = vec![Vec::<u64>::new(); intervals.len()];
         let mut per_rally_manual = vec![0_u64; intervals.len()];
@@ -406,7 +406,7 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
         let run = runs
             .get(&id)
             .ok_or_else(|| storage::internal("Validated run absent"))?;
-        let clips = native_rally_preview::verified_manual_clips(run, keys.clone())
+        let clips = native_rally_evidence::verified_manual_clips(run, keys.clone())
             .map_err(storage::bad_request)?;
         for (candidate, clip) in keys.into_iter().zip(clips) {
             checked.insert(format!("{id}:{candidate}"), clip);
@@ -470,7 +470,7 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
                 .iter()
                 .map(|i| clips[*i].clone())
                 .collect::<Vec<_>>();
-            let calculated = native_rally_preview::verified_camera_tracks(state, run, &subset)
+            let calculated = native_rally_evidence::verified_camera_tracks(state, run, &subset)
                 .map_err(storage::bad_request)?;
             for (index, track) in indices.into_iter().zip(calculated) {
                 by_source[index] = track;
@@ -570,8 +570,7 @@ pub async fn highlights(
         .filter_map(|source| source["rally_run_id"].as_str().map(str::to_owned))
         .collect();
     let materials =
-        crate::native_rally_preview::material_bindings(state.clone(), project_id.clone(), runs)
-            .await?;
+        crate::montage_material::material_bindings(state.clone(), project_id.clone(), runs).await?;
     let Json(job) = montage::start_native_montage(
         State(state),
         headers,

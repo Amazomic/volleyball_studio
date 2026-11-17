@@ -2,6 +2,7 @@
 //! selection. FFmpeg export is owned by volley-media; pixels are always read
 //! from the original project recording, never from analysis proxies.
 use crate::{
+    montage_material::{self, MaterialBinding},
     preparation, project_guard, projects,
     storage::{self, ApiError, ApiResult},
     AppState,
@@ -39,16 +40,6 @@ use volley_media::{
 
 const MAX_CLIPS: usize = 80;
 const MAX_TOTAL_SECONDS: f64 = 600.0;
-
-#[derive(Clone, Debug, serde::Serialize)]
-pub(crate) struct MaterialBinding {
-    pub(crate) project_id: String,
-    pub(crate) rally_run_id: String,
-    pub(crate) revision: String,
-    pub(crate) video: String,
-    pub(crate) original_source: Value,
-    pub(crate) intervals: Vec<(u64, u64)>,
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -258,7 +249,7 @@ fn prepare_request(state: &AppState, request: MontageRequest) -> Result<Planned,
                 "Montage material belongs to another project",
             ));
         }
-        crate::native_rally_preview::validate_material_binding(state, material)?;
+        montage_material::validate_material_binding(state, material)?;
     }
     let mut clips = Vec::new();
     let mut total = 0.0;
@@ -1365,6 +1356,27 @@ mod highlight_cancellation_tests {
         assert_eq!(fs::read(&original).unwrap(), b"do-not-touch-original");
         drop(snapshot);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn material_binding_preserves_frozen_receipt_json_contract() {
+        let binding = MaterialBinding {
+            project_id: "abcdef012345".into(),
+            rally_run_id: "a".repeat(32),
+            revision: "b".repeat(64),
+            video: "match.mp4".into(),
+            original_source: json!({"sha256":"c".repeat(64),"bytes":123}),
+            intervals: vec![(30, 60), (90, 120)],
+        };
+        assert_eq!(
+            serde_json::to_value(binding).unwrap(),
+            json!({
+                "project_id":"abcdef012345","rally_run_id":"a".repeat(32),
+                "revision":"b".repeat(64),"video":"match.mp4",
+                "original_source":{"sha256":"c".repeat(64),"bytes":123},
+                "intervals":[[30,60],[90,120]]
+            })
+        );
     }
 
     #[test]
