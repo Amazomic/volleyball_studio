@@ -196,7 +196,7 @@
                     <label>Мяч <input id="studio-raw-ball" type="range" min="0" max="100" value="0"><output id="studio-raw-ball-value">0%</output></label>
                   </fieldset>
                   <fieldset class="raw-model-control">
-                    <legend><label><input id="studio-raw-people-visible" type="checkbox" checked> RF-DETR Medium</label></legend>
+                    <legend><label><input id="studio-raw-people-visible" type="checkbox" checked> <span id="studio-raw-person-model">RF-DETR Medium</span></label></legend>
                     <label>Игроки <input id="studio-raw-player" type="range" min="0" max="100" value="50"><output id="studio-raw-player-value">50%</output></label>
                   </fieldset>
                   <fieldset class="raw-model-control">
@@ -241,6 +241,28 @@
                   <button class="primary" id="studio-training-save" type="button">Сохранить пример</button>
                   <button class="secondary" id="studio-training-refresh" type="button">Обновить базу</button>
                 </div>
+                <section class="studio-temporal-labels" aria-label="Эталонная разметка касаний и розыгрышей">
+                  <div class="studio-training-head"><strong>Эталонная разметка</strong><small>Кадр <output id="studio-annotation-current">—</output> · касания можно перетаскивать по шкале</small></div>
+                  <div class="studio-annotation-tools">
+                    <button type="button" class="secondary" id="studio-annotation-seed">Взять автоматические метки за основу</button>
+                    <button type="button" class="secondary" id="studio-annotation-add-touch">+ Касание</button>
+                    <button type="button" class="secondary" id="studio-annotation-move-touch" disabled>Перенести касание сюда</button>
+                    <button type="button" class="secondary" id="studio-annotation-delete-touch" disabled>Удалить касание</button>
+                  </div>
+                  <div id="studio-annotation-touch-lane" class="studio-annotation-touch-lane" aria-label="Эталонные касания по всему видео" role="group"></div>
+                  <div id="studio-annotation-touch-list" class="studio-annotation-touch-list" aria-label="Касания для коррекции"></div>
+                  <div class="studio-annotation-rally-controls">
+                    <button type="button" class="secondary" id="studio-annotation-new-rally">Новый розыгрыш</button>
+                    <button type="button" class="secondary" id="studio-annotation-rally-start">Установить начало розыгрыша</button>
+                    <button type="button" class="secondary" id="studio-annotation-rally-end">Установить конец розыгрыша</button>
+                    <small id="studio-annotation-rally-pending" aria-live="polite"></small>
+                  </div>
+                  <div class="studio-annotation-rally-header"><strong>Размеченные розыгрыши</strong><small>3 строки · прокрутка · выбрать для изменения границ</small></div>
+                  <div id="studio-annotation-rallies" class="studio-annotation-rallies" aria-label="Сохранённые розыгрыши"></div>
+                  <div class="studio-annotation-evaluation"><span id="studio-annotation-metrics">Точность появится после разметки.</span>
+                    <button type="button" class="primary" id="studio-annotation-review">Завершить проверку видео</button></div>
+                  <p id="studio-annotation-status" role="status" aria-live="polite">Исправления сохраняются как независимый эталон для проверки и настройки детектора.</p>
+                </section>
                 <div class="studio-training-library"><strong>Обучающие примеры <span id="studio-training-count">0</span></strong><div id="studio-training-list" aria-live="polite"></div></div>
               </section>
               <div class="viewer-details" hidden aria-hidden="true">

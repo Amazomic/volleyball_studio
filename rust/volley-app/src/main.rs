@@ -54,6 +54,7 @@ mod studio_analysis;
 mod studio_pipeline;
 mod studio_restart;
 mod studio_web;
+mod touch_annotation;
 mod touch_preview;
 mod training_samples;
 mod versioned_store;
@@ -184,6 +185,10 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
         .route(
             "/api/training/examples",
             get(training_samples::list).post(training_samples::edit),
+        )
+        .route(
+            "/api/training/annotations",
+            get(touch_annotation::list).post(touch_annotation::edit),
         )
         .route(
             "/api/video-primary-preview",

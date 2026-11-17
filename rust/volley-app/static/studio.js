@@ -1029,6 +1029,251 @@
       if(!data.examples.length)training.list.textContent="Пока нет примеров касаний и разметки площадки.";
     }catch(error){training.list.textContent="Не удалось загрузить примеры: "+error.message;}
   };
+  // Source-scoped human truth. Separate from automatic CPU predictions and
+  // from pose examples: training mode never rewrites immutable inference.
+  const annotation={
+    data:null,epoch:0,busy:false,touchId:null,rallyId:null,pendingStart:null,
+    status:$("studio-annotation-status"),current:$("studio-annotation-current"),
+    lane:$("studio-annotation-touch-lane"),touchList:$("studio-annotation-touch-list"),
+    rallies:$("studio-annotation-rallies"),metrics:$("studio-annotation-metrics"),
+    pending:$("studio-annotation-rally-pending"),
+    seed:$("studio-annotation-seed"),add:$("studio-annotation-add-touch"),
+    move:$("studio-annotation-move-touch"),remove:$("studio-annotation-delete-touch"),
+    next:$("studio-annotation-new-rally"),begin:$("studio-annotation-rally-start"),
+    finish:$("studio-annotation-rally-end"),review:$("studio-annotation-review")
+  };
+  const annotationFrame=()=>Math.max(0,Math.min(
+    (annotation.data?.total_frames||1)-1,
+    Math.round((Number(ui.video.currentTime)||s.seekAt||0)*fps())));
+  const annotationClock=frame=>(frame/fps()).toFixed(3).replace(".",",")+" с";
+  const annotationNotice=(value,error=false)=>{
+    annotation.status.textContent=value;
+    annotation.status.classList.toggle("is-error",error);
+  };
+  const annotationReady=()=>annotation.data&&Array.isArray(annotation.data.touches);
+  const annotationSorted=type=>[...(annotation.data?.[type]||[])]
+    .sort((a,b)=>(a.frame??a.start)-(b.frame??b.start));
+  const annotationPosition=frame=>100*Math.max(0,Math.min(1,
+    frame/Math.max(1,(annotation.data?.total_frames||1)-1)));
+  const annotationMarkCurrent=()=>{
+    if(!training.active)return;
+    annotation.current.textContent=annotationClock(annotationFrame())+
+      " · кадр "+annotationFrame();
+    const cursor=annotation.lane.querySelector(".studio-annotation-playhead");
+    if(cursor)cursor.style.left=annotationPosition(annotationFrame())+"%";
+  };
+  const drawAnnotation=()=>{
+    if(!training.active)return;
+    const data=annotation.data,ready=annotationReady();
+    annotation.seed.disabled=annotation.busy||!s.run;
+    annotation.seed.textContent=ready?"Сбросить метки к автоматическим":"Взять автоматические метки за основу";
+    for(const key of ["add","begin","finish","review","next"])
+      annotation[key].disabled=annotation.busy||!ready;
+    annotation.move.disabled=annotation.busy||!ready||!annotation.touchId;
+    annotation.remove.disabled=annotation.move.disabled;
+    annotation.review.textContent=data?.reviewed?"Проверено ✓":"Завершить проверку видео";
+    annotation.review.disabled=annotation.review.disabled||Boolean(data?.reviewed);
+    annotation.pending.textContent=annotation.rallyId?
+      "Выбран розыгрыш: границы меняются кнопками":
+      annotation.pendingStart!==null?
+      "Начало "+annotationClock(annotation.pendingStart)+" · установите конец":"";
+    annotation.lane.replaceChildren();
+    annotation.touchList.replaceChildren();
+    annotation.rallies.replaceChildren();
+    if(!ready){
+      annotation.metrics.textContent="Сначала создайте эталон из автоматических меток.";
+      annotation.lane.textContent="Нет разметки";
+      annotation.rallies.textContent="Нет размеченных розыгрышей";
+      annotationMarkCurrent();return;
+    }
+    const cursor=document.createElement("div");
+    cursor.className="studio-annotation-playhead";cursor.setAttribute("aria-hidden","true");
+    annotation.lane.append(cursor);
+    // Scrubbable touch lane: individual marks are pointer and keyboard editable.
+    for(const item of annotationSorted("touches")){
+      const tick=document.createElement("button");
+      tick.type="button";tick.className="studio-annotation-tick"+
+        (item.id===annotation.touchId?" selected":"");
+      tick.style.left=annotationPosition(item.frame)+"%";
+      tick.title="Касание "+annotationClock(item.frame)+
+        ". Перетащите или выберите и нажмите «Перенести»";
+      tick.setAttribute("aria-label",tick.title);
+      let pointer=null;
+      tick.addEventListener("pointerdown",e=>{
+        if(e.button!==0)return;
+        e.preventDefault();e.stopPropagation();
+        annotation.touchId=item.id;
+        pointer={id:e.pointerId,initialX:e.clientX,frame:item.frame};
+        tick.setPointerCapture?.(e.pointerId);
+        tick.classList.add("selected");
+        annotation.move.disabled=false;annotation.remove.disabled=false;
+      });
+      tick.addEventListener("pointermove",e=>{
+        if(!pointer||pointer.id!==e.pointerId)return;
+        const box=annotation.lane.getBoundingClientRect();
+        if(!box.width)return;
+        pointer.frame=Math.max(0,Math.min(data.total_frames-1,Math.round(
+          (e.clientX-box.left)/box.width*(data.total_frames-1))));
+        tick.style.left=annotationPosition(pointer.frame)+"%";
+      });
+      tick.addEventListener("pointerup",e=>{
+        if(!pointer||pointer.id!==e.pointerId)return;
+        const destination=pointer.frame;
+        pointer=null;
+        if(destination!==item.frame)editAnnotation("move_touch",{id:item.id,frame:destination});
+        else {seekTimeline(item.frame/fps());drawAnnotation();}
+      });
+      tick.addEventListener("pointercancel",()=>{pointer=null;drawAnnotation();});
+      tick.addEventListener("keydown",e=>{
+        if(e.key==="ArrowLeft"||e.key==="ArrowRight"){
+          e.preventDefault();
+          annotation.touchId=item.id;
+          editAnnotation("move_touch",{id:item.id,frame:Math.max(0,Math.min(
+            data.total_frames-1,item.frame+(e.key==="ArrowRight"?1:-1)))});
+        }
+      });
+      annotation.lane.append(tick);
+    }
+    const touches=annotationSorted("touches");
+    for(const item of touches){
+      const row=document.createElement("button");row.type="button";
+      row.className="studio-annotation-touch"+(item.id===annotation.touchId?" selected":"");
+      row.textContent="● "+annotationClock(item.frame);
+      row.title="Выбрать касание и перейти к нему";
+      row.addEventListener("click",()=>{
+        annotation.touchId=item.id;seekTimeline(item.frame/fps());drawAnnotation();
+      });
+      annotation.touchList.append(row);
+    }
+    const rallies=annotationSorted("rallies");
+    for(let index=0;index<rallies.length;index++){
+      const item=rallies[index];
+      const row=document.createElement("div");
+      row.className="studio-annotation-rally"+(item.id===annotation.rallyId?" selected":"");
+      const jump=document.createElement("button");
+      jump.type="button";jump.className="studio-annotation-rally-jump";
+      jump.textContent="№"+(index+1)+" · "+annotationClock(item.start)+" — "+
+        annotationClock(item.end);
+      jump.addEventListener("click",()=>{
+        annotation.rallyId=item.id;annotation.pendingStart=null;
+        seekTimeline(item.start/fps());drawAnnotation();
+      });
+      const remove=document.createElement("button");remove.type="button";
+      remove.className="secondary";remove.textContent="×";remove.title="Удалить розыгрыш";
+      remove.setAttribute("aria-label","Удалить размеченный розыгрыш");
+      remove.addEventListener("click",()=>editAnnotation("delete_rally",{id:item.id}));
+      row.append(jump,remove);annotation.rallies.append(row);
+    }
+    if(!rallies.length)annotation.rallies.textContent="Розыгрышей пока нет.";
+    const m=data.metrics?.touches;
+    annotation.metrics.textContent=m?
+      (data.reviewed?"ПРОВЕРЕНО · ":"ЧЕРНОВИК · ")+
+      "Совпадений "+m.matched+" · лишних "+m.extra+" · пропущено "+m.missed+
+      " · F1 "+(100*m.f1).toFixed(1)+"% · ошибка времени "+
+      (m.matched?Number(m.mean_error_ms).toFixed(1)+" мс":"—")+" · окно ±1 кадр (33 мс)"+
+      " · границы "+(data.metrics.rallies.boundary_mean_error_ms===null?"—":
+      Number(data.metrics.rallies.boundary_mean_error_ms).toFixed(1)+" мс"):
+      "Нет результатов сравнения.";
+    const overall=data.overall;
+    if(overall?.reviewed_videos>0)annotation.metrics.textContent+=
+      " | Вся проверенная база: "+overall.reviewed_videos+" видео · F1 "+
+      (100*overall.f1).toFixed(1)+"% · лишних "+overall.extra+
+      " · пропущено "+overall.missed+" · средняя ошибка "+
+      (overall.matched?Number(overall.mean_error_ms).toFixed(1)+" мс":"—");
+    annotationMarkCurrent();
+  };
+  const refreshAnnotation=async()=>{
+    const epoch=++annotation.epoch,project=s.project,run=s.run;
+    annotation.data=null;annotation.touchId=null;annotation.rallyId=null;
+    annotation.pendingStart=null;
+    if(!training.active||!project||!run){
+      annotationNotice("Для разметки выберите CPU-анализ и видео.");
+      drawAnnotation();return;
+    }
+    annotationNotice("Загрузка эталонных меток…");
+    try{
+      const data=await request(url("/api/training/annotations",{
+        project_id:project,rally_run_id:run
+      }));
+      if(epoch!==annotation.epoch||project!==s.project||run!==s.run)return;
+      if(data.schema!=="volley-touch-annotations/1"||data.video!==s.video)
+        throw Error("Неверный источник эталонной разметки");
+      annotation.data=data;drawAnnotation();
+      annotationNotice(data.reviewed?"Эталон проверен. Метрики рассчитаны по исходным CPU-детекциям.":
+        "Корректируйте касания и границы, затем завершите проверку видео.");
+    }catch(error){
+      if(epoch!==annotation.epoch)return;
+      annotationNotice("Не удалось загрузить метки: "+error.message,true);drawAnnotation();
+    }
+  };
+  const editAnnotation=async(action,fields={})=>{
+    if(annotation.busy||!s.project||!s.run)return;
+    if(annotation.data&&(annotation.data.project_id!==s.project||
+        annotation.data.rally_run_id!==s.run||annotation.data.video!==s.video)){
+      annotationNotice("Источник сменился. Дождитесь загрузки его разметки.",true);return;
+    }
+    const project=s.project,run=s.run,epoch=annotation.epoch;
+    if(!annotation.data&&action!=="seed"){
+      annotationNotice("Сначала создайте разметку из автоматических меток.",true);return;
+    }
+    annotation.busy=true;
+    annotationNotice("Сохранение разметки…");
+    try{
+      const result=await post("/api/training/annotations",{
+        action,project_id:project,rally_run_id:run,
+        revision:annotation.data?.revision||0,...fields
+      });
+      if(epoch!==annotation.epoch||project!==s.project||run!==s.run)return;
+      annotation.data=result;
+      if(action==="seed"||action==="delete_touch"){annotation.touchId=null;}
+      if(action==="seed"||action==="delete_rally"){annotation.rallyId=null;annotation.pendingStart=null;}
+      drawAnnotation();drawTimeline();
+      annotationNotice(action==="review"?
+        "Видео подтверждено. Результат проверки сохранён отдельно от автоматической детекции.":
+        "Метки сохранены. Проверка сброшена до повторного подтверждения.");
+    }catch(error){
+      if(epoch!==annotation.epoch)return;
+      annotationNotice("Ошибка сохранения: "+error.message,true);
+    }finally{annotation.busy=false;drawAnnotation();}
+  };
+  annotation.seed.addEventListener("click",()=>{
+    if(annotationReady()&&!window.confirm("Заменить текущую ручную разметку автоматической?"))return;
+    editAnnotation("seed");
+  });
+  annotation.add.addEventListener("click",()=>editAnnotation("add_touch",{frame:annotationFrame()}));
+  annotation.move.addEventListener("click",()=>{
+    if(annotation.touchId)editAnnotation("move_touch",{id:annotation.touchId,frame:annotationFrame()});
+  });
+  annotation.remove.addEventListener("click",()=>{
+    if(annotation.touchId)editAnnotation("delete_touch",{id:annotation.touchId});
+  });
+  annotation.next.addEventListener("click",()=>{
+    annotation.rallyId=null;annotation.pendingStart=null;
+    annotationNotice("Новый розыгрыш: выберите кадр начала, затем кадр конца.");
+    drawAnnotation();
+  });
+  annotation.begin.addEventListener("click",()=>{
+    const frame=annotationFrame();
+    const row=annotation.data?.rallies?.find(x=>x.id===annotation.rallyId);
+    if(row)editAnnotation("move_rally",{id:row.id,start:frame,end:row.end});
+    else{annotation.pendingStart=frame;drawAnnotation();}
+  });
+  annotation.finish.addEventListener("click",()=>{
+    const frame=annotationFrame();
+    const row=annotation.data?.rallies?.find(x=>x.id===annotation.rallyId);
+    if(row)editAnnotation("move_rally",{id:row.id,start:row.start,end:frame});
+    else if(annotation.pendingStart!==null){
+      const start=annotation.pendingStart;
+      editAnnotation("add_rally",{start,end:frame}).then(()=>{
+        if(annotation.data?.rallies?.some(x=>x.start===start&&x.end===frame)){
+          annotation.pendingStart=null;drawAnnotation();
+        }
+      });
+    }else annotationNotice("Сначала установите начало нового розыгрыша.",true);
+  });
+  annotation.review.addEventListener("click",()=>editAnnotation("review"));
+  ui.video.addEventListener("timeupdate",annotationMarkCurrent);
+  ui.video.addEventListener("seeked",annotationMarkCurrent);
   const pickTrainingPlayer=event=>{
     if(!training.active||!ui.video.paused||!s.run||!s.video)return;
     const frame=Math.max(0,Math.floor(ui.video.currentTime*fps()+0.001));
@@ -1123,6 +1368,7 @@
       drawTimeline();drawOverlay();
       trainingMessage("Остановите видео в момент удара и щёлкните по рамке игрока. Нужны сохранённые RTMPose и VBallNet.");
       refreshTraining();
+      refreshAnnotation();
     });
     for(const [input,value] of [[overlay.rawBall,$("studio-raw-ball-value")],
       [overlay.rawPlayer,$("studio-raw-player-value")],
@@ -1255,6 +1501,17 @@
           ctx.fillRect(x,y,Math.max(1,x2-x),bandHeight);
         }
       }
+      if(training.active&&annotationReady()){
+        for(const mark of annotation.data.rallies){
+          const x=mark.start/fps()/duration*width;
+          const x2=(mark.end+1)/fps()/duration*width;
+          ctx.fillStyle="#00ad9470";ctx.fillRect(x,y,Math.max(1,x2-x),bandHeight);
+        }
+        for(const mark of annotation.data.touches){
+          const x=mark.frame/fps()/duration*width;
+          ctx.fillStyle="#10deb2";ctx.fillRect(x,y,Math.max(2,Math.ceil(dpr)),bandHeight);
+        }
+      }
       if(overlay.flags.touches&&Array.isArray(data.touch_annotations)){
         for(const classified of [false,true]){
           for(const touch of data.touch_annotations){
@@ -1275,6 +1532,8 @@
   };
   const clearTimeline=()=>{
     timeline.epoch++;timeline.dragging=false;timeline.data=null;
+    if(training.active){annotation.epoch++;annotation.data=null;annotation.touchId=null;
+      annotation.rallyId=null;annotation.pendingStart=null;drawAnnotation();}
     timeline.status.textContent="Выберите CPU-версию";
     timeline.middle.textContent="—";timeline.end.textContent="—";
     timeline.track.title="";drawTimeline();refreshRallyCardTouchTicks();
@@ -1317,6 +1576,7 @@
       timeline.end.textContent=timeLabel(duration);
       drawTimeline();syncFavoritesSelection();drawOverlay();
       refreshRallyCardTouchTicks();updateRallyCardProgress();
+      if(training.active)refreshAnnotation();
       if(s.current){
         const selected=s.items.find(item=>item.candidate_id===s.current);
         if(selected){
