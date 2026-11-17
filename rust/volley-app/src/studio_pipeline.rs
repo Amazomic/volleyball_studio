@@ -1219,6 +1219,9 @@ async fn pipeline(
     path: &Path,
     status: &mut Value,
 ) -> Result<(), String> {
+    if cancel.load(Ordering::Acquire) {
+        return Err("cancelled".into());
+    }
     #[cfg(unix)]
     let mut pending_shared_pose: Option<crate::pose_inference::PendingPose> = None;
     log_native(
@@ -2030,9 +2033,16 @@ pub async fn start(
         .rallies
         .validate()
         .map_err(storage::bad_request)?;
-    projects::existing_project(&state, &request.project_id)?;
-    let _plan =
-        preparation::plan_for_async(state.clone(), &request.project_id, &request.video).await?;
+    let project = projects::existing_project(&state, &request.project_id)?;
+    if !project["videos"].as_array().is_some_and(|videos| {
+        videos
+            .iter()
+            .any(|video| video.as_str() == Some(&request.video))
+    }) {
+        return Err(storage::bad_request(
+            "Видео не принадлежит выбранному проекту",
+        ));
+    }
     let mut slot = manager().lock().await;
     // If the HTTP response was lost after scheduling, replaying the same
     // client token must recover the saved run rather than launch a duplicate.
@@ -2335,6 +2345,83 @@ pub async fn cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn start_queues_before_source_validation_and_records_validation_failure() {
+        let base = std::env::temp_dir().join(format!("studio-queue-{}", Uuid::new_v4()));
+        let project_id = "abc123def456";
+        fs::create_dir_all(base.join("projects").join(project_id)).unwrap();
+        storage::write_json_atomic(
+            &base.join("projects/projects.json"),
+            &json!({
+                "projects":[{"id":project_id,"videos":["missing.mp4"]}]
+            }),
+        )
+        .unwrap();
+        let state = Arc::new(AppState {
+            repository_root: base.clone(),
+            data_root: base.clone(),
+            writes_enabled: true,
+            montage: crate::montage::MontageManager::new(),
+            preparation: crate::preparation::PreparationManager::new(),
+            preview_limit: tokio::sync::Semaphore::new(1),
+            touch_limit: tokio::sync::Semaphore::new(1),
+            continuity_limit: tokio::sync::Semaphore::new(1),
+            reid_limit: tokio::sync::Semaphore::new(1),
+            identity_limit: tokio::sync::Semaphore::new(1),
+            statistics_limit: tokio::sync::Semaphore::new(1),
+            marks_limit: tokio::sync::Semaphore::new(1),
+            quick_reel: crate::quick_reel::QuickReelManager::new(),
+            inference_limit: tokio::sync::Semaphore::new(1),
+            full_inference: crate::inference_full::FullInferenceManager::new(),
+        });
+        let request = || {
+            serde_json::from_value::<StartRequest>(json!({
+                "project_id":project_id,"video":"missing.mp4","mode":"gpu",
+                "client_request_id":"12345678901234567890123456789012"
+            }))
+            .unwrap()
+        };
+        let Json(queued) = start(State(state.clone()), HeaderMap::new(), Json(request()))
+            .await
+            .unwrap();
+        assert_eq!(queued["status"], "queued");
+        let Json(recovered) = start(State(state.clone()), HeaderMap::new(), Json(request()))
+            .await
+            .unwrap();
+        assert_eq!(recovered["id"], queued["id"]);
+        assert_eq!(recovered["recovered"], true);
+        let path = base
+            .join("projects")
+            .join(project_id)
+            .join("native_studio_pipelines")
+            .join(queued["id"].as_str().unwrap())
+            .join("status.json");
+        assert_eq!(read(&path).unwrap()["status"], "queued");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while has_active().await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let failed = read(&path).unwrap();
+        assert_eq!(failed["status"], "failed");
+        assert!(failed["error"].as_str().is_some_and(|s| !s.is_empty()));
+        let events = fs::read_to_string(path.with_file_name("events.jsonl")).unwrap();
+        assert!(events
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .any(|event| event["kind"] == "stage_start"
+                && event["stage"] == "Проверка исходного видео"));
+        let mut unowned = request();
+        unowned.video = "unowned.mp4".into();
+        unowned.client_request_id = None;
+        assert!(start(State(state), HeaderMap::new(), Json(unowned))
+            .await
+            .is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]
