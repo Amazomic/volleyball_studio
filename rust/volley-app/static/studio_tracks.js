@@ -887,7 +887,7 @@
   const thresholdValue=node("output","","30%");
   thresholdLabel.append(thresholdValue,reviewThreshold);
   reviewThreshold.addEventListener("input",()=>{thresholdValue.textContent=reviewThreshold.value+"%";});
-  const groupButton=node("button","primary","Сгруппировать ID");
+  const groupButton=node("button","primary","Обновить признаки и совпадения");
   groupButton.type="button";groupButton.disabled=true;
   groupingControls.append(thresholdLabel,groupButton);
   const viewBar=node("div","track-view-bar");
@@ -938,7 +938,7 @@
   const renderGroupCards=()=>{
     clear(galleryItems);
     if(state.grouping){
-      galleryItems.append(node("div","empty-state","Идёт группировка похожих ID…"));
+      galleryItems.append(node("div","empty-state","Обновляем признаки и совпадения ID…"));
       galleryMore.hidden=true;
       return;
     }
@@ -1203,7 +1203,7 @@
     if(ids.length>2500){note("Для группировки доступно не более 2500 ID за одну обработку.",true);return;}
     state.busy=true;state.grouping=true;unlock();reidUnlock();renderGroupCards();
     window.VolleyballTasks?.set("track-grouping",{
-      label:"Группировка ID",stage:"Подготовка признаков: 0 / "+ids.length,progress:0
+      label:"Обновление признаков и совпадений",stage:"Подготовка признаков: 0 / "+ids.length,progress:0
     });
     try{
       for(let offset=0;offset<ids.length;offset+=8){
@@ -1218,16 +1218,16 @@
         if(result.computed_count>0&&!result.cache_persisted)throw Error("Не удалось сохранить признаки для группировки");
         const done=Math.min(offset+8,ids.length);
         window.VolleyballTasks?.set("track-grouping",{
-          label:"Группировка ID",stage:"Подготовка признаков: "+done+" / "+ids.length,
+          label:"Обновление признаков и совпадений",stage:"Подготовка признаков: "+done+" / "+ids.length,
           progress:ids.length?done/ids.length*100:0
         });
       }
       if(token!==state.token)return;
-      window.VolleyballTasks?.set("track-grouping",{label:"Группировка ID",stage:"Группировка похожих ID",progress:null});
+      window.VolleyballTasks?.set("track-grouping",{label:"Обновление признаков и совпадений",stage:"Группировка похожих ID",progress:null});
       if(!await reviewLoad())throw Error("Не удалось получить группы");
       if(token!==state.token)return;
       window.VolleyballTasks?.set("track-grouping",{
-        label:"Группировка ID",stage:"Обновление сходства с сохранёнными фото",progress:null
+        label:"Обновление признаков и совпадений",stage:"Обновление сходства с сохранёнными фото",progress:null
       });
       const summary=await refreshPhotoMatches(scope,token);
       if(!summary)return;
