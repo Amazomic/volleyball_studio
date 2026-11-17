@@ -346,7 +346,7 @@
     trajectory:$("studio-overlay-trajectory"),players:$("studio-overlay-players"),
     pose:$("studio-overlay-pose"),court:$("studio-overlay-court"),
     mode:$("studio-overlay-processed"),rawMode:$("studio-overlay-raw"),rawControls:$("studio-overlay-raw-controls"),actionControls:$("studio-overlay-actions"),
-    rawBall:$("studio-raw-ball"),rawVballVisible:$("studio-raw-vball-visible"),rawPeopleVisible:$("studio-raw-people-visible"),rawPlayer:$("studio-raw-player"),
+    rawBall:$("studio-raw-ball"),rawBallTrail:$("studio-raw-ball-trail"),rawVballVisible:$("studio-raw-vball-visible"),rawPeopleVisible:$("studio-raw-people-visible"),rawPlayer:$("studio-raw-player"),
     rawPose:$("studio-raw-pose"),rawPoseVisible:$("studio-raw-pose-visible"),
     raw:false,
     actionFlags:{attack:true,block:true,serve:true,overhead_pass:true,dig:true,low_touch:true},
@@ -767,6 +767,27 @@
     const point=ball=>[x+ball[0]*width,y+ball[1]*height];
     const frames=record.frames;
     if(overlay.raw){
+      if(overlay.rawVballVisible.checked&&overlay.rawBallTrail?.checked){
+        const threshold=Number(overlay.rawBall.value)/100;
+        let previous=null;
+        ctx.strokeStyle="#47e2ff";ctx.fillStyle="#47e2ff";ctx.lineWidth=2;
+        for(const row of frames){
+          if(row.frame<frame-Math.round(fps())||row.frame>frame)continue;
+          const balls=(row.raw?.balls||[]).filter(ball=>ball.source==="vballnet"&&
+            Number.isFinite(ball.score)&&ball.score>=threshold&&
+            Array.isArray(ball.point)&&ball.point.length===2&&ball.point.every(Number.isFinite));
+          for(const ball of balls){
+            const [px,py]=point(ball.point);
+            ctx.globalAlpha=0.25+0.6*(1-(frame-row.frame)/Math.max(1,fps()));
+            if(previous&&row.frame===previous.frame+1&&balls.length===1){
+              ctx.beginPath();ctx.moveTo(previous.x,previous.y);ctx.lineTo(px,py);ctx.stroke();
+            }
+            ctx.beginPath();ctx.arc(px,py,2.5,0,Math.PI*2);ctx.fill();
+          }
+          previous=balls.length===1?{frame:row.frame,x:point(balls[0].point)[0],y:point(balls[0].point)[1]}:null;
+        }
+        ctx.globalAlpha=1;
+      }
       const current=frames.find(row=>row.frame===frame);
       if(!current?.raw)return;
       const raw=current.raw;
@@ -1108,7 +1129,7 @@
       [overlay.rawPose,$("studio-raw-pose-value")]]){
       input.addEventListener("input",()=>{value.textContent=input.value+"%";drawOverlay();});
     }
-    for(const input of [overlay.rawVballVisible,overlay.rawPeopleVisible,overlay.rawPoseVisible])
+    for(const input of [overlay.rawVballVisible,overlay.rawPeopleVisible,overlay.rawPoseVisible,overlay.rawBallTrail].filter(Boolean))
       input.addEventListener("change",drawOverlay);
     for(const input of overlay.actionControls.querySelectorAll("[data-overlay-action]")){
       input.addEventListener("change",()=>{overlay.actionFlags[input.dataset.overlayAction]=input.checked;drawOverlay();});

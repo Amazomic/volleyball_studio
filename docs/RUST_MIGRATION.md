@@ -2166,3 +2166,13 @@ Studio показывает кнопку перехода между debug и re
 - Для временно-ограниченного сравнения ReID кэшируется признак только вместе с кадром и точными границами кропа; legacy-кэши читаются, но без метаданных соответствия требуемый кадр вычисляется заново.
 - Проверки в отдельной рабочей копии: `cargo fmt --all -- --check`, `cargo check -p volley-app --offline --locked`, `cargo test -p volley-app --offline --locked` (323 passed, 8 ignored), `node scripts/ci/test_track_candidate_scores.mjs`, `node scripts/ci/test_volley_web_wasm.mjs`, `node scripts/ci/test_studio_tracks_loading.mjs` — успешно. `test_studio_group_tracks.mjs` падает также на исходном коммите из-за неполного mock состояния групп, независимо от этого изменения.
 - Реальный GPU/ReID прогон на пользовательском видео здесь не запускался; предложения по cosine similarity не являются вероятностями личности.
+
+
+### 2026-11-17 — След сырых детекций VballNet
+
+- В блок VballNet режима «Сырые» добавлен выключенный по умолчанию чекбокс «След мяча» с переводом RU/EN.
+- Оверлей показывает затухающие исходные точки за последнюю секунду, в том числе при отсутствии детекции на текущем кадре; соединяет только соседние кадры с единственным кандидатом. Пропуски не интерполируются, порог уверенности и видимость VballNet учитываются. GPU/CPU-данные не изменяются.
+- Проверены переключение, пропуски, отсутствие соединения через разрыв, порог, скрытие модели, отсечение будущих и устаревших точек; синтаксис JS, Rust/WASM RU/EN и ownership/roadmap self-tests успешны. cargo fmt и cargo check workspace прошли.
+- Первый параллельный cargo test workspace: 340 passed, 1 failed, 9 ignored в volley-app; runtime::tests::idle_or_busy_server_report_guards_graceful_shutdown получил дополнительный studio_analysis от другого теста. Последовательный cargo test --workspace --offline -- --test-threads=1: 654 passed, 0 failed, 17 ignored по workspace.
+- Имеющиеся test_studio_overlay_continuity.mjs и test_studio_raw_gpu_preview.mjs останавливаются на неполных заглушках ctx.save и setTimeout. Визуальная проверка заблокирована Computer Use: не удалось уверенно определить URL вкладки Brave. Реальный GPU/матч не запускался.
+- Release-сборка успешна; штатный /api/studio/restart отказался прерывать активную reid_processing (shutdown_safe=false). Для применения после её завершения нужен безопасный перезапуск Studio и обновление страницы.

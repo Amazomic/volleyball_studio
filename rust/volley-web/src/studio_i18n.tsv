@@ -202,6 +202,7 @@ VballNet · мяч, RF-DETR + RTMPose · игроки. Два независим
 Оценки касаний RF-DETR + RTMPose	RF-DETR + RTMPose touch scores
 Алгоритм касаний	Touch algorithm
 Мяч VballNet	VballNet ball
+След мяча	Ball trail
 Мяч RF-DETR + RTMPose	RF-DETR + RTMPose ball
 Очистить историю	Clear history
 Скрыть записи истории текущего проекта; результаты анализа сохранятся	Hide the current project's history entries; analysis results will remain
