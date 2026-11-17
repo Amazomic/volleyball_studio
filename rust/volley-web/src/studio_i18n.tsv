@@ -427,3 +427,4 @@ VBallNet + RTMPose: контакты и изломы ±0,1 с	VBallNet + RTMPose
 Фильтры и режимы плеера	Player filters and modes
 Фильтры отображения	Display filters
 Разметка: двигайте отдельные углы или всю площадку вместе с сеткой, удерживая курсор внутри. Масштаб 10–124%: кнопки, колесо мыши, тачпад или жест двумя пальцами. Масштаб не меняет координаты, исходное видео не изменяется; обрезка пока не ограничивает GPU-анализ.	Marking mode: drag individual corners or drag inside the court to move all corners with the net. Zoom from 10% to 124% using buttons, the mouse wheel, touchpad or two-finger gestures. Zoom preserves annotation coordinates; the source video stays unchanged, and the trim range does not yet limit GPU analysis.
+Видео пока не выбраны. Добавьте исходные файлы выше.	No videos selected yet. Add source files above.

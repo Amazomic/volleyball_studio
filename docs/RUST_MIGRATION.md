@@ -2210,3 +2210,10 @@ Studio показывает кнопку перехода между debug и re
 - Регрессия \`scripts/ci/test_studio_track_assignment_nonblocking.mjs\` моделирует остановившийся GET альбома и не завершающуюся вторичную загрузку карточек: следующий Track ID успешно привязывается, а оба фото позднее сохраняются с правильными ревизиями.
 - Проверены тесты \`test_studio_track_assignment.mjs\`, \`test_studio_track_assignment_busy.mjs\`, \`test_studio_track_assignment_nonblocking.mjs\`, \`test_studio_tracks_loading.mjs\` и синтаксис JavaScript. Существующий \`test_studio_player_remove_track.mjs\` падает также на исходной версии: устаревшее ожидание текста кнопки «Удалить ID у игрока».
 - Реальные пользовательские данные, GPU/CPU-постобработки, ручные ID и альбомы тестами не изменялись.
+
+### 2026-11-17 — Компактный список привязанных исходных видео при создании проекта
+
+- Новый проект отображает только видео, явно выбранные через нативный проводник, без `/api/videos` и чужих файлов. Выбор для POST `/api/project-create` формируется из собственных связей проекта.
+- Каждое видео занимает одну строку с меньшим шрифтом, оригинальным именем, продолжительностью `mm:ss` и кнопкой отвязки 24×24 px. Список вмещает пять строк и прокручивается при большем количестве; положение прокрутки сохраняется после удаления.
+- Native picker возвращает `duration_sec` из метаданных исходного файла; API, кеши, оригинальные видео и пользовательские анализы не изменялись.
+- PASS: `cargo check -p volley-app --offline --locked`, `cargo fmt --all -- --check`, 348 Rust tests passed/9 ignored; проверены `test_studio_project_create_ui.mjs`, `test_studio_linked_videos.mjs`, `test_studio_dom_ids.mjs`, `test_studio_viewport_layout.mjs`, `test_volley_web_wasm.mjs` (271/271 переводов). GPU и реальный медиатест NOT TESTED.

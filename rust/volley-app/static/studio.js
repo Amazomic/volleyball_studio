@@ -2240,8 +2240,7 @@
     let creating=false,uploading=false,addingPlayer=false,activeUpload=null;
     let playerRevision="absent",dialogEpoch=0; const linkedFiles=new Map();
     const maxVideoBytes=window.VolleyballUpload.maxVideoBytes;
-    const selectedVideos=()=>[...ui.projectVideos.querySelectorAll("input[type=checkbox]:checked")]
-      .map(input=>input.value);
+    const selectedVideos=()=>[...linkedFiles.keys()];
     const selectedPlayers=()=>[...ui.projectPlayers.querySelectorAll("input[type=checkbox]:checked")]
       .map(input=>input.value);
     const updateSubmit=()=>{
@@ -2254,49 +2253,34 @@
     const alertCreate=error=>{
       ui.projectCreateError.textContent=String(error?.message||error);
     };
-    const makeChoice=(row,chosen)=>{
-      const label=make("label","studio-project-video-option");
-      label.title=String(row.display_name||row.name);
-      const box=document.createElement("input");
-      box.type="checkbox";box.value=row.name;box.checked=chosen;
-      box.addEventListener("change",updateSubmit);
-      label.append(box,make("span","",
-        (row.display_name||row.name)+(row.origin==="uploaded"?" · загружено":" · локально")+
-        (Number.isFinite(row.size_gb)?" · "+row.size_gb+" ГБ":"")));
-      return label;
+    const formatVideoDuration=seconds=>{
+      if(!Number.isFinite(seconds)||seconds<0)return "--:--";
+      const total=Math.round(seconds);
+      return String(Math.floor(total/60)).padStart(2,"0")+":"+
+        String(total%60).padStart(2,"0");
     };
     const renderLinkedFiles=()=>{
-      ui.projectVideos.querySelectorAll(".studio-project-pending").forEach(row=>row.remove());
-      for(const [key,file] of linkedFiles){
-        const row=make("div","studio-project-video-option studio-project-pending");
-        const checkbox=document.createElement("input");
-        checkbox.type="checkbox";checkbox.value=key;checkbox.checked=true;
-        checkbox.addEventListener("change",updateSubmit);
-        const name=make("span","",file.display_name+" · оригинал на диске");
-        name.style.flex="1";
-        const remove=make("button","secondary","×");
-        remove.type="button";remove.title="Убрать из проекта";
-        remove.setAttribute("aria-label","Убрать "+file.display_name);
-        remove.addEventListener("click",()=>{
-          linkedFiles.delete(key);row.remove();updateSubmit();
-        });
-        row.append(checkbox,name,remove);
-        ui.projectVideos.prepend(row);
-      }
-    };
-    const refreshVideos=async(autoChecked=new Set(),token=dialogEpoch)=>{
-      const previous=new Set(selectedVideos());
-      const raw=await request("/api/videos");
-      if(!ui.projectDialog.open||token!==dialogEpoch)return;
-      const list=(Array.isArray(raw.videos)?raw.videos:[]).filter(row=>
-        typeof row.name==="string"&&row.name.length>0);
+      const scrollTop=ui.projectVideos.scrollTop;
       ui.projectVideos.replaceChildren();
-      for(const row of list){
-        ui.projectVideos.append(makeChoice(row,previous.has(row.name)||autoChecked.has(row.name)));
+      for(const [key,file] of linkedFiles){
+        const row=make("div","studio-project-video-option studio-project-linked-video");
+        row.title=String(file.display_name||file.name);
+        const name=make("span","studio-project-video-name",file.display_name||file.name);
+        const duration=make("time","studio-project-video-duration",
+          formatVideoDuration(file.duration_sec));
+        duration.title="Продолжительность видео";
+        const remove=make("button","secondary studio-project-video-remove","×");
+        remove.type="button";remove.title="Отвязать видео от нового проекта";
+        remove.setAttribute("aria-label","Отвязать "+(file.display_name||file.name));
+        remove.addEventListener("click",()=>{
+          linkedFiles.delete(key);renderLinkedFiles();
+        });
+        row.append(name,duration,remove);
+        ui.projectVideos.append(row);
       }
-      if(!list.length)ui.projectVideos.append(make("p","panel-note",
-        "Пока нет видео. Перетащите MP4 сюда или выберите его через проводник."));
-      renderLinkedFiles();
+      if(!linkedFiles.size)ui.projectVideos.append(make("p","studio-project-video-empty",
+        "Видео пока не выбраны. Добавьте исходные файлы выше."));
+      ui.projectVideos.scrollTop=scrollTop;
       updateSubmit();
     };
     const renderPlayers=(players,selected)=>{
@@ -2329,14 +2313,12 @@
       playerRevision="absent"; linkedFiles.clear();
       ui.projectCreateError.textContent="";
       ui.projectUploadStatus.textContent="";
-      ui.projectVideos.replaceChildren(make("p","panel-note","Загрузка видео…"));
+      renderLinkedFiles();
       ui.projectPlayers.replaceChildren(make("p","panel-note","Загрузка игроков…"));
       ui.projectSubmit.disabled=true;
       ui.projectDialog.showModal();
       ui.projectName.focus();
-      const results=await Promise.allSettled([
-        refreshVideos(new Set(),token),refreshPlayers(new Set(),token)
-      ]);
+      const results=await Promise.allSettled([refreshPlayers(new Set(),token)]);
       if(token!==dialogEpoch)return;
       for(const result of results)if(result.status==="rejected")alertCreate(result.reason);
     };

@@ -234,15 +234,27 @@ body[data-ui-theme="light"] .analysis-gpu-settings-grid input{background:white;c
 .studio-project-create-col{min-width:0;min-height:0}
 .studio-project-create-col>.field-label{margin:0 0 7px}
 .studio-project-video-options,.studio-project-player-options{
-  display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,145px),1fr));
-  align-content:start;gap:3px;min-width:0;max-height:min(30dvh,220px);
-  overflow-y:auto;background:#131e2d;border:1px solid #34465f;border-radius:9px;padding:8px;
+  align-content:start;gap:4px;min-width:0;
+  overflow-y:auto;overflow-x:hidden;background:#131e2d;
+  border:1px solid #34465f;border-radius:9px;padding:8px;
 }
-.studio-project-player-options{max-height:min(33dvh,260px)}
+.studio-project-video-options{
+  display:flex;flex-direction:column;height:214px;max-height:214px;
+  scrollbar-gutter:stable;
+}
+.studio-project-player-options{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,145px),1fr));
+  max-height:min(33dvh,260px);
+}
 .studio-project-video-option{display:flex;align-items:center;gap:8px;min-width:0;min-height:32px;padding:5px 7px;border-radius:6px;cursor:pointer;overflow-wrap:anywhere}
 .studio-project-video-option:hover{background:#1b3151}
 .studio-project-video-option span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .studio-project-video-option input{width:17px;height:17px;flex:none;accent-color:#448eff}
+.studio-project-linked-video{flex:0 0 36px;width:100%;height:36px;min-height:36px;font-size:12px;line-height:1.25;cursor:default}
+.studio-project-linked-video .studio-project-video-name{flex:1;white-space:nowrap}
+.studio-project-video-duration{flex:none;color:#9badc8;font-size:11px;font-variant-numeric:tabular-nums}
+.studio-project-video-remove{display:grid;place-items:center;flex:0 0 24px;width:24px;height:24px;min-width:24px;min-height:24px;padding:0;border-radius:6px;font-size:16px;line-height:1}
+.studio-project-video-empty{margin:6px 2px;color:#91a5c0;font-size:12px;line-height:1.45}
 .studio-project-help{color:#91a5c0;line-height:1.4;font-size:11px;margin:7px 0 0}
 .studio-project-help code{color:#b6d7ff}
 .studio-project-error{font-size:12px;color:#ffc4c9;min-height:16px;margin:6px 0 0;overflow-wrap:anywhere}
@@ -252,6 +264,7 @@ body[data-ui-theme="light"] .studio-create-dialog{background:#f5f9ff;color:#1629
 body[data-ui-theme="light"] .studio-create-dialog input[type=text],
 body[data-ui-theme="light"] .studio-project-video-options{background:#fff;color:#162941;border-color:#bccfe4}
 body[data-ui-theme="light"] .studio-project-video-option:hover{background:#e9f1fb}
+body[data-ui-theme="light"] .studio-project-video-duration{color:#61728b}
 @media(max-width:600px){
   .studio-create-dialog{padding:13px 14px}
   .studio-project-create-grid{gap:9px}
@@ -262,7 +275,6 @@ body[data-ui-theme="light"] .studio-project-video-option:hover{background:#e9f1f
 }
 @media(max-height:620px){
   .studio-create-dialog{max-height:calc(100dvh - 16px);overflow-y:auto}
-  .studio-project-video-options{max-height:95px}
   .studio-project-player-options{max-height:125px}
 }
 
