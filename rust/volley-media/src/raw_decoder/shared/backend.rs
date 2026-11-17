@@ -171,6 +171,8 @@ fn preflight_nvdec(
         "-loglevel",
         "error",
         "-nostdin",
+        "-threads",
+        "1",
         "-noautorotate",
         "-hwaccel",
         "cuda",

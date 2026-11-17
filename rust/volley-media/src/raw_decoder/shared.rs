@@ -311,13 +311,18 @@ fn decode_input_command(
     cpu_threads: usize,
 ) -> (Command, String) {
     let mut command = Command::new("ffmpeg");
+    let decoder_threads = if decision.backend == DecodeBackend::Nvdec {
+        1
+    } else {
+        cpu_threads
+    };
     command.args([
         "-hide_banner",
         "-loglevel",
         "error",
         "-nostdin",
         "-threads",
-        &cpu_threads.to_string(),
+        &decoder_threads.to_string(),
     ]);
     let prefix = if decision.backend == DecodeBackend::Nvdec {
         command.args([

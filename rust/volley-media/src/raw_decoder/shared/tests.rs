@@ -556,3 +556,61 @@ fn shared_command_honors_requested_decoder_and_filter_threads() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires NVIDIA GPU and HEVC encoder"]
+fn hevc_nvdec_high_cpu_thread_budget_preserves_complete_windows() {
+    let temp = SocketDir::new().unwrap();
+    let source = temp.0.join("hevc-4k.mp4");
+    assert!(Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=3840x2160:rate=30:duration=0.4",
+            "-c:v",
+            "libx265",
+            "-preset",
+            "ultrafast",
+            "-x265-params",
+            "pools=1:frame-threads=1:log-level=error",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
+        ])
+        .arg(&source)
+        .status()
+        .unwrap()
+        .success());
+    let cancelled = AtomicBool::new(false);
+    let mut expected = Vec::new();
+    let software = decode_full_video_shared(&source, 9, &cancelled, |batch| {
+        expected.push((Sha256::digest(batch.gray), Sha256::digest(batch.rgb)));
+        Ok(())
+    })
+    .unwrap();
+    for threads in [32, 128] {
+        let mut position = 0;
+        let hardware = decode_full_video_shared_with_backend_and_tail(
+            &source,
+            9,
+            DecodePreference::Nvdec,
+            threads,
+            &cancelled,
+            |batch| {
+                assert_eq!(Sha256::digest(batch.gray), expected[position].0);
+                assert_eq!(Sha256::digest(batch.rgb), expected[position].1);
+                position += 1;
+                Ok(())
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(hardware.backend, DecodeBackend::Nvdec);
+        assert_eq!(hardware.decode.decoded_frames, software.decoded_frames);
+        assert_eq!(position, expected.len());
+    }
+    fs::remove_file(source).unwrap();
+}
