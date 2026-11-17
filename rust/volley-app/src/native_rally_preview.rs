@@ -1281,10 +1281,28 @@ fn montage_material(state: &AppState, run: &ValidatedRun) -> Result<Value, ApiEr
         "unidentified_contacts":unidentified,"unknown_action_contacts":unknown,
         "geometry_available":geometry_available,"authoritative_game_events":false,
         "original_verified_against_analysis":!manifest["original_source"].is_null()});
-    let bytes = serde_json::to_vec(&timeline)
-        .map_err(|e| storage::internal(format!("Timeline revision: {e}")))?;
-    timeline["material_revision"] = json!(crate::versioned_store::revision(Some(&bytes)));
-    Ok(timeline)
+    finalize_montage_material(timeline)
+}
+
+// JSON numbers must be normalized through the same deserialize/serialize
+// cycle as the persisted sidecar. Otherwise a float can change representation
+// when the file is loaded, invalidating its own content digest at start time.
+fn finalize_montage_material(mut timeline: Value) -> Result<Value, ApiError> {
+    for _ in 0..8 {
+        let bytes = serde_json::to_vec(&timeline)
+            .map_err(|e| storage::internal(format!("Timeline normalization: {e}")))?;
+        let normalized: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| storage::internal(format!("Timeline normalization: {e}")))?;
+        if normalized == timeline {
+            let revision = crate::versioned_store::revision(Some(&bytes));
+            timeline["material_revision"] = json!(revision);
+            return Ok(timeline);
+        }
+        timeline = normalized;
+    }
+    Err(storage::internal(
+        "Montage material numbers did not stabilize",
+    ))
 }
 
 pub(crate) fn publish_material(
@@ -1808,6 +1826,23 @@ pub async fn start_manual_montage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn montage_material_digest_survives_pretty_sidecar_roundtrip() {
+        let source = json!({
+            "montage_plan": [{"start_sec": 0.12345678901234567, "end_sec": 12.345678901234567}],
+            "dependencies": {"original_source": {"sha256": "abc"}},
+        });
+        let finalized = finalize_montage_material(source).unwrap();
+        let bytes = serde_json::to_vec_pretty(&finalized).unwrap();
+        let mut restored: Value = serde_json::from_slice(&bytes).unwrap();
+        let revision = restored["material_revision"].as_str().unwrap().to_owned();
+        restored
+            .as_object_mut()
+            .unwrap()
+            .remove("material_revision");
+        let encoded = serde_json::to_vec(&restored).unwrap();
+        assert_eq!(crate::versioned_store::revision(Some(&encoded)), revision);
+    }
     #[test]
     fn rally_windows_include_only_detected_play_not_inter_rally_frames() {
         let scope = RallyWindows {
