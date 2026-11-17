@@ -12,6 +12,15 @@ const tick=async()=>{for(let i=0;i<8;i++)await new Promise(r=>setImmediate(r));}
 const markup=readFileSync(join(root,"rust/volley-app/static/studio.html"),"utf8");
 const navMarkup=markup.match(/<nav class="menu">([\s\S]*?)<\/nav>/)?.[1]||"";
 const navOrder=[...navMarkup.matchAll(/id="studio-nav-([^"]+)"/g)].map(row=>row[1]);
+// Project roster stays beside the gallery at desktop widths and must precede
+// it when the responsive grid collapses (not land at the page bottom).
+const playersCss=readFileSync(join(root,"rust/volley-app/static/studio.css"),"utf8");
+assert.match(playersCss,/grid-template-areas:"gallery roster"/,
+  "Wide Players layout must keep the roster in the right-hand column");
+assert.match(playersCss,/@media\(max-width:650px\)\{\s*#studio-players-view \.players-workspace-layout\{[^}]*grid-template-areas:"roster" "gallery"/,
+  "Narrow Players layout must render the roster above the Track ID gallery");
+assert.match(playersCss,/grid-area:roster;position:sticky;top:18px;align-self:start/,
+  "Desktop roster must align with the gallery top and stick near the viewport top");
 assert.deepEqual(navOrder,["players","analysis","preview","report","montage"],
   "Sidebar must follow the requested five-step navigation order");
 const reportStart=markup.indexOf('id="studio-report-view"');
