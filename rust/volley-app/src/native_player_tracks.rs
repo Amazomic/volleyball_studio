@@ -95,6 +95,7 @@ struct Aggregate {
     best_box: [f64; 4],
     photo_samples: Vec<PhotoSample>,
     visible_spans: Vec<(u64, u64)>,
+    #[serde(with = "source_index::pair_geometry_keys")]
     observed_pairs: BTreeMap<(u64, u64), PairGeometry>,
 }
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
