@@ -8,11 +8,12 @@ const write=bytes=>{const ptr=e.volley_data_reserve(bytes.length);assert.ok(ptr)
 const read=()=>dec.decode(new Uint8Array(e.memory.buffer,e.volley_data_output_ptr(),e.volley_data_output_len()));
 function call(op,data){write(enc.encode(JSON.stringify(data)));assert.equal(e.volley_domain_call(op),1);return JSON.parse(read());}
 const id=n=>n.toString(16).padStart(32,"0"),video="a.mp4";
-const input={videos:[video,"b.mp4"],overviews:{[video]:{stages:[{key:"fusion",items:[{id:id(1),ravel_job_id:id(2)}]},{key:"gpu",items:[{id:id(2)}]},{key:"tracking",items:[{id:id(3),source_fusion_id:id(1)}]}]}},runs:[{video,rally_run_id:id(4),source_replay_id:id(3)},{video,rally_run_id:id(5),source_replay_id:id(99)}]};
+const input={videos:[video,"b.mp4"],overviews:{[video]:{stages:[{key:"fusion",items:[{id:id(1),person_job_id:id(2),vball_job_id:id(6)}]},{key:"gpu",items:[{id:id(2)},{id:id(6)}]},{key:"tracking",items:[{id:id(3),source_fusion_id:id(1)}]}]}},runs:[{video,rally_run_id:id(4),source_replay_id:id(3)},{video,rally_run_id:id(5),source_replay_id:id(99)}]};
 const chain=call(1,input);
 assert.equal(chain.choices.length,2);
 assert.equal(chain.choices[0].kind,"fusion");
 assert.equal(chain.choices[1].kind,"unlinked");
+assert.ok(!chain.choices.some(choice=>choice.id===id(2)||choice.id===id(6)));
 assert.equal(chain.byAnalysis[chain.choices[0].value][0].rally_run_id,id(4));
 assert.deepEqual(call(2,[{id:"a",start:null},{id:"b",start:30},{id:"c",start:10},{id:"d",start:30}]),["c","b","d","a"]);
 for(const size of [0,3,55,56,63,64,65,4194311]){

@@ -1,4 +1,4 @@
-import {readFileSync} from "node:fs";
+import {readFileSync,existsSync} from "node:fs";
 import {join} from "node:path";
 import {fileURLToPath} from "node:url";
 import {runInNewContext} from "node:vm";
@@ -6,6 +6,8 @@ import assert from "node:assert/strict";
 
 const root=join(fileURLToPath(new URL("../..",import.meta.url)));
 const html=readFileSync(join(root,"rust/volley-app/static/studio.html"),"utf8");
+assert.equal(existsSync(join(root,"rust/volley-app/static/studio_highlights.js")),false);
+assert.equal(existsSync(join(root,"scripts/ci/test_native_highlights_ui.mjs")),false);
 const script=readFileSync(join(root,"rust/volley-app/static/studio_tabs.js"),"utf8");
 
 function element(id){

@@ -20,7 +20,7 @@ for task in \
   test_studio_wasm_ui.mjs \
   test_native_quick_reel_ui.mjs \
   test_removed_archive_routes.mjs \
-  test_native_highlights_ui.mjs \
+  test_studio_montage_builder.mjs \
   test_native_stats_ui.mjs \
   test_rust_packaging.mjs;do
   node "scripts/ci/$task"

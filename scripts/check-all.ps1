@@ -56,7 +56,13 @@ $gates = Get-ChildItem (Join-Path $root "scripts/ci") -Filter "*.mjs" |
     Where-Object { $gpuGates -notcontains $_.Name } |
     Sort-Object Name
 foreach ($gate in $gates) {
-    Invoke-Gate $gate.Name { node $gate.FullName }
+    $gateArgs = @()
+    if ($gate.Name -eq "check_rust_ownership.mjs") {
+        $gateArgs = @("--self-test")
+    } elseif ($gate.Name -eq "check_rust_roadmap.mjs") {
+        $gateArgs = @("--check", "--self-test")
+    }
+    Invoke-Gate $gate.Name { node $gate.FullName @gateArgs }
 }
 
 if ($failures.Count -gt 0) {
