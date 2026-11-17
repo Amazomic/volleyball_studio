@@ -15,7 +15,7 @@
 ## Features
 
 - **Projects and video:** import recordings, select the analysis interval, annotate court geometry, and prepare footage.
-- **Primary GPU analysis:** ball and player detection using VballNet and RAVEL, with an additional RTMPose body-keypoint layer.
+- **Primary GPU analysis:** original-video analysis using VBallNet V4c for the ball, RF-DETR Medium for players, and RTMPose for body keypoints. Historical RAVEL evidence remains a compatibility input.
 - **CPU post-processing:** tracking, court-aware geometry, ball trajectories, touch candidates and types, and rally segmentation.
 - **Players:** Track IDs, ReID similarity suggestions, manually confirmed player assignments, and a player photo album.
 - **Preview and statistics:** rally playback, trajectory/player/keypoint overlays, filters, and human review.
