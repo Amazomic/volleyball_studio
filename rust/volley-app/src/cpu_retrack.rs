@@ -757,6 +757,11 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
         });
         storage::write_json_atomic(&directory.join("manifest.json"), &record)
             .map_err(|e| format!("Persist CPU tracking manifest: {e:?}"))?;
+        crate::native_player_tracks::prepare_replay_index(
+            &directory.join(OUTPUT_FILE),
+            &digest,
+            totals.frames,
+        )?;
         Ok(record)
     })();
     match result {

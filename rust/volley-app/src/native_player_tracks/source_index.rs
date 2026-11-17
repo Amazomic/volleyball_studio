@@ -10,6 +10,161 @@ pub(super) struct TrackIndex {
     change: Option<(u64, u64, i64, i64)>,
     tracks: BTreeMap<u64, Aggregate>,
 }
+const INDEX_CACHE_SCHEMA: &str = "volley-native-track-index/1";
+const MAX_INDEX_CACHE_BYTES: u64 = 128 * 1024 * 1024;
+
+#[derive(Serialize, Deserialize)]
+struct StoredTrackIndex {
+    schema: String,
+    sha: String,
+    rally_sha: Option<String>,
+    frames: u64,
+    size: u64,
+    modified: SystemTime,
+    change: (u64, u64, i64, i64),
+    tracks: TrackObservations,
+}
+
+fn stored_index_path(path: &Path, scope: Option<&str>) -> Option<PathBuf> {
+    if path.file_name()?.to_str()? != "tracked_frames.jsonl" {
+        return None;
+    }
+    let replay = path.parent()?;
+    let replay_id = replay.file_name()?.to_str()?;
+    if !opaque_id(replay_id) || replay.parent()?.file_name()?.to_str()? != "native_cpu_replays" {
+        return None;
+    }
+    let filename = match scope {
+        Some(sha) if valid_sha(sha) => format!("rally-{sha}.json"),
+        Some(_) => return None,
+        None => "full.json".to_owned(),
+    };
+    Some(
+        replay
+            .parent()?
+            .parent()?
+            .join("native_track_indices")
+            .join(replay_id)
+            .join(filename),
+    )
+}
+
+fn read_stored_index(
+    path: &Path,
+    sha: &str,
+    frames: u64,
+    size: u64,
+    modified: Option<SystemTime>,
+    change: Option<(u64, u64, i64, i64)>,
+    scope: Option<&str>,
+) -> Option<TrackObservations> {
+    let target = stored_index_path(path, scope)?;
+    let changed = change?;
+    let modified = modified?;
+    let meta = fs::symlink_metadata(&target).ok()?;
+    if meta.file_type().is_symlink()
+        || !meta.is_file()
+        || meta.len() == 0
+        || meta.len() > MAX_INDEX_CACHE_BYTES
+    {
+        return None;
+    }
+    let bytes = fs::read(&target).ok()?;
+    let stored: StoredTrackIndex = serde_json::from_slice(&bytes).ok()?;
+    if stored.schema != INDEX_CACHE_SCHEMA
+        || stored.sha != sha
+        || stored.rally_sha.as_deref() != scope
+        || stored.frames != frames
+        || stored.size != size
+        || stored.modified != modified
+        || stored.change != changed
+        || stored.tracks.len() > MAX_TRACKS
+        || stored.tracks.iter().any(|(&id, info)| {
+            id == 0
+                || id > i64::MAX as u64
+                || info.first > info.last
+                || info.last >= frames
+                || info.observed == 0
+                || info.observed > frames
+                || info.best_frame < info.first
+                || info.best_frame > info.last
+                || info.visible_spans.len() > frames as usize
+        })
+    {
+        return None;
+    }
+    Some(stored.tracks)
+}
+
+fn store_index(
+    path: &Path,
+    sha: &str,
+    frames: u64,
+    size: u64,
+    modified: Option<SystemTime>,
+    change: Option<(u64, u64, i64, i64)>,
+    scope: Option<&str>,
+    tracks: &TrackObservations,
+) -> Result<(), String> {
+    let (Some(target), Some(modified), Some(change)) =
+        (stored_index_path(path, scope), modified, change)
+    else {
+        return Ok(());
+    };
+    let cache_dir = target.parent().ok_or("Missing Track ID index folder")?;
+    let root = cache_dir.parent().ok_or("Missing Track ID index root")?;
+    for folder in [root, cache_dir] {
+        match fs::symlink_metadata(folder) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                return Err("Unsafe persistent Track ID index folder".into());
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(folder).map_err(|e| format!("Create Track ID index: {e}"))?;
+            }
+            Err(err) => return Err(format!("Check Track ID index folder: {err}")),
+        }
+    }
+    let record = StoredTrackIndex {
+        schema: INDEX_CACHE_SCHEMA.into(),
+        sha: sha.into(),
+        rally_sha: scope.map(str::to_owned),
+        frames,
+        size,
+        modified,
+        change,
+        tracks: tracks.clone(),
+    };
+    let value =
+        serde_json::to_value(record).map_err(|e| format!("Serialize Track ID index: {e}"))?;
+    storage::write_json_atomic(&target, &value)
+        .map_err(|e| format!("Persist Track ID index: {e:?}"))
+}
+
+static TRACK_INDEX_GATES: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+pub(crate) fn prepare_replay_index(path: &Path, sha: &str, frames: u64) -> Result<(), String> {
+    index_replay(path, sha, frames)?;
+    if let Some(target) = stored_index_path(path, None) {
+        if !target.is_file() {
+            return Err("Persistent Track ID index was not written".into());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn prepare_rally_index(
+    state: &AppState,
+    project_id: &str,
+    video: &str,
+    replay_id: &str,
+    rally_run_id: &str,
+) -> Result<(), String> {
+    source_for_rallies(state, project_id, video, replay_id, Some(rally_run_id))
+        .map_err(|e| format!("Build rally Track ID index: {e:?}"))?;
+    Ok(())
+}
+
 static TRACK_INDICES: OnceLock<Mutex<Vec<TrackIndex>>> = OnceLock::new();
 type TrackObservations = BTreeMap<u64, Aggregate>;
 pub(super) fn index_replay(
@@ -44,34 +199,44 @@ fn index_with_scope(
     if frames == 0 || frames > 48 * 3600 * 30 || !valid_sha(expected_sha) {
         return Err("Unsupported native track replay length or SHA-256".into());
     }
-    if let Some((sha, _)) = scope {
-        if !valid_sha(sha) {
-            return Err("Invalid selected rally SHA-256".into());
-        }
+    if scope.is_some_and(|(sha, _)| !valid_sha(sha)) {
+        return Err("Invalid selected rally SHA-256".into());
     }
+    let gate = {
+        let store = TRACK_INDEX_GATES.get_or_init(|| Mutex::new(BTreeMap::new()));
+        let mut paths = store
+            .lock()
+            .map_err(|_| "Track index gate lock is poisoned")?;
+        paths
+            .entry(path.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    let _gate = gate
+        .lock()
+        .map_err(|_| "Track index build lock is poisoned")?;
     let meta = fs::metadata(path).map_err(|e| format!("Track replay metadata: {e}"))?;
     let modified = meta.modified().ok();
     let change = volley_media::preparation::file_change_stamp(path, &meta);
+    let selected_sha = scope.map(|(sha, _)| sha);
     let store = TRACK_INDICES.get_or_init(|| Mutex::new(Vec::new()));
+    let same_file = |item: &TrackIndex| {
+        item.path == path
+            && item.sha == expected_sha
+            && item.frames == frames
+            && item.size == meta.len()
+            && item.modified == modified
+            && item.change == change
+    };
     if change.is_some() {
         let cached = store.lock().map_err(|_| "Track index lock is poisoned")?;
-        let same_file = |item: &TrackIndex| {
-            item.path == path
-                && item.sha == expected_sha
-                && item.frames == frames
-                && item.size == meta.len()
-                && item.modified == modified
-                && item.change == change
-        };
         if let Some(hit) = cached
             .iter()
-            .find(|item| same_file(item) && item.rally_sha.as_deref() == scope.map(|(sha, _)| sha))
+            .find(|item| same_file(item) && item.rally_sha.as_deref() == selected_sha)
         {
             if scope.is_none() {
                 return Ok((hit.tracks.clone(), None));
             }
-            // A scoped caller also needs the complete verified index for
-            // preexisting manual assignments. Cache hits must supply both.
             if let Some(full) = cached
                 .iter()
                 .find(|item| same_file(item) && item.rally_sha.is_none())
@@ -80,17 +245,95 @@ fn index_with_scope(
             }
         }
     }
+    let full_disk = read_stored_index(
+        path,
+        expected_sha,
+        frames,
+        meta.len(),
+        modified,
+        change,
+        None,
+    );
+    let scoped_disk = selected_sha.and_then(|sha| {
+        read_stored_index(
+            path,
+            expected_sha,
+            frames,
+            meta.len(),
+            modified,
+            change,
+            Some(sha),
+        )
+    });
+    if let Some(selected) = if scope.is_none() {
+        full_disk.clone()
+    } else {
+        scoped_disk.clone()
+    } {
+        if scope.is_none() || full_disk.is_some() {
+            let mut cache = store.lock().map_err(|_| "Track index lock is poisoned")?;
+            let entry = |rally_sha: Option<&str>, tracks: TrackObservations| TrackIndex {
+                path: path.to_owned(),
+                sha: expected_sha.to_owned(),
+                rally_sha: rally_sha.map(str::to_owned),
+                frames,
+                size: meta.len(),
+                modified,
+                change,
+                tracks,
+            };
+            if let Some(full) = &full_disk {
+                cache.retain(|item| item.path != path || item.rally_sha.is_some());
+                cache.push(entry(None, full.clone()));
+            }
+            if scope.is_some() {
+                cache.retain(|item| item.path != path || item.rally_sha.as_deref() != selected_sha);
+                cache.push(entry(selected_sha, selected.clone()));
+            }
+            while cache.len() > 8 {
+                cache.remove(0);
+            }
+            return Ok((selected, if scope.is_some() { full_disk } else { None }));
+        }
+    }
     let (tracks, full) = scan_with_scope(
         path,
         expected_sha,
         frames,
         scope.map(|(_, windows)| windows),
     )?;
+    let after = fs::metadata(path).map_err(|e| format!("Check indexed replay: {e}"))?;
+    if after.len() != meta.len()
+        || after.modified().ok() != modified
+        || volley_media::preparation::file_change_stamp(path, &after) != change
+    {
+        return Err("Track replay changed while building the index".into());
+    }
     if change.is_some() {
+        let _ = store_index(
+            path,
+            expected_sha,
+            frames,
+            meta.len(),
+            modified,
+            change,
+            None,
+            full.as_ref().unwrap_or(&tracks),
+        );
+        if let Some(sha) = selected_sha {
+            let _ = store_index(
+                path,
+                expected_sha,
+                frames,
+                meta.len(),
+                modified,
+                change,
+                Some(sha),
+                &tracks,
+            );
+        }
         let mut cache = store.lock().map_err(|_| "Track index lock is poisoned")?;
-        // One pass produces both the full source index (for persisted manual
-        // link validation) and the rally-only review index. Keep both warm.
-        let entry = |rally_sha: Option<&str>, tracks: BTreeMap<u64, Aggregate>| TrackIndex {
+        let entry = |rally_sha: Option<&str>, tracks: TrackObservations| TrackIndex {
             path: path.to_owned(),
             sha: expected_sha.to_owned(),
             rally_sha: rally_sha.map(str::to_owned),
@@ -104,10 +347,8 @@ fn index_with_scope(
             cache.retain(|row| row.path != path || row.rally_sha.is_some());
             cache.push(entry(None, all.clone()));
         }
-        cache.retain(|row| {
-            row.path != path || row.rally_sha.as_deref() != scope.map(|(sha, _)| sha)
-        });
-        cache.push(entry(scope.map(|(sha, _)| sha), tracks.clone()));
+        cache.retain(|row| row.path != path || row.rally_sha.as_deref() != selected_sha);
+        cache.push(entry(selected_sha, tracks.clone()));
         while cache.len() > 8 {
             cache.remove(0);
         }
@@ -734,5 +975,76 @@ mod spatial_duplicate_tests {
         let indexed = observed_pair(&boxes, true);
         assert!(!indexed.contains_key(&8));
         assert!(indexed[&7].observed_pairs.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod persistent_index_tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn index_is_saved_reused_and_reverified_when_source_changes() {
+        let root = std::env::temp_dir().join(format!("volley-persisted-tracks-{}", Uuid::new_v4()));
+        let replay_id = "a".repeat(32);
+        let replay = root.join("native_cpu_replays").join(&replay_id);
+        fs::create_dir_all(&replay).unwrap();
+        let path = replay.join("tracked_frames.jsonl");
+        let mut bytes = Vec::new();
+        for frame in 0..3u64 {
+            let row = json!({
+                "frame_index":frame,
+                "selected_ball":null,
+                "interpolated_track_ids":[],
+                "track_ids_provisional":true,
+                "confirmed_athlete_identities":false,
+                "touches_confirmed":false,
+                "tracked_players":[{
+                    "track_id":7,
+                    "is_verified_athlete":false,
+                    "detection":{
+                        "frame_index":frame,
+                        "class_name":"player",
+                        "score":0.91,
+                        "bbox_xyxy_norm":[0.2,0.2,0.4,0.7],
+                        "query_index":0
+                    }
+                }]
+            });
+            bytes.extend(serde_json::to_vec(&row).unwrap());
+            bytes.push(b'\n');
+        }
+        fs::write(&path, &bytes).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        prepare_replay_index(&path, &sha, 3).unwrap();
+        let cache_path = stored_index_path(&path, None).unwrap();
+        assert!(cache_path.is_file());
+        TRACK_INDICES.get().unwrap().lock().unwrap().clear();
+        assert_eq!(index_replay(&path, &sha, 3).unwrap()[&7].observed, 3);
+        let rally_sha = "b".repeat(64);
+        let windows = crate::native_rally_preview::RallyWindows {
+            intervals: vec![(1, 2)],
+            contexts: BTreeMap::new(),
+        };
+        let (in_play, all) = index_rally_replay(&path, &sha, 3, &rally_sha, &windows).unwrap();
+        assert_eq!(in_play[&7].observed, 2);
+        assert_eq!(all[&7].observed, 3);
+        assert!(stored_index_path(&path, Some(&rally_sha))
+            .unwrap()
+            .is_file());
+        TRACK_INDICES.get().unwrap().lock().unwrap().clear();
+        let (reloaded, full) = index_rally_replay(&path, &sha, 3, &rally_sha, &windows).unwrap();
+        assert_eq!(reloaded[&7].observed, 2);
+        assert_eq!(full[&7].observed, 3);
+
+        fs::write(&cache_path, b"{corrupt").unwrap();
+        TRACK_INDICES.get().unwrap().lock().unwrap().clear();
+        assert_eq!(index_replay(&path, &sha, 3).unwrap()[&7].observed, 3);
+
+        TRACK_INDICES.get().unwrap().lock().unwrap().clear();
+        let tampered = String::from_utf8(bytes).unwrap().replace("0.91", "0.92");
+        fs::write(&path, tampered).unwrap();
+        assert!(index_replay(&path, &sha, 3).is_err());
+        fs::remove_dir_all(&root).unwrap();
     }
 }

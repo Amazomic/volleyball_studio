@@ -826,6 +826,13 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
         });
         storage::write_json_atomic(&folder.join("manifest.json"), &manifest)
             .map_err(|e| format!("Save native rally manifest: {e:?}"))?;
+        crate::native_player_tracks::prepare_rally_index(
+            state,
+            &request.project_id,
+            &request.video,
+            &request.replay_id,
+            &run_id,
+        )?;
         Ok(manifest)
     })();
     match result {
