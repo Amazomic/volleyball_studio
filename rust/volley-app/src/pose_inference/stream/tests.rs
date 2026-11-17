@@ -124,12 +124,12 @@ fn streamed_pose_manifest_is_published_only_after_verified_fusion() {
     let (pending, fusion) = fake_pending();
     let folder = pending.artifact.folder.clone();
     let cancelled = AtomicBool::new(false);
-    let manifest = pending.publish(&fusion, true, &cancelled).unwrap();
+    let manifest = pending.publish(&fusion, &cancelled).unwrap();
     assert_eq!(manifest["schema"], "volley-native-gpu-pose/1");
     assert_eq!(manifest["source_fusion_sha256"], fusion["sha256"]);
     assert_eq!(manifest["decoded_frames"], 22);
     assert_eq!(manifest["sampled_frames"], 1);
-    assert_eq!(manifest["interpolate_pose"], true);
+    assert!(manifest.get("interpolate_pose").is_none());
     assert_eq!(
         manifest["sha256"],
         format!(
@@ -153,7 +153,7 @@ fn mismatched_fusion_and_cancelled_pose_are_not_published() {
     fusion["source_identity"]["mtime_ns"] = json!(901);
     let cancelled = AtomicBool::new(false);
     assert!(pending
-        .publish(&fusion, true, &cancelled)
+        .publish(&fusion, &cancelled)
         .unwrap_err()
         .contains("fusion identity"));
     assert!(!folder.exists());
@@ -161,7 +161,7 @@ fn mismatched_fusion_and_cancelled_pose_are_not_published() {
     let folder = pending.artifact.folder.clone();
     cancelled.store(true, Ordering::Release);
     assert_eq!(
-        pending.publish(&fusion, true, &cancelled).unwrap_err(),
+        pending.publish(&fusion, &cancelled).unwrap_err(),
         "cancelled"
     );
     assert!(!folder.exists());

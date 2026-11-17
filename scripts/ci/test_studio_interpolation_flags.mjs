@@ -24,18 +24,18 @@ const boxes={
 };
 const state={saved:null};
 const context={
-  $:id=>boxes[id],inputValue:id=>values[id],
+  $:id=>boxes[id]??{value:""},inputValue:id=>values[id],
   ui:{analysis:{querySelectorAll:()=>[boxes["studio-gpu-interpolate-players"],boxes["studio-gpu-interpolate-pose"]]},video:{value:"clip.mp4"}},
   projectId:()=>"abc123def456",
   analysisFormCache:{write:(project,video,fields)=>{state.saved={project,video,fields};},
     read:()=>({video:state.saved?.video,fields:state.saved?.fields})}
 };
-runInNewContext(slice("  const gpuProfile=()","  // Mirrors volley-core")+
+runInNewContext(slice("  const gpuProfile=()","  const allProfileFields=()")+
   slice("  const allProfileFields=()","  const selectedGpuSource=()")+
-  "\nthis.api={gpuProfile,saveAnalysisSettings,restoreAnalysisSettings,fieldValue,applyFieldValue};",context);
+  "\nthis.api={gpuProfile,postProfile,saveAnalysisSettings,restoreAnalysisSettings,fieldValue,applyFieldValue};",context);
 const api=context.api;
-assert.equal(api.gpuProfile().interpolate_players,true);
-assert.equal(api.gpuProfile().interpolate_pose,true);
+assert.equal(api.postProfile().interpolate_players,true);
+assert.equal(api.postProfile().interpolate_pose,true);
 assert.equal(api.gpuProfile().pose_stride,10);
 assert.ok(html.indexOf('id="studio-gpu-interpolate-players"')>html.indexOf('id="studio-post-heading"'));
 boxes["studio-gpu-interpolate-players"].checked=false;
@@ -44,11 +44,13 @@ assert.equal(state.saved.fields["studio-gpu-interpolate-players"][1],"0");
 assert.ok(!("studio-gpu-interpolate-pose" in state.saved.fields));
 boxes["studio-gpu-interpolate-players"].checked=true;
 api.restoreAnalysisSettings("abc123def456");
-assert.equal(api.gpuProfile().interpolate_players,false);
-assert.equal(api.gpuProfile().interpolate_pose,true);
+assert.equal(api.postProfile().interpolate_players,false);
+assert.equal(api.postProfile().interpolate_pose,true);
 boxes["studio-gpu-interpolate-players"].checked=true;
 boxes["studio-gpu-interpolate-pose"].checked=false;
-const gpu=api.gpuProfile();
-assert.equal(gpu.interpolate_players,true);
-assert.equal(gpu.interpolate_pose,false);
+const post=api.postProfile();
+assert.equal(post.interpolate_players,true);
+assert.equal(post.interpolate_pose,false);
+assert.ok(!("interpolate_players" in api.gpuProfile()));
+assert.ok(!("interpolate_pose" in api.gpuProfile()));
 console.log("CPU player interpolation and pose-preview interpolation: defaults and saved settings OK");

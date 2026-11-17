@@ -284,8 +284,10 @@ const golden=JSON.parse(pipelineStarts()[0].options.body);
 assert.equal(golden.project_id,"1234abcdef01");
 assert.equal(golden.video,"rally.mp4");
 assert.equal(golden.mode,"full");
-assert.deepEqual(golden.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:8,pose_enabled:true,pose_mode:"photo",pose_stride:10,interpolate_players:true,interpolate_pose:true});
+assert.deepEqual(golden.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:8,pose_enabled:true,pose_mode:"photo",pose_stride:10});
 assert.equal(golden.post.pose_classification,true);
+assert.equal(golden.post.interpolate_players,true);
+assert.equal(golden.post.interpolate_pose,true);
 assert.equal(golden.post.tracking.min_player_score,0.25);
 assert.equal(golden.post.tracking.nms_iou,0.72);
 assert.equal(golden.post.tracking.min_track_observations,12);
@@ -307,7 +309,7 @@ a.nodes.get("studio-analysis-start").dispatch("click");
 await tick();
 assert.equal(pipelineStarts().length,2,"Second explicit pipeline launch only");
 const override=JSON.parse(pipelineStarts()[1].options.body);
-assert.deepEqual(override.gpu,{stride:3,gpu_memory_limit_mb:8192,cpu_threads:12,pose_enabled:true,pose_mode:"photo",pose_stride:10,interpolate_players:true,interpolate_pose:true});
+assert.deepEqual(override.gpu,{stride:3,gpu_memory_limit_mb:8192,cpu_threads:12,pose_enabled:true,pose_mode:"photo",pose_stride:10});
 assert.equal(override.post.tracking.min_player_score,0.25);
 a.nodes.get("studio-gpu-memory").value="-1";
 a.nodes.get("studio-gpu-memory").dispatch("input");
@@ -332,13 +334,15 @@ assert.equal(pipelineStarts().length,3,"GPU-only button must launch the pipeline
 const gpuOnly=JSON.parse(pipelineStarts()[2].options.body);
 assert.equal(gpuOnly.mode,"gpu");
 assert.equal(gpuOnly.post,undefined,"GPU-only must not include CPU settings");
-assert.deepEqual(gpuOnly.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:8,pose_enabled:true,pose_mode:"photo",pose_stride:10,interpolate_players:true,interpolate_pose:true});
+assert.deepEqual(gpuOnly.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:8,pose_enabled:true,pose_mode:"photo",pose_stride:10});
 a.nodes.get("studio-inference").value=JSON.stringify([
   "rally.mp4","fusion","b".repeat(32)]);
 a.window.dispatchEvent({type:"volley:chain-change",
   detail:{project_id:"1234abcdef01",video:"rally.mp4"}});
 await tick();
 assert.equal(a.nodes.get("studio-analysis-post-only").disabled,false);
+a.nodes.get("studio-gpu-interpolate-players").checked=false;
+a.nodes.get("studio-gpu-interpolate-pose").checked=false;
 a.nodes.get("studio-analysis-post-only").dispatch("click");
 await tick();
 assert.equal(pipelineStarts().length,4,"CPU-only button starts a separate pipeline");
@@ -346,6 +350,8 @@ const postOnly=JSON.parse(pipelineStarts()[3].options.body);
 assert.equal(postOnly.mode,"post");
 assert.equal(postOnly.source_analysis_id,"b".repeat(32));
 assert.equal(postOnly.gpu,undefined,"CPU-only must not request a new GPU run");
+assert.equal(postOnly.post.interpolate_players,false);
+assert.equal(postOnly.post.interpolate_pose,false);
 assert.equal(postOnly.post.tracking.max_gap_frames,90);
 assert.equal(postOnly.post.tracking.min_track_observations,12);
 assert.match(postOnly.client_request_id,/^[a-f0-9]{32}$/,

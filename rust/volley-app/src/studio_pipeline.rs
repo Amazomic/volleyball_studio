@@ -393,10 +393,6 @@ pub struct GpuProfile {
     /// Shared sampling interval for person detection and RTMPose at 30 FPS.
     /// The historical API name pose_stride is retained for saved profiles.
     pose_stride: usize,
-    #[serde(default = "default_interpolation_enabled")]
-    interpolate_players: bool,
-    #[serde(default = "default_interpolation_enabled")]
-    interpolate_pose: bool,
 }
 const fn default_interpolation_enabled() -> bool {
     true
@@ -410,14 +406,16 @@ impl Default for GpuProfile {
             pose_enabled: true,
             pose_mode: crate::pose_inference::PoseInputMode::Photo,
             pose_stride: volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES,
-            interpolate_players: true,
-            interpolate_pose: true,
         }
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PostProfile {
+    #[serde(default = "default_interpolation_enabled")]
+    interpolate_players: bool,
+    #[serde(default = "default_interpolation_enabled")]
+    interpolate_pose: bool,
     tracking: TrackingOptions,
     touches: TouchSettings,
     rallies: RallySettings,
@@ -430,6 +428,8 @@ fn default_pose_classification() -> bool {
 impl Default for PostProfile {
     fn default() -> Self {
         Self {
+            interpolate_players: true,
+            interpolate_pose: true,
             tracking: TrackingOptions::default(),
             touches: TouchSettings::default(),
             rallies: RallySettings::default(),
@@ -460,7 +460,7 @@ impl PipelineMode {
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "StartRequestWire")]
 pub struct StartRequest {
     project_id: String,
     video: String,
@@ -475,6 +475,63 @@ pub struct StartRequest {
     #[serde(default)]
     client_request_id: Option<String>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartRequestWire {
+    project_id: String,
+    video: String,
+    #[serde(default = "empty_profile")]
+    gpu: Value,
+    #[serde(default = "empty_profile")]
+    post: Value,
+    #[serde(default)]
+    mode: PipelineMode,
+    #[serde(default)]
+    source_analysis_id: Option<String>,
+    #[serde(default)]
+    client_request_id: Option<String>,
+}
+
+fn empty_profile() -> Value {
+    json!({})
+}
+
+fn decode_profiles(mut gpu: Value, mut post: Value) -> Result<(GpuProfile, PostProfile), String> {
+    let gpu_fields = gpu.as_object_mut().ok_or("GPU profile must be an object")?;
+    let post_fields = post
+        .as_object_mut()
+        .ok_or("CPU profile must be an object")?;
+    for key in ["interpolate_players", "interpolate_pose"] {
+        if let Some(value) = gpu_fields.remove(key) {
+            if !value.is_boolean() {
+                return Err(format!("Invalid legacy interpolation flag: {key}"));
+            }
+            post_fields.entry(key).or_insert(value);
+        }
+    }
+    Ok((
+        serde_json::from_value(gpu).map_err(|e| e.to_string())?,
+        serde_json::from_value(post).map_err(|e| e.to_string())?,
+    ))
+}
+
+impl TryFrom<StartRequestWire> for StartRequest {
+    type Error = String;
+
+    fn try_from(wire: StartRequestWire) -> Result<Self, Self::Error> {
+        let (gpu, post) = decode_profiles(wire.gpu, wire.post)?;
+        Ok(Self {
+            project_id: wire.project_id,
+            video: wire.video,
+            gpu,
+            post,
+            mode: wire.mode,
+            source_analysis_id: wire.source_analysis_id,
+            client_request_id: wire.client_request_id,
+        })
+    }
+}
+
 #[derive(Deserialize)]
 pub struct StatusQuery {
     project_id: String,
@@ -776,9 +833,6 @@ fn gpu_lineage_valid(
                     .pose_mode
                     .effective_stride(request.gpu.pose_stride)
             || pose["pose_mode"].as_str().unwrap_or("photo") != request.gpu.pose_mode.name()
-            || (saved["gpu_model_stack"] != requested_gpu_model_stack()
-                && pose["interpolate_players"].as_bool().unwrap_or(true)
-                    != request.gpu.interpolate_players)
             || pose["project_id"] != request.project_id
             || pose["video"] != request.video
             || pose["source_identity"] != *identity
@@ -843,7 +897,7 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
     };
     track["schema"] == "volley-native-cpu-tracking/1"
         && track["state"] == "provisional_tracklets_rebuilt"
-        && track["interpolated_positions_version"] == (if request.gpu.interpolate_players {
+        && track["interpolated_positions_version"] == (if request.post.interpolate_players {
             "bounded_same_track_3s_v2"
         } else {
             "disabled_v1"
@@ -852,7 +906,7 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
             || !request.gpu.pose_enabled
             || track["track_association_version"] == cpu_retrack::POSE_TRACK_ASSOCIATION_VERSION)
         && track["replay_id"] == replay
-        && track["interpolate_pose"].as_bool().unwrap_or(true) == request.gpu.interpolate_pose
+        && track["interpolate_pose"].as_bool().unwrap_or(true) == request.post.interpolate_pose
         && track["source_fusion_id"] == fusion
         && track["ball_selection_policy"] == "vballnet_only_v1"
         && track["project_id"] == request.project_id
@@ -911,12 +965,8 @@ fn compatible_version(saved: &Value, request: &StartRequest, identity: &Value) -
         && saved["gpu_model_stack"] == requested_gpu_model_stack()
         && saved["project_id"] == request.project_id
         && saved["video"] == request.video
-        && serde_json::from_value::<GpuProfile>(saved["profile"]["gpu"].clone())
-            .is_ok_and(|mut gpu| {
-                gpu.interpolate_players = request.gpu.interpolate_players;
-                gpu.interpolate_pose = request.gpu.interpolate_pose;
-                json!(gpu) == json!(request.gpu)
-            })
+        && decode_profiles(saved["profile"]["gpu"].clone(), empty_profile())
+            .is_ok_and(|(gpu, _)| json!(gpu) == json!(request.gpu))
         // Older pipeline status files can predate the source_identity field;
         // the fusion and both GPU manifests are always validated separately.
         && (saved["source_identity"].is_null() || saved["source_identity"] == *identity)
@@ -973,8 +1023,11 @@ fn find_reusable(
         }
         if saved["status"] == "complete"
             && saved["pipeline_complete"] == true
-            && saved["profile"]["post"]
-                == serde_json::to_value(&request.post).unwrap_or(Value::Null)
+            && decode_profiles(
+                saved["profile"]["gpu"].clone(),
+                saved["profile"]["post"].clone(),
+            )
+            .is_ok_and(|(_, post)| json!(post) == json!(request.post))
             && saved["court_revision"] == json!(court_revision)
             && cpu_lineage_valid(&project, request, &saved)
         {
@@ -1024,7 +1077,7 @@ fn selected_gpu(
             {
                 continue;
             }
-            let Ok(gpu) = serde_json::from_value::<GpuProfile>(saved["profile"]["gpu"].clone())
+            let Ok((gpu, _)) = decode_profiles(saved["profile"]["gpu"].clone(), empty_profile())
             else {
                 continue;
             };
@@ -1305,9 +1358,8 @@ async fn pipeline(
         }
         status["analysis_id"] = source["analysis_id"].clone();
         status["gpu_jobs"] = source["gpu_jobs"].clone();
-        status["profile"]["gpu"] = source["profile"]["gpu"].clone();
-        status["profile"]["gpu"]["interpolate_players"] = json!(request.gpu.interpolate_players);
-        status["profile"]["gpu"]["interpolate_pose"] = json!(request.gpu.interpolate_pose);
+        let (gpu, _) = decode_profiles(source["profile"]["gpu"].clone(), empty_profile())?;
+        status["profile"]["gpu"] = json!(gpu);
         status["gpu_reused"] = json!(true);
         status["reused_from_id"] = source["id"].clone();
         save(path, status)?;
@@ -1549,7 +1601,7 @@ async fn pipeline(
                 }
                 // Pose evidence is invisible to reuse until its detector
                 // source and SHA-bound fusion are both immutable and verified.
-                let pose = pending.publish(&fusion, request.gpu.interpolate_pose, cancel)?;
+                let pose = pending.publish(&fusion, cancel)?;
                 status["gpu_jobs"]["pose"] = pose["pose_run_id"].clone();
                 save(path, status)?;
                 log_event(
@@ -1587,8 +1639,7 @@ async fn pipeline(
                     "stride":request.gpu.pose_stride,
                     "box_source":"observed_detector_only",
                     "threads":request.gpu.cpu_threads,
-                    "gpu_memory_limit_mb":request.gpu.gpu_memory_limit_mb,
-                    "interpolate_pose":request.gpu.interpolate_pose}),
+                    "gpu_memory_limit_mb":request.gpu.gpu_memory_limit_mb}),
         )?;
         let _permit = app
             .inference_limit
@@ -1603,7 +1654,6 @@ async fn pipeline(
                 &fusion_id,
                 request.gpu.gpu_memory_limit_mb,
                 request.gpu.cpu_threads,
-                request.gpu.interpolate_pose,
                 cancel,
                 |_, p| {
                     progress(
@@ -1646,10 +1696,8 @@ async fn pipeline(
             video: request.video.clone(),
             fusion_id,
             settings: Some(request.post.tracking),
-            interpolate_pose: request.gpu.interpolate_pose,
-            interpolate_players: status["profile"]["gpu"]["interpolate_players"]
-                .as_bool()
-                .unwrap_or(true),
+            interpolate_pose: request.post.interpolate_pose,
+            interpolate_players: request.post.interpolate_players,
         },
         cpu_retrack::process,
     )
@@ -2059,8 +2107,13 @@ pub async fn start(
                         || previous["video"] != request.video
                         || previous["mode"] != json!(request.mode)
                         || previous["source_analysis_id"] != json!(request.source_analysis_id)
-                        || previous["profile"]["gpu"] != json!(request.gpu)
-                        || previous["profile"]["post"] != json!(request.post)
+                        || !decode_profiles(
+                            previous["profile"]["gpu"].clone(),
+                            previous["profile"]["post"].clone(),
+                        )
+                        .is_ok_and(|(gpu, post)| {
+                            json!(gpu) == json!(request.gpu) && json!(post) == json!(request.post)
+                        })
                     {
                         return Err(storage::conflict("Идентификатор запроса уже использован"));
                     }
@@ -2414,6 +2467,27 @@ mod tests {
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .any(|event| event["kind"] == "stage_start"
                 && event["stage"] == "Проверка исходного видео"));
+        let mut legacy = failed.clone();
+        for key in ["interpolate_players", "interpolate_pose"] {
+            legacy["profile"]["post"]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            legacy["profile"]["gpu"][key] = json!(true);
+        }
+        storage::write_json_atomic(&path, &legacy).unwrap();
+        let Json(recovered) = start(State(state.clone()), HeaderMap::new(), Json(request()))
+            .await
+            .unwrap();
+        assert_eq!(recovered["id"], queued["id"]);
+        assert_eq!(recovered["recovered"], true);
+        let mut different = request();
+        different.post.interpolate_pose = false;
+        assert!(
+            start(State(state.clone()), HeaderMap::new(), Json(different))
+                .await
+                .is_err()
+        );
         let mut unowned = request();
         unowned.video = "unowned.mp4".into();
         unowned.client_request_id = None;
@@ -2483,32 +2557,72 @@ mod tests {
     }
 
     #[test]
-    fn gpu_interpolation_options_default_to_legacy_behavior_and_remain_independent() {
-        let original: GpuProfile = serde_json::from_value(json!({
-            "stride":9,"pose_stride":3,"pose_enabled":true,
-            "cpu_threads":8,"gpu_memory_limit_mb":0
-        }))
-        .unwrap();
+    fn interpolation_profile_migrates_legacy_and_prefers_explicit_cpu_values() {
+        for (input, players, pose) in [
+            (
+                json!({"gpu":{"interpolate_players":false,"interpolate_pose":false}}),
+                false,
+                false,
+            ),
+            (
+                json!({"gpu":{"interpolate_players":false,"interpolate_pose":false},
+                    "post":{"interpolate_players":true}}),
+                true,
+                false,
+            ),
+            (
+                json!({"post":{"interpolate_players":false,"interpolate_pose":true}}),
+                false,
+                true,
+            ),
+            (json!({}), true, true),
+        ] {
+            let mut input = input;
+            input["project_id"] = json!("abc123def456");
+            input["video"] = json!("match.mp4");
+            let request: StartRequest = serde_json::from_value(input).unwrap();
+            let output = json!(request);
+            assert_eq!(output["post"]["interpolate_players"], players);
+            assert_eq!(output["post"]["interpolate_pose"], pose);
+            assert!(output["gpu"].get("interpolate_players").is_none());
+            assert!(output["gpu"].get("interpolate_pose").is_none());
+        }
+    }
+
+    #[test]
+    fn interpolation_profiles_reject_invalid_flags_and_unknown_fields() {
+        for fields in [
+            json!({"gpu":{"interpolate_pose":"false"}}),
+            json!({"post":{"interpolate_players":null}}),
+            json!({"post":{"interpolate_pose":0}}),
+            json!({"gpu":{"unknown":true}}),
+            json!({"post":{"unknown":true}}),
+            json!({"unknown":true}),
+        ] {
+            let mut fields = fields;
+            fields["project_id"] = json!("abc123def456");
+            fields["video"] = json!("match.mp4");
+            assert!(serde_json::from_value::<StartRequest>(fields).is_err());
+        }
+    }
+
+    #[test]
+    fn cpu_interpolation_options_default_on_and_remain_independent() {
+        let original = PostProfile::default();
         assert!(original.interpolate_players);
         assert!(original.interpolate_pose);
-        assert_eq!(
-            original.pose_mode,
-            crate::pose_inference::PoseInputMode::Photo
-        );
-        assert_eq!(original.pose_mode.effective_stride(original.pose_stride), 3);
-        let changed: GpuProfile = serde_json::from_value(json!({
+        let changed: PostProfile = serde_json::from_value(json!({
             "interpolate_players":false,"interpolate_pose":true
         }))
         .unwrap();
         assert!(!changed.interpolate_players);
         assert!(changed.interpolate_pose);
-        let other: GpuProfile = serde_json::from_value(json!({
+        let other: PostProfile = serde_json::from_value(json!({
             "interpolate_players":true,"interpolate_pose":false
         }))
         .unwrap();
         assert!(other.interpolate_players);
         assert!(!other.interpolate_pose);
-        assert_ne!(json!(other), json!(changed));
     }
 
     #[test]
@@ -2522,7 +2636,6 @@ mod tests {
             profile.pose_mode,
             crate::pose_inference::PoseInputMode::Photo
         );
-        assert!(profile.interpolate_players);
     }
 
     #[test]
@@ -2565,9 +2678,9 @@ mod tests {
             "source_identity":identity
         });
         assert!(compatible_version(&saved, &request, &identity));
-        request.gpu.interpolate_players = false;
+        request.post.interpolate_players = false;
         assert!(compatible_version(&saved, &request, &identity));
-        request.gpu.interpolate_pose = false;
+        request.post.interpolate_pose = false;
         assert!(compatible_version(&saved, &request, &identity));
     }
 
@@ -2796,6 +2909,30 @@ mod branching_tests {
             "unchanged settings must reuse both versions"
         );
         assert!(compatible_version(&saved, &request, &identity));
+        let mut old_profile = saved.clone();
+        for key in ["interpolate_players", "interpolate_pose"] {
+            old_profile["profile"]["post"]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            old_profile["profile"]["gpu"][key] = json!(true);
+        }
+        storage::write_json_atomic(&directory.join("status.json"), &old_profile).unwrap();
+        assert!(find_reusable(&state, &request, &identity, &"2".repeat(32))
+            .full
+            .is_some());
+        assert!(selected_gpu(&state, &request, &identity, &analysis).is_ok());
+        for (players, pose) in [(false, true), (true, false), (false, false)] {
+            request.post.interpolate_players = players;
+            request.post.interpolate_pose = pose;
+            let changed = find_reusable(&state, &request, &identity, &"2".repeat(32));
+            assert!(changed.full.is_none());
+            assert!(changed.gpu.is_some());
+            assert!(!cpu_lineage_valid(&project_dir, &request, &saved));
+        }
+        request.post.interpolate_players = true;
+        request.post.interpolate_pose = true;
+        storage::write_json_atomic(&directory.join("status.json"), &saved).unwrap();
         let mut legacy = saved.clone();
         legacy["gpu_model_stack"] = json!("vballnet_rtmdet_rtmpose_tiled_coco17_v3");
         assert!(!compatible_version(&legacy, &request, &identity));

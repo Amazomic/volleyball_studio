@@ -278,7 +278,6 @@ impl PendingPose {
     pub(crate) fn publish(
         mut self,
         fusion: &Value,
-        interpolate_pose: bool,
         cancelled: &AtomicBool,
     ) -> Result<Value, String> {
         if cancelled.load(Ordering::Acquire) {
@@ -326,7 +325,6 @@ impl PendingPose {
             "box_source_version":"detector_observed_sampling_v1",
             "source_person_sampling_period_frames":self.sample_stride,
             "interpolate_players":false,
-            "interpolate_pose":interpolate_pose,
             "file":POSE_FILE,
             "sha256":self.checksum,
             "decode_pipeline":"shared_primary_v1"

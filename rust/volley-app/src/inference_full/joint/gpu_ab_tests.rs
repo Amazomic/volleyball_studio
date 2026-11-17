@@ -307,7 +307,6 @@ fn real_uu_match_gpu_ab_legacy_vs_shared() -> Result<(), String> {
             .ok_or("Old fusion ID missing")?,
         memory,
         threads,
-        true,
         &abort,
         |_, _| Ok(()),
     )?;
@@ -338,7 +337,7 @@ fn real_uu_match_gpu_ab_legacy_vs_shared() -> Result<(), String> {
     let shared_pose = joint
         .pending_pose
         .ok_or("Joint GPU failed to produce pose evidence")?
-        .publish(&shared_fusion, true, &abort)?;
+        .publish(&shared_fusion, &abort)?;
     let shared_time = start.elapsed().as_secs_f64();
     println!("AB SHARED seconds={shared_time:.3} backend={:?} frames={} windows={} people={} pose_samples={}",
         joint.backend,joint.decoded_frames,joint.windows,

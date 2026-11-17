@@ -209,12 +209,12 @@
       cpu_threads:inputValue("studio-gpu-threads"),
       pose_enabled:$("studio-gpu-pose-enabled").value==="1",
       pose_mode:"photo",
-      pose_stride:inputValue("studio-gpu-person-stride"),
-      interpolate_players:$("studio-gpu-interpolate-players").checked,
-      interpolate_pose:$("studio-gpu-interpolate-pose").checked
+      pose_stride:inputValue("studio-gpu-person-stride")
   });
   // Mirrors volley-core's validated native defaults (no JS-only processing).
   const postProfile=()=>({
+    interpolate_players:$("studio-gpu-interpolate-players").checked,
+    interpolate_pose:$("studio-gpu-interpolate-pose").checked,
     pose_classification:$("studio-post-pose-classify").value==="1",
     tracking:{
       min_player_score:inputValue("studio-post-player-score"),

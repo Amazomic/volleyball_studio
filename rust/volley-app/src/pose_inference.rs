@@ -175,7 +175,6 @@ pub fn process(
     fusion_id: &str,
     memory_mb: u64,
     threads: usize,
-    interpolate_pose: bool,
     cancel: &AtomicBool,
     mut on_progress: impl FnMut(&'static str, f64) -> Result<(), String>,
 ) -> Result<Value, String> {
@@ -360,7 +359,6 @@ pub fn process(
             "box_source_version":"detector_observed_sampling_v1",
             "source_person_sampling_period_frames":stride,
             "interpolate_players":false,
-            "interpolate_pose":interpolate_pose,
             "file":POSE_FILE, "sha256":format!("{:x}",checksum.finalize())
         });
         crate::storage::write_json_atomic(&output.join("manifest.json"), &pose_manifest)
