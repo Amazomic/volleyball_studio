@@ -1,7 +1,7 @@
 //! Explicit reviewed game-action labels for SHA-verified native Touch events.
 //! No automatically inferred attack, serve or block; no identity promotion.
 use crate::{
-    native_rally_preview::{self, NativeMotion, ValidatedRun},
+    native_rally_evidence::{self, NativeMotion, ValidatedRun},
     project_guard, projects,
     storage::{self, safe_folder, ApiError, ApiResult, BoundedReader},
     versioned_store::{self, revision},
@@ -180,8 +180,13 @@ fn response(
 }
 fn handle(state: &AppState, req: &ReviewRequest) -> Result<Value, ApiError> {
     let _guard = project_guard::write_guard(state, &req.project_id)?;
-    native_rally_preview::verify_run_or_candidate(state, &req.project_id, &req.rally_run_id, None)?;
-    let run = native_rally_preview::inspect_project(state, &req.project_id, &req.rally_run_id)?;
+    native_rally_evidence::verify_run_or_candidate(
+        state,
+        &req.project_id,
+        &req.rally_run_id,
+        None,
+    )?;
+    let run = native_rally_evidence::inspect_project(state, &req.project_id, &req.rally_run_id)?;
     let file = path_for(state, &run).map_err(storage::bad_request)?;
     let before = versioned_store::read_optional_bounded(&file, MAX_DOC_BYTES)
         .map_err(storage::bad_request)?;

@@ -589,14 +589,14 @@ pub(crate) fn refine_leading_ball(
     discovery_id: &str,
 ) -> Result<Value, ApiError> {
     let run =
-        crate::native_rally_preview::inspect_project(state, &request.project_id, discovery_id)?;
+        crate::native_rally_evidence::inspect_project(state, &request.project_id, discovery_id)?;
     if run.replay_id != request.replay_id || run.video != request.video {
         return Err(storage::bad_request(
             "Leading-ball boundaries belong to another replay",
         ));
     }
     let windows =
-        crate::native_rally_preview::verified_track_windows(&run).map_err(storage::bad_request)?;
+        crate::native_rally_evidence::verified_track_windows(&run).map_err(storage::bad_request)?;
     let mut starts = vec![0];
     starts.extend(
         windows

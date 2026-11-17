@@ -1,7 +1,7 @@
 //! Source-verified game report: rank long, eventful rallies and append a
 //! human-review-only athlete statistics slate. No Track ID guesses or proxy pixels.
 use crate::{
-    montage, native_action_review, native_player_tracks, native_rally_preview, project_guard,
+    montage, native_action_review, native_player_tracks, native_rally_evidence, project_guard,
     projects,
     storage::{self, ApiError, ApiResult},
     AppState,
@@ -91,13 +91,13 @@ fn report_plan(state: &AppState, req: &ReportRequest) -> Result<ReportPlan, ApiE
     let mut ids = req.rally_run_ids.clone();
     ids.sort();
     for id in &ids {
-        let run = native_rally_preview::inspect_project(state, &req.project_id, id)?;
+        let run = native_rally_evidence::inspect_project(state, &req.project_id, id)?;
         if !videos.insert(run.video.clone()) {
             return Err(storage::bad_request(
                 "Нельзя смешивать CPU-версии одного видео",
             ));
         }
-        let raw = native_rally_preview::verified_quick_rally_candidates(&run)
+        let raw = native_rally_evidence::verified_quick_rally_candidates(&run)
             .map_err(storage::bad_request)?;
         for (candidate_id, start, end, touches, coverage) in raw {
             let seconds = (end - start + 1) as f64 / 30.0;
@@ -188,7 +188,7 @@ fn report_plan(state: &AppState, req: &ReportRequest) -> Result<ReportPlan, ApiE
             .get(&row.run_id)
             .ok_or_else(|| storage::internal("Missing CPU source"))?;
         let Some(clip) =
-            native_rally_preview::verified_manual_clips(run, vec![row.candidate_id.clone()])
+            native_rally_evidence::verified_manual_clips(run, vec![row.candidate_id.clone()])
                 .map_err(storage::bad_request)?
                 .into_iter()
                 .next()
@@ -212,7 +212,7 @@ fn report_plan(state: &AppState, req: &ReportRequest) -> Result<ReportPlan, ApiE
                 .iter()
                 .map(|i| clips[*i].clone())
                 .collect::<Vec<_>>();
-            let derived = native_rally_preview::verified_camera_tracks(state, run, &subset)
+            let derived = native_rally_evidence::verified_camera_tracks(state, run, &subset)
                 .map_err(storage::bad_request)?;
             for (i, track) in indices.into_iter().zip(derived) {
                 by_clip[i] = track;
@@ -315,8 +315,7 @@ pub async fn report(
         .filter_map(|source| source["rally_run_id"].as_str().map(str::to_owned))
         .collect();
     let materials =
-        crate::native_rally_preview::material_bindings(state.clone(), project_id.clone(), runs)
-            .await?;
+        crate::montage_material::material_bindings(state.clone(), project_id.clone(), runs).await?;
     let Json(job) = montage::start_native_montage(
         State(state),
         headers,

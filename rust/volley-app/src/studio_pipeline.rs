@@ -1932,7 +1932,7 @@ async fn perform(
         let app = state.clone();
         let project = request.project_id.clone();
         match tokio::task::spawn_blocking(move || {
-            crate::native_rally_preview::publish_material(&app, &project, &rally)
+            crate::montage_material::publish_material(&app, &project, &rally)
         })
         .await
         {

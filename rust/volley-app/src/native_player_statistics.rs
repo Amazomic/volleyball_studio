@@ -3,7 +3,7 @@
 //! Unresolved Track IDs remain diagnostics, not new report players.
 use crate::{
     native_player_tracks::{self, NativeReviewedOwners},
-    native_rally_preview::{self, NativeMotion, ValidatedRun},
+    native_rally_evidence::{self, NativeMotion, ValidatedRun},
     project_guard, projects,
     storage::{self, safe_file, ApiError, ApiResult, BoundedReader},
     versioned_store::{self, revision},
@@ -75,7 +75,7 @@ fn count_native_contacts(
     run: &ValidatedRun,
     replay_file: &Path,
     owners: &NativeReviewedOwners,
-    windows: &native_rally_preview::RallyWindows,
+    windows: &native_rally_evidence::RallyWindows,
 ) -> Result<ContactCounts, String> {
     if owners.source_sha != run.replay_sha {
         return Err("Player review source differs from Touch's CPU Track ID snapshot".into());
@@ -148,7 +148,7 @@ fn count_native_contacts(
                     event.body_contact_supported && event.contact_landmark.is_some();
                 let interval = windows.intervals.partition_point(|(_, end)| *end < frame);
                 let mut outside = BTreeMap::new();
-                let final_touch = native_rally_preview::finalize_touch(
+                let final_touch = native_rally_evidence::finalize_touch(
                     event,
                     windows.contains(frame),
                     windows.contexts.get(&frame),
@@ -228,7 +228,7 @@ pub(crate) fn verified_contacts_for_montage(
     let replay =
         safe_file(&root, "tracked_frames.jsonl", MAX_SOURCE).map_err(storage::bad_request)?;
     let windows =
-        native_rally_preview::verified_track_windows(run).map_err(storage::bad_request)?;
+        native_rally_evidence::verified_track_windows(run).map_err(storage::bad_request)?;
     let counts =
         count_native_contacts(run, &replay, owners, &windows).map_err(storage::bad_request)?;
     debug_assert_eq!(counts.touches as usize, counts.montage_contacts.len());
@@ -269,14 +269,17 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
     let mut sources = Vec::new();
     let mut track_breakdown = Vec::new();
     for input in &request.sources {
-        native_rally_preview::verify_run_or_candidate(
+        native_rally_evidence::verify_run_or_candidate(
             state,
             &request.project_id,
             &input.rally_run_id,
             None,
         )?;
-        let run =
-            native_rally_preview::inspect_project(state, &request.project_id, &input.rally_run_id)?;
+        let run = native_rally_evidence::inspect_project(
+            state,
+            &request.project_id,
+            &input.rally_run_id,
+        )?;
         if !select_unique_video(&mut selected, &run.video) {
             return Err(storage::conflict(
                 "Do not double-count multiple CPU revisions of one video",
@@ -316,7 +319,7 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
         let replay =
             safe_file(&root, "tracked_frames.jsonl", MAX_SOURCE).map_err(storage::bad_request)?;
         let windows =
-            native_rally_preview::verified_track_windows(&run).map_err(storage::bad_request)?;
+            native_rally_evidence::verified_track_windows(&run).map_err(storage::bad_request)?;
         rallies += run.expected_rallies;
         let subtotal = count_native_contacts(&run, &replay, &owners, &windows)
             .map_err(storage::bad_request)?;
@@ -467,7 +470,7 @@ pub(crate) fn rally_report_counts(
     let replay =
         safe_file(&root, "tracked_frames.jsonl", MAX_SOURCE).map_err(storage::bad_request)?;
     let windows =
-        native_rally_preview::verified_track_windows(run).map_err(storage::bad_request)?;
+        native_rally_evidence::verified_track_windows(run).map_err(storage::bad_request)?;
     let counts =
         count_native_contacts(run, &replay, owners, &windows).map_err(storage::bad_request)?;
     let mut result = BTreeMap::<String, (u64, u64, u64)>::new();
@@ -727,7 +730,7 @@ mod tests {
             &run,
             &replay,
             &owners,
-            &native_rally_preview::RallyWindows {
+            &native_rally_evidence::RallyWindows {
                 intervals: vec![(0, 79)],
                 contexts: BTreeMap::new(),
             },
@@ -762,7 +765,7 @@ mod tests {
             &run,
             &replay,
             &owners,
-            &native_rally_preview::RallyWindows {
+            &native_rally_evidence::RallyWindows {
                 intervals: vec![(0, 79)],
                 contexts: BTreeMap::new(),
             },
@@ -775,7 +778,7 @@ mod tests {
             &run,
             &replay,
             &owners,
-            &native_rally_preview::RallyWindows {
+            &native_rally_evidence::RallyWindows {
                 intervals: vec![(0, 79)],
                 contexts: BTreeMap::new(),
             },
@@ -791,7 +794,7 @@ mod tests {
     fn final_rally_context_is_shared_by_statistics_and_montage() {
         use volley_core::action_prediction::ActionKind;
         let (root, run, replay, owners) = fixture();
-        let scope = native_rally_preview::RallyWindows {
+        let scope = native_rally_evidence::RallyWindows {
             intervals: vec![(0, 79)],
             contexts: BTreeMap::from([
                 (10, (Some(7), true, None)),
@@ -815,7 +818,7 @@ mod tests {
     #[test]
     fn stats_exclude_touches_between_rallies_without_skipping_source_validation() {
         let (root, run, replay, owners) = fixture();
-        let scope = native_rally_preview::RallyWindows {
+        let scope = native_rally_evidence::RallyWindows {
             intervals: vec![(8, 22), (48, 53)],
             contexts: BTreeMap::new(),
         };
@@ -854,7 +857,7 @@ mod tests {
             &run,
             &replay,
             &owners,
-            &native_rally_preview::RallyWindows {
+            &native_rally_evidence::RallyWindows {
                 intervals: vec![(0, 79)],
                 contexts: BTreeMap::new(),
             },
@@ -897,7 +900,7 @@ mod tests {
             &run,
             &replay,
             &owners,
-            &native_rally_preview::RallyWindows {
+            &native_rally_evidence::RallyWindows {
                 intervals: vec![(0, 79)],
                 contexts: BTreeMap::new(),
             },
@@ -981,7 +984,7 @@ mod tests {
             &run,
             &replay,
             &owners,
-            &native_rally_preview::RallyWindows {
+            &native_rally_evidence::RallyWindows {
                 intervals: vec![(8, 22), (48, 53)],
                 contexts: BTreeMap::new(),
             },

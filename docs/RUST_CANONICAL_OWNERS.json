@@ -230,6 +230,8 @@
                         "status":  "partial",
                         "adapters":  [
                                          "rust/volley-app/src/rallies.rs",
+                                         "rust/volley-app/src/native_rally_evidence.rs",
+                                         "rust/volley-app/src/native_rally_evidence/camera.rs",
                                          "rust/volley-app/src/cpu_rallies.rs",
                                          "rust/volley-app/src/native_rally_preview.rs",
                                          "rust/volley-app/src/native_preview_overlay.rs",
@@ -304,6 +306,7 @@
                         "status":  "partial",
                         "adapters":  [
                                          "rust/volley-app/src/montage.rs",
+                                         "rust/volley-app/src/montage_material.rs",
                                          "rust/volley-app/src/player_montage.rs",
                                          "rust/volley-app/src/native_rally_preview.rs",
                                          "rust/volley-app/src/rallies.rs",

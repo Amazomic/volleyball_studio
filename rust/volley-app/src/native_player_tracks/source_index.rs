@@ -289,7 +289,7 @@ pub(super) fn index_rally_replay(
     expected_sha: &str,
     frames: u64,
     rally_sha: &str,
-    windows: &crate::native_rally_preview::RallyWindows,
+    windows: &crate::native_rally_evidence::RallyWindows,
 ) -> Result<(TrackObservations, TrackObservations), String> {
     let (selected, full) =
         index_with_scope(path, expected_sha, frames, Some((rally_sha, windows)))?;
@@ -303,7 +303,7 @@ fn index_with_scope(
     path: &Path,
     expected_sha: &str,
     frames: u64,
-    scope: Option<(&str, &crate::native_rally_preview::RallyWindows)>,
+    scope: Option<(&str, &crate::native_rally_evidence::RallyWindows)>,
 ) -> Result<(TrackObservations, Option<TrackObservations>), String> {
     if frames == 0 || frames > 48 * 3600 * 30 || !valid_sha(expected_sha) {
         return Err("Unsupported native track replay length or SHA-256".into());
@@ -563,7 +563,7 @@ fn scan_with_scope(
     path: &Path,
     expected_sha: &str,
     frames: u64,
-    windows: Option<&crate::native_rally_preview::RallyWindows>,
+    windows: Option<&crate::native_rally_evidence::RallyWindows>,
 ) -> Result<(TrackObservations, Option<TrackObservations>), String> {
     let mut reader = BoundedReader::open(path)?;
     let mut full = BTreeMap::<u64, Aggregate>::new();
@@ -807,14 +807,14 @@ pub(super) fn source_for_rallies(
     let Some(run_id) = rally_run_id else {
         return source(state, project_id, video, replay_id);
     };
-    let run = crate::native_rally_preview::inspect_project(state, project_id, run_id)?;
+    let run = crate::native_rally_evidence::inspect_project(state, project_id, run_id)?;
     if run.replay_id != replay_id || run.video != video {
         return Err(storage::bad_request(
             "Selected rally version does not match CPU Track ID source",
         ));
     }
     let windows =
-        crate::native_rally_preview::verified_track_windows(&run).map_err(storage::bad_request)?;
+        crate::native_rally_evidence::verified_track_windows(&run).map_err(storage::bad_request)?;
     let replay_dir = projects::project_root(state)
         .join(project_id)
         .join("native_cpu_replays")
@@ -910,7 +910,7 @@ mod rally_scope_tests {
         let (full, secondary) = scan_with_scope(&path, &sha, 48, None).unwrap();
         assert!(secondary.is_none());
         assert_eq!(full.len(), 4);
-        let windows = crate::native_rally_preview::RallyWindows {
+        let windows = crate::native_rally_evidence::RallyWindows {
             intervals: vec![(12, 20), (40, 44)],
             contexts: std::collections::BTreeMap::new(),
         };
@@ -1181,7 +1181,7 @@ mod persistent_index_tests {
         TRACK_INDICES.get().unwrap().lock().unwrap().clear();
         assert_eq!(index_replay(&path, &sha, 3).unwrap()[&7].observed, 3);
         let rally_sha = "b".repeat(64);
-        let windows = crate::native_rally_preview::RallyWindows {
+        let windows = crate::native_rally_evidence::RallyWindows {
             intervals: vec![(1, 2)],
             contexts: BTreeMap::new(),
         };
