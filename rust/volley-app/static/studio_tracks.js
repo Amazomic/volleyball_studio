@@ -623,29 +623,56 @@
       !state.projectPlayerIds.has(playerId))return;
     const scope={project_id:state.project,player_id:playerId,video:state.video,
       replay_id:state.replay,rally_run_id:state.rallyRun,
-      photo_index:state.photoIndices.get(ids[0])||0,expected_source_sha256:state.sourceSha};
+      expected_source_sha256:state.sourceSha};
+    // Preserve the selected image for EVERY ID before the refresh removes
+    // its card. Different IDs in a ReID group often show different angles.
+    const samples=ids.map(trackId=>({
+      trackId,photoIndex:state.photoIndices.get(trackId)||0
+    }));
     if(!await edit("assign",ids,playerId))return;
     if(scope.project_id!==state.project||scope.replay_id!==state.replay)return;
     state.busy=true;unlock();
+    let saved=0,alreadySaved=0;
+    const failures=[];
     try{
       const album=await post("/api/players/native/references",{
         project_id:scope.project_id,player_id:playerId,action:"read"
       });
-      const existing=Array.isArray(album.photos)&&album.photos.some(photo=>
-        photo.project_id===scope.project_id&&photo.video===scope.video&&
-        photo.replay_id===scope.replay_id&&photo.track_id===ids[0]&&
-        photo.rally_run_id===scope.rally_run_id&&
-        (photo.photo_index||0)===scope.photo_index&&
-        photo.source_replay_sha256===scope.expected_source_sha256);
-      if(!existing)await post("/api/players/native/references",{
-        ...scope,action:"enroll",track_id:ids[0],expected_revision:album.revision
-      });
-      window.dispatchEvent(new Event("volley:player-photo-saved"));
-      if(scope.project_id===state.project&&scope.replay_id===state.replay)
-        note("Track ID привязаны, фото добавлено игроку.");
+      let revision=album.revision;
+      let photos=Array.isArray(album.photos)?album.photos:[];
+      for(const {trackId,photoIndex} of samples){
+        if(scope.project_id!==state.project||scope.replay_id!==state.replay)break;
+        const existing=photos.some(photo=>
+          photo.project_id===scope.project_id&&photo.video===scope.video&&
+          photo.replay_id===scope.replay_id&&photo.track_id===trackId&&
+          photo.rally_run_id===scope.rally_run_id&&
+          (photo.photo_index||0)===photoIndex&&
+          photo.source_replay_sha256===scope.expected_source_sha256);
+        if(existing){alreadySaved++;continue;}
+        try{
+          const updated=await post("/api/players/native/references",{
+            ...scope,action:"enroll",track_id:trackId,photo_index:photoIndex,
+            expected_revision:revision
+          });
+          // Each append changes the optimistic album revision.
+          revision=updated.revision;
+          photos=Array.isArray(updated.photos)?updated.photos:photos;
+          saved++;
+        }catch(error){
+          failures.push("ID "+trackId+": "+error.message);
+          // A missing crop must not block other group members.
+        }
+      }
+      if(saved)window.dispatchEvent(new Event("volley:player-photo-saved"));
+      if(scope.project_id===state.project&&scope.replay_id===state.replay){
+        const summary="Track ID привязаны. Сохранено фото: "+saved+
+          (alreadySaved?" · уже было: "+alreadySaved:"");
+        note(failures.length?summary+" · ошибки: "+failures.join("; "):summary,
+          failures.length>0);
+      }
     }catch(error){
       if(scope.project_id===state.project&&scope.replay_id===state.replay)
-        note("Track ID привязаны, но фото не сохранено: "+error.message,true);
+        note("Track ID привязаны, но фото не сохранены: "+error.message,true);
     }finally{state.busy=false;unlock();}
   };
   // Native appearance matches are only reviewed proposals, never athletes.
