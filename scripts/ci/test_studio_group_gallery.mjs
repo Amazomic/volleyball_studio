@@ -78,4 +78,15 @@ assert.equal(requests[0].body.action,"compare_photos");
 assert.equal(summary.photoCount,7);
 assert.equal(helperState.playerMatches["101"],undefined,"old suggestions are replaced");
 assert.equal(helperState.playerMatches["102"][0].cosine_similarity,.92);
-console.log("ReID photo/ID navigation, single-ID split, and refreshed photo matches: OK");
+const css=readFileSync(new URL("../../rust/volley-app/static/studio.css",import.meta.url),"utf8");
+assert.match(css,/#studio-players-view \.track-group-arrow-top\{left:8px;top:8px\}/,
+  "previous photo control stays in the upper-left corner");
+assert.match(css,/#studio-players-view \.track-group-arrow-bottom\{left:8px;top:52px\}/,
+  "next photo control stacks below it, away from the face");
+assert.match(css,/#studio-players-view \.track-group-arrow::before\{/,
+  "arrows use centered CSS chevrons instead of font glyph positioning");
+assert.match(css,/transition:scale \.18s ease/,
+  "photo navigation has a smooth hover/press animation");
+assert.match(css,/@media\(prefers-reduced-motion:reduce\)/,
+  "button animation respects reduced-motion preferences");
+console.log("ReID photo/ID navigation, controls layout, and refreshed photo matches: OK");
