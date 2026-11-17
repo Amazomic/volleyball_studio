@@ -2176,3 +2176,12 @@ Studio показывает кнопку перехода между debug и re
 - Первый параллельный cargo test workspace: 340 passed, 1 failed, 9 ignored в volley-app; runtime::tests::idle_or_busy_server_report_guards_graceful_shutdown получил дополнительный studio_analysis от другого теста. Последовательный cargo test --workspace --offline -- --test-threads=1: 654 passed, 0 failed, 17 ignored по workspace.
 - Имеющиеся test_studio_overlay_continuity.mjs и test_studio_raw_gpu_preview.mjs останавливаются на неполных заглушках ctx.save и setTimeout. Визуальная проверка заблокирована Computer Use: не удалось уверенно определить URL вкладки Brave. Реальный GPU/матч не запускался.
 - Release-сборка успешна; штатный /api/studio/restart отказался прерывать активную reid_processing (shutdown_safe=false). Для применения после её завершения нужен безопасный перезапуск Studio и обновление страницы.
+
+
+### 2026-11-17 — Аудит структуры: этап 1, UI и проверки
+
+- Удалены нераздаваемый studio_highlights.js и устаревший тест; покрытие перенесено на действующий studio_montage_builder.js с реальными HTML ID, профилями, SHA, музыкой, запуском, отменой и отказами превью. WSL fault-набор обновлён.
+- WASM-фикстура использует person_job_id/vball_job_id; PowerShell check-all передаёт ownership/roadmap self-test. Rust-код, форматы данных и алгоритмы не изменены.
+- Исполнитель: codex/audit-cleanup-stage-one, коммит 4fdecaa; база e709708. Интеграция в rust выполнена отдельно от ранее существовавших незакоммиченных правок. Подробности: docs/agent-runs/2026-11-17-audit-stage-one.md.
+- PASS: DOM, montage tab/builder, domain WASM, volley-web WASM, ownership/roadmap self-tests; фактические аргументы PowerShell-цикла, bash -n fault-набора, независимое ревью. Расширенный набор не зелёный: чистая база 54/70 PASS (все 16 FAIL повторены на исходном снимке); совмещённое дерево 54/71 PASS, 17 FAIL вне согласованных исправлений.
+- Rust fmt/check/test, GPU, реальные матчи и lifecycle NOT RUN: исполняемый Rust не менялся. WASM использован из существующей локальной сборки. Пересборка и перезапуск Studio не требуются: удалённый JS не был подключён/раздаваем. Остальные этапы ожидают отдельного согласования пользователя.
