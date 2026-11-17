@@ -696,6 +696,16 @@ pub async fn reid_review(
         .map_err(|e| storage::internal(format!("Automatic identity worker: {e}")))??;
         return Ok(Json(result));
     }
+    if req.action == "refresh_matches" {
+        let comparison =
+            super::photo_comparison::compare(state.clone(), headers, req.clone()).await?;
+        let result = tokio::task::spawn_blocking(move || {
+            save_photo_match_suggestions(&state, &req, &comparison)
+        })
+        .await
+        .map_err(|e| storage::internal(format!("Photo candidate refresh worker: {e}")))??;
+        return Ok(Json(result));
+    }
     if req.action == "compare_photos" {
         return Ok(Json(
             super::photo_comparison::compare(state, headers, req).await?,

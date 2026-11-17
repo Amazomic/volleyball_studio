@@ -967,6 +967,25 @@ pub(super) fn save_automatic_photo_links(
     req: &ReidReviewRequest,
     comparison: &Value,
 ) -> Result<Value, ApiError> {
+    persist_photo_comparison(state, req, comparison, true)
+}
+
+/// Save the ranked candidates without changing manual or automatic owners.
+/// This is used by the gallery's explicit refresh and survives page reloads.
+pub(super) fn save_photo_match_suggestions(
+    state: &AppState,
+    req: &ReidReviewRequest,
+    comparison: &Value,
+) -> Result<Value, ApiError> {
+    persist_photo_comparison(state, req, comparison, false)
+}
+
+fn persist_photo_comparison(
+    state: &AppState,
+    req: &ReidReviewRequest,
+    comparison: &Value,
+    auto_assign: bool,
+) -> Result<Value, ApiError> {
     if !state.writes_enabled {
         return Err(storage::conflict(
             "Automatic links require isolated writable storage",
@@ -1001,8 +1020,14 @@ pub(super) fn save_automatic_photo_links(
         req.rally_run_id.as_deref(),
     )?;
     let matches = &comparison["player_matches"];
-    let (updated, chosen) =
-        refresh_automatic_photo_links(&scoped, &doc, matches).map_err(storage::bad_request)?;
+    let chosen = if auto_assign {
+        let (updated, chosen) =
+            refresh_automatic_photo_links(&scoped, &doc, matches).map_err(storage::bad_request)?;
+        doc = updated;
+        chosen
+    } else {
+        BTreeMap::new()
+    };
     let (current_albums, reference_hashes) = reference_album_snapshot(state, &ctx)
         .ok_or_else(|| storage::conflict("Saved player reference photos changed"))?;
     if comparison["album_revisions"] != json!(current_albums) {
@@ -1010,7 +1035,6 @@ pub(super) fn save_automatic_photo_links(
             "Reference photo albums changed during automatic assignment",
         ));
     }
-    doc = updated;
     doc["automatic_identity_evidence"] = json!({
         "threshold":0.30, "matches":matches,
         "rally_run_id":req.rally_run_id,
@@ -1039,9 +1063,18 @@ pub(super) fn save_automatic_photo_links(
     versioned_store::write_json_checked(parent, &ctx.sidecar, &doc, MAX_LINKS)
         .map_err(storage::bad_request)?;
     let saved = existing(&ctx.sidecar).map_err(storage::bad_request)?;
-    Ok(
-        json!({"automatic_count":chosen.len(),"automatic_assignments":chosen,"unassigned_track_ids":unassigned,"identity_revision":revision(saved.as_deref()),"confirmed":false}),
-    )
+    if auto_assign {
+        Ok(
+            json!({"automatic_count":chosen.len(),"automatic_assignments":chosen,
+            "unassigned_track_ids":unassigned,
+            "identity_revision":revision(saved.as_deref()),"confirmed":false}),
+        )
+    } else {
+        let mut response = comparison.clone();
+        response["identity_revision"] = json!(revision(saved.as_deref()));
+        response["saved"] = json!(true);
+        Ok(response)
+    }
 }
 pub async fn read(
     State(state): State<Arc<AppState>>,
