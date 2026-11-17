@@ -3,6 +3,9 @@
 //! No project inference data, analysis proxy or Python worker may be reused.
 //! All writes require VOLLEY_RUST_DATA_ROOT outside the original checkout.
 
+#[cfg(test)]
+use crate::quick_reel_source::prepared_plan_for_quick_reel;
+use crate::quick_reel_source::{mtime, source_for, verify_source, Source, QUICK_ROOT};
 use crate::{
     cpu_rallies, cpu_retrack, cpu_touches, inference_full, inference_fusion, montage,
     native_rally_evidence, preparation,
@@ -16,7 +19,7 @@ use axum::{
     Json,
 };
 use fs2::FileExt;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::{
     collections::HashSet,
@@ -24,7 +27,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::sync::{watch, Mutex};
 use uuid::Uuid;
@@ -37,9 +40,7 @@ use pipeline::{best_quick_rallies, create_run_workspace, RankedRally};
 use volley_media::preparation::{PreparationPlan, PreparationReuse};
 
 const MAX_VIDEOS: usize = 30;
-const MAX_VIDEO_SIZE: u64 = 500 * 1024 * 1024 * 1024;
 const MAX_SELECTION_BYTES: u64 = 16 * 1024;
-const QUICK_ROOT: &str = "quick_reels";
 const MAX_BROWSER_UPLOAD: u64 = storage::MAX_BROWSER_VIDEO_BYTES;
 
 #[derive(Debug, Deserialize)]
@@ -84,16 +85,6 @@ impl QuickReelManager {
             current: Mutex::new(None),
         }
     }
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct Source {
-    id: String,
-    name: String,
-    source: String,
-    size: u64,
-    mtime_ns: u128,
-    #[serde(default)]
-    display_name: Option<String>,
 }
 #[derive(Clone)]
 struct PreparedRun {
@@ -165,82 +156,6 @@ fn ensure_write(state: &AppState) -> Result<(), ApiError> {
     } else {
         Ok(())
     }
-}
-fn safe_source(path: &str) -> Result<(PathBuf, fs::Metadata), ApiError> {
-    if path.is_empty() || path.len() > 4096 || path.contains('\0') {
-        return Err(storage::bad_request(
-            "Выберите реальный локальный видеофайл",
-        ));
-    }
-    let initial = Path::new(path);
-    if !initial.is_absolute() {
-        return Err(storage::bad_request(
-            "Ожидается абсолютный путь, выбранный проводником",
-        ));
-    }
-    let canonical = initial
-        .canonicalize()
-        .map_err(|_| storage::bad_request("Выбранный видеофайл не найден"))?;
-    if !canonical.is_file() {
-        return Err(storage::bad_request(
-            "Указанный путь не является видеофайлом",
-        ));
-    }
-    let name = canonical
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| storage::bad_request("Некорректное имя видео"))?;
-    storage::video_name(name)?;
-    let meta = fs::metadata(&canonical)
-        .map_err(|_| storage::bad_request("Нет доступа к метаданным видео"))?;
-    if meta.len() == 0 || meta.len() > MAX_VIDEO_SIZE {
-        return Err(storage::bad_request(
-            "Размер видео должен быть от 1 байта до 500 ГиБ",
-        ));
-    }
-    Ok((canonical, meta))
-}
-fn mtime(meta: &fs::Metadata) -> Result<u128, ApiError> {
-    meta.modified()
-        .ok()
-        .and_then(|v| v.duration_since(UNIX_EPOCH).ok())
-        .map(|v| v.as_nanos())
-        .ok_or_else(|| storage::bad_request("Не удалось прочитать время изменения файла"))
-}
-fn source_for(path: &str) -> Result<Source, ApiError> {
-    let (canonical, meta) = safe_source(path)?;
-    let probe = volley_media::probe(&canonical).map_err(storage::bad_request)?;
-    if probe.duration_sec < 0.1 || !probe.duration_sec.is_finite() {
-        return Err(storage::bad_request(
-            "Видео не содержит воспроизводимых кадров",
-        ));
-    }
-    Ok(Source {
-        id: Uuid::new_v4().simple().to_string(),
-        name: canonical
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned(),
-        source: canonical.to_string_lossy().into_owned(),
-        size: meta.len(),
-        mtime_ns: mtime(&meta)?,
-        display_name: None,
-    })
-}
-fn verify_source(item: &Source) -> Result<PathBuf, ApiError> {
-    if !is_id(&item.id) {
-        return Err(storage::bad_request("Неправильный ID выбранного видео"));
-    }
-    let (canonical, meta) = safe_source(&item.source)?;
-    if canonical.to_string_lossy() != item.source
-        || meta.len() != item.size
-        || mtime(&meta)? != item.mtime_ns
-        || canonical.file_name().and_then(|s| s.to_str()) != Some(item.name.as_str())
-    {
-        return Err(storage::conflict("Исходное видео изменилось после выбора"));
-    }
-    Ok(canonical)
 }
 fn selection_file(state: &AppState, id: &str) -> Result<PathBuf, ApiError> {
     if !is_id(id) {
@@ -845,80 +760,6 @@ fn checked_request(state: &AppState, input: StartRequest) -> Result<PreparedRun,
         audio_duration,
         root,
     })
-}
-/// Only the worker's per-run directory may act as an internal transient
-/// project namespace. It is NEVER entered into the real projects registry.
-/// Shared preparation is the *only* cache that the internal stages can read.
-pub(crate) fn prepared_plan_for_quick_reel(
-    state: &AppState,
-    project: &Value,
-    video: &str,
-) -> Result<PreparationPlan, ApiError> {
-    storage::video_name(video)?;
-    let scoped = state
-        .data_root
-        .canonicalize()
-        .map_err(|_| storage::bad_request("Quick Reel pipeline root missing"))?;
-    if scoped.file_name().and_then(|s| s.to_str()) != Some("pipeline") {
-        return Err(storage::bad_request(
-            "Not an internal Quick Reel pipeline namespace",
-        ));
-    }
-    let run_dir = scoped
-        .parent()
-        .ok_or_else(|| storage::bad_request("Quick Reel has no run root"))?;
-    let run_id = run_dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    let quick_root = run_dir
-        .parent()
-        .ok_or_else(|| storage::bad_request("Quick Reel root missing"))?;
-    if !is_id(run_id)
-        || quick_root.file_name().and_then(|s| s.to_str()) != Some(QUICK_ROOT)
-        || project["quick_reel_run_id"].as_str() != Some(run_id)
-    {
-        return Err(storage::bad_request(
-            "Quick Reel virtual project does not belong to this run",
-        ));
-    }
-    let global_root = quick_root
-        .parent()
-        .ok_or_else(|| storage::bad_request("Project storage missing"))?;
-    let original = project["source_paths"][video]
-        .as_str()
-        .ok_or_else(|| storage::bad_request("Missing original Quick Reel source mapping"))?;
-    let expected_id = project["source_ids"][video]
-        .as_str()
-        .ok_or_else(|| storage::bad_request("Missing Quick Reel source token"))?;
-    // The original request was written by the server before this private
-    // namespace was constructed. Re-verify source identity for every stage.
-    let request = storage::read_json(&run_dir.join("request.json"))?
-        .ok_or_else(|| storage::bad_request("Missing original Quick Reel request"))?;
-    if request["id"].as_str() != Some(run_id)
-        || request["inference_cache_reuse"] != false
-        || request["schema"] != "volley-rust-quick-reel/1"
-    {
-        return Err(storage::conflict("Quick Reel request identity changed"));
-    }
-    let saved = request["videos"]
-        .as_array()
-        .and_then(|rows| {
-            rows.iter().find(|row| {
-                row["id"].as_str() == Some(expected_id) && row["source"].as_str() == Some(original)
-            })
-        })
-        .ok_or_else(|| storage::conflict("Quick Reel input not in immutable run request"))?;
-    let source: Source = serde_json::from_value(saved.clone())
-        .map_err(|_| storage::bad_request("Damaged Quick Reel source identity"))?;
-    let canonical = verify_source(&source)?;
-    let plan = PreparationPlan::new(&canonical, global_root, None)
-        .and_then(PreparationPlan::bind_source)
-        .map(PreparationPlan::read_original)
-        .map_err(storage::bad_request)?;
-    if plan.ready_path().is_none() {
-        return Err(storage::conflict(
-            "Quick Reel prepared media not ready; no inference reuse allowed",
-        ));
-    }
-    Ok(plan)
 }
 fn status_file(run: &PreparedRun) -> PathBuf {
     run.root.join("status.json")
@@ -1742,6 +1583,64 @@ mod tests {
         assert!(!run.root.exists());
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn source_identity_json_contract() {
+        let source = Source {
+            id: "a".repeat(32),
+            name: "clip.mp4".into(),
+            source: "/tmp/clip.mp4".into(),
+            size: 17,
+            mtime_ns: 123456789,
+            display_name: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&source).unwrap(),
+            json!({
+                "id":"a".repeat(32),"name":"clip.mp4","source":"/tmp/clip.mp4",
+                "size":17,"mtime_ns":123456789,"display_name":null
+            })
+        );
+        let mut saved = serde_json::to_value(&source).unwrap();
+        saved.as_object_mut().unwrap().remove("display_name");
+        assert!(serde_json::from_value::<Source>(saved)
+            .unwrap()
+            .display_name
+            .is_none());
+    }
+
+    #[test]
+    fn source_identity_rejects_metadata_changes_without_probe() {
+        let folder = std::env::temp_dir().join(format!("volley-source-{}", Uuid::new_v4()));
+        fs::create_dir(&folder).unwrap();
+        let file = folder.join("clip.mp4");
+        fs::write(&file, b"fixture without a media stream").unwrap();
+        let canonical = file.canonicalize().unwrap();
+        let meta = canonical.metadata().unwrap();
+        let source = Source {
+            id: "a".repeat(32),
+            name: "clip.mp4".into(),
+            source: canonical.to_string_lossy().into_owned(),
+            size: meta.len(),
+            mtime_ns: mtime(&meta).unwrap(),
+            display_name: None,
+        };
+        assert_eq!(verify_source(&source).unwrap(), canonical);
+        for changed in 0..5 {
+            let mut invalid = source.clone();
+            match changed {
+                0 => invalid.id = "../escape".into(),
+                1 => invalid.size += 1,
+                2 => invalid.mtime_ns += 1,
+                3 => invalid.name = "other.mp4".into(),
+                _ => invalid.source = "relative.mp4".into(),
+            }
+            assert!(verify_source(&invalid).is_err(), "change {changed}");
+        }
+        fs::write(&file, b"changed").unwrap();
+        assert!(verify_source(&source).is_err());
+        fs::remove_dir_all(folder).unwrap();
+    }
+
     #[test]
     fn source_token_cannot_traverse() {
         assert!(is_id("0123456789abcdef0123456789abcdef"));

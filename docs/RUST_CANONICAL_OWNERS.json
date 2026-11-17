@@ -426,7 +426,8 @@
                         "owner":  "rust/volley-app/src/quick_reel.rs",
                         "status":  "partial",
                         "adapters":  [
-                                         "rust/volley-app/src/quick_reel_pipeline.rs"
+                                         "rust/volley-app/src/quick_reel_pipeline.rs",
+                                          "rust/volley-app/src/quick_reel_source.rs"
                                      ],
                         "routes":  [
                                        {
