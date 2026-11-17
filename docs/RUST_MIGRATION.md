@@ -2063,3 +2063,10 @@ Studio показывает кнопку перехода между debug и re
 - Added bounded on-demand 18-second browser fragments (H.264 Constrained Baseline + AAC, maximum display side 1280), an immutable source identity cache, project authorization and MSE client-side time mapping. Original media and GPU analysis evidence remain unchanged.
 - Verification: WSL `cargo check -p volley-app --offline`, focused Rust unit test and Node browser-adapter test passed; FFmpeg output verified with ffprobe and Windows Edge supports the required MSE MIME. End-to-end real-browser playback against the new running backend remains unverified.
 - Deployment blocked: the live Studio reports `studio_analysis` and `gpu_inference` running. Code committed in separate worktree/branch; shared checkout and active process must not be restarted before jobs complete.
+
+### 2026-11-17 — HEVC preview code 4 follow-up
+
+- Reproduced the browser-safe H.264/AAC fragmented MP4 playback in Chromium with actual decoded frames. Identified a load-order race in Analysis: `studio.js` assigned the original HEVC `/api/video-media` before the asynchronous codec probe/MutationObserver switched it to MSE; this could raise `MEDIA_ERR_SRC_NOT_SUPPORTED` and leave a stale error overlay.
+- Analysis now probes the codec before assigning `src`. HEVC connects directly to MSE, preserving source-wide seeking and playback intent. A decoder error can reinitialize the stream, and a successful `loadeddata` clears the stale video error indicator.
+- The project-ready compatibility scan skips HEVC videos handled through fragments, preventing unwanted full-match transcoding on project selection.
+- Checks: JS syntax, Node regression validating that HEVC never reaches the HTML video `src`, and existing Rust backend fragment HTTP 206/ffprobe checks. Browser verification of the updated UI against the live `nn` project remains to be confirmed after applying the static assets.

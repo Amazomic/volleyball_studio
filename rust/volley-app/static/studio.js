@@ -1317,14 +1317,28 @@
     }
     return left>0&&rows[left-1].end_frame>=frame?rows[left-1]:null;
   };
+  const loadPreviewVideo=(autoplay=false)=>{
+    const project=s.project,video=s.video,key=project+":"+video;
+    if(window.VolleyballBrowserVideo?.load){
+      window.VolleyballBrowserVideo.load(ui.video,project,video,{
+        autoplay,seek:s.seekAt
+      }).catch(error=>{
+        if(s.videoKey===key)
+          message("Не удалось загрузить видео: "+error.message,"error");
+      });
+    }else{
+      ui.video.src=url("/api/video-media",{project_id:project,video});
+      ui.video.load();
+      if(autoplay)ui.video.play().catch(()=>{});
+    }
+  };
   const ensurePreviewVideo=()=>{
     if(!s.project||!s.video)return;
     const key=s.project+":"+s.video;
     if(s.videoKey===key)return;
     s.videoKey=key;
     ui.emptyVideo.classList.add("hidden");
-    ui.video.src=url("/api/video-media",{project_id:s.project,video:s.video});
-    ui.video.load();
+    loadPreviewVideo();
   };
   const seekTimeline=seconds=>{
     if((!overlay.raw&&!timeline.data)||!s.video||(!overlay.raw&&!s.run))return;
@@ -1350,8 +1364,7 @@
     const key=s.project+":"+s.video;
     if(s.videoKey!==key){
       s.videoKey=key;
-      ui.video.src=url("/api/video-media",{project_id:s.project,video:s.video});
-      ui.video.load();
+      loadPreviewVideo();
     }else if(ui.video.readyState>=1){
       try{ui.video.currentTime=position;}catch{}
     }
@@ -1972,16 +1985,16 @@
     setOverlaySource(item);
     prefetchOverlayAtFrame(Math.floor(s.seekAt*fps()));
     drawTimeline();
+    let deferredPlay=false;
     if(s.videoKey!==key){
       s.videoKey=key;
-      ui.video.src=url("/api/video-media",{project_id:s.project,video:s.video});
-      ui.video.load();
+      loadPreviewVideo(previewIsVisible());
+      deferredPlay=true;
     }else if(ui.video.readyState>=1){
       try{ui.video.currentTime=s.seekAt;}catch{}
     }
-    // A card click starts playback only while the preview is visible.
     // Metadata/seek is restored by loadedmetadata without background playback.
-    if(previewIsVisible())ui.video.play().catch(error=>
+    if(previewIsVisible()&&!deferredPlay)ui.video.play().catch(error=>
       message("Воспроизведение недоступно: "+error.message,"error"));
   };
   const cards=()=>{
@@ -2566,7 +2579,12 @@
   ui.video.addEventListener("ended",()=>{
     if(s.stopAt!==null&&s.playbackMode!=="free")onRallyBoundary();
   });
+  let videoDecodeErrorShown=false;
+  ui.video.addEventListener("loadeddata",()=>{
+    if(videoDecodeErrorShown){videoDecodeErrorShown=false;overlayMessage("");}
+  });
   ui.video.addEventListener("error",()=>{
+    videoDecodeErrorShown=true;
     overlay.presentedTime=null;overlayContext();
     if(s.videoKey)overlayMessage("Видео не декодируется (код "+
       (ui.video.error?.code||"?")+"). Нажмите «Воспроизвести» для повторной загрузки.");
@@ -2602,7 +2620,8 @@
       if(ui.video.error){
         // A failed byte-range request must not permanently poison this player.
         overlay.presentedTime=null;
-        ui.video.load();
+        loadPreviewVideo(true);
+        return;
       }
       // Replay a completed selection from its beginning, not a fraction past its end.
       if(s.playbackMode!=="free"&&s.clipStart!==null&&s.clipEnd!==null&&

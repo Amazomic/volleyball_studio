@@ -105,6 +105,12 @@
       const selected=catalog.projects?.find(row=>row.id===project);
       for(const video of selected?.videos||[]){
         if(epoch!==projectEpoch)return;
+        // HEVC uses seekable short fMP4 fragments; never start a full-match
+        // browser transcode merely because this project was selected.
+        const streamed=window.VolleyballBrowserVideo?.canStream?
+          await window.VolleyballBrowserVideo.canStream(project,video).catch(()=>false):false;
+        if(epoch!==projectEpoch)return;
+        if(streamed)continue;
         await resolve(project,video).catch(error=>console.warn("Проверка просмотра:",error.message));
       }
     }catch(error){console.warn("Проверка просмотра:",error.message);}

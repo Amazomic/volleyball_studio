@@ -7,11 +7,14 @@ const code = fs.readFileSync(
 const fetched = [];
 const source = "/api/video-media?project_id=project123&video=example.mp4";
 let currentSrc = source;
+const assigned = [];
 const listeners = new Map();
 const video = {
   tagName: "VIDEO", paused: true, currentTime: 0, buffered: {length: 0},
   getAttribute: name => name === "src" ? currentSrc : null,
-  set src(value) {currentSrc = value;},
+  set src(value) {currentSrc = value;assigned.push(value);},
+  removeAttribute(name) {if(name==="src")currentSrc="";},
+  pause() {this.paused=true;},
   get src() {return currentSrc;},
   load() {},
   addEventListener(name,fn) {listeners.set(name,fn);},
@@ -41,6 +44,7 @@ class MockUrl extends URL {
   static createObjectURL(){return "blob:volley-test";}
   static revokeObjectURL(){}
 }
+const windowRef={MediaSource:MockMediaSource,dispatchEvent(){}};
 const fetch = async path => {
   fetched.push(String(path));
   if(String(path).startsWith("/api/video-info"))
@@ -53,7 +57,7 @@ vm.runInNewContext(code,{
   URL:MockUrl,URLSearchParams,MediaSource:MockMediaSource,MutationObserver:MockObserver,
   document:{documentElement:{},querySelectorAll:()=>[video],addEventListener(){}},
   location:{href:"http://127.0.0.1:8875/studio",origin:"http://127.0.0.1:8875"},
-  window:{MediaSource:MockMediaSource,dispatchEvent(){}},
+  window:windowRef,
   CustomEvent:class {constructor(name,options){this.name=name;this.detail=options.detail;}},
   fetch,console,Number,Promise,Map,WeakMap,WeakSet,Set
 });
@@ -67,4 +71,13 @@ assert(fetched.some(path=>path.startsWith("/api/video-fragment?") &&
   path.includes("project_id=project123") && path.includes("video=example.mp4") &&
   path.includes("index=0")),"first segment must be fetched for the correct project");
 assert(sourceBuffer.buffer.appended>=1500,"fMP4 bytes must reach the SourceBuffer");
-console.log("HEVC MSE preview: project-scoped segment 0 appended successfully");
+assert.equal(typeof windowRef.VolleyballBrowserVideo?.load,"function",
+  "explicit preflight loader must be exposed");
+assert.equal(await windowRef.VolleyballBrowserVideo.canStream("project123","example.mp4"),
+  true,"HEVC must be eligible for short-fragment streaming");
+const count=assigned.length;
+await windowRef.VolleyballBrowserVideo.load(video,"project123","example.mp4",{seek:21});
+assert(currentSrc.startsWith("blob:"),"HEVC preflight must attach MSE directly");
+assert(assigned.slice(count).every(src=>src.startsWith("blob:")),
+  "HEVC preflight must NEVER assign the unsupported original video URL");
+console.log("HEVC MSE preview: preflight avoids original, project-scoped fragment appended");

@@ -6,7 +6,7 @@
   if(!window.MediaSource||!MediaSource.isTypeSupported(MIME))return;
 
   const sessions=new WeakMap();
-  const sourceInfo=new Map();
+  const sourceInfo=new Map(),pendingLoads=new WeakMap();
   const urlFor=(path,params)=>path+"?"+new URLSearchParams(params);
   const announce=(video,status)=>window.dispatchEvent(
     new CustomEvent("volley:playback-status",{detail:{...status,video}}));
@@ -25,15 +25,16 @@
     });
   }
 
-  function start(video,source,meta){
+  function start(video,source,meta,options={}){
     const url=new URL(source,location.href),project=url.searchParams.get("project_id"),
           name=url.searchParams.get("video");
     if(!project||!name)return;
     const previous=sessions.get(video);
     if(previous?.source===source)return;
     previous?.close();
-    const initial=Number.isFinite(video.currentTime)?video.currentTime:0;
-    const wasPlaying=!video.paused;
+    const initial=Number.isFinite(options.seek)?options.seek:
+      (Number.isFinite(video.currentTime)?video.currentTime:0);
+    const wasPlaying=!!options.autoplay||!video.paused;
     const media=new MediaSource(),objectUrl=URL.createObjectURL(media);
     let buffer=null,closed=false,queue=Promise.resolve(),busy=new Set();
     const loaded=new Set();
@@ -141,6 +142,50 @@
     video.load();
   }
 
+  // Explicit source selection happens BEFORE assigning the original HEVC to a video.
+  // This prevents a queued MEDIA_ERR_SRC_NOT_SUPPORTED from the original file
+  // from leaking into the browser-safe MediaSource playback.
+  async function load(video,project,name,options={}){
+    if(!video||!project||!name)return;
+    const token=Symbol("video-load");
+    pendingLoads.set(video,token);
+    const previous=sessions.get(video);
+    previous?.close();sessions.delete(video);
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    const source=urlFor("/api/video-media",{project_id:project,video:name});
+    const info=await readInfo(project,name);
+    if(pendingLoads.get(video)!==token)return;
+    if(info?.codec==="hevc"||info?.codec==="h265"){
+      start(video,source,info,options);
+    }else{
+      video.src=source;video.load();
+      if(options.autoplay)video.play().catch(()=>{});
+    }
+  }
+  function readInfo(project,name){
+    const key=project+":"+name;
+    if(!sourceInfo.has(key)){
+      const promise=fetch(urlFor("/api/video-info",{video:name}),{
+        credentials:"same-origin",cache:"no-store"
+      }).then(response=>{
+        if(!response.ok)throw Error("Video probe HTTP "+response.status);
+        return response.json();
+      }).catch(error=>{
+        sourceInfo.delete(key);
+        throw error;
+      });
+      sourceInfo.set(key,promise);
+    }
+    return sourceInfo.get(key);
+  }
+  window.VolleyballBrowserVideo={
+    load,
+    canStream:(project,name)=>readInfo(project,name).then(info=>
+      info?.codec==="hevc"||info?.codec==="h265")
+  };
+
   function inspect(video,source){
     if(sessions.get(video)?.source===source)return Promise.resolve(true);
     const url=new URL(source,location.href);
@@ -149,13 +194,9 @@
       return Promise.resolve(false);
     const name=url.searchParams.get("video");
     if(!name)return Promise.resolve(false);
-    let promise=sourceInfo.get(name);
-    if(!promise){
-      promise=fetch(urlFor("/api/video-info",{video:name}),{cache:"no-store"})
-        .then(response=>response.ok?response.json():null).catch(()=>null);
-      sourceInfo.set(name,promise);
-    }
-    return promise.then(info=>{
+    const project=url.searchParams.get("project_id");
+    if(!project)return Promise.resolve(false);
+    return readInfo(project,name).then(info=>{
       if(video.getAttribute("src")!==source)return true;
       if(info?.codec==="hevc"||info?.codec==="h265"){
         start(video,source,info);return true;
