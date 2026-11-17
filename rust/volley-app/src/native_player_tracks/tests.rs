@@ -991,6 +991,8 @@ fn reid_player_matches_require_reviewed_nonoverlapping_photo_evidence() {
     let mut second = ctx.tracks[&7].clone();
     second.first = 20;
     second.last = 30;
+    second.visible_spans = vec![(20, 30)];
+    second.visible_spans = vec![(20, 30)];
     ctx.tracks.insert(8, second);
     ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
     let mut identity = base_document(&ctx);
@@ -1014,15 +1016,44 @@ fn reid_player_matches_require_reviewed_nonoverlapping_photo_evidence() {
     );
     // Same-frame player boxes cannot be the same athlete.
     ctx.tracks.get_mut(&8).unwrap().first = 10;
+    ctx.tracks.get_mut(&8).unwrap().visible_spans = vec![(10, 30)];
     assert_eq!(
         player_match_candidates(&ctx, &identity, &features).unwrap(),
         json!({})
     );
     ctx.tracks.get_mut(&8).unwrap().first = 20;
+    ctx.tracks.get_mut(&8).unwrap().visible_spans = vec![(20, 30)];
     identity["excluded_ids"] = json!([8]);
     assert_eq!(
         player_match_candidates(&ctx, &identity, &features).unwrap(),
         json!({})
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn overlapping_lifetimes_without_same_frame_detection_allow_reid_reacquisition() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    let mut second = ctx.tracks[&7].clone();
+    second.first = 8;
+    second.last = 30;
+    second.visible_spans = vec![(20, 25)];
+    second.observed_pairs.clear();
+    ctx.tracks.insert(8, second);
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
+    let mut identity = base_document(&ctx);
+    identity["assignments"] = json!({"7":"abcdef012345"});
+    let mut reference = vec![0.0_f32; 256];
+    reference[0] = 1.0;
+    let features = BTreeMap::from([(7, reference.clone()), (8, reference)]);
+    let matches = player_match_candidates(&ctx, &identity, &features).unwrap();
+    assert_eq!(matches["8"][0]["reference_track_id"], 7);
+    ctx.tracks.get_mut(&8).unwrap().visible_spans = vec![(10, 13)];
+    assert_eq!(
+        player_match_candidates(&ctx, &identity, &features).unwrap(),
+        json!({}),
+        "Only real same-frame co-visibility may prohibit an ID reacquisition"
     );
     fs::remove_dir_all(root).unwrap();
 }

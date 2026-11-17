@@ -758,12 +758,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sampled_person_request_defaults_to_ten_and_accepts_one_through_thirty() {
+    fn sampled_person_request_defaults_to_each_frame_and_accepts_one_through_thirty() {
         let request = serde_json::json!({
             "project_id":"abc123def456","video":"match.mp4","model":"players"
         });
         let parsed: StartRequest = serde_json::from_value(request.clone()).unwrap();
-        assert_eq!(parsed.person_stride, 10);
+        assert_eq!(parsed.person_stride, 1);
         for step in [1, 2, 3, 5, 10, 30] {
             let mut sample = request.clone();
             sample["person_stride"] = json!(step);

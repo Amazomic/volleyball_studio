@@ -10,7 +10,7 @@ use ort::{
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-pub const PERSON_SAMPLE_PERIOD_FRAMES: usize = 10;
+pub const PERSON_SAMPLE_PERIOD_FRAMES: usize = 1;
 const W: usize = 640;
 const H: usize = 360;
 const MAX_PERSONS: usize = 12;

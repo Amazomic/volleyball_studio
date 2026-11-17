@@ -389,6 +389,7 @@ VBallNet определяет мяч.	VBallNet detects the ball.
 Игроки и позы · шаг, кадров	Players and poses · stride, frames
 Детектор игроков и RTMPose работают на одних кадрах, по реальным рамкам детектора. Промежуточные кадры не передаются в эти нейросети.	The player detector and RTMPose use the same frames and observed detector boxes. Intermediate frames are not sent to these models.
 Видео: 30 кадров в секунду (30 FPS). Каждый 10-й кадр → 3 раза/с.	Video: 30 frames per second (30 FPS). Every 10th frame → 3 samples/s.
+Видео: 30 кадров в секунду (30 FPS). Каждый кадр → 30 раз/с.	Video: 30 frames per second (30 FPS). Every frame → 30 samples/s.
 Дополнительные настройки	Additional settings
 Определить поле и сетку	Detect court and net
 Трекинг · касания · розыгрыши. Повторный GPU-анализ не требуется.	Tracking · contacts · rallies. GPU analysis is reused.

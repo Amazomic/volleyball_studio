@@ -382,8 +382,8 @@
                 <div><div class="analysis-field-heading"><label class="field-label" for="studio-gpu-stride">Шаг анализа мяча</label><button class="analysis-help" type="button" aria-label="О шаге анализа мяча" aria-describedby="studio-ball-step-help">i<span id="studio-ball-step-help" class="analysis-tooltip" role="tooltip">Шаг окон VBallNet в кадрах: от 1 до 9. Меньший шаг увеличивает перекрытие окон и время анализа.</span></button></div>
                                   <input id="studio-gpu-stride" type="number" min="1" max="9" step="1" value="9" data-default="9"></div>
                 <div>
-                  <div class="analysis-field-heading"><label class="field-label" for="studio-gpu-person-stride">Игроки и позы · шаг, кадров</label><button class="analysis-help" type="button" aria-label="О частоте определения игроков и поз" aria-describedby="studio-person-step-help">i<span id="studio-person-step-help" class="analysis-tooltip" role="tooltip">Детектор игроков и RTMPose работают на одних кадрах, по реальным рамкам детектора. Промежуточные кадры не передаются в эти нейросети.<span id="studio-gpu-person-rate" class="analysis-tooltip-rate" role="status" aria-live="polite">Видео: 30 кадров в секунду (30 FPS). Каждый 10-й кадр → 3 раза/с.</span></span></button></div>
-                  <input id="studio-gpu-person-stride" type="number" min="1" max="30" step="1" value="10" data-default="10" aria-describedby="studio-gpu-person-rate">
+                  <div class="analysis-field-heading"><label class="field-label" for="studio-gpu-person-stride">Игроки и позы · шаг, кадров</label><button class="analysis-help" type="button" aria-label="О частоте определения игроков и поз" aria-describedby="studio-person-step-help">i<span id="studio-person-step-help" class="analysis-tooltip" role="tooltip">Детектор игроков и RTMPose работают на одних кадрах, по реальным рамкам детектора. Промежуточные кадры не передаются в эти нейросети.<span id="studio-gpu-person-rate" class="analysis-tooltip-rate" role="status" aria-live="polite">Видео: 30 кадров в секунду (30 FPS). Каждый кадр → 30 раз/с.</span></span></button></div>
+                  <input id="studio-gpu-person-stride" type="number" min="1" max="30" step="1" value="1" data-default="1" aria-describedby="studio-gpu-person-rate">
                 </div>
               </div>
               <details class="analysis-profile-advanced">
@@ -459,7 +459,7 @@
                 <button id="studio-analysis-post-only" class="primary analysis-stage-launch" type="button" title="Запустить CPU на выбранной в шапке GPU-версии и сохранить новую постобработку">▶ Начать анализ</button>
               </div>
               <div class="analysis-profile-fields analysis-profile-core analysis-profile-core-post">
-                <div><label class="field-label" for="studio-post-touch-algorithm">Алгоритм касаний</label><select id="studio-post-touch-algorithm" data-default="legacy"><option value="pose_motion">Строгий: траектория + точки тела</option><option value="legacy" selected>VBallNet + RTMPose: контакты и изломы ±0,1 с</option></select></div>
+                <div><label class="field-label" for="studio-post-touch-algorithm">Алгоритм касаний</label><select id="studio-post-touch-algorithm" data-default="pose_motion"><option value="pose_motion" selected>Строгий: траектория + точки тела</option><option value="legacy">VBallNet + RTMPose: контакты и изломы ±0,1 с</option></select></div>
                 <div><label class="field-label" for="studio-post-touch-threshold">Мин. уверенность физического касания</label><input id="studio-post-touch-threshold" type="number" min="0" max="1" step="0.01" value="0.48" data-default="0.48"></div>
               </div>
               <details class="analysis-profile-advanced">

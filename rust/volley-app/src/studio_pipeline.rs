@@ -431,7 +431,10 @@ impl Default for PostProfile {
             interpolate_players: true,
             interpolate_pose: true,
             tracking: TrackingOptions::default(),
-            touches: TouchSettings::default(),
+            touches: TouchSettings {
+                algorithm: TouchAlgorithm::PoseMotion,
+                ..TouchSettings::default()
+            },
             rallies: RallySettings::default(),
             pose_classification: true,
         }
@@ -2654,11 +2657,11 @@ mod tests {
             "source_identity":identity
         });
         assert!(compatible_version(&saved, &request, &identity));
-        for step in [1, 2, 3, 5, 9, 30] {
+        for step in [2, 3, 5, 9, 10, 30] {
             request.gpu.pose_stride = step;
             assert!(!compatible_version(&saved, &request, &identity));
         }
-        request.gpu.pose_stride = 10;
+        request.gpu.pose_stride = 1;
         assert!(compatible_version(&saved, &request, &identity));
     }
 
@@ -2742,6 +2745,7 @@ mod tests {
         assert_eq!(profile.gpu.cpu_threads, 8);
         assert_eq!(profile.post.tracking.max_gap_frames, 90);
         assert_eq!(profile.post.touches.threshold, 0.48);
+        assert_eq!(profile.post.touches.algorithm, TouchAlgorithm::PoseMotion);
         assert_eq!(profile.post.rallies.min_rally_frames, 45);
         assert!(profile.post.tracking.validate().is_ok());
         assert!(profile.post.touches.validate().is_ok());
@@ -2795,6 +2799,7 @@ mod branching_tests {
         // The historic fixture contains no RTMPose run, so its GPU profile
         // must explicitly disable the newly introduced pose stage.
         request.gpu.pose_enabled = false;
+        request.post.touches.algorithm = TouchAlgorithm::Legacy;
         let sha = "a".repeat(64);
         for (model, id) in [("ball", &gpu_ball), ("players", &gpu_players)] {
             emit(

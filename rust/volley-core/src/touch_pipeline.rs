@@ -784,6 +784,7 @@ mod tests {
         let settings: TouchSettings = serde_json::from_str(r#"{"threshold":0.5,"smooth":5,"min_gap":10,"max_reach_ratio":0.35,"min_interval_sec":0.35}"#).unwrap();
         assert!(!settings.use_ravel_touch);
         assert!(!settings.require_pose);
+        assert_eq!(settings.algorithm, TouchAlgorithm::Legacy);
         assert!(settings.validate().is_ok());
     }
 

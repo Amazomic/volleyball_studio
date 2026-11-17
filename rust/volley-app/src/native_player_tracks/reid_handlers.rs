@@ -485,9 +485,7 @@ pub(super) fn player_match_candidates(
         };
         let mut nearest = BTreeMap::<String, (f64, u64)>::new();
         for &(anchor_id, player_id, reference, other) in &anchors {
-            if candidate.first <= reference.last && reference.first <= candidate.last
-                || other.len() != vector.len()
-            {
+            if tracks_co_visible(candidate, reference) || other.len() != vector.len() {
                 continue;
             }
             let cosine = vector
