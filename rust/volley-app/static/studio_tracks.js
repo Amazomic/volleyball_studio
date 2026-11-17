@@ -938,9 +938,8 @@
   const renderGroupCards=()=>{
     clear(galleryItems);
     if(state.grouping){
-      galleryItems.append(node("div","empty-state","Обновляем признаки и совпадения ID…"));
-      galleryMore.hidden=true;
-      return;
+      galleryItems.append(node("div","empty-state",
+        "Обновление выполняется. Уже найденные группы доступны для просмотра."));
     }
     if(!state.groups.length&&!state.groupLoaded){
       galleryItems.append(node("div","empty-state",
@@ -1117,7 +1116,7 @@
   const refreshPhotoMatches=async(scope,token)=>{
     const ids=[...state.comparisonIds];
     if(ids.length>1024)throw Error("Для сравнения доступно не более 1024 Track ID одной обработки.");
-    state.playerMatches={};renderRows();
+    // Keep the last valid scores visible until the replacement is verified.
     const result=await post("/api/players/native/reid-review",{
       ...scope,action:"compare_photos"
     });
