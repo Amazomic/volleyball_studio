@@ -371,8 +371,13 @@ fn decode_input_command(
         &decoder_threads.to_string(),
     ]);
     let prefix = if decision.backend == DecodeBackend::Nvdec {
+        // FFmpeg copies the original display matrix into the encoded MP4 even
+        // after we manually transpose NVDEC frames. Clear it on the INPUT;
+        // the explicit rotation_filter below still rotates the actual pixels.
         command.args([
             "-noautorotate",
+            "-display_rotation:v:0",
+            "0",
             "-hwaccel",
             "cuda",
             "-hwaccel_output_format",

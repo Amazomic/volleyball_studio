@@ -317,7 +317,15 @@ pub(crate) fn run_joint_pair(
         return Err("cancelled".into());
     }
     if let Some(preview) = preview {
-        preview.publish(cancelled)?;
+        if let Err(error) = preview.publish(cancelled) {
+            // Preview is an optional browser artifact. A bad MP4 must never
+            // discard expensive, already validated ball/player GPU evidence.
+            // Source integrity and cancellation remain fatal.
+            if error == "cancelled" || error == "Preview source changed during analysis" {
+                return Err(error);
+            }
+            eprintln!("Primary preview unavailable (GPU evidence retained): {error}");
+        }
     }
     report(1.0)?;
     pending.committed = true;

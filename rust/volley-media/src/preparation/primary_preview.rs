@@ -109,14 +109,20 @@ impl PrimaryPreviewWrite {
             .ok_or("Missing source duration")?;
         let ratio = expected["width"].as_f64().ok_or("Missing source width")?
             / expected["height"].as_f64().ok_or("Missing source height")?;
+        let duration_delta = (info.duration_sec - duration).abs();
+        let aspect_delta = ((info.width as f64 / info.height as f64) / ratio - 1.0).abs();
         if info.codec != "h264"
             || info.width > 1280
             || info.height > 1280
             || info.rotation != 0
-            || (info.duration_sec - duration).abs() > 0.25
-            || ((info.width as f64 / info.height as f64) / ratio - 1.0).abs() > 0.02
+            || duration_delta > 0.25
+            || aspect_delta > 0.02
         {
-            return Err("Invalid primary preview dimensions, rotation or timeline".into());
+            return Err(format!(
+                "Invalid primary preview dimensions, rotation or timeline: codec={}, size={}x{}, rotation={}, duration={:.3}s (source={:.3}s, delta={:.3}s), aspect_delta={:.4}",
+                info.codec, info.width, info.height, info.rotation,
+                info.duration_sec, duration, duration_delta, aspect_delta,
+            ));
         }
         check_cancelled(cancelled)?;
         let before = fs::metadata(&self.path).map_err(|e| e.to_string())?;
