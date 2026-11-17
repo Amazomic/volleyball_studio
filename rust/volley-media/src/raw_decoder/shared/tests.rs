@@ -534,6 +534,34 @@ fn rotated_nvdec_matches_software_pixels() {
 }
 
 #[test]
+fn nvdec_preview_clears_display_rotation_before_manual_pixel_rotation() {
+    let decision = DecodeSelection {
+        backend: DecodeBackend::Nvdec,
+        fallback_reason: None,
+        rotation_filter: "transpose=clock,",
+    };
+    let command = shared_decode_command_with_preview(Path::new("rotated.mp4"), &decision, 2, true);
+    let args: Vec<_> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let rotation = args
+        .iter()
+        .position(|arg| arg == "-display_rotation:v:0")
+        .unwrap();
+    let input = args.iter().position(|arg| arg == "-i").unwrap();
+    assert_eq!(args[rotation + 1], "0");
+    assert!(args.iter().any(|arg| arg == "-noautorotate"));
+    assert!(rotation < input);
+    let filter = &args[args
+        .iter()
+        .position(|arg| arg == "-filter_complex")
+        .unwrap()
+        + 1];
+    assert!(filter.contains("hwdownload,format=nv12,transpose=clock,split=2"));
+}
+
+#[test]
 fn shared_command_honors_requested_decoder_and_filter_threads() {
     let decision = DecodeSelection {
         backend: DecodeBackend::Software,
