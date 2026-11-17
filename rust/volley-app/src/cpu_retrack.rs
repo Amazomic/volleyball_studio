@@ -3,7 +3,10 @@
 //! A tracklet ID is NOT an authenticated real athlete identity.
 use crate::{
     inference_stream, preparation, project_guard, projects,
-    storage::{self, ApiError, ApiResult},
+    storage::{
+        self, safe_file, safe_folder, ApiError, ApiResult, BoundedReader,
+        MAX_JSONL_ROW_BYTES as MAX_ROW_BYTES,
+    },
     AppState,
 };
 use axum::{
@@ -16,8 +19,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, BufWriter, Write},
-    path::{Path, PathBuf},
+    io::{BufWriter, Write},
+    path::Path,
     sync::Arc,
 };
 use uuid::Uuid;
@@ -28,7 +31,6 @@ use volley_core::{
 
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-const MAX_ROW_BYTES: usize = 512 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
 pub(crate) const POSE_TRACK_ASSOCIATION_VERSION: &str = "pose_coco17_recency_v2";
 pub(crate) mod ball_track;
@@ -39,21 +41,6 @@ mod pose_source;
 mod track_merge;
 
 pub(crate) use volley_core::contracts::job_id as opaque_id;
-pub(crate) fn safe_file(folder: &Path, name: &str, limit: u64) -> Result<PathBuf, String> {
-    let path = folder.join(name);
-    let info = fs::symlink_metadata(&path).map_err(|e| format!("Read CPU input {name}: {e}"))?;
-    if info.file_type().is_symlink() || !info.is_file() || info.len() > limit {
-        return Err(format!("Unsafe CPU input file: {name}"));
-    }
-    Ok(path)
-}
-pub(crate) fn safe_folder(path: &Path) -> Result<(), String> {
-    let info = fs::symlink_metadata(path).map_err(|e| format!("Read folder: {e}"))?;
-    if info.file_type().is_symlink() || !info.is_dir() {
-        return Err("CPU input folder must be a real directory".into());
-    }
-    Ok(())
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,53 +73,6 @@ struct FusedFrame {
     selected_ball: Option<Value>,
     player_track_ids_confirmed: bool,
     touches_confirmed: bool,
-}
-
-pub(crate) struct BoundedReader {
-    reader: BufReader<File>,
-    hash: Sha256,
-}
-impl BoundedReader {
-    pub(crate) fn open(path: &Path) -> Result<Self, String> {
-        Ok(Self {
-            reader: BufReader::new(
-                File::open(path).map_err(|e| format!("Open source frames: {e}"))?,
-            ),
-            hash: Sha256::new(),
-        })
-    }
-    pub(crate) fn line(&mut self) -> Result<Option<Vec<u8>>, String> {
-        let mut line = Vec::with_capacity(2048);
-        loop {
-            let chunk = self
-                .reader
-                .fill_buf()
-                .map_err(|e| format!("Read fusion frames: {e}"))?;
-            if chunk.is_empty() {
-                if line.is_empty() {
-                    return Ok(None);
-                }
-                return Err("Fusion JSONL must terminate every row with LF".into());
-            }
-            let n = chunk
-                .iter()
-                .position(|c| *c == b'\n')
-                .map_or(chunk.len(), |pos| pos + 1);
-            if line.len() + n > MAX_ROW_BYTES {
-                return Err("Fusion JSONL row exceeds 512 KiB".into());
-            }
-            let done = chunk[n - 1] == b'\n';
-            line.extend_from_slice(&chunk[..n]);
-            self.hash.update(&chunk[..n]);
-            self.reader.consume(n);
-            if done {
-                return Ok(Some(line));
-            }
-        }
-    }
-    pub(crate) fn finish(self) -> String {
-        format!("{:x}", self.hash.finalize())
-    }
 }
 
 #[derive(Default)]

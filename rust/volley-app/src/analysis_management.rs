@@ -423,9 +423,9 @@ mod tests {
     }
 }
 use crate::{
-    cpu_retrack::{opaque_id, safe_folder},
+    cpu_retrack::opaque_id,
     project_guard, projects,
-    storage::{self, ApiError, ApiResult},
+    storage::{self, safe_folder, ApiError, ApiResult},
     AppState,
 };
 use axum::{extract::State, http::HeaderMap, Json};

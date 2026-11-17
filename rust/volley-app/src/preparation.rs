@@ -179,10 +179,10 @@ pub(crate) fn plan_for_run(
         return Err(storage::bad_request("Invalid source run"));
     }
     let root = projects::project_root(state).join(id).join(directory);
-    crate::cpu_retrack::safe_folder(&root).map_err(storage::bad_request)?;
+    crate::storage::safe_folder(&root).map_err(storage::bad_request)?;
     let folder = root.join(run);
-    crate::cpu_retrack::safe_folder(&folder).map_err(storage::bad_request)?;
-    let file = crate::cpu_retrack::safe_file(&folder, "manifest.json", 64 * 1024)
+    crate::storage::safe_folder(&folder).map_err(storage::bad_request)?;
+    let file = crate::storage::safe_file(&folder, "manifest.json", 64 * 1024)
         .map_err(storage::bad_request)?;
     let manifest: Value = serde_json::from_slice(
         &fs::read(file).map_err(|e| storage::internal(format!("Read source: {e}")))?,

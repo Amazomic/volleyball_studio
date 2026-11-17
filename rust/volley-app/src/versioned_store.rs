@@ -4,11 +4,7 @@
 use crate::storage;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{
-    fs::{self, File},
-    io::Read,
-    path::Path,
-};
+use std::{fs, path::Path};
 
 pub(crate) fn revision(raw: Option<&[u8]>) -> String {
     raw.map(|bytes| format!("{:x}", Sha256::digest(bytes)))
@@ -38,23 +34,13 @@ pub(crate) fn read_optional_bounded(path: &Path, limit: u64) -> Result<Option<Ve
     if limit == 0 {
         return Err("Sidecar byte limit must be positive".into());
     }
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > limit => {
-            return Err("Unsafe or oversized sidecar file".into())
-        }
-        Ok(_) => (),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("Check sidecar file: {e}")),
-    }
-    let file = File::open(path).map_err(|e| format!("Open sidecar file: {e}"))?;
-    let mut bytes = Vec::new();
-    file.take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("Read bounded sidecar: {e}"))?;
-    if bytes.len() as u64 > limit {
-        return Err("Sidecar exceeds byte limit".into());
-    }
-    Ok(Some(bytes))
+    storage::read_optional_bounded(path, limit).map_err(|error| match error {
+        storage::BoundedReadError::Metadata(error) => format!("Check sidecar file: {error}"),
+        storage::BoundedReadError::Unsafe => "Unsafe or oversized sidecar file".into(),
+        storage::BoundedReadError::Open(error) => format!("Open sidecar file: {error}"),
+        storage::BoundedReadError::Read(error) => format!("Read bounded sidecar: {error}"),
+        storage::BoundedReadError::TooLarge => "Sidecar exceeds byte limit".into(),
+    })
 }
 
 /// Write a *direct child* of a checked directory. The caller must hold

@@ -3,9 +3,9 @@
 //! ReID appearance vectors / saved athlete photo templates are not generated
 //! by this module; each owner association requires an explicit human action.
 use crate::{
-    cpu_retrack::{opaque_id, safe_file, safe_folder, BoundedReader},
+    cpu_retrack::opaque_id,
     inference_stream, native_reid_cache, player_catalog, preparation, project_guard, projects,
-    storage::{self, ApiError, ApiResult},
+    storage::{self, safe_file, safe_folder, ApiError, ApiResult, BoundedReader},
     versioned_store::{self, revision},
     AppState,
 };

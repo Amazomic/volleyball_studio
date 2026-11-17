@@ -363,8 +363,8 @@
                         "owner":  "rust/volley-app/src/versioned_store.rs",
                         "status":  "partial",
                         "adapters":  [
-
-                                     ],
+                            "rust/volley-app/src/storage.rs"
+                        ],
                         "routes":  [
 
                                    ],

@@ -1,9 +1,9 @@
 //! Gold bookmarks for exact, immutable native provisional rally versions.
 //! This is NOT the legacy confirmed-CPU-run gold marks format.
 use crate::{
-    cpu_retrack::{opaque_id, safe_folder},
+    cpu_retrack::opaque_id,
     native_rally_preview, project_guard, projects,
-    storage::{self, ApiError, ApiResult},
+    storage::{self, safe_folder, ApiError, ApiResult},
     versioned_store::{self, revision as digest},
     AppState,
 };
