@@ -22,7 +22,7 @@
     groups:[],grouped:new Set(),groupLoaded:false,groupShown:24,singleCount:0,
     playerMatches:{},libraryPlayers:[],projectPlayerIds:new Set(),
     rosterEpoch:0,rosterBusy:false,rosterLoaded:false,tracksLoaded:false,loadingKey:null,grouping:false,
-    photoIndices:new Map(),viewPlayer:"",viewConflicts:false,filteredTotal:0,unassignedIds:new Set(),identityConflictIds:new Set(),comparisonIds:new Set()
+    photoIndices:new Map(),groupNavigation:new Map(),viewPlayer:"",viewConflicts:false,filteredTotal:0,unassignedIds:new Set(),identityConflictIds:new Set(),comparisonIds:new Set()
   };
   const node=(tag,klass,text)=>{
     const n=document.createElement(tag);if(klass)n.className=klass;
@@ -226,7 +226,7 @@
     state.token++;state.selected.clear();state.rallyIds.clear();state.offset=0;state.rows=[];
     state.total=0;state.revision="absent";state.roster=[];state.writable=false;
     state.tracksLoaded=false;state.loadingKey=null;state.grouping=false;
-    state.photoIndices.clear();
+    state.photoIndices.clear();state.groupNavigation.clear();
     state.sourceSha="";state.groupRevision=null;state.rallyRun="";state.fallback=false;
     state.groups=[];state.grouped.clear();state.groupLoaded=false;
     state.groupShown=24;state.singleCount=0;state.playerMatches={};
@@ -922,7 +922,55 @@
       const item=node("article","native-track-group-card native-track-photo-card");
       item.dataset.trackCardKey="group:"+ids.join(",");
       const mosaics=node("div","track-group-photo-mosaic");
-      for(const id of ids.slice(0,3))mosaics.append(portrait(id,"track-group-portrait"));
+      const groupKey=ids.join(",");
+      const view=state.groupNavigation.get(groupKey)||{idIndex:0};
+      state.groupNavigation.set(groupKey,view);
+      view.idIndex%=ids.length;
+      const image=node("img","track-group-main-photo");
+      image.loading="lazy";image.decoding="async";
+      const fallback=node("span","track-group-photo-fallback","Фото недоступно");
+      fallback.hidden=true;
+      const photoLabel=node("span","track-group-photo-label");
+      const detach=node("button","track-group-detach","×");
+      detach.type="button";
+      detach.disabled=state.busy||!state.writable||!state.groupRevision;
+      const currentId=()=>ids[view.idIndex];
+      const showPhoto=()=>{
+        const id=currentId(),photoIndex=state.photoIndices.get(id)||0;
+        image.hidden=false;fallback.hidden=true;
+        image.alt="Фото "+(photoIndex+1)+" Track ID "+id;
+        image.src=path("/api/players/native/track-photo",{
+          project_id:state.project,video:state.video,replay_id:state.replay,
+          rally_run_id:state.rallyRun,track_id:String(id),photo_index:String(photoIndex)
+        });
+        photoLabel.textContent="ID "+id+" · фото "+(photoIndex+1);
+        detach.title="Исключить ID "+id+" из ReID-группы";
+        detach.setAttribute("aria-label",detach.title);
+      };
+      image.addEventListener("error",()=>{image.hidden=true;fallback.hidden=false;});
+      const changeId=delta=>{
+        view.idIndex=(view.idIndex+delta+ids.length)%ids.length;
+        showPhoto();
+      };
+      const changePhoto=delta=>{
+        const id=currentId();
+        state.photoIndices.set(id,((state.photoIndices.get(id)||0)+delta+13)%13);
+        showPhoto();
+      };
+      const arrow=(kind,sign,label,handler)=>{
+        const button=node("button","track-group-arrow track-group-arrow-"+kind,sign);
+        button.type="button";button.title=label;
+        button.setAttribute("aria-label",label);
+        button.addEventListener("click",handler);
+        return button;
+      };
+      const previousId=arrow("left","‹","Предыдущий ID в группе",()=>changeId(-1));
+      const nextId=arrow("right","›","Следующий ID в группе",()=>changeId(1));
+      const previousPhoto=arrow("top","⌃","Предыдущее фото этого ID",()=>changePhoto(-1));
+      const nextPhoto=arrow("bottom","⌄","Следующее фото этого ID",()=>changePhoto(1));
+      detach.addEventListener("click",()=>void reviewEdit("split",[currentId()]));
+      mosaics.append(image,fallback,previousId,nextId,previousPhoto,nextPhoto,photoLabel,detach);
+      showPhoto();
       const meta=node("div","native-track-group-meta");
       const name=node("strong","",group.source==="manual"?"Ручная группа":
         "ReID-группа");
@@ -1030,26 +1078,34 @@
       reviewNote(String(error.message||error),true);}
     finally{state.busy=false;unlock();reidUnlock();}
   };
+  const refreshPhotoMatches=async(scope,token)=>{
+    const ids=[...state.comparisonIds];
+    if(ids.length>1024)throw Error("Для сравнения доступно не более 1024 Track ID одной обработки.");
+    state.playerMatches={};renderRows();
+    const result=await post("/api/players/native/reid-review",{
+      ...scope,action:"compare_photos"
+    });
+    if(token!==state.token||scope.replay_id!==state.replay)return null;
+    if(result.schema!=="volley-native-player-photo-comparison/1"||
+      result.source_replay_sha256!==state.sourceSha||result.auto_assign_enabled!==false||
+      result.confirmed!==false||!result.player_matches||
+      typeof result.player_matches!=="object"||Array.isArray(result.player_matches))
+      throw Error("Некорректный результат сравнения фотографий");
+    state.playerMatches=result.player_matches;
+    renderRows();renderGroupCards();
+    return {trackCount:ids.length,photoCount:result.photo_count};
+  };
   const repeatPhotoAnalysis=async()=>{
     if(!reviewReady()||state.busy)return;
-    const scope=reviewScope(),token=state.token,ids=[...state.comparisonIds];
-    if(!ids.length){reviewNote("Нет непривязанных ID для сравнения.");return;}
-    if(ids.length>1024){reviewNote("Для сравнения доступно не более 1024 Track ID одной обработки.",true);return;}
-    state.busy=true;state.playerMatches={};unlock();reidUnlock();
+    const scope=reviewScope(),token=state.token;
+    state.busy=true;unlock();reidUnlock();
     galleryStatus.textContent="Выполняется повторный анализ…";
     try{
-      reviewNote("Извлекаем признаки и сравниваем ID с сохранёнными фотографиями игроков…");
-      const result=await post("/api/players/native/reid-review",{
-        ...scope,rally_run_id:state.rallyRun,action:"compare_photos"
-      });
-      if(token!==state.token||scope.replay_id!==state.replay)return;
-      if(result.schema!=="volley-native-player-photo-comparison/1"||
-        result.source_replay_sha256!==state.sourceSha||result.auto_assign_enabled!==false||
-        result.confirmed!==false||!result.player_matches||typeof result.player_matches!=="object")
-        throw Error("Некорректный результат сравнения фотографий");
-      state.playerMatches=result.player_matches;renderRows();renderGroupCards();
-      galleryStatus.textContent="Сравнено ID: "+ids.length+" · фото: "+result.photo_count;
-      reviewNote("Сравнено ID: "+ids.length+" · фото: "+result.photo_count+
+      reviewNote("Сравниваем ID с актуальными сохранёнными фотографиями игроков…");
+      const summary=await refreshPhotoMatches(scope,token);
+      if(!summary)return;
+      galleryStatus.textContent="Сравнено ID: "+summary.trackCount+" · фото: "+summary.photoCount;
+      reviewNote("Сравнено ID: "+summary.trackCount+" · фото: "+summary.photoCount+
         ". Совпадения требуют ручной проверки.");
     }catch(error){galleryStatus.textContent="Анализ не завершён: "+String(error.message||error);
       reviewNote(String(error.message||error),true);}
@@ -1134,8 +1190,14 @@
       window.VolleyballTasks?.set("track-grouping",{label:"Группировка ID",stage:"Группировка похожих ID",progress:null});
       if(!await reviewLoad())throw Error("Не удалось получить группы");
       if(token!==state.token)return;
+      window.VolleyballTasks?.set("track-grouping",{
+        label:"Группировка ID",stage:"Обновление сходства с сохранёнными фото",progress:null
+      });
+      const summary=await refreshPhotoMatches(scope,token);
+      if(!summary)return;
       setMode("groups");
-      note("Группировка завершена. Проверьте предложения перед привязкой к игроку.");
+      note("Группировка завершена. Сходство пересчитано по "+summary.photoCount+
+        " сохранённым фото. Проверьте ID перед привязкой к игроку.");
     }catch(error){if(token===state.token)note("Группировка не завершена: "+String(error.message||error),true);}
     finally{
       window.VolleyballTasks?.clear("track-grouping");
@@ -1143,9 +1205,9 @@
       if(token===state.token)renderGroupCards();
     }
   });
-  const reviewEdit=async action=>{
-    if(!reviewReady()||state.busy||!state.groupRevision)return;
-    const ids=[...state.selected];
+  const reviewEdit=async(action,chosenIds=null)=>{
+    if(!reviewReady()||state.busy||!state.groupRevision||!state.writable)return;
+    const ids=chosenIds||[...state.selected];
     if(!ids.length||ids.length>200||(action==="merge"&&ids.length<2))return;
     const scope=reviewScope(),token=state.token;
     state.busy=true;unlock();reidUnlock();
@@ -1156,7 +1218,8 @@
       if(token!==state.token||scope.replay_id!==state.replay)return;
       state.groupRevision=String(record.revision);
       state.selected.clear();renderRows();reviewRender(record);
-      reviewNote("Ручная группа сохранена. Привязка к игроку не изменена.");
+      reviewNote(action==="split"?"ID исключён из группировки. Привязка к игроку не изменена.":
+        "Ручная группа сохранена. Привязка к игроку не изменена.");
     }catch(e){
       state.groupRevision=null;
       reviewNote(e.message+" Обновите предложения перед новой попыткой.",true);

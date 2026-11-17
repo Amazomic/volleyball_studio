@@ -1584,3 +1584,38 @@ body[data-ui-theme="light"] .analysis-history-eta{color:#285e9a!important}
 .studio-training-example{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 8px;background:#1b2b41;border-radius:7px}
 .studio-training-example span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .studio-training-example button{padding:5px 8px;flex:none;font-size:11px}
+
+#studio-players-view .track-group-photo-mosaic{
+  position:relative;display:block;aspect-ratio:5/3;min-height:170px;
+  background:#0b1728;overflow:hidden;
+}
+#studio-players-view .track-group-main-photo{
+  display:block;width:100%;height:100%;object-fit:contain;object-position:center;
+}
+#studio-players-view .track-group-main-photo[hidden],
+#studio-players-view .track-group-photo-fallback[hidden]{display:none}
+#studio-players-view .track-group-photo-fallback{
+  position:absolute;inset:0;display:grid;place-items:center;color:#aac0d9;font-size:12px;
+}
+#studio-players-view .track-group-arrow,
+#studio-players-view .track-group-detach{
+  position:absolute;z-index:2;display:grid;place-items:center;
+  width:34px;height:34px;padding:0;border:1px solid #6982a5;border-radius:9px;
+  background:rgba(9,21,37,.84);color:#f1f7ff;font-size:25px;line-height:1;
+  cursor:pointer;backdrop-filter:blur(4px);
+}
+#studio-players-view .track-group-arrow:hover,
+#studio-players-view .track-group-detach:hover{background:#29558c;border-color:#c5ddff}
+#studio-players-view .track-group-arrow:focus-visible,
+#studio-players-view .track-group-detach:focus-visible{outline:2px solid #d9edff;outline-offset:2px}
+#studio-players-view .track-group-arrow-left{left:8px;top:50%;transform:translateY(-50%)}
+#studio-players-view .track-group-arrow-right{right:8px;top:50%;transform:translateY(-50%)}
+#studio-players-view .track-group-arrow-top{left:50%;top:7px;transform:translateX(-50%)}
+#studio-players-view .track-group-arrow-bottom{left:50%;bottom:7px;transform:translateX(-50%)}
+#studio-players-view .track-group-detach{right:8px;top:8px;font-size:23px;color:#ffcece}
+#studio-players-view .track-group-detach:disabled{opacity:.4;cursor:not-allowed}
+#studio-players-view .track-group-photo-label{
+  position:absolute;z-index:1;left:8px;bottom:8px;padding:5px 7px;
+  border-radius:6px;background:rgba(6,15,28,.85);color:#e5f3ff;
+  font-size:11px;font-weight:650;pointer-events:none;
+}

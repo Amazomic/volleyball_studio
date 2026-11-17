@@ -7,7 +7,7 @@ const start=source.indexOf('  groupButton.addEventListener("click",async()=>{');
 const end=source.indexOf('  const reviewEdit=',start);
 assert.ok(start>=0&&end>start);
 let click;
-const requests=[],notes=[],modes=[],tasks=[],renders=[];
+const requests=[],notes=[],modes=[],tasks=[],renders=[],refreshes=[];
 let finishFirst;
 const first=new Promise(resolve=>{finishFirst=resolve;});
 const state={busy:false,writable:true,token:1,rallyRun:"rally",unassignedIds:new Set([1,2,3,4,5,6,7,8,9])};
@@ -17,7 +17,8 @@ const context={state,groupButton:{addEventListener:(_,fn)=>{click=fn;}},reviewRe
   window:{VolleyballTasks:{set:(...args)=>tasks.push(args),clear:key=>tasks.push([key,"clear"])}},
   renderGroupCards:()=>renders.push(state.grouping),
   post:async(url,body)=>{requests.push({url,body});if(requests.length===1)await first;return {computed_count:body.track_ids.length,cache_persisted:true};},
-  reviewLoad:async()=>true,setMode:mode=>modes.push(mode)};
+  reviewLoad:async()=>true,refreshPhotoMatches:async(scope,token)=>{refreshes.push([scope,token]);return {trackCount:9,photoCount:5};},
+  setMode:mode=>modes.push(mode)};
 runInNewContext(source.slice(start,end),context);
 const running=click();
 assert.equal(state.grouping,true,"group gallery displays its grouping state while work runs");
@@ -29,6 +30,9 @@ assert.deepEqual(Array.from(requests[0].body.track_ids),[1,2,3,4,5,6,7,8]);
 assert.deepEqual(Array.from(requests[1].body.track_ids),[9]);
 assert.equal(requests[0].body.rally_run_id,"rally");
 assert.deepEqual(modes,["groups"]);
+assert.equal(refreshes.length,1,"grouping must refresh saved athlete photo matches");
+assert.equal(refreshes[0][1],1);
+assert.ok(notes.at(-1)[0].includes("5 сохранённым фото"));
 assert.equal(state.busy,false);
 assert.equal(state.grouping,false);
 assert.equal(renders.at(-1),false);
