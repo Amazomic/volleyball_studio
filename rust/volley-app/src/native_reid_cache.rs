@@ -64,11 +64,21 @@ struct CacheDocument {
     dimensions: usize,
     /// Unconfirmed vectors; a Track ID here is unique only within replay_id.
     features: BTreeMap<u64, Vec<f32>>,
+    // Optional for legacy caches. A rally crop may reuse only an identical
+    // measured source frame and box, never a vector from an intermission.
+    #[serde(default)]
+    crop_provenance: BTreeMap<u64, CropProvenance>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CropProvenance {
+    pub frame: u64,
+    pub crop: [u32; 4],
 }
 
 #[derive(Default)]
 pub(crate) struct CacheLookup {
     pub vectors: BTreeMap<u64, Vec<f32>>,
+    pub provenance: BTreeMap<u64, CropProvenance>,
     pub invalidated: bool,
 }
 fn normal_vector(vector: &[f32]) -> bool {
@@ -122,6 +132,7 @@ fn read_document(path: &Path, scope: &CacheScope) -> Result<CacheLookup, String>
     {
         return Ok(CacheLookup {
             vectors: BTreeMap::new(),
+            provenance: BTreeMap::new(),
             invalidated: true,
         });
     }
@@ -133,8 +144,16 @@ fn read_document(path: &Path, scope: &CacheScope) -> Result<CacheLookup, String>
     {
         return Err("Corrupt or unnormalized ReID vector in saved cache".into());
     }
+    if doc
+        .crop_provenance
+        .iter()
+        .any(|(id, p)| !doc.features.contains_key(id) || p.crop[2] == 0 || p.crop[3] == 0)
+    {
+        return Err("Invalid ReID crop provenance".into());
+    }
     Ok(CacheLookup {
         vectors: doc.features,
+        provenance: doc.crop_provenance,
         invalidated: false,
     })
 }
@@ -145,10 +164,30 @@ pub(crate) fn read(root: &Path, scope: &CacheScope) -> Result<CacheLookup, Strin
 /// Merge only server-computed, normalized vectors. A project lock and on-disk
 /// exclusive cache lock preserve concurrent requests. A stale model/source
 /// resets the old document; no old vector is carried into the new feature space.
+#[cfg(test)]
 pub(crate) fn merge(
     root: &Path,
     scope: &CacheScope,
     generated: &[(u64, Vec<f32>)],
+) -> Result<usize, String> {
+    merge_inner(root, scope, generated, &BTreeMap::new())
+}
+pub(crate) fn merge_with_crops(
+    root: &Path,
+    scope: &CacheScope,
+    generated: &[(u64, Vec<f32>)],
+    crops: &BTreeMap<u64, CropProvenance>,
+) -> Result<usize, String> {
+    if generated.iter().any(|(id, _)| !crops.contains_key(id)) || crops.len() != generated.len() {
+        return Err("Missing ReID source crop provenance".into());
+    }
+    merge_inner(root, scope, generated, crops)
+}
+fn merge_inner(
+    root: &Path,
+    scope: &CacheScope,
+    generated: &[(u64, Vec<f32>)],
+    crops: &BTreeMap<u64, CropProvenance>,
 ) -> Result<usize, String> {
     scope_valid(scope)?;
     if generated.is_empty()
@@ -179,11 +218,17 @@ pub(crate) fn merge(
         .map_err(|e| format!("Lock ReID cache: {e}"))?;
     let previous = read_document(&file, scope)?;
     let mut combined = previous.vectors;
+    let mut provenance = previous.provenance;
     for (id, vector) in generated {
         if !combined.contains_key(id) && combined.len() >= MAX_FEATURES {
             return Err("Native ReID cache track limit exceeded".into());
         }
         combined.insert(*id, vector.clone());
+        if let Some(crop) = crops.get(id) {
+            provenance.insert(*id, crop.clone());
+        } else {
+            provenance.remove(id);
+        }
     }
     let n = combined.len();
     let value = serde_json::to_value(CacheDocument {
@@ -197,6 +242,7 @@ pub(crate) fn merge(
         preprocessing: PREPROCESS.into(),
         dimensions: DIMENSIONS,
         features: combined,
+        crop_provenance: provenance,
     })
     .map_err(|e| format!("Encode ReID feature cache: {e}"))?;
     versioned_store::write_json_checked(folder, &file, &value, MAX_BYTES)?;
@@ -254,6 +300,35 @@ mod tests {
         assert!(read(&root, &new_run).unwrap().vectors.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn rally_crop_cache_only_reuses_exact_measured_crop() {
+        let root = folder();
+        let src = source();
+        let first = CropProvenance {
+            frame: 120,
+            crop: [10, 20, 80, 160],
+        };
+        let second = CropProvenance {
+            frame: 220,
+            crop: [12, 20, 80, 160],
+        };
+        // Legacy vectors are valid for full-replay grouping but do not claim
+        // to identify any particular rally crop.
+        merge(&root, &src, &[(7, vector(0))]).unwrap();
+        assert!(read(&root, &src).unwrap().provenance.get(&7).is_none());
+        let mut crops = BTreeMap::new();
+        crops.insert(7, first.clone());
+        merge_with_crops(&root, &src, &[(7, vector(1))], &crops).unwrap();
+        let cached = read(&root, &src).unwrap();
+        assert_eq!(cached.provenance.get(&7), Some(&first));
+        assert_ne!(cached.provenance.get(&7), Some(&second));
+        assert_eq!(cached.vectors.get(&7), Some(&vector(1)));
+        // A legacy overwrite must clear the old crop claim.
+        merge(&root, &src, &[(7, vector(0))]).unwrap();
+        assert!(read(&root, &src).unwrap().provenance.get(&7).is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn reid_cache_merges_but_rejects_forged_or_malformed_vectors() {
         let root = folder();

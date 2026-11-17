@@ -482,7 +482,7 @@
       }
     }
     return [...byPlayer.values()].sort((a,b)=>
-      b.score-a.score||a.name.localeCompare(b.name,"ru")).slice(0,3);
+      b.score-a.score||a.name.localeCompare(b.name,"ru"));
   };
   const attachSuggestions=(card,ids)=>{
     const panel=node("div","track-link-suggestions");
@@ -501,7 +501,7 @@
     const matched=new Set(candidates.map(match=>match.playerId));
     for(const person of state.roster){
       if(matched.has(person.id))continue;
-      const option=node("option","",person.name);option.value=person.id;
+      const option=node("option","",person.name+" · нет данных ReID");option.value=person.id;
       select.append(option);
     }
     if(candidates.length)select.value=candidates[0].playerId;
@@ -1118,12 +1118,12 @@
     if(ids.length>1024)throw Error("Для сравнения доступно не более 1024 Track ID одной обработки.");
     // Keep the last valid scores visible until the replacement is verified.
     const result=await post("/api/players/native/reid-review",{
-      ...scope,action:"compare_photos"
+      ...scope,action:state.writable?"refresh_matches":"compare_photos"
     });
     if(token!==state.token||scope.replay_id!==state.replay)return null;
     if(result.schema!=="volley-native-player-photo-comparison/1"||
       result.source_replay_sha256!==state.sourceSha||result.auto_assign_enabled!==false||
-      result.confirmed!==false||!result.player_matches||
+      result.confirmed!==false||(state.writable&&result.saved!==true)||!result.player_matches||
       typeof result.player_matches!=="object"||Array.isArray(result.player_matches))
       throw Error("Некорректный результат сравнения фотографий");
     state.playerMatches=result.player_matches;

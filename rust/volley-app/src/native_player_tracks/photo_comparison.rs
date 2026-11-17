@@ -355,7 +355,9 @@ pub(super) async fn compare(
                 rally_run_id: req.rally_run_id.clone(),
                 expected_source_sha256: req.expected_source_sha256.clone(),
                 track_ids: chunk.to_vec(),
-                transient: true,
+                // Source crop provenance is now part of the SHA/model-bound
+                // cache. Subsequent comparisons reuse exactly the same crop.
+                transient: false,
             }),
         )
         .await?;

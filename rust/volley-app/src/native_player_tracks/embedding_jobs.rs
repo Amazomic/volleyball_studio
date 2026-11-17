@@ -117,9 +117,22 @@ pub async fn embeddings(
             .map_err(|e| storage::internal(format!("ReID cache read task: {e}")))?
             .map_err(storage::bad_request)?;
     let cache_invalidated = cache.invalidated;
+    let crop_provenance = crops
+        .iter()
+        .map(|(id, frame, crop)| {
+            (
+                *id,
+                native_reid_cache::CropProvenance {
+                    frame: *frame,
+                    crop: *crop,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut selected = BTreeMap::<u64, Vec<f32>>::new();
     for (id, _, _) in &crops {
-        if !scope_requires_new_embedding {
+        let verified_crop = cache.provenance.get(id) == crop_provenance.get(id);
+        if !scope_requires_new_embedding || verified_crop {
             if let Some(vector) = cache.vectors.get(id) {
                 selected.insert(*id, vector.clone());
             }
@@ -231,6 +244,10 @@ pub async fn embeddings(
         let writer = state.clone();
         let scope = cache_scope.clone();
         let vectors = computed.clone();
+        let crops = vectors
+            .iter()
+            .filter_map(|(id, _)| crop_provenance.get(id).cloned().map(|crop| (*id, crop)))
+            .collect::<BTreeMap<_, _>>();
         let source_path = source_file.clone();
         let replay_path = replay_file.clone();
         tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
@@ -248,7 +265,7 @@ pub async fn embeddings(
                     "Native ReID source/model changed before cache commit",
                 ));
             }
-            native_reid_cache::merge(&writer.data_root, &scope, &vectors)
+            native_reid_cache::merge_with_crops(&writer.data_root, &scope, &vectors, &crops)
                 .map_err(storage::bad_request)?;
             Ok(())
         })
