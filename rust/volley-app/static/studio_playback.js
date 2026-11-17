@@ -10,6 +10,42 @@
     if(!response.ok)throw Error(data.error||data.message||"HTTP "+response.status);
     return data;
   };
+  const primary=async(project,video)=>{
+    const result=await request("/api/video-primary-preview?"+new URLSearchParams({project_id:project,video}));
+    if(result.state!=="ready")return null;
+    if(result.project_id!==project||result.video!==video||typeof result.media_url!=="string"||
+       !result.media_url.startsWith("/api/video-primary-preview?"))throw Error("Некорректный предпросмотр видео");
+    return result.media_url;
+  };
+  const directLoads=new WeakMap();
+  const direct=(video,source,{seek=0,autoplay=false}={})=>{
+    const token=Symbol("primary-load");
+    directLoads.set(video,token);
+    video.pause();
+    video.addEventListener("loadedmetadata",()=>{
+      if(directLoads.get(video)!==token||video.getAttribute("src")!==source)return;
+      if(seek>0)video.currentTime=seek;
+      if(autoplay)video.play().catch(()=>{});
+    },{once:true});
+    video.src=source;video.load();
+  };
+  const inspectPrimary=async video=>{
+    const src=video.getAttribute("src");
+    if(!src)return;
+    const url=new URL(src,location.href);
+    if(url.origin!==location.origin||!["/api/video-media","/api/video-source"].includes(url.pathname))return;
+    const project=url.searchParams.get("project_id"),name=url.searchParams.get("video");
+    if(!project||!name)return;
+    try{
+      const media=await primary(project,name);
+      if(media&&video.getAttribute("src")===src)
+        direct(video,media,{seek:video.currentTime||0,autoplay:!video.paused});
+    }catch(error){console.warn("Предпросмотр после анализа:",error.message);}
+  };
+  const primaryWatch=typeof MutationObserver==="function"?new MutationObserver(mutations=>{
+    for(const row of mutations)if(row.target?.tagName==="VIDEO"&&row.attributeName==="src")inspectPrimary(row.target);
+  }):null;
+  primaryWatch?.observe(document.documentElement,{subtree:true,attributes:true,attributeFilter:["src"]});
   const probe=src=>new Promise(resolve=>{
     const video=document.createElement("video");
     video.muted=true;video.playsInline=true;video.preload="auto";
@@ -51,6 +87,8 @@
     const src=original(project,video);
     if(pending.has(src))return pending.get(src);
     const work=(async()=>{
+      const ready=await primary(project,video).catch(()=>null);
+      if(ready)return ready;
       const code=await probe(src);
       if(code===0||code===null)return src;
       return await compatible(project,video,code)||src;
@@ -95,19 +133,5 @@
       video.src=media;video.load();
     }).catch(failed).finally(()=>{if(busy.get(video)===src)busy.delete(video);});
   },true);
-  let projectEpoch=0;
-  window.addEventListener("volley:project-ready",async()=>{
-    const epoch=++projectEpoch,project=document.getElementById("studio-project")?.value;
-    if(!project)return;
-    try{
-      const catalog=window.VolleyballStudioProjectCatalog?
-        await window.VolleyballStudioProjectCatalog():await request("/api/projects");
-      const selected=catalog.projects?.find(row=>row.id===project);
-      for(const video of selected?.videos||[]){
-        if(epoch!==projectEpoch)return;
-        await resolve(project,video).catch(error=>console.warn("Проверка просмотра:",error.message));
-      }
-    }catch(error){console.warn("Проверка просмотра:",error.message);}
-  });
-  window.VolleyballPlayback={resolve};
+  window.VolleyballPlayback={resolve,primary,direct};
 })();

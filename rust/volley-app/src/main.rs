@@ -182,6 +182,10 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
             "/api/training/examples",
             get(training_samples::list).post(training_samples::edit),
         )
+        .route(
+            "/api/video-primary-preview",
+            get(preparation::primary_preview::get),
+        )
         .route("/api/video-view", get(playback::video_view))
         .route("/api/video-media", get(playback::video_media))
         .route("/api/video-preview", get(playback::video_preview))

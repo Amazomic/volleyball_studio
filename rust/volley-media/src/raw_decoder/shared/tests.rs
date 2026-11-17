@@ -614,3 +614,321 @@ fn hevc_nvdec_high_cpu_thread_budget_preserves_complete_windows() {
     }
     fs::remove_file(source).unwrap();
 }
+
+fn preview_source(root: &Path, name: &str, rate: u32, duration: &str, audio: bool) -> PathBuf {
+    let source = root.join(name);
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        &format!("testsrc2=size=160x90:rate={rate}:duration={duration}"),
+    ]);
+    if audio {
+        cmd.args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency=440:duration={duration}"),
+            "-c:a",
+            "aac",
+        ]);
+    }
+    assert!(cmd
+        .args(["-c:v", "libx264", "-threads", "1", "-pix_fmt", "yuv420p", "-y"])
+        .arg(&source)
+        .status()
+        .unwrap()
+        .success());
+    source
+}
+
+#[test]
+fn shared_preview_preserves_model_pixels_native_fps_audio_and_per_video_isolation() {
+    use crate::preparation::primary_preview::PrimaryPreviewPlan;
+    let temp = SocketDir::new().unwrap();
+    let cancel = AtomicBool::new(false);
+    let first = preview_source(&temp.0, "first.mp4", 60, "0.73", true);
+    let second = preview_source(&temp.0, "second.mp4", 25, "1.16", false);
+    let mut outputs = Vec::new();
+    for (source, name, native_fps, audio) in [
+        (&first, "first.mp4", 60.0, true),
+        (&second, "second.mp4", 25.0, false),
+    ] {
+        let plan = PrimaryPreviewPlan::new(source, &temp.0, "project", name).unwrap();
+        let other = PrimaryPreviewPlan::new(source, &temp.0, "other-project", name).unwrap();
+        assert_ne!(plan.output, other.output);
+        assert!(plan.ready_path().is_none());
+        let mut measured = Vec::new();
+        let baseline = decode_full_video_shared(source, 9, &cancel, |batch| {
+            measured.push((
+                batch.first_frame,
+                Sha256::digest(&batch.gray).to_vec(),
+                Sha256::digest(&batch.rgb).to_vec(),
+            ));
+            Ok(())
+        })
+        .unwrap();
+        let write = plan.begin().unwrap();
+        let mut count = 0;
+        let mut tail_count = 0;
+        let summary = decode_full_video_shared_with_preview(
+            source,
+            9,
+            DecodePreference::Software,
+            2,
+            &cancel,
+            Some(PrimaryPreviewOutput {
+                path: &write.path,
+                hardware: false,
+            }),
+            |batch| {
+                assert_eq!(batch.first_frame, measured[count].0);
+                assert_eq!(Sha256::digest(&batch.gray).to_vec(), measured[count].1);
+                assert_eq!(Sha256::digest(&batch.rgb).to_vec(), measured[count].2);
+                count += 1;
+                Ok(())
+            },
+            |_, frames| {
+                tail_count = frames;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(baseline.decoded_frames, summary.decode.decoded_frames);
+        assert_eq!(tail_count, baseline.decoded_frames);
+        assert_eq!(count, measured.len());
+        assert!(plan.ready_path().is_none());
+        write.publish(&cancel).unwrap();
+        assert_eq!(plan.ready_path(), Some(plan.output.as_path()));
+        let probe = crate::ffprobe(&plan.output).unwrap();
+        let info = crate::inspect_probe(&probe).unwrap();
+        assert!((info.fps.unwrap() - native_fps).abs() < 0.1);
+        assert_eq!((info.width, info.height), (160, 90));
+        assert_eq!(
+            probe["streams"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|stream| stream["codec_type"] == "audio"),
+            audio
+        );
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&plan.manifest).unwrap()).unwrap();
+        assert_eq!(receipt["video"], name);
+        assert_eq!(receipt["timeline"]["frame_timing"], "native_pts");
+        outputs.push(plan.output.clone());
+    }
+    assert_ne!(outputs[0], outputs[1]);
+    assert_ne!(
+        fs::read(&outputs[0]).unwrap(),
+        fs::read(&outputs[1]).unwrap()
+    );
+    assert!((crate::probe(&outputs[0]).unwrap().duration_sec - 0.73).abs() < 0.1);
+    assert!((crate::probe(&outputs[1]).unwrap().duration_sec - 1.16).abs() < 0.1);
+    fs::remove_dir_all(&temp.0).unwrap();
+}
+
+#[test]
+fn shared_preview_failure_or_cancellation_never_publishes_or_leaves_partial() {
+    use crate::preparation::primary_preview::PrimaryPreviewPlan;
+    let temp = SocketDir::new().unwrap();
+    let source = preview_source(&temp.0, "failure.mp4", 30, "1.0", false);
+    let plan = PrimaryPreviewPlan::new(&source, &temp.0, "project", "failure.mp4").unwrap();
+    for cancelled in [false, true] {
+        let write = plan.begin().unwrap();
+        let path = write.path.clone();
+        let cancel = AtomicBool::new(cancelled);
+        let result = decode_full_video_shared_with_preview(
+            &source,
+            9,
+            DecodePreference::Software,
+            2,
+            &cancel,
+            Some(PrimaryPreviewOutput {
+                path: &path,
+                hardware: false,
+            }),
+            |_| Err("synthetic model failure".into()),
+            |_, _| Ok(()),
+        );
+        assert!(result.is_err());
+        drop(write);
+        assert!(!path.exists());
+        assert!(!path.parent().unwrap().exists());
+        assert!(plan.ready_path().is_none());
+        assert!(!plan.manifest.exists());
+    }
+    fs::remove_dir_all(&temp.0).unwrap();
+}
+
+#[test]
+#[ignore = "requires NVIDIA NVDEC/NVENC"]
+fn shared_preview_nvdec_nvenc_preserves_rotation_audio_and_native_fps() {
+    use crate::preparation::primary_preview::PrimaryPreviewPlan;
+    let temp = SocketDir::new().unwrap();
+    let base = temp.0.join("hevc.mp4");
+    assert!(Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=60:duration=0.73",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=duration=0.73",
+            "-c:v",
+            "libx265",
+            "-x265-params",
+            "log-level=error:pools=1",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-y"
+        ])
+        .arg(&base)
+        .status()
+        .unwrap()
+        .success());
+    let cancel = AtomicBool::new(false);
+    for rotation in [0, 90, -90, 180] {
+        let name = format!("rotated-{rotation}.mp4");
+        let source = temp.0.join(&name);
+        assert!(Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(&base)
+            .args([
+                "-c",
+                "copy",
+                "-metadata:s:v:0",
+                &format!("rotate={rotation}"),
+                "-y"
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let plan = PrimaryPreviewPlan::new(&source, &temp.0, "project", &name).unwrap();
+        let write = plan.begin().unwrap();
+        let mut baseline = Vec::new();
+        decode_full_video_shared_with_backend_and_tail(
+            &source,
+            9,
+            DecodePreference::Nvdec,
+            2,
+            &cancel,
+            |batch| {
+                baseline.push((
+                    Sha256::digest(&batch.gray).to_vec(),
+                    Sha256::digest(&batch.rgb).to_vec(),
+                ));
+                Ok(())
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        let mut index = 0;
+        let result = decode_full_video_shared_with_preview(
+            &source,
+            9,
+            DecodePreference::Nvdec,
+            2,
+            &cancel,
+            Some(PrimaryPreviewOutput {
+                path: &write.path,
+                hardware: true,
+            }),
+            |batch| {
+                assert_eq!(
+                    (
+                        Sha256::digest(&batch.gray).to_vec(),
+                        Sha256::digest(&batch.rgb).to_vec()
+                    ),
+                    baseline[index]
+                );
+                index += 1;
+                Ok(())
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(result.backend, DecodeBackend::Nvdec);
+        assert_eq!(index, baseline.len());
+        write.publish(&cancel).unwrap();
+        let info = crate::probe(plan.ready_path().unwrap()).unwrap();
+        assert_eq!(info.rotation, 0);
+        assert!((info.fps.unwrap() - 60.0).abs() < 0.1);
+        let original = crate::probe(&source).unwrap();
+        assert_eq!((info.width, info.height), (original.width, original.height));
+        let probe = crate::ffprobe(&plan.output).unwrap();
+        assert!(probe["streams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["codec_name"] == "aac"));
+    }
+    fs::remove_dir_all(&temp.0).unwrap();
+}
+
+#[test]
+fn primary_preview_cancel_before_publish_cleans_encoded_file_and_source_change_invalidates_cache() {
+    use crate::preparation::primary_preview::PrimaryPreviewPlan;
+    let temp = SocketDir::new().unwrap();
+    let source = preview_source(&temp.0, "source.mp4", 30, "0.6", false);
+    let plan = PrimaryPreviewPlan::new(&source, &temp.0, "project", "source.mp4").unwrap();
+    let cancel = AtomicBool::new(false);
+    let write = plan.begin().unwrap();
+    let scratch = write.path.clone();
+    decode_full_video_shared_with_preview(
+        &source,
+        9,
+        DecodePreference::Software,
+        2,
+        &cancel,
+        Some(PrimaryPreviewOutput {
+            path: &write.path,
+            hardware: false,
+        }),
+        |_| Ok(()),
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    cancel.store(true, Ordering::Release);
+    assert_eq!(write.publish(&cancel).unwrap_err(), "cancelled");
+    assert!(!scratch.exists());
+    assert!(plan.ready_path().is_none());
+    cancel.store(false, Ordering::Release);
+    let write = plan.begin().unwrap();
+    decode_full_video_shared_with_preview(
+        &source,
+        9,
+        DecodePreference::Software,
+        2,
+        &cancel,
+        Some(PrimaryPreviewOutput {
+            path: &write.path,
+            hardware: false,
+        }),
+        |_| Ok(()),
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    write.publish(&cancel).unwrap();
+    assert!(plan.ready_path().is_some());
+    use std::io::Write;
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&source)
+        .unwrap()
+        .write_all(b"source changed")
+        .unwrap();
+    assert!(plan.ready_path().is_none());
+    fs::remove_dir_all(&temp.0).unwrap();
+}

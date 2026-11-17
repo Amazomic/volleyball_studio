@@ -545,3 +545,115 @@ async fn unknown_api_route_returns_404() {
     assert_eq!(code, 404);
     server.close().await;
 }
+
+#[tokio::test]
+async fn primary_preview_discovery_is_per_video_and_does_not_prepare() {
+    let server = TestServer::spawn(true).await;
+    server.seed_project("123456abcdef");
+    let (code, body) = server
+        .request(
+            "GET",
+            "/api/video-primary-preview?project_id=123456abcdef&video=match.mp4",
+            None,
+        )
+        .await;
+    assert_eq!(code, 200, "{body}");
+    let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["state"], "missing");
+    assert_eq!(response["video"], "match.mp4");
+    assert!(response["media_url"].is_null());
+    let (code, _) = server
+        .request(
+            "GET",
+            "/api/video-primary-preview?project_id=123456abcdef&video=other.mp4",
+            None,
+        )
+        .await;
+    assert_eq!(code, 400);
+    assert!(!server.state.data_root.join("primary-playback-v1").exists());
+    server.close().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn primary_preview_http_keeps_two_videos_separate_and_checks_version() {
+    use volley_media::{
+        preparation::primary_preview::PrimaryPreviewPlan,
+        raw_decoder::{
+            decode_full_video_shared_with_preview, DecodePreference, PrimaryPreviewOutput,
+        },
+    };
+    let server = TestServer::spawn(true).await;
+    let project = "123456abcdef";
+    server.seed_project(project);
+    storage::write_json_atomic(&server.root.join("sandbox/projects/projects.json"), &serde_json::json!({"schema":1,"projects":[{"id":project,"name":"Match","videos":["match.mp4","second.mp4"]}]})).unwrap();
+    let folder = server.root.join("original/project");
+    fs::create_dir_all(&folder).unwrap();
+    let mut urls = Vec::new();
+    for (name, duration) in [("match.mp4", "0.6"), ("second.mp4", "1.1")] {
+        let source = folder.join(name);
+        assert!(std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("testsrc2=size=160x90:rate=30:duration={duration}"),
+                "-c:v",
+                "libx264",
+                "-threads",
+                "1",
+                "-y"
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let plan =
+            PrimaryPreviewPlan::new(&source, &server.state.data_root, project, name).unwrap();
+        let write = plan.begin().unwrap();
+        decode_full_video_shared_with_preview(
+            &source,
+            9,
+            DecodePreference::Software,
+            2,
+            &std::sync::atomic::AtomicBool::new(false),
+            Some(PrimaryPreviewOutput {
+                path: &write.path,
+                hardware: false,
+            }),
+            |_| Ok(()),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        write
+            .publish(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        let (code, body) = server
+            .request(
+                "GET",
+                &format!("/api/video-primary-preview?project_id={project}&video={name}"),
+                None,
+            )
+            .await;
+        assert_eq!(code, 200, "{body}");
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["video"], name);
+        assert_eq!(value["state"], "ready");
+        let url = value["media_url"].as_str().unwrap().to_owned();
+        let (code, body) = server.request("GET", &url, None).await;
+        assert_eq!(code, 200);
+        assert_eq!(
+            body,
+            String::from_utf8_lossy(&fs::read(plan.ready_path().unwrap()).unwrap())
+        );
+        let (code,_)=server.request("GET",&format!("/api/video-primary-preview?project_id={project}&video={name}&media=1&preview_id=wrong"),None).await;
+        assert_eq!(code, 409);
+        urls.push(url);
+    }
+    assert_ne!(urls[0], urls[1]);
+    let forged = urls[0].replace("match%2Emp4", "second%2Emp4");
+    assert_eq!(server.request("GET", &forged, None).await.0, 409);
+    server.close().await;
+}

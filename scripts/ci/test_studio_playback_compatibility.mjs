@@ -23,6 +23,7 @@ async function scenario(mode){
   };
   const window={location:{origin:"http://127.0.0.1:8875"},addEventListener(){},dispatchEvent:event=>notifications.push(event),
     VolleyballStudioActivity:{async fetch(path,options={}){
+      if(path.startsWith("/api/video-primary-preview?"))return {ok:true,json:async()=>({state:"missing",media_url:null})};
       requests.push({path,options});
       const report=options.body?JSON.parse(options.body):{};
       const code=report.browser_error_code;
