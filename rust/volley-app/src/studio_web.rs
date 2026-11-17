@@ -54,7 +54,7 @@ fn web_asset(mime: &'static str, contents: &str) -> Response {
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self' blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
         ),
     );
     response
@@ -618,6 +618,12 @@ mod tests {
     fn native_ui_has_strict_csp_and_no_legacy_health_gate() {
         let page = web_asset("text/html; charset=utf-8", HTML);
         assert!(page.headers().contains_key(header::CONTENT_SECURITY_POLICY));
+        let csp = page.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert!(csp
+            .split(';')
+            .any(|directive| directive.trim() == "media-src 'self' blob:"));
         assert!(HTML.contains("id=\"studio-rallies\""));
         assert!(HTML.contains("id=\"studio-project\""));
         assert!(HTML.contains("id=\"studio-analysis-view\""));
