@@ -94,7 +94,7 @@ pub(crate) fn plan_for(
     let project = projects::existing_project(state, id)?;
     storage::video_name(video)?;
     if project["quick_reel_internal"] == true {
-        return crate::quick_reel::prepared_plan_for_quick_reel(state, &project, video);
+        return crate::quick_reel_source::prepared_plan_for_quick_reel(state, &project, video);
     }
     if !project["videos"]
         .as_array()

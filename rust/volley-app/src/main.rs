@@ -42,6 +42,7 @@ mod project_guard;
 mod project_upload;
 mod projects;
 mod quick_reel;
+mod quick_reel_source;
 mod rallies;
 mod rally_marks;
 mod reid_group_edits;
