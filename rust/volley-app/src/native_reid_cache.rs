@@ -164,6 +164,7 @@ pub(crate) fn read(root: &Path, scope: &CacheScope) -> Result<CacheLookup, Strin
 /// Merge only server-computed, normalized vectors. A project lock and on-disk
 /// exclusive cache lock preserve concurrent requests. A stale model/source
 /// resets the old document; no old vector is carried into the new feature space.
+#[cfg(test)]
 pub(crate) fn merge(
     root: &Path,
     scope: &CacheScope,
