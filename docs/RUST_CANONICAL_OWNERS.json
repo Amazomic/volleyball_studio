@@ -46,9 +46,17 @@
     "status": "partial",
     "adapters": [
         "rust/volley-app/src/preparation.rs",
-        "rust/volley-app/static/studio_playback.js"
+        "rust/volley-app/static/studio_playback.js",
+        "rust/volley-media/src/preparation/primary_preview.rs",
+        "rust/volley-app/src/preparation/primary_preview.rs",
+        "rust/volley-app/static/studio_fragments.js"
     ],
-    "routes": [],
+    "routes": [
+        {
+            "path": "/api/video-primary-preview",
+            "handler": "preparation::primary_preview"
+        }
+    ],
     "stores": [
         {
             "source": "native",
@@ -61,6 +69,10 @@
         {
             "source": "legacy",
             "path": "prepared/<metadata_id>.mp4"
+        },
+        {
+            "source": "native",
+            "path": "primary-playback-v1/<project_video_key>/<source_profile_sha>/preview.mp4"
         }
     ]
 },

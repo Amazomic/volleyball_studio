@@ -809,3 +809,5 @@ mod tests {
         assert_eq!(args[encoder + 1], "h264_nvenc");
     }
 }
+
+pub mod primary_preview;

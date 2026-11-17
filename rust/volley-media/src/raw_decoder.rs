@@ -6,8 +6,9 @@ mod shared;
 #[cfg(unix)]
 pub use shared::{
     decode_full_video_shared, decode_full_video_shared_with_backend,
-    decode_full_video_shared_with_backend_and_tail, select_decode_backend, DecodeBackend,
-    DecodePreference, DecodeSelection, PrimaryDecodeSummary, PrimaryFrameBatch,
+    decode_full_video_shared_with_backend_and_tail, decode_full_video_shared_with_preview,
+    select_decode_backend, DecodeBackend, DecodePreference, DecodeSelection, PrimaryDecodeSummary,
+    PrimaryFrameBatch, PrimaryPreviewOutput,
 };
 
 use crate::frame_windows::{FrameWindows, RawWindow, CLIP_FRAMES, MAX_FRAMES};

@@ -234,6 +234,7 @@ pub fn decode_full_video_shared(
             rotation_filter: "",
         },
         0,
+        None,
         consume,
         |_, _| Ok(()),
     )
@@ -249,10 +250,16 @@ pub fn decode_full_video_shared_with_backend(
     consume: impl FnMut(PrimaryFrameBatch) -> Result<(), String>,
 ) -> Result<PrimaryDecodeSummary, String> {
     let decision = select_decode_backend(source, preference, cancelled)?;
-    let decode =
-        decode_full_video_shared_impl(source, stride, cancelled, &decision, 0, consume, |_, _| {
-            Ok(())
-        })?;
+    let decode = decode_full_video_shared_impl(
+        source,
+        stride,
+        cancelled,
+        &decision,
+        0,
+        None,
+        consume,
+        |_, _| Ok(()),
+    )?;
     Ok(PrimaryDecodeSummary {
         decode,
         backend: decision.backend,
@@ -282,6 +289,45 @@ pub fn decode_full_video_shared_with_backend_and_tail(
         cancelled,
         &decision,
         cpu_threads,
+        None,
+        consume,
+        on_tail,
+    )?;
+    Ok(PrimaryDecodeSummary {
+        decode,
+        backend: decision.backend,
+        fallback_reason: decision.fallback_reason,
+    })
+}
+
+#[derive(Clone, Copy)]
+pub struct PrimaryPreviewOutput<'a> {
+    pub path: &'a Path,
+    pub hardware: bool,
+}
+
+#[expect(clippy::too_many_arguments)]
+pub fn decode_full_video_shared_with_preview(
+    source: &Path,
+    stride: usize,
+    preference: DecodePreference,
+    cpu_threads: usize,
+    cancelled: &AtomicBool,
+    preview: Option<PrimaryPreviewOutput<'_>>,
+    consume: impl FnMut(PrimaryFrameBatch) -> Result<(), String>,
+    on_tail: impl FnMut(&[u8], u64) -> Result<(), String>,
+) -> Result<PrimaryDecodeSummary, String> {
+    if stride != 9 {
+        return Err("Preview requires disjoint nine-frame model windows".into());
+    }
+    let decision = select_decode_backend(source, preference, cancelled)?;
+    let decode = decode_full_video_shared_impl(
+        source,
+        stride,
+        cancelled,
+        &decision,
+        cpu_threads,
+        preview,
         consume,
         on_tail,
     )?;
@@ -341,8 +387,25 @@ fn decode_input_command(
 }
 
 fn shared_decode_command(source: &Path, decision: &DecodeSelection, cpu_threads: usize) -> Command {
+    shared_decode_command_with_preview(source, decision, cpu_threads, false)
+}
+
+fn shared_decode_command_with_preview(
+    source: &Path,
+    decision: &DecodeSelection,
+    cpu_threads: usize,
+    preview: bool,
+) -> Command {
     let (mut command, prefix) = decode_input_command(source, decision, cpu_threads);
-    let filters = format!("[0:v]{prefix}fps=30,split=2[ball][players];[ball]scale=512:288:flags=bilinear,format=gray[g];[players]scale=640:360:flags=bilinear,format=rgb24[r]");
+    let input = if preview {
+        format!("[0:v]{prefix}split=2[model][preview];[model]")
+    } else {
+        format!("[0:v]{prefix}")
+    };
+    let mut filters = format!("{input}fps=30,split=2[ball][players];[ball]scale=512:288:flags=bilinear,format=gray[g];[players]scale=640:360:flags=bilinear,format=rgb24[r]");
+    if preview {
+        filters.push_str(";[preview]scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,format=yuv420p[p]");
+    }
     command.args([
         "-filter_complex_threads",
         &cpu_threads.to_string(),
@@ -358,6 +421,7 @@ fn decode_full_video_shared_impl(
     cancelled: &AtomicBool,
     decision: &DecodeSelection,
     cpu_threads: usize,
+    preview: Option<PrimaryPreviewOutput<'_>>,
     mut consume: impl FnMut(PrimaryFrameBatch) -> Result<(), String>,
     mut on_tail: impl FnMut(&[u8], u64) -> Result<(), String>,
 ) -> Result<DecodeSummary, String> {
@@ -385,7 +449,11 @@ fn decode_full_video_shared_impl(
         .set_nonblocking(true)
         .map_err(|error| format!("RGB socket: {error}"))?;
 
-    let mut command = shared_decode_command(source, decision, cpu_threads);
+    let mut command = if preview.is_some() {
+        shared_decode_command_with_preview(source, decision, cpu_threads, true)
+    } else {
+        shared_decode_command(source, decision, cpu_threads)
+    };
     command
         .args(["-map", "[g]", "-an", "-sn", "-dn"])
         .args(["-f", "rawvideo", "-pix_fmt", "gray"])
@@ -396,6 +464,46 @@ fn decode_full_video_shared_impl(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    if let Some(preview) = preview {
+        command.args([
+            "-map", "[p]", "-map", "0:a:0?", "-sn", "-dn", "-c:a", "aac", "-b:a", "128k",
+        ]);
+        if preview.hardware {
+            command.args([
+                "-c:v",
+                "h264_nvenc",
+                "-preset",
+                "p4",
+                "-rc",
+                "vbr",
+                "-cq",
+                "23",
+                "-b:v",
+                "0",
+            ]);
+        } else {
+            command.args([
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", "2",
+            ]);
+        }
+        command
+            .args([
+                "-fps_mode",
+                "passthrough",
+                "-force_key_frames",
+                "expr:gte(t,n_forced*1)",
+                "-map_metadata",
+                "-1",
+                "-metadata:s:v:0",
+                "rotate=0",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+                "-y",
+            ])
+            .arg(preview.path);
+    }
     let mut child = ManagedChild(
         command
             .spawn()
@@ -483,10 +591,23 @@ fn decode_full_video_shared_impl(
                 if windows == 0 {
                     return Err("Video does not contain a complete nine-frame model window".into());
                 }
-                let status = child
-                    .0
-                    .wait()
-                    .map_err(|error| format!("Wait shared FFmpeg: {error}"))?;
+                let finishing = Instant::now();
+                let status = loop {
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err("cancelled".into());
+                    }
+                    if finishing.elapsed() > IDLE_LIMIT {
+                        return Err("Shared FFmpeg finalization timed out".into());
+                    }
+                    if let Some(status) = child
+                        .0
+                        .try_wait()
+                        .map_err(|error| format!("Wait shared FFmpeg: {error}"))?
+                    {
+                        break status;
+                    }
+                    thread::sleep(POLL);
+                };
                 if !status.success() {
                     return Err(format!("Shared FFmpeg exited with {status}"));
                 }
