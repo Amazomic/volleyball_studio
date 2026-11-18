@@ -485,12 +485,8 @@
                   <p>Трекинг · касания · розыгрыши. Повторный GPU-анализ не требуется.</p></div>
                 <button id="studio-analysis-post-only" class="primary analysis-stage-launch" type="button" title="Запустить CPU на выбранной в шапке GPU-версии и сохранить новую постобработку">▶ Начать анализ</button>
               </div>
-              <div class="analysis-profile-fields analysis-profile-core analysis-profile-core-post">
-                <div><label class="field-label" for="studio-post-touch-algorithm">Алгоритм касаний</label><select id="studio-post-touch-algorithm" data-default="pose_motion"><option value="pose_motion" selected>Строгий: траектория + точки тела</option><option value="legacy">VBallNet + RTMPose: контакты и изломы ±0,1 с</option></select></div>
-                <div><label class="field-label" for="studio-post-touch-threshold">Мин. уверенность физического касания</label><input id="studio-post-touch-threshold" type="number" min="0" max="1" step="0.01" value="0.48" data-default="0.48"></div>
-              </div>
               <details class="analysis-profile-advanced">
-                <summary>Настройки постобработки · дополнительно</summary>
+                <summary>Параметры постобработки</summary>
                 <div class="analysis-profile-subtitle">Игроки и позы</div>
                 <div class="analysis-profile-fields">
                   <div class="analysis-profile-toggle"><label><input id="studio-gpu-interpolate-players" type="checkbox" checked data-default="1"> Интерполяция игроков в CPU</label></div>
@@ -505,6 +501,7 @@
                 </div>
                 <div class="analysis-profile-subtitle">Контакты мяча</div>
                 <div class="analysis-profile-fields">
+                  <div><label class="field-label" for="studio-post-touch-threshold">Мин. уверенность физического касания</label><input id="studio-post-touch-threshold" type="number" min="0" max="1" step="0.01" value="0.48" data-default="0.48"></div>
                   <div><label class="field-label" for="studio-post-require-pose">Подтверждение точками тела</label><select id="studio-post-require-pose" data-default="0"><option value="0">Не обязательно (рекомендуется)</option><option value="1">Строгая фильтрация (меньше касаний)</option></select></div>
                   <div><label class="field-label" for="studio-post-pose-confidence">Мин. уверенность точки тела</label><input id="studio-post-pose-confidence" type="number" min="0" max="1" step="0.01" value="0.28" data-default="0.28"></div>
                   <div><label class="field-label" for="studio-post-pose-distance">Расстояние до точки, доля роста</label><input id="studio-post-pose-distance" type="number" min="0.01" max="1" step="0.01" value="0.34" data-default="0.34"></div>
@@ -533,8 +530,8 @@
                   <div><label class="field-label" for="studio-post-no-touch">Максимум без нового касания другого игрока, кадров</label><input id="studio-post-no-touch" type="number" min="90" max="120" step="1" value="120" data-default="120"></div>
                   <div><label class="field-label" for="studio-post-context">Контекст розыгрыша, кадров</label><input id="studio-post-context" type="number" min="0" max="180" step="1" value="45" data-default="45"></div>
                 </div>
+                <p class="analysis-profile-hint"><a href="#" id="studio-analysis-reset" class="analysis-reset-link">↺ Вернуть эталонные настройки</a></p>
               </details>
-              <p class="analysis-profile-hint"><a href="#" id="studio-analysis-reset" class="analysis-reset-link">↺ Вернуть эталонные настройки</a></p>
               </section>
               <div class="analysis-run-actions">
                 <button id="studio-analysis-start" type="button" class="primary">▶ Полный анализ</button>

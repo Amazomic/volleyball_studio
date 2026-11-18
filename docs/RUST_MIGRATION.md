@@ -2289,3 +2289,7 @@ Studio показывает кнопку перехода между debug и re
 - Проверки Windows: `cargo fmt --all -- --check` — PASS; `cargo check --workspace --offline` — PASS; `cargo test --workspace --offline -- --skip storage::tests::shared_storage_statistics_preserve_missing_exact_bytes_and_http_errors` — PASS (349 тестов приложения, 8 ignored; ошибка теста хранилища существовала до интеграции); тесты сырых RF-DETR рамок и RTMPose overlay — PASS.
 - Пересобран Rust/WASM и добавлен перевод подписей режима дообучения. `node scripts/ci/test_volley_web_wasm.mjs` — PASS: 287/287 подписей HTML, 77/77 accessibility. `node scripts/ci/test_studio_wasm_ui.mjs` — PASS.
 - A/B-сравнение качества Track ID на реальных размеченных видео ещё не проведено. Удалять старый код только после проверки числа ID switches, fragmentation, ложных/пропущенных ID и закрытий/пересечений игроков.
+
+### 2026-11-18 — единый алгоритм CPU-касаний и свёрнутая форма
+
+Новые CPU-постобработки используют только `pose_motion` (траектория VBallNet + точки тела RTMPose). Выбор `legacy` в UI удалён и запрещён для новых API-запросов, но старые сохранённые CPU-профили остаются читаемыми. Порог касаний, интерполяция, Track ID, розыгрыши и сброс профиля находятся в единственном закрытом по умолчанию блоке «Параметры постобработки». Проверены Cargo, JS/UI и Rust/WASM; см. `docs/agent-runs/2026-11-18-post-single-mode.md`.

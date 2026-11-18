@@ -59,7 +59,7 @@ assert.equal(stride.value,"10","A new gold default must override an old snapshot
 assert.equal(touch.value,"0.75","Unchanged defaults must restore user overrides");
 assert.equal(refreshed.analysisFormCache.read("b".repeat(12)),null,
   "Settings are isolated by project");
-assert.match(studio,/VolleyballStudioProjectCatalog=\(\)=>previewCache\.load\("\/api\/projects",300000,true\)/);
+assert.match(studio,/VolleyballStudioProjectCatalog=\(\)=>request\("\/api\/projects"\)/);
 assert.match(studio,/rallies\/runs",\{project_id:project\}\),300000,true\)/);
 assert.match(tabs,/await window\.VolleyballStudioProjectCatalog\(\)/);
 assert.match(tabs,/window\.VolleyballEditor\?\.load\(project,ui\.video\.value,true\)/);

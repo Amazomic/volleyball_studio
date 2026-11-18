@@ -17,8 +17,7 @@ const project="f39dff74992f";
 const key=`volley:studio-analysis-form:v1:${project}`;
 const inputs=[
   {id:"studio-post-require-pose",value:"0",dataset:{default:"0"},checkValidity:()=>true},
-  {id:"studio-post-ball-score",value:"0.35",dataset:{default:"0.35"},checkValidity:()=>true},
-  {id:"studio-post-touch-algorithm",value:"legacy",dataset:{default:"legacy"},checkValidity:()=>true}
+  {id:"studio-post-ball-score",value:"0.35",dataset:{default:"0.35"},checkValidity:()=>true}
 ];
 const ui={analysis:{querySelectorAll:()=>inputs},video:{value:"match.mp4"}};
 const env={ui,localStorage,$:id=>inputs.find(x=>x.id===id),projectId:()=>project};
@@ -28,7 +27,8 @@ runInNewContext(extract("  const allProfileFields=()=>","  const selectedGpuSour
 
 storage.set(key,JSON.stringify({version:1,video:"match.mp4",fields:{
   "studio-post-require-pose":["0","1"],
-  "studio-post-ball-score":["0.35","0.44"]
+  "studio-post-ball-score":["0.35","0.44"],
+  "studio-post-touch-algorithm":["pose_motion","legacy"]
 }}));
 assert.equal(env.restore(project),"match.mp4");
 assert.equal(inputs[0].value,"0","Strict legacy override must not leak into the calibrated profile");
@@ -39,6 +39,8 @@ inputs[0].value="1";
 env.save();
 assert.equal(JSON.parse(storage.get(key)).fields["studio-post-require-pose"][1],"1",
   "A deliberate strict-mode change in v2 must persist");
+assert.equal(JSON.parse(storage.get(key)).fields["studio-post-touch-algorithm"],undefined,
+  "A removed legacy algorithm choice must not be persisted again");
 assert.equal(env.restore(project),"match.mp4");
 assert.equal(inputs[0].value,"1","A user-selected v2 strict mode must not be erased");
 console.log("PASS: migrated stale RTMPose gate and preserved user settings in v2.");

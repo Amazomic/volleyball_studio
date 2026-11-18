@@ -522,7 +522,20 @@ impl TryFrom<StartRequestWire> for StartRequest {
     type Error = String;
 
     fn try_from(wire: StartRequestWire) -> Result<Self, Self::Error> {
-        let (gpu, post) = decode_profiles(wire.gpu, wire.post)?;
+        // Historical CPU snapshots may still deserialize the old algorithm,
+        // but new Studio requests have a single supported contact method.
+        if wire
+            .post
+            .pointer("/touches/algorithm")
+            .and_then(Value::as_str)
+            == Some("legacy")
+        {
+            return Err("Для новой постобработки используется только pose_motion".into());
+        }
+        let (gpu, mut post) = decode_profiles(wire.gpu, wire.post)?;
+        // TouchSettings::default() remains legacy for old saved data. An API
+        // request with partial touch parameters must use the current method.
+        post.touches.algorithm = TouchAlgorithm::PoseMotion;
         Ok(Self {
             project_id: wire.project_id,
             video: wire.video,
@@ -2597,6 +2610,27 @@ mod tests {
             assert!(output["gpu"].get("interpolate_players").is_none());
             assert!(output["gpu"].get("interpolate_pose").is_none());
         }
+    }
+
+    #[test]
+    fn new_post_requests_have_one_touch_algorithm_without_rewriting_saved_legacy() {
+        let base = json!({"project_id":"abc123def456","video":"match.mp4"});
+        let fresh: StartRequest = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(fresh.post.touches.algorithm, TouchAlgorithm::PoseMotion);
+
+        let mut partial = base.clone();
+        partial["post"] = json!({"touches":{"threshold":0.62}});
+        let active: StartRequest = serde_json::from_value(partial).unwrap();
+        assert_eq!(active.post.touches.algorithm, TouchAlgorithm::PoseMotion);
+        assert_eq!(active.post.touches.threshold, 0.62);
+
+        let mut previous_choice = base;
+        previous_choice["post"] = json!({"touches":{"algorithm":"legacy"}});
+        assert!(serde_json::from_value::<StartRequest>(previous_choice).is_err());
+
+        let (_, archived) =
+            decode_profiles(json!({}), json!({"touches":{"algorithm":"legacy"}})).unwrap();
+        assert_eq!(archived.touches.algorithm, TouchAlgorithm::Legacy);
     }
 
     #[test]

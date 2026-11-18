@@ -451,3 +451,4 @@ VBallNet + RTMPose: контакты и изломы ±0,1 с	VBallNet + RTMPose
 Эталонные касания по всему видео	Ground-truth touches throughout the video
 Касания для коррекции	Touches to correct
 Сохранённые розыгрыши	Saved rallies
+Параметры постобработки	Post-processing parameters

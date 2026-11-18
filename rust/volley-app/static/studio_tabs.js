@@ -225,7 +225,7 @@
       ambiguity_margin:inputValue("studio-post-margin")
     },
     touches:{
-      algorithm:$("studio-post-touch-algorithm").value,
+      algorithm:"pose_motion", // Единственный алгоритм новых CPU-анализов.
       threshold:inputValue("studio-post-touch-threshold"),
       min_ball_score:inputValue("studio-post-ball-score"),
       smooth:inputValue("studio-post-smooth"),
@@ -301,8 +301,7 @@
         "Изменено параметров: "+changed.length+
         ". При изменении GPU создаётся новый анализ; при изменении только CPU — новая постобработка.":
         "Эталонный профиль активен. Совпадающие готовые версии используются повторно.";
-      if($("studio-post-require-pose").value==="1" &&
-          $("studio-post-touch-algorithm").value==="legacy"){
+      if($("studio-post-require-pose").value==="1"){
         ui.profileDelta.textContent+=" Внимание: обязательное подтверждение RTMPose отбрасывает касания без уверенной позы и может оставить розыгрыш без событий.";
       }
     }

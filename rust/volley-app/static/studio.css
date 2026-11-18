@@ -520,7 +520,6 @@ body[data-ui-theme="light"] .studio-sidebar-restart-status{color:#395672}
 .analysis-profile-toggle label{display:flex;align-items:center;gap:9px;font-size:12px;color:#c2d6f1;cursor:pointer}
 .analysis-profile-fields .analysis-profile-toggle input[type="checkbox"]{width:17px;height:17px;min-width:17px;margin:0;padding:0;accent-color:#599fff}
 .analysis-profile-source{grid-column:span 2}
-.analysis-profile-core-post{grid-template-columns:repeat(2,minmax(0,1fr));max-width:760px}
 .analysis-profile-advanced[open] summary{margin-bottom:10px}
 .analysis-profile-hint{font-size:11px;color:#92a9c6;line-height:1.4;margin:9px 0 0}
 .analysis-profile-subtitle{font-weight:750;color:#c2d6f1;margin:15px 0 9px;padding-bottom:6px;border-bottom:1px solid #293f5b;font-size:12px}

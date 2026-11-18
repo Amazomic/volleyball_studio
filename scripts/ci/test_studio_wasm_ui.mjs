@@ -41,7 +41,7 @@ const profileSelects=[...markup.matchAll(/<select[^>]*id="(studio-(?:gpu|post)[^
   .map(row=>Object.fromEntries([...row[0].matchAll(/([\w-]+)="([^"]*)"/g)]
     .map(attr=>[attr[1],attr[2]])));
 assert.deepEqual(profileSelects.map(attrs=>attrs.id).sort(),
-  ["studio-gpu-pose-enabled","studio-post-pose-classify","studio-post-require-pose","studio-post-touch-algorithm"]);
+  ["studio-gpu-pose-enabled","studio-post-pose-classify","studio-post-require-pose"]);
 
 const names=["preview","analysis","players","montage","quick","report"];
 class Node {
