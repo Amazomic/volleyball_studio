@@ -844,8 +844,13 @@ fn gpu_lineage_valid(
             return false;
         }
         if saved["gpu_model_stack"] == requested_gpu_model_stack() {
-            if pose["box_source_version"] != "detector_observed_sampling_v1"
-                || pose["source_person_sampling_period_frames"] != request.gpu.pose_stride
+            if !matches!(
+                pose["box_source_version"].as_str(),
+                Some(
+                    "detector_observed_sampling_v1"
+                        | "detector_observed_and_bounded_interpolated_v1"
+                )
+            ) || pose["source_person_sampling_period_frames"] != request.gpu.pose_stride
                 || pose["interpolate_players"] != false
                 || pose["stride"] != request.gpu.pose_stride
                 || !pose["crop_plan_file"].is_null()
@@ -907,9 +912,9 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
         } else {
             "disabled_v1"
         })
-        && (saved["gpu_model_stack"] != requested_gpu_model_stack()
-            || !request.gpu.pose_enabled
-            || track["track_association_version"] == cpu_retrack::POSE_TRACK_ASSOCIATION_VERSION)
+        // A saved replay from the disabled legacy tracker must never be
+        // silently reused when ByteTrack is now the default.
+        && track["track_association_version"] == cpu_retrack::TRACK_ASSOCIATION_VERSION
         && track["replay_id"] == replay
         && track["interpolate_pose"].as_bool().unwrap_or(true) == request.post.interpolate_pose
         && track["source_fusion_id"] == fusion
@@ -947,7 +952,7 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
 // Changing the original-video 30 FPS source and detector-to-pose alignment
 // together must invalidate both earlier GPU evidence versions.
 const RFDETR_GPU_MODEL_STACK: &str =
-    "vballnet_rfdetr_medium_18250b5a_original30_native_pose_pixels_v6";
+    "vballnet_rfdetr_medium_18250b5a_original30_native_pose_pixels_bytetrack_lowconf_v7";
 
 /// The GPU-evidence cache must not be shared by different detector weights
 /// or detector-to-pose box policies.
@@ -2846,7 +2851,8 @@ mod branching_tests {
                 "schema":"volley-native-cpu-tracking/1","state":"provisional_tracklets_rebuilt","replay_id":replay,
                 "project_id":request.project_id,"video":request.video,
                 "source_fusion_id":analysis,"ball_selection_policy":"vballnet_only_v1",
-                "interpolated_positions_version":"bounded_same_track_3s_v2","sha256":sha
+                 "interpolated_positions_version":"bounded_same_track_3s_v2",
+                "track_association_version":cpu_retrack::TRACK_ASSOCIATION_VERSION,"sha256":sha
             }),
         );
         emit(

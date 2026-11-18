@@ -5,6 +5,7 @@
 use crate::{bbox_iou, fusion::Candidate};
 use serde::{Deserialize, Serialize};
 mod association;
+pub mod bytetrack;
 mod confirmation;
 mod pose_matching;
 pub use confirmation::{TrackConfirmation, TrackConfirmationSummary};
@@ -401,6 +402,10 @@ fn score_match(
 
 /// Streaming tracker with bounded active state. IDs start at 1; query_index
 /// is NOT a global Track ID and is never used to cross nine-frame windows.
+/// Legacy association engine disabled in production since ByteTrack rollout.
+/// TODO(bytetrack-removal): Remove this implementation and its tests once
+/// ByteTrack meets the no-ID-switch/no-gap benchmark on labeled videos.
+/// See docs/agent-runs/2026-11-18-bytetrack-replacement.md.
 pub struct ProvisionalTracker {
     config: TrackingOptions,
     active: Vec<ActiveTrack>,
@@ -725,7 +730,7 @@ mod tests {
     }
     #[test]
     fn sparse_full_and_upper_body_crops_at_25m54s_are_one_track() {
-        // Real GPU proposals in mm, 25:53.7–25:54.7 (10-frame sampling).
+        // Real GPU proposals in mm, 25:53.7вЂ“25:54.7 (10-frame sampling).
         // The upper torso crop and full-body pose share the *same* head.
         // Original tracker treated the height jump as a new player and
         // published two Track IDs around frame 46626.
@@ -824,7 +829,7 @@ mod tests {
     #[test]
     fn sparse_pose_crop_switch_keeps_one_real_track_on_match_frame_143271() {
         // Reproduced from the project's immutable GPU person/pose fusion
-        // at 1:19:33–1:19:37. The person is observed once every 10 frames.
+        // at 1:19:33вЂ“1:19:37. The person is observed once every 10 frames.
         // Old scoring minted ID 795 when skeleton height suddenly shrank,
         // then alternated 792/795 and visual gap filling showed both.
         let poses: &[(u64, [f64; 4], [f64; 2])] = &[

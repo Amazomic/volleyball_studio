@@ -430,3 +430,24 @@ VBallNet + RTMPose: контакты и изломы ±0,1 с	VBallNet + RTMPose
 Разметка: двигайте отдельные углы или всю площадку вместе с сеткой, удерживая курсор внутри. Масштаб 10–124%: кнопки, колесо мыши, тачпад или жест двумя пальцами. Масштаб не меняет координаты, исходное видео не изменяется; обрезка пока не ограничивает GPU-анализ.	Marking mode: drag individual corners or drag inside the court to move all corners with the net. Zoom from 10% to 124% using buttons, the mouse wheel, touchpad or two-finger gestures. Zoom preserves annotation coordinates; the source video stays unchanged, and the trim range does not yet limit GPU analysis.
 
 Видео пока не выбраны. Добавьте исходные файлы выше.	No videos selected yet. Add source files above.
+Интерполированные рамки	Interpolated boxes
+Эталонная разметка	Ground-truth annotations
+Кадр	Frame
+· касания можно перетаскивать по шкале	· drag touches on the timeline
+Взять автоматические метки за основу	Use automatic markers as a starting point
++ Касание	+ Touch
+Перенести касание сюда	Move touch here
+Удалить касание	Delete touch
+Новый розыгрыш	New rally
+Установить начало розыгрыша	Set rally start
+Установить конец розыгрыша	Set rally end
+Размеченные розыгрыши	Annotated rallies
+3 строки · прокрутка · выбрать для изменения границ	3 rows · scroll · select to adjust boundaries
+Точность появится после разметки.	Accuracy will appear after annotation.
+Завершить проверку видео	Finish video review
+Исправления сохраняются как независимый эталон для проверки и настройки детектора.	Corrections are saved as an independent ground truth for detector evaluation and tuning.
+Обучающие примеры поз	Pose training examples
+Эталонная разметка касаний и розыгрышей	Ground-truth touch and rally annotations
+Эталонные касания по всему видео	Ground-truth touches throughout the video
+Касания для коррекции	Touches to correct
+Сохранённые розыгрыши	Saved rallies

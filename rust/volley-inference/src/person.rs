@@ -24,7 +24,9 @@ pub const RFDETR_MEDIUM_FILE: &str = "rf-detr-medium.onnx";
 pub const RFDETR_MEDIUM_SHA256: &str =
     "18250b5a3a9552ae117d592f8e8c27fe52438d70c914a77a8913fc45d8f29e69";
 const RFDETR_SIDE: usize = 576;
-const RFDETR_MIN_SCORE: f32 = 0.28;
+// ByteTrack stage two requires detector boxes that the old 0.28 cutoff discarded.
+// Low-score boxes are NOT eligible to start a new Track ID.
+const RFDETR_MIN_SCORE: f32 = 0.10;
 const RFDETR_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const RFDETR_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
@@ -574,6 +576,17 @@ mod tests {
             assert!(observation.head.is_none());
             assert_eq!(observation.keypoints, [[0.0; 3]; KPT_COUNT]);
         }
+    }
+
+    #[test]
+    fn retains_low_score_person_proposal_for_bytetrack_second_pass() {
+        let boxes = rfdetr_detector_observations(vec![
+            (0.17, [0.2, 0.2, 0.3, 0.8]),
+            (0.09, [0.4, 0.2, 0.5, 0.8]),
+        ]);
+        assert_eq!(boxes.len(), 1);
+        assert!((boxes[0].score - 0.17).abs() < 0.0001);
+        assert_eq!(boxes[0].bbox, [0.2, 0.2, 0.3, 0.8]);
     }
 
     #[test]
