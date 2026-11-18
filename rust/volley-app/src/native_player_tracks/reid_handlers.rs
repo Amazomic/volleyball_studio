@@ -441,6 +441,12 @@ pub(super) fn photo_match_candidates_with_samples(
         for reference in references {
             if !ctx.roster.contains_key(&reference.player_id)
                 || reference.vector.len() != vector.len()
+                || assignments.iter().any(|(confirmed_id, player)| {
+                    player.as_str() == Some(reference.player_id.as_str())
+                        && confirmed_id.parse::<u64>().ok().is_some_and(|other| {
+                            other != id && measured_conflict_frame(ctx, id, other).is_some()
+                        })
+                })
             {
                 continue;
             }
