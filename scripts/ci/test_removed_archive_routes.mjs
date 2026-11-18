@@ -18,7 +18,7 @@ for(const source of [html,native,runtime,tabs]){
 assert.ok(!html.includes('data-studio-tab="legacy"'));
 assert.ok(!ui.includes('"quick","legacy"'));
 assert.ok(ui.includes('"preview","analysis","players","montage","quick"'));
-for(const route of ["preview","analysis","players","report","montage","quick"]){
+for(const route of ["preview","analysis","players","report","montage","quick","training"]){
   assert.ok(html.includes('data-studio-tab="'+route+'"'),"Missing real nav "+route);
 }
 for(const file of [
@@ -31,4 +31,4 @@ for(const file of [
 }
 assert.ok(guard.includes("pub(crate) fn write_guard("));
 assert.ok(guard.includes("try_lock_exclusive"));
-console.log("Six routes and standalone project-write guard: obsolete archives and legacy imports removed");
+console.log("Seven routes and standalone project-write guard: obsolete archives and legacy imports removed");

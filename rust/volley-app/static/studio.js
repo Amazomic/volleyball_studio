@@ -1008,7 +1008,7 @@
   // Manual examples are audited in Rust; the browser only selects the saved
   // CPU frame and player, never sends arbitrary pose coordinates.
   const training={
-    mode:$("studio-overlay-training"),panel:$("studio-training-panel"),
+    panel:$("studio-training-panel"),
     status:$("studio-training-status"),label:$("studio-training-label"),
     save:$("studio-training-save"),refresh:$("studio-training-refresh"),
     list:$("studio-training-list"),count:$("studio-training-count"),
@@ -1353,7 +1353,6 @@
       training.active=false;training.track=null;training.frame=null;
       training.panel.classList.add("hidden");
       overlay.canvas.closest(".video-wrap")?.classList.remove("training-select");
-      training.mode.setAttribute("aria-selected","false");
       overlay.raw=raw;
       updateRawDetectorLabel();
       overlay.mode.setAttribute("aria-selected",String(!raw));
@@ -1374,14 +1373,13 @@
     };
     overlay.mode.addEventListener("click",()=>selectMode(false));
     overlay.rawMode.addEventListener("click",()=>selectMode(true));
-    training.mode.addEventListener("click",()=>{
+    const selectTrainingMode=()=>{
       if(training.active)return;
       ui.video.pause();
       overlay.raw=false;training.active=true;training.track=null;training.frame=null;
       overlay.flags.pose=true;overlay.flags.players=true;
       overlay.mode.setAttribute("aria-selected","false");
       overlay.rawMode.setAttribute("aria-selected","false");
-      training.mode.setAttribute("aria-selected","true");
       overlay.rawControls.classList.add("hidden");
       overlay.actionControls.classList.remove("hidden");
       training.panel.classList.remove("hidden");
@@ -1392,6 +1390,10 @@
       trainingMessage("Остановите видео в момент удара и щёлкните по рамке игрока. Нужны сохранённые RTMPose и VBallNet.");
       refreshTraining();
       refreshAnnotation();
+    };
+    window.addEventListener("volley:tab-change",event=>{
+      if(event.detail?.tab==="training")selectTrainingMode();
+      else if(training.active)selectMode(false);
     });
     for(const [input,value] of [[overlay.rawBall,$("studio-raw-ball-value")],
       [overlay.rawPlayer,$("studio-raw-player-value")],

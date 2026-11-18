@@ -17,7 +17,7 @@ const makeView=()=>{
   const view={
     hidden,
     contains:media=>media.parent===view,
-    classList:{toggle:(_name,value)=>{hidden.value=value;}}
+    classList:{toggle:(name,value)=>{if(name==="hidden")hidden.value=value;}}
   };
   return view;
 };
@@ -64,6 +64,13 @@ assert.equal(editorVideo.paused,true,"Leaving analysis must pause its editor pla
 context.switchTab("preview");
 assert.equal(previewVideo.paused,true,"Reopening preview must not auto-resume");
 
+previewVideo.paused=false;
+context.switchTab("training");
+assert.equal(ui.preview.hidden.value,false,"Training reuses the existing viewer");
+assert.equal(previewVideo.paused,false,"Entering training preserves the preview player");
+context.switchTab("preview");
+assert.equal(previewVideo.paused,false,"Returning from training preserves playback position");
+
 editorVideo.paused=false;
 fire("play",editorVideo);
 assert.equal(editorVideo.paused,true,"Delayed play in hidden analysis must be rejected");
@@ -82,7 +89,7 @@ handlers.window.get("pagehide")();
 assert.equal(reportAudio.paused,true,"Leaving the page must pause active audio/video");
 assert.match(preview,/const previewIsVisible=\(\)=>!document\.hidden&&/);
 assert.match(preview,/if\(!s\.videoKey\|\|!previewIsVisible\(\)\)return;/);
-assert.match(preview,/if\(previewIsVisible\(\)\)ui\.video\.play\(\)/);
+assert.match(preview,/if\(previewIsVisible\(\)(?:&&!deferredPlay)?\)ui\.video\.play\(\)/);
 assert.match(preview,/event\.target\?\.isContentEditable\|\|!s\.videoKey\|\|!previewIsVisible\(\)\)return;/);
 
 console.log("Studio media lifecycle: hidden tabs, browser background and page exit: OK");

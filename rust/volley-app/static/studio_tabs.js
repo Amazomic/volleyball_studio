@@ -135,7 +135,7 @@
   // Keep every media element scoped to its visible workspace. Hidden views
   // stay mounted for fast navigation but must never keep playing.
   const views={
-    preview:ui.preview,montage:ui.montage,quick:ui.quick,
+    preview:ui.preview,training:ui.preview,montage:ui.montage,quick:ui.quick,
     analysis:ui.analysis,players:ui.players,report:ui.report
   };
   const pauseInactiveMedia=(activeTab)=>{
@@ -149,7 +149,8 @@
     const next=runtime.navigate(requested);
     if(previous!==next)runtime.beginLoad(previous);
     state.tab=next;
-    ui.preview.classList.toggle("hidden",next!=="preview");
+    ui.preview.classList.toggle("hidden",next!=="preview"&&next!=="training");
+    ui.preview.classList.toggle("training-workspace",next==="training");
     ui.montage.classList.toggle("hidden",next!=="montage");
     ui.quick.classList.toggle("hidden",next!=="quick");
     ui.analysis.classList.toggle("hidden",next!=="analysis");

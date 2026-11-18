@@ -52,17 +52,19 @@ assert.equal(read(0),"0".repeat(24));
 assert.equal(read(79),(79).toString(16).padStart(24,"0"));
 e.volley_selection_clear();
 assert.equal(e.volley_selection_count(),0);
-// The same real compiled WASM now validates six-tab routing, browser-only
+// The same real compiled WASM now validates seven-tab routing, browser-only
 // visual settings, stale async response epochs and every RU/EN text entry.
 assert.equal(e.volley_ui_api_version(),1);
-assert.equal(e.volley_ui_tab_count(),6);
+assert.equal(e.volley_ui_tab_count(),7);
 e.volley_ui_reset();
 assert.equal(e.volley_ui_get(0),0);
 assert.equal(e.volley_ui_set(0,4),1);
 assert.equal(e.volley_ui_get(0),4);
 assert.equal(e.volley_ui_set(0,5),1);
 assert.equal(e.volley_ui_get(0),5);
-assert.equal(e.volley_ui_set(0,6),0);
+assert.equal(e.volley_ui_set(0,6),1);
+assert.equal(e.volley_ui_get(0),6);
+assert.equal(e.volley_ui_set(0,7),0);
 for(let key=1;key<=4;key++){
   assert.equal(e.volley_ui_set(key,1),1);
   assert.equal(e.volley_ui_get(key),1);
@@ -74,7 +76,7 @@ const epoch2=e.volley_ui_begin_load(2);
 assert.ok(epoch1>0&&epoch2>epoch1);
 assert.equal(e.volley_ui_current_load(2,epoch1),0);
 assert.equal(e.volley_ui_current_load(2,epoch2),1);
-assert.equal(e.volley_ui_begin_load(6),0);
+assert.equal(e.volley_ui_begin_load(7),0);
 const words=e.volley_ui_text_count();
 assert.ok(words>160&&words<1024,"Expected substantial Rust-owned bilingual UI strings");
 const sourceKeys=new Set(),allWords=[];
@@ -124,6 +126,6 @@ assert.deepEqual(untranslated,[],
   "Every static visible Russian HTML label must be translated by the Rust/WASM catalogue");
 console.log("WASM UI accessibility translation coverage: "+
   [...new Set(attrs)].length+"/"+[...new Set(attrs)].length+" labels");
-console.log("Actual Rust/WASM UI: six tabs, validated preferences, load epochs, "+
+console.log("Actual Rust/WASM UI: seven tabs, validated preferences, load epochs, "+
   words+" full RU/EN text pairs and out-of-bounds checks passed");
 console.log("Actual Rust/WebAssembly browser selection engine: 80-ID order, cap, dedup, revision-independent mutations and memory exports passed ("+bytes.length+" bytes)");
