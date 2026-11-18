@@ -5,6 +5,7 @@ pub mod decode;
 pub mod person;
 pub mod pose;
 pub mod reid_openvino;
+pub mod trajectory_tcn;
 
 use ort::{
     execution_providers::{CPUExecutionProvider, CUDAExecutionProvider, ExecutionProvider},

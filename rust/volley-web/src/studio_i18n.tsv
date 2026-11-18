@@ -452,3 +452,4 @@ VBallNet + RTMPose: контакты и изломы ±0,1 с	VBallNet + RTMPose
 Касания для коррекции	Touches to correct
 Сохранённые розыгрыши	Saved rallies
 Параметры постобработки	Post-processing parameters
+Экспериментальная TCN Volley3D (нужен обученный ONNX)	Experimental Volley3D TCN (trained ONNX required)

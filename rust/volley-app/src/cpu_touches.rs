@@ -31,11 +31,13 @@ use volley_core::{
     fusion::Candidate,
     pose_classification,
     touch_pipeline::{
-        evaluate_pose_block, evaluate_rally_blocks, exclude_ball_teleports, pose_contact_at_frame,
-        pose_contact_from_nearby_sample, reconstruct_track_gaps, PhysicalTouchCandidate, PoseFrame,
-        PosePlayer, TouchAlgorithm, TouchBall, TouchFrame, TouchPlayer, TouchSettings,
+        evaluate_pose_block, evaluate_rally_blocks, evaluate_tcn_peaks, exclude_ball_teleports,
+        pose_contact_at_frame, pose_contact_from_nearby_sample, reconstruct_track_gaps,
+        trajectory_features, PhysicalTouchCandidate, PoseFrame, PosePlayer, TouchAlgorithm,
+        TouchBall, TouchFrame, TouchPlayer, TouchSettings,
     },
 };
+use volley_inference::trajectory_tcn::{TrajectoryTcn, MODEL_FILENAME};
 
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 16384;
@@ -708,6 +710,7 @@ pub(crate) fn detect_stream(
     settings: TouchSettings,
 ) -> Result<(String, u64, u64), String> {
     detect_stream_with_pose(
+        None,
         source,
         output,
         expected_sha,
@@ -727,6 +730,7 @@ pub(crate) fn detect_stream(
 
 #[expect(clippy::too_many_arguments)]
 fn detect_stream_with_pose(
+    mut tcn: Option<&mut TrajectoryTcn>,
     source: &Path,
     output: &Path,
     expected_sha: &str,
@@ -743,6 +747,9 @@ fn detect_stream_with_pose(
     rally_starts: &[u64],
 ) -> Result<(String, u64, u64), String> {
     settings.validate()?;
+    if settings.algorithm == TouchAlgorithm::TrajectoryTcn && tcn.is_none() {
+        return Err("Не загружена обученная TCN Volley3D".into());
+    }
     if count == 0 || count > 48 * 3600 * 30 {
         return Err("Touch source frame count exceeds limit".into());
     }
@@ -828,7 +835,33 @@ fn detect_stream_with_pose(
                 if start >= end {
                     continue;
                 }
-                let mut events = if settings.algorithm == TouchAlgorithm::PoseMotion {
+                let mut events = if settings.algorithm == TouchAlgorithm::TrajectoryTcn {
+                    // Only one fixed ONNX CPU session across the streamed replay.
+                    let network = tcn.as_deref_mut().ok_or("Missing trained TCN session")?;
+                    let scores = network.score(&trajectory_features(evidence_frames))?;
+                    let mut events = evaluate_tcn_peaks(
+                        evidence_frames,
+                        &scores,
+                        width,
+                        height,
+                        start,
+                        end,
+                        settings,
+                    )?;
+                    if let Some((root, fusion, interpolation)) = pose_source {
+                        refine_pose_events_policy(
+                            &mut events,
+                            evidence_frames,
+                            width,
+                            height,
+                            root,
+                            fusion,
+                            settings,
+                            Some(interpolation),
+                        )?;
+                    }
+                    events
+                } else if settings.algorithm == TouchAlgorithm::PoseMotion {
                     let (root, fusion, interpolation) = pose_source
                         .ok_or("Для выбранного режима необходим сохранённый анализ позы")?;
                     let poses =
@@ -1070,6 +1103,17 @@ pub(crate) fn process_with_ball_scope(
         .unwrap_or_default()
         .validate()
         .map_err(storage::bad_request)?;
+    // Fail before creating run artifacts if no trained checkpoint exists.
+    // Model bytes never replace or mutate saved VBallNet inference evidence.
+    let mut tcn = if settings.algorithm == TouchAlgorithm::TrajectoryTcn {
+        Some(
+            TrajectoryTcn::load(&state.repository_root.join("models").join(MODEL_FILENAME))
+                .map_err(storage::bad_request)?,
+        )
+    } else {
+        None
+    };
+    let tcn_sha = tcn.as_ref().map(|network| network.sha256().to_owned());
     let _guard = project_guard::write_guard(state, &req.project_id)?;
     let project = projects::existing_project(state, &req.project_id)?;
     if !project["videos"]
@@ -1195,6 +1239,7 @@ pub(crate) fn process_with_ball_scope(
             rally_starts,
         )?;
         let (digest, events, raw) = detect_stream_with_pose(
+            tcn.as_mut(),
             &source,
             &part,
             &sha,
@@ -1248,7 +1293,12 @@ pub(crate) fn process_with_ball_scope(
             "court_context_enabled":court_calibration.is_some(),
             "motion_supported_proposals_before_dedup":raw,
             "touch_candidates":events,
-            "method":if settings.algorithm == TouchAlgorithm::PoseMotion { "vballnet_trajectory_body_contact_v11" } else { "vballnet_gravity_player_geometry_pose_contact_v11" },
+            "method":match settings.algorithm {
+                TouchAlgorithm::PoseMotion => "vballnet_trajectory_body_contact_v11",
+                TouchAlgorithm::Legacy => "vballnet_gravity_player_geometry_pose_contact_v11",
+                TouchAlgorithm::TrajectoryTcn => "vballnet_volley3d_tcn_v1",
+            },
+            "tcn_model_sha256":tcn_sha,
             "trajectory_detector_version":volley_core::touch_pipeline::TRAJECTORY_DETECTOR_VERSION,
             "pose_classification_requested":pose_requested,
             "human_training_example_count":training_examples.len(),
@@ -1691,6 +1741,7 @@ mod tests {
         let source = root.join("tracked.jsonl");
         fs::write(&source, source_bytes).unwrap();
         let (_, count, _) = detect_stream_with_pose(
+            None,
             &source,
             &root.join("pose-contacts.jsonl"),
             &source_sha,
@@ -1714,6 +1765,7 @@ mod tests {
         for algorithm in [TouchAlgorithm::Legacy, TouchAlgorithm::PoseMotion] {
             let output = root.join(format!("rally-cut-{algorithm:?}.jsonl"));
             detect_stream_with_pose(
+                None,
                 &source,
                 &output,
                 &source_sha,
@@ -1929,6 +1981,7 @@ mod local_tuning_diagnostic {
         let fusion = manifest["pose_source_fusion_id"].as_str().unwrap();
         let output = root.join(format!("touches-{}.jsonl", Uuid::new_v4()));
         detect_stream_with_pose(
+            None,
             &source,
             &output,
             manifest["source_replay_sha256"].as_str().unwrap(),

@@ -5,6 +5,7 @@ mod ball_continuity;
 mod geometry;
 mod player_gap;
 mod pose_motion;
+mod trajectory_tcn;
 pub use ball_continuity::{
     exclude_ball_teleports, flag_ball_teleports, flag_local_ball_artifacts,
     repair_accepted_vballnet_trajectory, repair_vballnet_trajectory,
@@ -16,6 +17,7 @@ pub use pose_motion::{
     evaluate_pose_block, pose_contact_at_frame, pose_contact_from_nearby_sample, PoseFrame,
     PosePlayer,
 };
+pub use trajectory_tcn::{evaluate_tcn_peaks, trajectory_features};
 
 /// Maximum time between a real observed VBallNet anchor and a predicted
 /// impact inside the bounded (at most ten-frame) missing-ball island.
@@ -80,6 +82,7 @@ pub enum TouchAlgorithm {
     #[default]
     Legacy,
     PoseMotion,
+    TrajectoryTcn,
 }
 impl Default for TouchSettings {
     fn default() -> Self {
