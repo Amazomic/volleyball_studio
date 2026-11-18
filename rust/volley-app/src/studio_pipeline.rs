@@ -1063,13 +1063,26 @@ fn find_reusable(
         let Ok(saved) = read(&file) else {
             continue;
         };
+        let complete_gpu = gpu_lineage_valid(&project, request, identity, &saved);
+        let recoverable_pose = request.gpu.pose_enabled
+            && saved["gpu_jobs"]["pose"].is_null()
+            && matches!(
+                saved["status"].as_str(),
+                Some("failed" | "cancelled" | "interrupted")
+            )
+            && {
+                let mut without_pose = request.clone();
+                without_pose.gpu.pose_enabled = false;
+                gpu_lineage_valid(&project, &without_pose, identity, &saved)
+            };
         if saved["id"] != id
             || !compatible_version(&saved, request, identity)
-            || !gpu_lineage_valid(&project, request, identity, &saved)
+            || !(complete_gpu || recoverable_pose)
         {
             continue;
         }
-        if saved["status"] == "complete"
+        if complete_gpu
+            && saved["status"] == "complete"
             && saved["pipeline_complete"] == true
             && decode_profiles(
                 saved["profile"]["gpu"].clone(),
@@ -1079,6 +1092,7 @@ fn find_reusable(
             && saved["court_revision"] == json!(court_revision)
             && cpu_lineage_valid(&project, request, &saved, tcn_sha.as_deref())
         {
+            matches.gpu = Some(saved.clone());
             matches.full = Some(saved);
             return matches;
         }
@@ -1379,7 +1393,7 @@ async fn pipeline(
         "info",
         "Проверка GPU/CPU профилей, подготовленного видео и подписанных идентификаторов источника",
     )?;
-    let reusable = if request.mode == PipelineMode::Full {
+    let reusable = if request.mode.allows_gpu_execution() {
         let reusable = find_reusable(app, request, &identity, current_id);
         let matches = |saved: &Value| saved["original_source"] == original_source;
         ExistingVersions {
@@ -1424,7 +1438,8 @@ async fn pipeline(
             82.0,
         )?;
     } else if let Some(existing) = reusable.full.filter(|v| {
-        v["automatic_identity"].is_object()
+        request.mode == PipelineMode::Full
+            && v["automatic_identity"].is_object()
             && v["cpu_runs"]["tracking"]
                 .as_str()
                 .and_then(|replay| {
@@ -2995,7 +3010,29 @@ mod branching_tests {
             matching.full.is_some(),
             "unchanged settings must reuse both versions"
         );
+        assert!(matching.gpu.is_some());
         assert!(compatible_version(&saved, &request, &identity));
+        let mut failed_pose = saved.clone();
+        failed_pose["status"] = json!("failed");
+        failed_pose["pipeline_complete"] = json!(false);
+        failed_pose["profile"]["gpu"]["pose_enabled"] = json!(true);
+        storage::write_json_atomic(&directory.join("status.json"), &failed_pose).unwrap();
+        request.gpu.pose_enabled = true;
+        request.mode = PipelineMode::Gpu;
+        let recovered = find_reusable(&state, &request, &identity, &"2".repeat(32));
+        assert!(recovered.full.is_none());
+        assert!(
+            recovered.gpu.is_some(),
+            "failed RTMPose must reuse valid raw GPU evidence"
+        );
+        failed_pose["gpu_jobs"]["pose"] = json!("9".repeat(32));
+        storage::write_json_atomic(&directory.join("status.json"), &failed_pose).unwrap();
+        assert!(find_reusable(&state, &request, &identity, &"2".repeat(32))
+            .gpu
+            .is_none());
+        request.gpu.pose_enabled = false;
+        request.mode = PipelineMode::Full;
+        storage::write_json_atomic(&directory.join("status.json"), &saved).unwrap();
         let mut old_profile = saved.clone();
         for key in ["interpolate_players", "interpolate_pose"] {
             old_profile["profile"]["post"]
