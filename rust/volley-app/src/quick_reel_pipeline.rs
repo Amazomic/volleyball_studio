@@ -165,7 +165,7 @@ async fn quick_gpu_model(
     let request: inference_full::StartRequest = serde_json::from_value(json!({
         "project_id":work.project_id,"video":alias,
         "model":model,"stride":9,"device":"cuda",
-        "gpu_device_id":0,"gpu_memory_limit_mb":0,"cpu_threads":8
+        "gpu_device_id":0,"gpu_memory_limit_mb":0,"cpu_threads":0
     }))
     .map_err(|e| format!("Quick Reel GPU parameters: {e}"))?;
     if *cancelled.borrow() {

@@ -56,7 +56,7 @@ fn default_device() -> Device {
     Device::Cuda
 }
 fn default_threads() -> usize {
-    8
+    0
 }
 
 fn checked_range(request: &ScanRequest, duration: f64) -> Result<(u64, u64), String> {

@@ -36,7 +36,7 @@ fn default_device() -> Device {
     Device::Cuda
 }
 fn default_threads() -> usize {
-    8
+    0
 }
 
 pub(crate) fn pixel_params(kind: ModelKind) -> (usize, usize, usize, &'static str) {

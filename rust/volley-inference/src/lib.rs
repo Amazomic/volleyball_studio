@@ -77,13 +77,13 @@ pub struct Config {
     pub cpu_threads: usize,
 }
 fn default_threads() -> usize {
-    8
+    0
 }
 impl Config {
     pub fn verify(&self) -> Result<(), String> {
         if !(0..=15).contains(&self.gpu_device_id)
             || self.gpu_memory_limit_mb > 131072
-            || !(1..=128).contains(&self.cpu_threads)
+            || self.cpu_threads > 128
         {
             return Err("Invalid CUDA device, GPU memory limit or CPU threads".into());
         }
@@ -276,10 +276,12 @@ impl Engine {
         ort::init()
             .commit()
             .map_err(|e| format!("ONNX Runtime initialization: {e}"))?;
-        let mut builder = Session::builder()
-            .map_err(|e| format!("ONNX session builder: {e}"))?
-            .with_intra_threads(config.cpu_threads)
-            .map_err(|e| format!("ONNX CPU thread config: {e}"))?;
+        let mut builder = Session::builder().map_err(|e| format!("ONNX session builder: {e}"))?;
+        if config.cpu_threads != 0 {
+            builder = builder
+                .with_intra_threads(config.cpu_threads)
+                .map_err(|e| format!("ONNX CPU thread config: {e}"))?;
+        }
         if config.device == Device::Cuda {
             let mut cuda = CUDAExecutionProvider::default().with_device_id(config.gpu_device_id);
             if config.gpu_memory_limit_mb > 0 {
@@ -390,15 +392,30 @@ mod tests {
     }
     #[test]
     fn gpu_memory_is_bounded() {
+        assert_eq!(default_threads(), 0);
         assert!(Config {
             model: ModelKind::Ball,
             device: Device::Cuda,
             gpu_device_id: 0,
             gpu_memory_limit_mb: 0,
-            cpu_threads: 8
+            cpu_threads: 0
         }
         .verify()
         .is_ok());
+        let manual = Config {
+            model: ModelKind::Ball,
+            device: Device::Cuda,
+            gpu_device_id: 0,
+            gpu_memory_limit_mb: 4096,
+            cpu_threads: 12,
+        };
+        assert!(manual.verify().is_ok());
+        assert!(Config {
+            cpu_threads: 129,
+            ..manual
+        }
+        .verify()
+        .is_err());
         assert!(Config {
             model: ModelKind::Ball,
             device: Device::Cpu,

@@ -120,7 +120,7 @@ fn default_device() -> Device {
     Device::Cuda
 }
 fn default_threads() -> usize {
-    8
+    0
 }
 
 #[derive(Deserialize)]

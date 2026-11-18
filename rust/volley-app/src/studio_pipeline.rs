@@ -402,7 +402,7 @@ impl Default for GpuProfile {
         Self {
             stride: 9,
             gpu_memory_limit_mb: 0,
-            cpu_threads: 8,
+            cpu_threads: 0,
             pose_enabled: true,
             pose_mode: crate::pose_inference::PoseInputMode::Photo,
             pose_stride: volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES,
@@ -2123,7 +2123,7 @@ pub async fn start(
         return Err(storage::bad_request("Некорректный идентификатор запроса"));
     }
     if !(1..=9).contains(&request.gpu.stride)
-        || !(1..=128).contains(&request.gpu.cpu_threads)
+        || request.gpu.cpu_threads > 128
         || request.gpu.gpu_memory_limit_mb > 131072
         || !(1..=30).contains(&request.gpu.pose_stride)
     {
@@ -2838,7 +2838,15 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(profile.gpu.stride, 9);
-        assert_eq!(profile.gpu.cpu_threads, 8);
+        assert_eq!(profile.gpu.cpu_threads, 0);
+        assert_eq!(profile.gpu.gpu_memory_limit_mb, 0);
+        let manual: StartRequest = serde_json::from_value(json!({
+            "project_id":"abc123def456","video":"match.mp4",
+            "gpu":{"cpu_threads":12,"gpu_memory_limit_mb":4096}
+        }))
+        .unwrap();
+        assert_eq!(manual.gpu.cpu_threads, 12);
+        assert_eq!(manual.gpu.gpu_memory_limit_mb, 4096);
         assert_eq!(profile.post.tracking.max_gap_frames, 90);
         assert_eq!(profile.post.touches.threshold, 0.48);
         assert_eq!(profile.post.touches.algorithm, TouchAlgorithm::PoseMotion);

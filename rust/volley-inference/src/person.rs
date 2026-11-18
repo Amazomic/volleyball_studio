@@ -173,7 +173,7 @@ impl PersonEngine {
         variant: DetectorVariant,
         with_pose: bool,
     ) -> Result<Self, String> {
-        if !(1..=128).contains(&threads) || memory_mb > 131072 {
+        if threads > 128 || memory_mb > 131072 {
             return Err("Invalid person inference resource settings".into());
         }
         let models = repo
@@ -209,10 +209,13 @@ impl PersonEngine {
         ort::init()
             .commit()
             .map_err(|e| format!("ONNX Runtime init: {e}"))?;
-        let mut builder = Session::builder()
-            .map_err(|e| format!("RF-DETR session builder: {e}"))?
-            .with_intra_threads(threads)
-            .map_err(|e| e.to_string())?;
+        let mut builder =
+            Session::builder().map_err(|e| format!("RF-DETR session builder: {e}"))?;
+        if threads != 0 {
+            builder = builder
+                .with_intra_threads(threads)
+                .map_err(|e| e.to_string())?;
+        }
         if device == Device::Cuda {
             let mut cuda = CUDAExecutionProvider::default().with_device_id(0);
             if memory_mb > 0 {

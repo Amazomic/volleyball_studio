@@ -43,10 +43,9 @@ pub async fn get_resources() -> Json<Value> {
     let cores = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1);
-    let threads = ((cores as f64) * 0.8).round() as usize;
     Json(json!({
         "logical_cpu_count": cores,
-        "default_threads": threads.clamp(1, 128)
+        "default_threads": 0
     }))
 }
 

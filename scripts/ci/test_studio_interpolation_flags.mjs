@@ -14,18 +14,19 @@ const slice=(begin,end)=>{
   return source.slice(start,stop);
 };
 const values={
-  "studio-gpu-stride":9,"studio-gpu-memory":0,"studio-gpu-threads":8,
+  "studio-gpu-stride":9,"studio-gpu-memory":0,"studio-gpu-threads":0,
   "studio-gpu-person-stride":10,
 };
 const boxes={
   "studio-gpu-pose-enabled":{value:"1"},
+  "studio-gpu-threads":{type:"number",value:"0",dataset:{default:"0"},id:"studio-gpu-threads",checkValidity:()=>true},
   "studio-gpu-interpolate-players":{type:"checkbox",checked:true,dataset:{default:"1"},id:"studio-gpu-interpolate-players",checkValidity:()=>true},
   "studio-gpu-interpolate-pose":{type:"checkbox",checked:true,dataset:{default:"1"},id:"studio-gpu-interpolate-pose",checkValidity:()=>true}
 };
 const state={saved:null};
 const context={
   $:id=>boxes[id]??{value:""},inputValue:id=>values[id],
-  ui:{analysis:{querySelectorAll:()=>[boxes["studio-gpu-interpolate-players"],boxes["studio-gpu-interpolate-pose"]]},video:{value:"clip.mp4"}},
+  ui:{analysis:{querySelectorAll:()=>[boxes["studio-gpu-interpolate-players"],boxes["studio-gpu-interpolate-pose"],boxes["studio-gpu-threads"]]},video:{value:"clip.mp4"}},
   projectId:()=>"abc123def456",
   analysisFormCache:{write:(project,video,fields)=>{state.saved={project,video,fields};},
     read:()=>({video:state.saved?.video,fields:state.saved?.fields})}
@@ -46,6 +47,9 @@ boxes["studio-gpu-interpolate-players"].checked=true;
 api.restoreAnalysisSettings("abc123def456");
 assert.equal(api.postProfile().interpolate_players,false);
 assert.equal(api.postProfile().interpolate_pose,true);
+state.saved={video:"clip.mp4",fields:{"studio-gpu-threads":["8","12"]}};
+api.restoreAnalysisSettings("abc123def456");
+assert.equal(boxes["studio-gpu-threads"].value,"12","Preserve saved manual CPU limits from older defaults");
 boxes["studio-gpu-interpolate-players"].checked=true;
 boxes["studio-gpu-interpolate-pose"].checked=false;
 const post=api.postProfile();

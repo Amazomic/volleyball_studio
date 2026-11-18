@@ -293,7 +293,7 @@ const golden=JSON.parse(pipelineStarts()[0].options.body);
 assert.equal(golden.project_id,"1234abcdef01");
 assert.equal(golden.video,"rally.mp4");
 assert.equal(golden.mode,"full");
-assert.deepEqual(golden.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:8,pose_enabled:true,pose_mode:"photo",pose_stride:1});
+assert.deepEqual(golden.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:0,pose_enabled:true,pose_mode:"photo",pose_stride:1});
 assert.equal(golden.post.pose_classification,true);
 assert.equal(golden.post.interpolate_players,true);
 assert.equal(golden.post.interpolate_pose,true);
@@ -331,7 +331,7 @@ a.nodes.get("studio-analysis-reset").dispatch("click");
 await tick();
 assert.equal(a.nodes.get("studio-gpu-stride").value,"9");
 assert.equal(a.nodes.get("studio-gpu-memory").value,"0");
-assert.equal(a.nodes.get("studio-gpu-threads").value,"8");
+assert.equal(a.nodes.get("studio-gpu-threads").value,"0");
 assert.ok(a.nodes.get("studio-analysis-profile-delta").textContent.includes("Эталонный профиль активен"),
   "Reset must restore the reference profile");
 // Each card starts only its own stage, with the CPU source taken from
@@ -344,7 +344,7 @@ assert.equal(pipelineStarts().length,3,"GPU-only button must launch the pipeline
 const gpuOnly=JSON.parse(pipelineStarts()[2].options.body);
 assert.equal(gpuOnly.mode,"gpu");
 assert.equal(gpuOnly.post,undefined,"GPU-only must not include CPU settings");
-assert.deepEqual(gpuOnly.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:8,pose_enabled:true,pose_mode:"photo",pose_stride:1});
+assert.deepEqual(gpuOnly.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:0,pose_enabled:true,pose_mode:"photo",pose_stride:1});
 a.nodes.get("studio-inference").value=JSON.stringify([
   "rally.mp4","fusion","b".repeat(32)]);
 a.window.dispatchEvent({type:"volley:chain-change",

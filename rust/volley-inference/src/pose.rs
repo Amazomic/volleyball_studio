@@ -37,7 +37,7 @@ impl PoseEngine {
         threads: usize,
         memory_mb: u64,
     ) -> Result<Self, String> {
-        if !(1..=128).contains(&threads) || memory_mb > 131072 {
+        if threads > 128 || memory_mb > 131072 {
             return Err("Invalid pose engine thread or memory setting".into());
         }
         let models = repo
@@ -63,10 +63,13 @@ impl PoseEngine {
         ort::init()
             .commit()
             .map_err(|e| format!("ONNX runtime: {e}"))?;
-        let mut builder = Session::builder()
-            .map_err(|e| format!("RTMPose session builder: {e}"))?
-            .with_intra_threads(threads)
-            .map_err(|e| format!("RTMPose threads: {e}"))?;
+        let mut builder =
+            Session::builder().map_err(|e| format!("RTMPose session builder: {e}"))?;
+        if threads != 0 {
+            builder = builder
+                .with_intra_threads(threads)
+                .map_err(|e| format!("RTMPose threads: {e}"))?;
+        }
         if device == Device::Cuda {
             let mut cuda = CUDAExecutionProvider::default().with_device_id(0);
             if memory_mb > 0 {
