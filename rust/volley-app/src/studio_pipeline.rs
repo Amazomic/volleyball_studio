@@ -945,6 +945,11 @@ fn cpu_lineage_valid(
         && track["video"] == request.video
         && touches["schema"] == "volley-native-cpu-touch-proposals/1"
         && touches["state"] == "motion_gated_touch_proposals"
+        && touches["preliminary_rally_scope_version"] == "ball_down_up_v1"
+        && touches["preliminary_rally_settings"] == json!(request.post.rallies)
+        && touches["preliminary_rally_scope_applied"].as_bool().is_some()
+        && rallies["preliminary_rally_scope_version"] == "ball_down_up_v1"
+        && rallies["preliminary_rally_scope_applied"] == touches["preliminary_rally_scope_applied"]
         && touches["touch_id"] == touch
         && touches["source_replay_id"] == replay
         && touches["project_id"] == request.project_id
@@ -1792,14 +1797,19 @@ async fn pipeline(
     )?;
     let touches = cpu(
         app.clone(),
-        cpu_touches::TouchRequest {
-            project_id: request.project_id.clone(),
-            video: request.video.clone(),
-            replay_id: replay_id.clone(),
-            settings: Some(request.post.touches),
-            pose_classification: request.post.pose_classification,
+        (
+            cpu_touches::TouchRequest {
+                project_id: request.project_id.clone(),
+                video: request.video.clone(),
+                replay_id: replay_id.clone(),
+                settings: Some(request.post.touches),
+                pose_classification: request.post.pose_classification,
+            },
+            request.post.rallies,
+        ),
+        |app, (touch_request, rally_settings)| {
+            cpu_touches::process_discovery_with_rally_settings(app, touch_request, *rally_settings)
         },
-        cpu_touches::process_discovery,
     )
     .await?;
     let touch_id = require_id(&touches, "touch_id")?;
@@ -2961,6 +2971,9 @@ mod branching_tests {
                 "schema":"volley-native-cpu-touch-proposals/1","state":"motion_gated_touch_proposals","touch_id":touch,
                 "project_id":request.project_id,"video":request.video,
                 "source_replay_id":replay,"method":"vballnet_gravity_player_geometry_pose_contact_v11","sha256":sha,
+                "preliminary_rally_scope_version":"ball_down_up_v1",
+                "preliminary_rally_settings":request.post.rallies,
+                "preliminary_rally_scope_applied":false,
                 "ball_tracking_policy":crate::cpu_retrack::ball_track::POLICY,
                 "leading_ball_rally_starts":true,"leading_ball_min_score":0.28
             }),
@@ -2974,6 +2987,8 @@ mod branching_tests {
                 "schema":"volley-native-cpu-rally-proposals/1","state":"provisional_rally_segments","rally_run_id":rally,
                 "court_contact_context_version":"python_serve_toss_possession_v2",
                 "ground_boundary_version":"trajectory_court_surface_v3",
+                "preliminary_rally_scope_version":"ball_down_up_v1",
+                "preliminary_rally_scope_applied":false,
                 "ball_tracking_policy":crate::cpu_retrack::ball_track::POLICY,
                 "project_id":request.project_id,"video":request.video,
                 "source_replay_id":replay,"source_touch_id":touch,"sha256":sha,

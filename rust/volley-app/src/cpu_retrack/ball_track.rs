@@ -32,6 +32,101 @@ pub(crate) fn saved_scope(manifest: &serde_json::Value) -> Result<Option<(Vec<u6
     Ok(Some((starts, score)))
 }
 
+pub(crate) struct PreliminaryRallyScope {
+    pub impacts: Vec<u64>,
+    pub intervals: Vec<(u64, u64)>,
+}
+
+pub(crate) fn preliminary_rally_scope(
+    source: &Path,
+    expected_sha: &str,
+    frames: u64,
+    width: u32,
+    height: u32,
+    min_score: f64,
+    accepted: &[bool],
+    settings: volley_core::rally_reconstruction::RallySettings,
+) -> Result<PreliminaryRallyScope, String> {
+    use volley_core::motion::{downward_to_upward_breaks, BallObservation};
+
+    if settings.validate().is_err()
+        || accepted.len() != frames as usize
+        || !(64..=16384).contains(&width)
+        || !(64..=16384).contains(&height)
+        || !min_score.is_finite()
+        || !(0.01..=1.0).contains(&min_score)
+    {
+        return Err("Invalid preliminary rally detection settings".into());
+    }
+    let mut reader = BoundedReader::open(source)?;
+    let mut segment = Vec::<BallObservation>::with_capacity(640);
+    let mut impacts = Vec::new();
+    let mut emit = |observations: &[BallObservation]| {
+        impacts.extend(
+            downward_to_upward_breaks(observations)
+                .into_iter()
+                .filter_map(|item| u64::try_from(item.frame).ok()),
+        );
+    };
+    for frame in 0..frames {
+        let bytes = reader.line()?.ok_or("Truncated preliminary ball source")?;
+        let row: BallOnlyFrame =
+            serde_json::from_slice(&bytes).map_err(|_| "Malformed preliminary ball source")?;
+        if row.frame_index != frame {
+            return Err("Preliminary ball source frames out of order".into());
+        }
+        let point = row.selected_ball.and_then(|ball| {
+            if ball.source_model != "vballnet"
+                || ball.detection.score < min_score
+                || !accepted[frame as usize]
+            {
+                return None;
+            }
+            let [x1, y1, x2, y2] = ball.detection.bbox_xyxy_norm;
+            if ![x1, y1, x2, y2].iter().all(|v| v.is_finite()) {
+                return None;
+            }
+            Some(BallObservation {
+                frame: frame as i64,
+                x: (x1 + x2) * 0.5 * width as f64,
+                y: (y1 + y2) * 0.5 * height as f64,
+            })
+        });
+        if point.is_none()
+            && segment
+                .last()
+                .is_some_and(|last| frame > last.frame as u64 + 4)
+        {
+            emit(&segment);
+            segment.clear();
+        }
+        if let Some(point) = point {
+            if segment
+                .last()
+                .is_some_and(|last| point.frame - last.frame > 4)
+            {
+                emit(&segment);
+                segment.clear();
+            }
+            segment.push(point);
+            if segment.len() >= 640 {
+                emit(&segment);
+                let keep = segment.split_off(segment.len() - 20);
+                segment = keep;
+            }
+        }
+    }
+    emit(&segment);
+    if reader.line()?.is_some() || reader.finish() != expected_sha {
+        return Err("Preliminary ball source SHA-256 mismatch".into());
+    }
+    impacts.sort_unstable();
+    impacts.dedup_by(|next, earlier| *next - *earlier <= 6);
+    let intervals =
+        volley_core::rally_reconstruction::preliminary_rally_intervals(&impacts, frames, settings);
+    Ok(PreliminaryRallyScope { impacts, intervals })
+}
+
 pub(crate) struct BallTrackMask {
     pub accepted: Vec<bool>,
     pub rejected: Vec<bool>,
@@ -257,6 +352,82 @@ mod tests {
     use super::*;
     use serde_json::json;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn preliminary_ball_only_reversals_define_gameplay_scope_without_player_tracks() {
+        let root =
+            std::env::temp_dir().join(format!("preliminary-rallies-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("tracked.jsonl");
+        let mut bytes = Vec::new();
+        for frame in 0..210_u64 {
+            let y = if frame <= 70 {
+                100.0 + 7.0 * frame as f64
+            } else if frame <= 100 {
+                590.0 - 7.0 * (frame - 70) as f64
+            } else if frame <= 130 {
+                380.0 + 7.0 * (frame - 100) as f64
+            } else {
+                590.0 - 7.0 * (frame - 130) as f64
+            };
+            bytes.extend(
+                serde_json::to_vec(&json!({
+                    "frame_index":frame,
+                    "selected_ball":{
+                        "source_model":"vballnet",
+                        "detection":{
+                            "score":0.9,
+                            "bbox_xyxy_norm":[0.49,(y-4.0)/720.0,0.51,(y+4.0)/720.0]
+                        }
+                    }
+                }))
+                .unwrap(),
+            );
+            bytes.push(b'\n');
+        }
+        fs::write(&path, &bytes).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let scope = preliminary_rally_scope(
+            &path,
+            &sha,
+            210,
+            1280,
+            720,
+            0.35,
+            &vec![true; 210],
+            volley_core::rally_reconstruction::RallySettings::default(),
+        )
+        .unwrap();
+        assert_eq!(scope.impacts.len(), 2, "{:?}", scope.impacts);
+        assert!((scope.impacts[0] as i64 - 70).abs() <= 2);
+        assert!((scope.impacts[1] as i64 - 130).abs() <= 2);
+        assert!(scope.intervals[0].0 <= 25 && scope.intervals[0].1 >= 175);
+        let missing = preliminary_rally_scope(
+            &path,
+            &sha,
+            210,
+            1280,
+            720,
+            0.35,
+            &(0..210).map(|i| i < 90).collect::<Vec<_>>(),
+            volley_core::rally_reconstruction::RallySettings::default(),
+        )
+        .unwrap();
+        assert!(missing.intervals.is_empty());
+        assert!(preliminary_rally_scope(
+            &path,
+            &"0".repeat(64),
+            210,
+            1280,
+            720,
+            0.35,
+            &vec![true; 210],
+            volley_core::rally_reconstruction::RallySettings::default(),
+        )
+        .is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn saved_tracking_scope_rejects_missing_threshold_or_invalid_resets() {

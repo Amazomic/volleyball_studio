@@ -259,6 +259,7 @@ fn reject_teleport_frames(
 // identity (files, SHAs, run ids, geometry). Grouping into parameter structs
 // belongs to the stage E decomposition, not to a lint-driven rewrite of
 // tested CPU pipeline code.
+#[cfg(test)]
 #[expect(clippy::too_many_arguments)]
 fn rebuild_from_snapshots(
     frames_file: &Path,
@@ -275,6 +276,43 @@ fn rebuild_from_snapshots(
     touch_id: &str,
     court: Option<&volley_core::court_geometry::CourtTransform>,
     ball_scope: Option<(&[u64], f64)>,
+) -> Result<(String, RallyTotals, OutputCounters), String> {
+    rebuild_from_snapshots_with_scope(
+        frames_file,
+        touches_file,
+        replay_sha,
+        touch_sha,
+        frames,
+        expected_touches,
+        width,
+        height,
+        settings,
+        output,
+        replay_id,
+        touch_id,
+        court,
+        ball_scope,
+        None,
+    )
+}
+
+#[expect(clippy::too_many_arguments)]
+fn rebuild_from_snapshots_with_scope(
+    frames_file: &Path,
+    touches_file: &Path,
+    replay_sha: &str,
+    touch_sha: &str,
+    frames: u64,
+    expected_touches: u64,
+    width: u32,
+    height: u32,
+    settings: RallySettings,
+    output: &Path,
+    replay_id: &str,
+    touch_id: &str,
+    court: Option<&volley_core::court_geometry::CourtTransform>,
+    ball_scope: Option<(&[u64], f64)>,
+    preliminary_intervals: Option<&[(u64, u64)]>,
 ) -> Result<(String, RallyTotals, OutputCounters), String> {
     settings.validate()?;
     if frames == 0 || frames > 48 * 3600 * 30 || expected_touches > frames {
@@ -319,6 +357,12 @@ fn rebuild_from_snapshots(
         {
             return Err("Tracked frame ordering or identity status is incompatible".into());
         }
+        let in_preliminary_rally = preliminary_intervals.is_none_or(|intervals| {
+            let index = intervals.partition_point(|(_, end)| *end < frame_index);
+            intervals
+                .get(index)
+                .is_some_and(|(start, end)| *start <= frame_index && frame_index <= *end)
+        });
         let ball = match frame.selected_ball {
             Some(ball) => {
                 if !matches!(ball.source_model.as_str(), "vballnet" | "ravel")
@@ -340,6 +384,7 @@ fn rebuild_from_snapshots(
                     let [left, top, right, bottom] = ball.detection.bbox_xyxy_norm;
                     if ball.detection.score >= settings.min_ball_score
                         && accepted_ball_frames[frame_index as usize]
+                        && in_preliminary_rally
                     {
                         history.push_ball(CourtBallSample {
                             frame: frame_index,
@@ -365,7 +410,9 @@ fn rebuild_from_snapshots(
         // Distinguish immutable raw ball evidence from confidence-qualified
         // ball observations used by touch/court/rally reconstruction.
         let reliable_ball = ball.filter(|b| {
-            b.score >= settings.min_ball_score && accepted_ball_frames[frame_index as usize]
+            in_preliminary_rally
+                && b.score >= settings.min_ball_score
+                && accepted_ball_frames[frame_index as usize]
         });
         let near_player = reliable_ball.is_some_and(|b| {
             frame.tracked_players.iter().any(|tracked| {
@@ -399,6 +446,9 @@ fn rebuild_from_snapshots(
         }
         let mut events = Vec::new();
         while next.as_ref().is_some_and(|t| t.frame_index == frame_index) {
+            if !in_preliminary_rally {
+                return Err("Detailed Touch is outside preliminary gameplay intervals".into());
+            }
             let item = next.take().expect("checked");
             item.verify(frames, width, height)?;
             if let Some(track_id) = item.provisional_track_id {
@@ -605,7 +655,9 @@ pub(crate) fn refine_leading_ball(
             .map(|(start, _)| *start)
             .filter(|start| *start > 0),
     );
-    let touches = crate::cpu_touches::process_with_ball_scope(state, request, &starts)?;
+    let touches = crate::cpu_touches::process_with_ball_scope_and_rally_settings(
+        state, request, &starts, settings,
+    )?;
     let touch_id = touches["touch_id"]
         .as_str()
         .ok_or_else(|| storage::bad_request("Missing refined Touch ID"))?;
@@ -621,6 +673,21 @@ pub(crate) fn refine_leading_ball(
     )?;
     Ok(json!({"touches":touches,"rallies":rallies,
         "ball_tracking_boundary_source":{"rally_run_id":discovery_id,"sha256":run.rally_sha}}))
+}
+
+fn record_preliminary_scope(manifest: &mut Value, contacts: &Value, applied: bool) {
+    if contacts["preliminary_rally_scope_version"] == "ball_down_up_v1" {
+        for key in [
+            "preliminary_rally_scope_version",
+            "preliminary_rally_file",
+            "preliminary_rally_sha256",
+            "preliminary_trajectory_impact_count",
+            "preliminary_rally_interval_count",
+        ] {
+            manifest[key] = contacts[key].clone();
+        }
+        manifest["preliminary_rally_scope_applied"] = json!(applied);
+    }
 }
 
 pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value, ApiError> {
@@ -728,6 +795,84 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
         .as_u64()
         .filter(|n| *n <= frames)
         .ok_or_else(|| storage::bad_request("Unbounded or missing motion Touch count"))?;
+    let preliminary_intervals: Option<Vec<(u64, u64)>> =
+        match contacts["preliminary_rally_scope_version"].as_str() {
+            Some("ball_down_up_v1") => {
+                if contacts["preliminary_rally_settings"] != json!(settings)
+                    || contacts["preliminary_rally_file"] != "preliminary_rallies.json"
+                {
+                    return Err(storage::bad_request(
+                        "Preliminary rally settings or source filename differ",
+                    ));
+                }
+                let source = safe_file(&touch_dir, "preliminary_rallies.json", 64 * 1024 * 1024)
+                    .map_err(storage::bad_request)?;
+                let data_bytes = fs::read(source)
+                    .map_err(|e| storage::bad_request(format!("Read preliminary gameplay: {e}")))?;
+                let expected_sha =
+                    sha(&contacts["preliminary_rally_sha256"]).map_err(storage::bad_request)?;
+                if format!("{:x}", Sha256::digest(&data_bytes)) != expected_sha {
+                    return Err(storage::bad_request(
+                        "Preliminary ball-only gameplay checksum changed",
+                    ));
+                }
+                let data: Value = serde_json::from_slice(&data_bytes)
+                    .map_err(|_| storage::bad_request("Malformed preliminary gameplay evidence"))?;
+                if data["schema"] != "volley-native-preliminary-ball-rallies/1"
+                    || data["source_replay_id"] != request.replay_id
+                    || data["source_replay_sha256"] != tracked["sha256"]
+                    || data["frames"] != frames
+                    || data["settings"] != json!(settings)
+                {
+                    return Err(storage::bad_request(
+                        "Preliminary gameplay provenance differs",
+                    ));
+                }
+                let impacts: Vec<u64> = serde_json::from_value(data["trajectory_impacts"].clone())
+                    .map_err(|_| storage::bad_request("Invalid preliminary trajectory impacts"))?;
+                let intervals: Vec<(u64, u64)> =
+                    serde_json::from_value(data["rally_intervals"].clone())
+                        .map_err(|_| storage::bad_request("Invalid preliminary rally intervals"))?;
+                if impacts.len() as u64
+                    != contacts["preliminary_trajectory_impact_count"]
+                        .as_u64()
+                        .unwrap_or(u64::MAX)
+                    || intervals.len() as u64
+                        != contacts["preliminary_rally_interval_count"]
+                            .as_u64()
+                            .unwrap_or(u64::MAX)
+                    || intervals
+                        != volley_core::rally_reconstruction::preliminary_rally_intervals(
+                            &impacts, frames, settings,
+                        )
+                {
+                    return Err(storage::bad_request(
+                        "Preliminary gameplay intervals do not match trajectory impacts",
+                    ));
+                }
+                let should_apply =
+                    volley_core::rally_reconstruction::preliminary_rally_scope_usable(
+                        impacts.len(),
+                        &intervals,
+                        frames,
+                    );
+                if contacts["preliminary_rally_scope_applied"]
+                    .as_bool()
+                    .is_some_and(|applied| applied != should_apply)
+                {
+                    return Err(storage::bad_request(
+                        "Preliminary gameplay applicability differs from saved evidence",
+                    ));
+                }
+                should_apply.then_some(intervals)
+            }
+            None => None,
+            _ => {
+                return Err(storage::bad_request(
+                    "Unknown preliminary rally detector version",
+                ))
+            }
+        };
     let replay_sha = sha(&tracked["sha256"]).map_err(storage::bad_request)?;
     let touch_sha = sha(&contacts["sha256"]).map_err(storage::bad_request)?;
     if contacts["source_replay_sha256"].as_str() != Some(replay_sha.as_str()) {
@@ -764,7 +909,7 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
             .as_ref()
             .map(|(starts, score)| (starts.as_slice(), *score))
             .unwrap_or((&[], settings.min_ball_score));
-        let (output_sha, stats, output) = rebuild_from_snapshots(
+        let (output_sha, stats, output) = rebuild_from_snapshots_with_scope(
             &tracked_file,
             &touch_file,
             &replay_sha,
@@ -781,13 +926,14 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
                 .as_ref()
                 .and_then(|snapshot| snapshot.transform.as_ref()),
             Some((rally_starts, tracking_score)),
+            preliminary_intervals.as_deref(),
         )?;
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared video changed during native rally processing".into());
         }
         fs::rename(part, folder.join(OUTPUT_FILE))
             .map_err(|e| format!("Publish rally candidates: {e}"))?;
-        let manifest = json!({
+        let mut manifest = json!({
             "schema":"volley-native-cpu-rally-proposals/1",
             "state":"provisional_rally_segments",
             "project_id":request.project_id,
@@ -824,6 +970,7 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
             "montage_ready":false,
             "cpu_processing_complete":false,
         });
+        record_preliminary_scope(&mut manifest, &contacts, preliminary_intervals.is_some());
         storage::write_json_atomic(&folder.join("manifest.json"), &manifest)
             .map_err(|e| format!("Save native rally manifest: {e:?}"))?;
         crate::native_player_tracks::prepare_rally_index(
@@ -884,6 +1031,35 @@ pub async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preliminary_fallback_keeps_versioned_source_for_cache_reuse() {
+        let contacts = json!({
+            "preliminary_rally_scope_version":"ball_down_up_v1",
+            "preliminary_rally_file":"preliminary_rallies.json",
+            "preliminary_rally_sha256":"a".repeat(64),
+            "preliminary_trajectory_impact_count":7,
+            "preliminary_rally_interval_count":0
+        });
+        let mut fallback = json!({});
+        record_preliminary_scope(&mut fallback, &contacts, false);
+        assert_eq!(
+            fallback["preliminary_rally_scope_version"],
+            "ball_down_up_v1"
+        );
+        assert_eq!(fallback["preliminary_rally_scope_applied"], false);
+        assert_eq!(fallback["preliminary_trajectory_impact_count"], 7);
+        assert_eq!(
+            fallback["preliminary_rally_sha256"],
+            contacts["preliminary_rally_sha256"]
+        );
+        let mut active = json!({});
+        record_preliminary_scope(&mut active, &contacts, true);
+        assert_eq!(active["preliminary_rally_scope_applied"], true);
+        let mut legacy = json!({});
+        record_preliminary_scope(&mut legacy, &json!({}), false);
+        assert!(legacy["preliminary_rally_scope_version"].is_null());
+    }
 
     fn ball_threshold_observations(
         tracking_score: f64,

@@ -57,6 +57,56 @@ impl RallySettings {
     }
 }
 
+pub fn preliminary_rally_scope_usable(
+    impact_count: usize,
+    intervals: &[(u64, u64)],
+    total_frames: u64,
+) -> bool {
+    total_frames > 0
+        && !intervals.is_empty()
+        && impact_count >= 2
+        && (impact_count as u64) >= total_frames.div_ceil(900)
+}
+
+pub fn preliminary_rally_intervals(
+    impacts: &[u64],
+    total_frames: u64,
+    settings: RallySettings,
+) -> Vec<(u64, u64)> {
+    if total_frames == 0
+        || settings.validate().is_err()
+        || impacts.iter().any(|frame| *frame >= total_frames)
+        || impacts.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Vec::new();
+    }
+    let mut intervals: Vec<(u64, u64)> = Vec::new();
+    let mut begin = 0;
+    for end in 1..=impacts.len() {
+        if end < impacts.len()
+            && impacts[end] - impacts[end - 1] <= settings.max_without_touch_frames.min(120)
+        {
+            continue;
+        }
+        let group = &impacts[begin..end];
+        if group.len() >= settings.min_touch_candidates as usize {
+            let start = group[0].saturating_sub(settings.suggested_context_frames);
+            let stop = group[group.len() - 1]
+                .saturating_add(settings.suggested_context_frames)
+                .min(total_frames - 1);
+            if stop - start + 1 >= settings.min_rally_frames {
+                if let Some((_, last)) = intervals.last_mut().filter(|(_, last)| *last >= start) {
+                    *last = (*last).max(stop);
+                } else {
+                    intervals.push((start, stop));
+                }
+            }
+        }
+        begin = end;
+    }
+    intervals
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct BallFrame {
     pub x_px: f64,
@@ -549,6 +599,22 @@ impl RallySegmenter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preliminary_boundaries_are_ball_only_and_discard_isolated_non_gameplay_motion() {
+        let settings = RallySettings::default();
+        let windows = preliminary_rally_intervals(&[40, 78, 155, 390, 580, 611], 750, settings);
+        assert_eq!(windows, vec![(0, 200), (535, 656)]);
+        assert!(preliminary_rally_intervals(&[300], 750, settings).is_empty());
+        assert!(preliminary_rally_intervals(&[300, 300], 750, settings).is_empty());
+        assert!(!preliminary_rally_scope_usable(0, &[], 200_385));
+        assert!(!preliminary_rally_scope_usable(
+            7,
+            &[(70_000, 70_120)],
+            200_385
+        ));
+        assert!(preliminary_rally_scope_usable(2, &[(25, 175)], 210));
+    }
+
     #[test]
     fn ground_candidate_distinguishes_bounce_from_ballistic_apex_and_player_contact() {
         let mut points = [BallFrame {

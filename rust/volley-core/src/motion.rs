@@ -3,7 +3,9 @@
 //! in scripts/volleyball_studio/reprocess.py and never performs inference.
 
 mod trajectory;
-pub use trajectory::{trajectory_breaks, trajectory_breaks_in_rallies, TrajectoryBreak};
+pub use trajectory::{
+    downward_to_upward_breaks, trajectory_breaks, trajectory_breaks_in_rallies, TrajectoryBreak,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]

@@ -725,6 +725,7 @@ pub(crate) fn detect_stream(
         &[],
         None,
         &[],
+        None,
     )
 }
 
@@ -749,8 +750,15 @@ fn detect_stream_with_pose(
     training: &[training_samples::Example],
     ball_mask: Option<&crate::cpu_retrack::ball_track::BallTrackMask>,
     rally_starts: &[u64],
+    preliminary_intervals: Option<&[(u64, u64)]>,
 ) -> Result<(String, u64, u64), String> {
     settings.validate()?;
+    if preliminary_intervals.is_some_and(|intervals| {
+        intervals.iter().any(|(start, end)| start > end)
+            || intervals.windows(2).any(|pair| pair[0].1 >= pair[1].0)
+    }) {
+        return Err("Invalid preliminary rally intervals".into());
+    }
     if settings.algorithm == TouchAlgorithm::TrajectoryTcn && tcn.is_none() {
         return Err("Не загружена обученная TCN Volley3D".into());
     }
@@ -778,107 +786,90 @@ fn detect_stream_with_pose(
     let mut motion_candidates: u64 = 0;
     let mut pending: Option<PhysicalTouchCandidate> = None;
     let separation = (settings.min_interval_sec * 30.0).round().max(1.0) as u64;
-    let mut process_block =
-        |start: u64, end: u64, input: &VecDeque<TouchFrame>| -> Result<(), String> {
-            let region_start = start.saturating_sub(HALO as u64);
-            let region_end = (end + HALO as u64).min(count);
-            let first = input
-                .front()
-                .ok_or("Touch frame buffer is empty")?
-                .frame_index;
-            if region_start < first
-                || region_end
-                    > input
-                        .back()
-                        .ok_or("Touch frame buffer truncated")?
-                        .frame_index
-                        + 1
-            {
-                return Err("Touch segment missing lookbehind or lookahead".into());
-            }
-            let offset = (region_start - first) as usize;
-            let n = (region_end - region_start) as usize;
-            let mut block = input
+    let mut process_block = |start: u64,
+                             end: u64,
+                             input: &VecDeque<TouchFrame>|
+     -> Result<(), String> {
+        if preliminary_intervals.is_some_and(|intervals| {
+            !intervals
                 .iter()
-                .skip(offset)
-                .take(n)
-                .cloned()
-                .collect::<Vec<_>>();
-            // Filter weak VBallNet proposals only in this derived CPU working
-            // copy; raw GPU and saved CPU tracking snapshots remain immutable.
-            gate_ball_confidence(&mut block, settings.min_ball_score);
-            // A short false localization must not hide several neighboring impacts.
-            // Only the bounded working copy is cleaned; the hashed CPU replay remains immutable.
-            let clean = if let Some(mask) = ball_mask {
-                let mut clean = block.clone();
-                for frame in &mut clean {
-                    if !mask.accepted[frame.frame_index as usize] {
-                        frame.selected_ball = None;
-                    }
+                .any(|(first, last)| *first < end && *last >= start)
+        }) {
+            return Ok(());
+        }
+        let region_start = start.saturating_sub(HALO as u64);
+        let region_end = (end + HALO as u64).min(count);
+        let first = input
+            .front()
+            .ok_or("Touch frame buffer is empty")?
+            .frame_index;
+        if region_start < first
+            || region_end
+                > input
+                    .back()
+                    .ok_or("Touch frame buffer truncated")?
+                    .frame_index
+                    + 1
+        {
+            return Err("Touch segment missing lookbehind or lookahead".into());
+        }
+        let offset = (region_start - first) as usize;
+        let n = (region_end - region_start) as usize;
+        let mut block = input
+            .iter()
+            .skip(offset)
+            .take(n)
+            .cloned()
+            .collect::<Vec<_>>();
+        // Filter weak VBallNet proposals only in this derived CPU working
+        // copy; raw GPU and saved CPU tracking snapshots remain immutable.
+        gate_ball_confidence(&mut block, settings.min_ball_score);
+        // A short false localization must not hide several neighboring impacts.
+        // Only the bounded working copy is cleaned; the hashed CPU replay remains immutable.
+        let clean = if let Some(mask) = ball_mask {
+            let mut clean = block.clone();
+            for frame in &mut clean {
+                if !mask.accepted[frame.frame_index as usize] {
+                    frame.selected_ball = None;
                 }
-                clean
-            } else {
-                exclude_ball_teleports(&block, width, height)
-            };
-            // Reconstruct bounded positions of existing tracked skeletons only.
-            // The immutable replay and original GPU player detections remain unchanged.
-            let continuous = if interpolate_players {
-                reconstruct_track_gaps(&clean)
-            } else {
-                clean
-            };
-            let filtered = if let Some(calibration) = court {
-                court_touch::filter_on_court(&continuous, calibration)
-            } else {
-                continuous
-            };
-            for range in volley_core::touch_pipeline::rally_frame_ranges(&filtered, rally_starts)? {
-                let evidence_frames: &[TouchFrame] = &filtered[range];
-                let start = start.max(evidence_frames[0].frame_index);
-                let end = end.min(evidence_frames.last().unwrap().frame_index + 1);
-                if start >= end {
-                    continue;
-                }
-                let mut events = if settings.algorithm == TouchAlgorithm::TrajectoryTcn {
-                    // Only one fixed ONNX CPU session across the streamed replay.
-                    let network = tcn.as_deref_mut().ok_or("Missing trained TCN session")?;
-                    let scores = network.score(&trajectory_features(evidence_frames))?;
-                    let mut events = evaluate_tcn_peaks(
-                        evidence_frames,
-                        &scores,
-                        width,
-                        height,
-                        start,
-                        end,
-                        settings,
-                    )?;
-                    if let Some((root, fusion, interpolation)) = pose_source {
-                        refine_pose_events_policy(
-                            &mut events,
-                            evidence_frames,
-                            width,
-                            height,
-                            root,
-                            fusion,
-                            settings,
-                            Some(interpolation),
-                        )?;
-                    }
-                    events
-                } else if settings.algorithm == TouchAlgorithm::PoseMotion {
-                    let (root, fusion, interpolation) = pose_source
-                        .ok_or("Для выбранного режима необходим сохранённый анализ позы")?;
-                    let poses =
-                        pose_frames_policy(root, fusion, evidence_frames, Some(interpolation))?;
-                    let mut events = evaluate_rally_blocks(
-                        evidence_frames,
-                        width,
-                        height,
-                        start,
-                        end,
-                        settings,
-                        rally_starts,
-                    )?;
+            }
+            clean
+        } else {
+            exclude_ball_teleports(&block, width, height)
+        };
+        // Reconstruct bounded positions of existing tracked skeletons only.
+        // The immutable replay and original GPU player detections remain unchanged.
+        let continuous = if interpolate_players {
+            reconstruct_track_gaps(&clean)
+        } else {
+            clean
+        };
+        let filtered = if let Some(calibration) = court {
+            court_touch::filter_on_court(&continuous, calibration)
+        } else {
+            continuous
+        };
+        for range in volley_core::touch_pipeline::rally_frame_ranges(&filtered, rally_starts)? {
+            let evidence_frames: &[TouchFrame] = &filtered[range];
+            let start = start.max(evidence_frames[0].frame_index);
+            let end = end.min(evidence_frames.last().unwrap().frame_index + 1);
+            if start >= end {
+                continue;
+            }
+            let mut events = if settings.algorithm == TouchAlgorithm::TrajectoryTcn {
+                // Only one fixed ONNX CPU session across the streamed replay.
+                let network = tcn.as_deref_mut().ok_or("Missing trained TCN session")?;
+                let scores = network.score(&trajectory_features(evidence_frames))?;
+                let mut events = evaluate_tcn_peaks(
+                    evidence_frames,
+                    &scores,
+                    width,
+                    height,
+                    start,
+                    end,
+                    settings,
+                )?;
+                if let Some((root, fusion, interpolation)) = pose_source {
                     refine_pose_events_policy(
                         &mut events,
                         evidence_frames,
@@ -889,6 +880,69 @@ fn detect_stream_with_pose(
                         settings,
                         Some(interpolation),
                     )?;
+                }
+                events
+            } else if settings.algorithm == TouchAlgorithm::PoseMotion {
+                let (root, fusion, interpolation) =
+                    pose_source.ok_or("Для выбранного режима необходим сохранённый анализ позы")?;
+                let poses = pose_frames_policy(root, fusion, evidence_frames, Some(interpolation))?;
+                let mut events = evaluate_rally_blocks(
+                    evidence_frames,
+                    width,
+                    height,
+                    start,
+                    end,
+                    settings,
+                    rally_starts,
+                )?;
+                refine_pose_events_policy(
+                    &mut events,
+                    evidence_frames,
+                    width,
+                    height,
+                    root,
+                    fusion,
+                    settings,
+                    Some(interpolation),
+                )?;
+                events.extend(evaluate_pose_block(
+                    evidence_frames,
+                    &poses,
+                    width,
+                    height,
+                    start,
+                    end,
+                    settings,
+                )?);
+                events.sort_by_key(|event| event.frame_index);
+                events
+            } else {
+                let mut events = evaluate_rally_blocks(
+                    evidence_frames,
+                    width,
+                    height,
+                    start,
+                    end,
+                    settings,
+                    rally_starts,
+                )?;
+                if let Some((root, fusion, interpolation)) = pose_source {
+                    refine_pose_events_policy(
+                        &mut events,
+                        evidence_frames,
+                        width,
+                        height,
+                        root,
+                        fusion,
+                        settings,
+                        Some(interpolation),
+                    )?;
+                    // The default legacy detector can miss a motion-supported
+                    // wrist contact that RTMPose confirms independently.
+                    // Add those source-backed candidates rather than restricting
+                    // pose evidence to labels of already-found legacy touches.
+                    let poses =
+                        pose_frames_policy(root, fusion, evidence_frames, Some(interpolation))?;
                     events.extend(evaluate_pose_block(
                         evidence_frames,
                         &poses,
@@ -898,136 +952,105 @@ fn detect_stream_with_pose(
                         end,
                         settings,
                     )?);
+                    events.sort_by(|a, b| {
+                        b.body_contact_supported
+                            .cmp(&a.body_contact_supported)
+                            .then_with(|| {
+                                a.contact_landmark
+                                    .as_ref()
+                                    .map(|point| point.priority_distance())
+                                    .unwrap_or(f64::INFINITY)
+                                    .total_cmp(
+                                        &b.contact_landmark
+                                            .as_ref()
+                                            .map(|point| point.priority_distance())
+                                            .unwrap_or(f64::INFINITY),
+                                    )
+                            })
+                            .then_with(|| {
+                                b.velocity_residual_px_frame
+                                    .total_cmp(&a.velocity_residual_px_frame)
+                            })
+                            .then_with(|| b.probability.total_cmp(&a.probability))
+                    });
+                    let mut unique = Vec::new();
+                    let separation = (settings.min_interval_sec * 30.0).round().max(1.0) as u64;
+                    for event in events {
+                        if unique.iter().all(|prior: &PhysicalTouchCandidate| {
+                            prior.frame_index.abs_diff(event.frame_index) > separation
+                        }) {
+                            unique.push(event);
+                        }
+                    }
+                    events = unique;
                     events.sort_by_key(|event| event.frame_index);
-                    events
-                } else {
-                    let mut events = evaluate_rally_blocks(
-                        evidence_frames,
-                        width,
-                        height,
-                        start,
-                        end,
-                        settings,
-                        rally_starts,
-                    )?;
-                    if let Some((root, fusion, interpolation)) = pose_source {
-                        refine_pose_events_policy(
-                            &mut events,
-                            evidence_frames,
-                            width,
-                            height,
-                            root,
-                            fusion,
-                            settings,
-                            Some(interpolation),
-                        )?;
-                        // The default legacy detector can miss a motion-supported
-                        // wrist contact that RTMPose confirms independently.
-                        // Add those source-backed candidates rather than restricting
-                        // pose evidence to labels of already-found legacy touches.
-                        let poses =
-                            pose_frames_policy(root, fusion, evidence_frames, Some(interpolation))?;
-                        events.extend(evaluate_pose_block(
-                            evidence_frames,
-                            &poses,
-                            width,
-                            height,
-                            start,
-                            end,
-                            settings,
-                        )?);
-                        events.sort_by(|a, b| {
-                            b.body_contact_supported
-                                .cmp(&a.body_contact_supported)
-                                .then_with(|| {
-                                    a.contact_landmark
-                                        .as_ref()
-                                        .map(|point| point.priority_distance())
-                                        .unwrap_or(f64::INFINITY)
-                                        .total_cmp(
-                                            &b.contact_landmark
-                                                .as_ref()
-                                                .map(|point| point.priority_distance())
-                                                .unwrap_or(f64::INFINITY),
-                                        )
-                                })
-                                .then_with(|| {
-                                    b.velocity_residual_px_frame
-                                        .total_cmp(&a.velocity_residual_px_frame)
-                                })
-                                .then_with(|| b.probability.total_cmp(&a.probability))
-                        });
-                        let mut unique = Vec::new();
-                        let separation = (settings.min_interval_sec * 30.0).round().max(1.0) as u64;
-                        for event in events {
-                            if unique.iter().all(|prior: &PhysicalTouchCandidate| {
-                                prior.frame_index.abs_diff(event.frame_index) > separation
-                            }) {
-                                unique.push(event);
-                            }
-                        }
-                        events = unique;
-                        events.sort_by_key(|event| event.frame_index);
-                    }
-                    events
-                };
-                apply_training(
-                    &mut events,
-                    evidence_frames,
-                    pose_source,
-                    width,
-                    height,
-                    settings,
-                    training,
-                )?;
+                }
+                events
+            };
+            apply_training(
+                &mut events,
+                evidence_frames,
+                pose_source,
+                width,
+                height,
+                settings,
+                training,
+            )?;
+            if let Some(intervals) = preliminary_intervals {
+                events.retain(|event| {
+                    intervals.iter().any(|(first, last)| {
+                        event.frame_index >= *first && event.frame_index <= *last
+                    })
+                });
+            }
+            for event in &mut events {
+                if !event.body_contact_supported || event.contact_landmark.is_none() {
+                    event.provisional_track_id =
+                        nearest_source_track_for_ball(&block, event, width, height);
+                    event.action_prediction = None;
+                    event.body_contact_supported = false;
+                    event.contact_landmark = None;
+                    event.contact_pose_sample_frame = None;
+                }
+            }
+            if let Some(calibration) = court {
+                court_touch::annotate(&mut events, evidence_frames, calibration);
+            }
+            if net.is_some() {
                 for event in &mut events {
-                    if !event.body_contact_supported || event.contact_landmark.is_none() {
-                        event.provisional_track_id =
-                            nearest_source_track_for_ball(&block, event, width, height);
+                    if event.action_prediction.as_ref().is_some_and(|p| {
+                        p.kind == volley_core::action_prediction::ActionKind::Block
+                    }) && !volley_core::court_geometry::observed_net_contact(
+                        net,
+                        [
+                            event.ball_x_px / width as f64,
+                            event.ball_y_px / height as f64,
+                        ],
+                    ) {
                         event.action_prediction = None;
-                        event.body_contact_supported = false;
-                        event.contact_landmark = None;
-                        event.contact_pose_sample_frame = None;
-                    }
-                }
-                if let Some(calibration) = court {
-                    court_touch::annotate(&mut events, evidence_frames, calibration);
-                }
-                if net.is_some() {
-                    for event in &mut events {
-                        if event.action_prediction.as_ref().is_some_and(|p| {
-                            p.kind == volley_core::action_prediction::ActionKind::Block
-                        }) && !volley_core::court_geometry::observed_net_contact(
-                            net,
-                            [
-                                event.ball_x_px / width as f64,
-                                event.ball_y_px / height as f64,
-                            ],
-                        ) {
-                            event.action_prediction = None;
-                        }
-                    }
-                }
-                events.retain(|event| touch_confidence_passes(event.probability, settings.threshold));
-                for event in events {
-                    // Reconstructed gap positions must not acquire authority as
-                    // source-frame detections. Check before cross-chunk dedup so
-                    // an inferred candidate cannot suppress a genuine contact.
-                    let Some(track_id) = event.provisional_track_id else {
-                        continue;
-                    };
-                    if !source_frame_contains_track(&block, event.frame_index, track_id) {
-                        continue;
-                    }
-                    motion_candidates += 1;
-                    if let Some(last) = select_pending_touch(&mut pending, event, separation) {
-                        emit_record(&mut writer, &mut output_hash, &last)?;
-                        emitted += 1;
                     }
                 }
             }
-            Ok(())
-        };
+            events.retain(|event| touch_confidence_passes(event.probability, settings.threshold));
+            for event in events {
+                // Reconstructed gap positions must not acquire authority as
+                // source-frame detections. Check before cross-chunk dedup so
+                // an inferred candidate cannot suppress a genuine contact.
+                let Some(track_id) = event.provisional_track_id else {
+                    continue;
+                };
+                if !source_frame_contains_track(&block, event.frame_index, track_id) {
+                    continue;
+                }
+                motion_candidates += 1;
+                if let Some(last) = select_pending_touch(&mut pending, event, separation) {
+                    emit_record(&mut writer, &mut output_hash, &last)?;
+                    emitted += 1;
+                }
+            }
+        }
+        Ok(())
+    };
     for index in 0..count {
         let bytes = reader.line()?.ok_or("CPU tracked frame JSONL truncated")?;
         let raw: TrackedFrame = serde_json::from_slice(&bytes)
@@ -1081,17 +1104,35 @@ fn detect_stream_with_pose(
 }
 
 pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, ApiError> {
-    process_with_ball_scope(state, req, &[0])
+    process_with_ball_scope_and_rally_settings(
+        state,
+        req,
+        &[0],
+        volley_core::rally_reconstruction::RallySettings::default(),
+    )
 }
 
 pub(crate) fn process_discovery(state: &AppState, req: &TouchRequest) -> Result<Value, ApiError> {
-    process_with_ball_scope(state, req, &[])
+    process_discovery_with_rally_settings(
+        state,
+        req,
+        volley_core::rally_reconstruction::RallySettings::default(),
+    )
 }
 
-pub(crate) fn process_with_ball_scope(
+pub(crate) fn process_discovery_with_rally_settings(
+    state: &AppState,
+    req: &TouchRequest,
+    rally_settings: volley_core::rally_reconstruction::RallySettings,
+) -> Result<Value, ApiError> {
+    process_with_ball_scope_and_rally_settings(state, req, &[], rally_settings)
+}
+
+pub(crate) fn process_with_ball_scope_and_rally_settings(
     state: &AppState,
     req: &TouchRequest,
     rally_starts: &[u64],
+    rally_settings: volley_core::rally_reconstruction::RallySettings,
 ) -> Result<Value, ApiError> {
     if !state.writes_enabled {
         return Err(storage::conflict(
@@ -1108,6 +1149,7 @@ pub(crate) fn process_with_ball_scope(
         .unwrap_or_default()
         .validate()
         .map_err(storage::bad_request)?;
+    let rally_settings = rally_settings.validate().map_err(storage::bad_request)?;
     // Fail before creating run artifacts if no trained checkpoint exists.
     // Model bytes never replace or mutate saved VBallNet inference evidence.
     let mut tcn = if settings.algorithm == TouchAlgorithm::TrajectoryTcn {
@@ -1243,6 +1285,22 @@ pub(crate) fn process_with_ball_scope(
             settings.min_ball_score,
             rally_starts,
         )?;
+        let preliminary = crate::cpu_retrack::ball_track::preliminary_rally_scope(
+            &source,
+            &sha,
+            frames,
+            dimensions.width,
+            dimensions.height,
+            settings.min_ball_score,
+            &ball_mask.accepted,
+            rally_settings,
+        )?;
+        let preliminary_scope_applied =
+            volley_core::rally_reconstruction::preliminary_rally_scope_usable(
+                preliminary.impacts.len(),
+                &preliminary.intervals,
+                frames,
+            );
         let (digest, events, raw) = detect_stream_with_pose(
             tcn.as_mut(),
             &source,
@@ -1265,6 +1323,7 @@ pub(crate) fn process_with_ball_scope(
             &training_examples,
             Some(&ball_mask),
             rally_starts,
+            preliminary_scope_applied.then_some(preliminary.intervals.as_slice()),
         )?;
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared source changed during CPU Touch replay".into());
@@ -1276,7 +1335,7 @@ pub(crate) fn process_with_ball_scope(
         }
         fs::rename(part, folder.join(OUTPUT_FILE))
             .map_err(|e| format!("Publish motion-gated Touch events: {e}"))?;
-        let record = json!({
+        let mut record = json!({
             "schema":"volley-native-cpu-touch-proposals/1",
             "state":"motion_gated_touch_proposals",
             "project_id":req.project_id,
@@ -1322,6 +1381,34 @@ pub(crate) fn process_with_ball_scope(
             } else { "contact_geometry_v1" },
             "cpu_processing_complete":false,
         });
+        let preliminary_data = json!({
+            "schema":"volley-native-preliminary-ball-rallies/1",
+            "source_replay_id":req.replay_id,
+            "source_replay_sha256":sha,
+            "frames":frames,
+            "settings":rally_settings,
+            "trajectory_impacts":preliminary.impacts,
+            "rally_intervals":preliminary.intervals,
+        });
+        storage::write_json_atomic(&folder.join("preliminary_rallies.json"), &preliminary_data)
+            .map_err(|e| format!("Save preliminary ball-only gameplay: {e:?}"))?;
+        let preliminary_bytes = fs::read(folder.join("preliminary_rallies.json"))
+            .map_err(|e| format!("Read preliminary gameplay checksum: {e}"))?;
+        record["preliminary_rally_scope_version"] = json!("ball_down_up_v1");
+        record["preliminary_rally_scope_applied"] = json!(preliminary_scope_applied);
+        record["preliminary_rally_settings"] = json!(rally_settings);
+        record["preliminary_rally_file"] = json!("preliminary_rallies.json");
+        record["preliminary_rally_sha256"] =
+            json!(format!("{:x}", Sha256::digest(&preliminary_bytes)));
+        record["preliminary_trajectory_impact_count"] = json!(preliminary_data
+            ["trajectory_impacts"]
+            .as_array()
+            .unwrap()
+            .len());
+        record["preliminary_rally_interval_count"] = json!(preliminary_data["rally_intervals"]
+            .as_array()
+            .unwrap()
+            .len());
         storage::write_json_atomic(&folder.join("manifest.json"), &record)
             .map_err(|e| format!("Save native Touch manifest: {e:?}"))?;
         Ok(record)
@@ -1383,7 +1470,9 @@ mod tests {
     fn minimum_contact_confidence_applies_to_all_pose_motion_candidates() {
         let scores = [0.29, 0.48, 0.64, 0.83];
         let enabled = |threshold| {
-            scores.iter().copied()
+            scores
+                .iter()
+                .copied()
                 .filter(|score| touch_confidence_passes(*score, threshold))
                 .collect::<Vec<_>>()
         };
@@ -1777,6 +1866,7 @@ mod tests {
             &[],
             None,
             &[],
+            None,
         )
         .unwrap();
         assert_eq!(count, 1);
@@ -1801,6 +1891,7 @@ mod tests {
                 &[],
                 None,
                 &[240],
+                None,
             )
             .unwrap();
             let near: Vec<Value> = fs::read_to_string(output)
@@ -2014,6 +2105,7 @@ mod local_tuning_diagnostic {
             &[],
             None,
             &[],
+            None,
         )
         .unwrap();
         let events: Vec<Value> = fs::read_to_string(output)

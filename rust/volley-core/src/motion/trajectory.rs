@@ -189,6 +189,22 @@ pub fn trajectory_breaks(points: &[BallObservation]) -> Vec<TrajectoryBreak> {
     found
 }
 
+pub fn downward_to_upward_breaks(points: &[BallObservation]) -> Vec<TrajectoryBreak> {
+    trajectory_breaks(points)
+        .into_iter()
+        .filter(|impact| {
+            let left_end = points.partition_point(|p| p.frame < impact.frame);
+            let right_begin = points.partition_point(|p| p.frame <= impact.frame);
+            let left = &points[left_end.saturating_sub(7)..left_end];
+            let right = &points[right_begin..(right_begin + 7).min(points.len())];
+            match (fit(left, impact.frame), fit(right, impact.frame)) {
+                (Some(before), Some(after)) => before.y[1] > 2.0 && after.y[1] < -2.0,
+                _ => false,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +241,27 @@ mod tests {
         let found = trajectory_breaks(&flight(true));
         assert_eq!(found.len(), 1, "{found:?}");
         assert!((found[0].frame - 30).abs() <= 1, "{found:?}");
+    }
+
+    #[test]
+    fn preliminary_impacts_only_count_descending_to_ascending_ball() {
+        let rebound = downward_to_upward_breaks(&flight(true));
+        assert_eq!(rebound.len(), 1, "{rebound:?}");
+        assert!((rebound[0].frame - 30).abs() <= 1);
+        assert!(downward_to_upward_breaks(&flight(false)).is_empty());
+        let side_change: Vec<_> = flight(true)
+            .into_iter()
+            .map(|mut p| {
+                let t = p.frame as f64 - 30.0;
+                p.x = 400.0 + if t > 0.0 { -8.0 } else { 8.0 } * t;
+                p.y = 200.0 + t * 5.0;
+                p
+            })
+            .collect();
+        assert!(downward_to_upward_breaks(&side_change).is_empty());
+        let mut noise = flight(false);
+        noise[30].y += 55.0;
+        assert!(downward_to_upward_breaks(&noise).is_empty());
     }
 
     #[test]
