@@ -497,3 +497,8 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 База обучающих примеров RTMPose ·	RTMPose training examples ·
 Сравнение двух алгоритмов разметки розыгрышей	Compare two rally labeling algorithms
 Параметры поиска розыгрышей по мячу	Ball-only rally detection settings
+Смоделировать розыгрыши и касания	Simulate rallies and touches
+Действия с меткой видео	Actions for a video marker
+Нажмите кнопку моделирования над видео, затем выберите касание или границу кликом.	Use the simulation button above the video, then click a touch or rally boundary to edit.
+Дополнительные кнопки разметки	Additional annotation controls
+Дополнительные кнопки границ розыгрышей	Additional rally boundary controls

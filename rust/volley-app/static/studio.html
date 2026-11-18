@@ -165,7 +165,7 @@
         <section class="workspace">
           <div class="viewer-layout">
             <section class="viewer-panel" aria-label="Плеер розыгрышей">
-              <div class="viewer-head"><strong><span class="studio-preview-caption">Просмотр видео</span><span class="studio-training-caption">Дообучение</span></strong><span id="studio-video-time">—</span></div>
+              <div class="viewer-head"><strong><span class="studio-preview-caption">Просмотр видео</span><span class="studio-training-caption">Дообучение</span></strong><div class="studio-training-video-actions"><button type="button" class="primary" id="studio-comparison-recalculate">Смоделировать розыгрыши и касания</button><small id="studio-simulation-summary" role="status" aria-live="polite"></small></div><span id="studio-video-time">—</span></div>
               <div class="video-wrap">
                 <video id="studio-video" tabindex="0" preload="metadata" playsinline aria-label="Просмотр исходного видео. Пробел — воспроизведение или пауза"></video>
                 <canvas id="studio-video-overlay" class="video-overlay" aria-hidden="true"></canvas>
@@ -211,6 +211,10 @@
                 </div>
                 </div>
                 <span id="studio-overlay-status" class="video-overlay-status hidden" role="status"></span>
+                <div id="studio-annotation-context" class="studio-annotation-context hidden" role="group" aria-label="Действия с меткой видео">
+                  <strong id="studio-annotation-context-label"></strong>
+                  <div id="studio-annotation-context-actions"></div>
+                </div>
                 <span id="studio-video-empty">Выберите розыгрыш справа</span>
 
 
@@ -241,7 +245,7 @@
                 <section class="studio-training-comparison" aria-label="Сравнение двух алгоритмов разметки розыгрышей">
                   <div class="studio-training-compare-title">
                     <div><strong>Розыгрыши: CPU против траектории мяча</strong><small>Сравнение по одной версии видео, без повторного GPU-анализа</small></div>
-                    <button type="button" class="secondary" id="studio-comparison-recalculate">Рассчитать по траектории</button>
+                    <small>Нажмите кнопку моделирования над видео, затем выберите касание или границу кликом.</small>
                   </div>
                   <div class="studio-training-compare-controls" role="group" aria-label="Параметры поиска розыгрышей по мячу">
                     <label>Перегибов для розыгрыша <input id="studio-comparison-min-impacts" type="number" min="1" max="10" step="1" value="2"></label>
@@ -251,6 +255,7 @@
                   </div>
                   <p id="studio-comparison-status" role="status" aria-live="polite">Выберите видео и CPU-постобработку.</p>
                   <div id="studio-comparison-metrics" class="studio-training-compare-metrics" aria-live="polite"></div>
+                  <div id="studio-comparison-touches" class="studio-training-simulated-touches" aria-live="polite"></div>
                   <div class="studio-training-compare-review">
                     <strong>Проверка расхождений</strong>
                     <label>Показать
@@ -293,19 +298,25 @@
                 </details>
                 <section class="studio-temporal-labels" aria-label="Эталонная разметка касаний и розыгрышей">
                   <div class="studio-training-head"><strong>Эталонная разметка</strong><small>Кадр <output id="studio-annotation-current">—</output> · эталонные касания перемещаются на шкале под видео</small></div>
-                  <div class="studio-annotation-tools">
+                  <details class="studio-training-advanced studio-training-legacy-tools">
+                    <summary>Дополнительные кнопки разметки</summary>
+                    <div class="studio-annotation-tools">
                     <button type="button" class="secondary" id="studio-annotation-seed">Взять автоматические метки за основу</button>
                     <button type="button" class="secondary" id="studio-annotation-add-touch">+ Касание</button>
                     <button type="button" class="secondary" id="studio-annotation-move-touch" disabled>Перенести касание сюда</button>
                     <button type="button" class="secondary" id="studio-annotation-delete-touch" disabled>Удалить касание</button>
                   </div>
+                  </details>
                   <div id="studio-annotation-touch-list" class="studio-annotation-touch-list" aria-label="Касания для коррекции"></div>
-                  <div class="studio-annotation-rally-controls">
+                  <details class="studio-training-advanced studio-training-legacy-tools">
+                    <summary>Дополнительные кнопки границ розыгрышей</summary>
+                    <div class="studio-annotation-rally-controls">
                     <button type="button" class="secondary" id="studio-annotation-new-rally">Новый розыгрыш</button>
                     <button type="button" class="secondary" id="studio-annotation-rally-start">Установить начало розыгрыша</button>
                     <button type="button" class="secondary" id="studio-annotation-rally-end">Установить конец розыгрыша</button>
                     <small id="studio-annotation-rally-pending" aria-live="polite"></small>
                   </div>
+                  </details>
                   <div class="studio-annotation-rally-header"><strong>Размеченные розыгрыши</strong><small>3 строки · прокрутка · выбрать для изменения границ</small></div>
                   <div id="studio-annotation-rallies" class="studio-annotation-rallies" aria-label="Сохранённые розыгрыши"></div>
                   <div class="studio-annotation-evaluation"><span id="studio-annotation-metrics">Точность появится после разметки.</span></div>

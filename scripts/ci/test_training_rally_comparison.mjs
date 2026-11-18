@@ -86,7 +86,7 @@ assert.equal(rows.length,3,"disagreements should exclude agreed rallies");
 rows[1].click();
 assert.equal(seeked,220/30);
 assert.equal(paused,true);
-assert.equal(elements.get("studio-comparison-metrics").children.length,6);
+assert.equal(elements.get("studio-comparison-metrics").children.length,7);
 comparison.filter.value="all";
 renderComparison();
 assert.equal(elements.get("studio-comparison-differences").children.filter(
@@ -103,4 +103,26 @@ release(comparison.data);
 await pending;
 assert.equal(comparison.sourceKey,"","An old request must not claim the newer run");
 assert.equal(comparison.epoch,1);
+const saved=comparison.data;
+s.run="r";
+comparison.data={...saved,trajectory_status:"unavailable"};
+renderComparison();
+assert.equal(comparison.recalculate.disabled,false,
+  "Older CPU versions must offer simulation from their saved replay");
+const queries=[];
+context.request=async (_request)=> {
+  queries.push(_request.query);
+  return {...saved,trajectory_status:"ready",
+    simulated_touch_candidates:[12,220],
+    parameters:{min_impacts:2,context_frames:45,min_duration_frames:45,max_touch_gap_frames:120}};
+};
+comparison.sourceKey="p:r:source.mp4";
+await refreshComparison(true);
+assert.equal(queries.at(-1).simulate,true);
+assert.equal(comparison.simulated,true);
+assert.equal(elements.get("studio-comparison-touches").children.length,2);
+assert.match(elements.get("studio-simulation-summary").textContent,/возможных касаний/);
+await refreshComparison();
+assert.equal(queries.at(-1).simulate,true,
+  "Manual edits must preserve the current simulation and its parameters");
 console.log("Training comparison: source guard, editable params, separate timeline overlays and discrepancy navigation: OK");

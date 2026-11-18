@@ -27,6 +27,7 @@ pub struct CompareQuery {
     context_frames: Option<u64>,
     min_duration_frames: Option<u64>,
     max_touch_gap_frames: Option<u64>,
+    simulate: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -65,7 +66,7 @@ fn intervals(value: &Value, frames: u64) -> Result<Vec<Interval>, ApiError> {
     Ok(output)
 }
 
-fn cpu_intervals(run: &ValidatedRun) -> Result<Vec<Interval>, ApiError> {
+fn cpu_intervals(run: &ValidatedRun) -> Result<(Vec<Interval>, Vec<u64>), ApiError> {
     let timeline = generate(run, Choice::Timeline)
         .map_err(storage::bad_request)?
         .value;
@@ -90,7 +91,17 @@ fn cpu_intervals(run: &ValidatedRun) -> Result<Vec<Interval>, ApiError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     result.sort_by_key(|v| (v.start, v.end));
-    Ok(result)
+    let mut touches = timeline["touch_annotations"]
+        .as_array()
+        .ok_or_else(|| storage::bad_request("CPU touch timeline is missing"))?
+        .iter()
+        .filter(|touch| touch["touch_attributed"] == true || touch["contact_verified"] == true)
+        .filter_map(|touch| touch["frame_index"].as_u64())
+        .filter(|&frame| frame < run.frames)
+        .collect::<Vec<_>>();
+    touches.sort_unstable();
+    touches.dedup();
+    Ok((result, touches))
 }
 
 fn overlap(a: Interval, b: Interval) -> f64 {
@@ -214,7 +225,8 @@ fn differences(
 fn saved_impacts(
     state: &AppState,
     run: &ValidatedRun,
-) -> Result<Option<(Vec<u64>, RallySettings)>, ApiError> {
+    simulate: bool,
+) -> Result<Option<(Vec<u64>, RallySettings, &'static str)>, ApiError> {
     let root = projects::project_root(state)
         .join(&run.project_id)
         .join("native_cpu_touch_runs")
@@ -236,7 +248,55 @@ fn saved_impacts(
         ));
     }
     if manifest.get("preliminary_rally_file").is_none() {
-        return Ok(None);
+        if !simulate {
+            return Ok(None);
+        }
+        let starts: Vec<u64> = match manifest.get("leading_ball_rally_starts") {
+            Some(value) => serde_json::from_value(value.clone())
+                .map_err(|_| storage::bad_request("Invalid saved leading-ball boundaries"))?,
+            None => vec![0],
+        };
+        let settings = RallySettings {
+            min_ball_score: run.min_ball_score,
+            ..RallySettings::default()
+        };
+        settings.validate().map_err(storage::bad_request)?;
+        let replay_root = projects::project_root(state)
+            .join(&run.project_id)
+            .join("native_cpu_replays")
+            .join(&run.replay_id);
+        let replay = safe_file(
+            &replay_root,
+            "tracked_frames.jsonl",
+            64 * 1024 * 1024 * 1024,
+        )
+        .map_err(storage::bad_request)?;
+        let mask = crate::cpu_retrack::ball_track::read(
+            &replay,
+            &run.replay_sha,
+            run.frames,
+            run.width,
+            run.height,
+            settings.min_ball_score,
+            &starts,
+        )
+        .map_err(storage::bad_request)?;
+        let computed = crate::cpu_retrack::ball_track::preliminary_rally_scope(
+            &replay,
+            &run.replay_sha,
+            run.frames,
+            run.width,
+            run.height,
+            settings.min_ball_score,
+            &mask.accepted,
+            settings,
+        )
+        .map_err(storage::bad_request)?;
+        return Ok(Some((
+            computed.impacts,
+            settings,
+            "recalculated_saved_cpu_replay",
+        )));
     }
     if manifest["preliminary_rally_file"] != "preliminary_rallies.json" {
         return Err(storage::bad_request("Unexpected preliminary rally file"));
@@ -284,15 +344,31 @@ fn saved_impacts(
             "Saved trajectory intervals do not match the detector",
         ));
     }
-    Ok(Some((impacts, settings)))
+    Ok(Some((impacts, settings, "saved_cpu_trajectory_impacts")))
+}
+
+fn impacts_within_rallies(impacts: &[u64], rallies: &[Interval]) -> Vec<u64> {
+    let mut index = 0usize;
+    impacts
+        .iter()
+        .copied()
+        .filter(|&frame| {
+            while index < rallies.len() && rallies[index].end < frame {
+                index += 1;
+            }
+            rallies
+                .get(index)
+                .is_some_and(|rally| rally.start <= frame && frame <= rally.end)
+        })
+        .collect()
 }
 
 fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result<Value, ApiError> {
-    let cpu = cpu_intervals(run)?;
+    let (cpu, cpu_touches) = cpu_intervals(run)?;
     let truth = touch_annotation::comparison_truth(state, run)?;
     let reference = truth
         .as_ref()
-        .map(|(items, _)| {
+        .map(|(items, _, _)| {
             let mut sorted = items
                 .iter()
                 .map(|&(start, end)| Interval::new(start, end, run.frames))
@@ -301,37 +377,61 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
             Ok(sorted)
         })
         .transpose()?;
-    let reviewed = truth.as_ref().is_some_and(|(_, reviewed)| *reviewed);
-    let saved = saved_impacts(state, run)?;
-    let (trajectory, impacts, parameters, status) = if let Some((impacts, mut settings)) = saved {
-        if let Some(n) = query.min_impacts {
-            settings.min_touch_candidates = n;
-        }
-        if let Some(n) = query.context_frames {
-            settings.suggested_context_frames = n;
-        }
-        if let Some(n) = query.min_duration_frames {
-            settings.min_rally_frames = n;
-        }
-        if let Some(n) = query.max_touch_gap_frames {
-            settings.max_without_touch_frames = n;
-        }
-        settings.validate().map_err(storage::bad_request)?;
-        let intervals = preliminary_rally_intervals(&impacts, run.frames, settings)
-            .into_iter()
-            .map(|(start, end)| Interval::new(start, end, run.frames))
-            .collect::<Result<Vec<_>, _>>()?;
-        (
-            intervals,
-            impacts,
-            json!({"min_impacts":settings.min_touch_candidates,
+    let reviewed = truth.as_ref().is_some_and(|(_, _, reviewed)| *reviewed);
+    let saved = saved_impacts(state, run, query.simulate.unwrap_or(false))?;
+    let (trajectory, impacts, parameters, status, source) =
+        if let Some((impacts, mut settings, source)) = saved {
+            if let Some(n) = query.min_impacts {
+                settings.min_touch_candidates = n;
+            }
+            if let Some(n) = query.context_frames {
+                settings.suggested_context_frames = n;
+            }
+            if let Some(n) = query.min_duration_frames {
+                settings.min_rally_frames = n;
+            }
+            if let Some(n) = query.max_touch_gap_frames {
+                settings.max_without_touch_frames = n;
+            }
+            settings.validate().map_err(storage::bad_request)?;
+            let intervals = preliminary_rally_intervals(&impacts, run.frames, settings)
+                .into_iter()
+                .map(|(start, end)| Interval::new(start, end, run.frames))
+                .collect::<Result<Vec<_>, _>>()?;
+            (
+                intervals,
+                impacts,
+                json!({"min_impacts":settings.min_touch_candidates,
                 "context_frames":settings.suggested_context_frames,
                 "min_duration_frames":settings.min_rally_frames,
                 "max_touch_gap_frames":settings.max_without_touch_frames.min(120)}),
-            "ready",
-        )
+                "ready",
+                source,
+            )
+        } else {
+            (
+                Vec::new(),
+                Vec::new(),
+                Value::Null,
+                "unavailable",
+                "missing_saved_trajectory",
+            )
+        };
+    let simulated_touches = impacts_within_rallies(&impacts, &trajectory);
+    let cpu_vs_simulated_touches = (status == "ready")
+        .then(|| touch_annotation::compare_touch_frames(&cpu_touches, &simulated_touches));
+    let reference_touches = truth.as_ref().map(|(_, touches, _)| touches.as_slice());
+    let touch_reference = if reviewed {
+        reference_touches.map(|touches| {
+            json!({
+                "cpu":touch_annotation::compare_touch_frames(touches, &cpu_touches),
+                "trajectory":if status == "ready" {
+                    Some(touch_annotation::compare_touch_frames(touches, &simulated_touches))
+                } else {None}
+            })
+        })
     } else {
-        (Vec::new(), Vec::new(), Value::Null, "unavailable")
+        None
     };
     let (cpu_trajectory, pairs, used) = match_intervals(&cpu, &trajectory);
     let (cpu_reference, trajectory_reference) = if reviewed {
@@ -353,6 +453,11 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         "trajectory_status":status,
         "trajectory_detector_version":"ball_down_up_v1",
         "trajectory_impacts":impacts,"parameters":parameters,
+        "simulated_touch_candidates":simulated_touches,
+        "cpu_touch_candidates":cpu_touches,
+        "touch_metrics":{"cpu_trajectory":cpu_vs_simulated_touches,
+                         "reference":touch_reference},
+        "simulation_touch_status":"unverified_ball_direction_change",
         "cpu_rallies":cpu,"trajectory_rallies":trajectory,
         "reference_rallies":reference,"reference_reviewed":reviewed,
         "metrics":{"cpu_trajectory":if status=="ready" {Some(cpu_trajectory)} else {None},
@@ -361,7 +466,7 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
             if reviewed {reference.as_deref().unwrap_or(&[])} else {&[]})}
             else {Vec::new()},
         "model_retrained":false,
-        "source":"saved_cpu_trajectory_impacts",
+        "source":source,
         "published_cpu_unchanged":true}))
 }
 
@@ -443,6 +548,23 @@ mod tests {
         settings.max_without_touch_frames = 120;
         settings.min_touch_candidates = 4;
         assert!(preliminary_rally_intervals(&impacts, 500, settings).is_empty());
+    }
+
+    #[test]
+    fn simulated_touches_only_follow_valid_rally_intervals() {
+        let impacts = [10, 20, 30, 100, 110, 170];
+        let segments = [
+            Interval { start: 8, end: 35 },
+            Interval {
+                start: 105,
+                end: 125,
+            },
+        ];
+        assert_eq!(
+            impacts_within_rallies(&impacts, &segments),
+            vec![10, 20, 30, 110]
+        );
+        assert!(impacts_within_rallies(&impacts, &[]).is_empty());
     }
 
     #[test]

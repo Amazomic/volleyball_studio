@@ -1785,3 +1785,23 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 .studio-training-advanced.studio-training-library #studio-training-list{max-height:270px;overflow:auto}
 #studio-preview-view.training-workspace .video-timeline-legend{flex-wrap:wrap}
 @media(max-width:650px){.studio-training-compare-row{grid-template-columns:1fr;gap:4px}.studio-training-comparison{padding:12px}.studio-training-compare-controls label{min-width:115px}}
+
+#studio-preview-view .studio-training-video-actions{display:none}
+#studio-preview-view.training-workspace .studio-training-video-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+#studio-preview-view.training-workspace .viewer-head{align-items:center;flex-wrap:wrap;gap:9px}
+#studio-preview-view.training-workspace .viewer-head strong{white-space:nowrap}
+#studio-preview-view.training-workspace #studio-comparison-recalculate{padding:8px 11px;font-size:12px;justify-content:center;white-space:normal}
+#studio-simulation-summary{font-size:11px;color:#f5cc78}
+#studio-preview-view .video-wrap.training-annotation #studio-video-overlay{pointer-events:auto;cursor:crosshair}
+.studio-annotation-context{position:absolute;z-index:35;width:min(268px,calc(100% - 16px));padding:12px;border:1px solid #759bb4;border-radius:12px;background:#102338f2;box-shadow:0 12px 34px #000a;pointer-events:auto;display:grid;gap:8px;backdrop-filter:blur(8px)}
+.studio-annotation-context strong{display:block;font-size:12px;color:#f5f9ff}
+#studio-annotation-context-actions{display:flex;flex-direction:column;gap:5px;max-height:240px;overflow-y:auto}
+#studio-annotation-context-actions button{width:100%;min-height:33px;text-align:left;font-size:11px;padding:7px 9px}
+#studio-annotation-context-actions button:hover{border-color:#69ade1}
+#studio-annotation-context-actions .studio-context-destructive{border-color:#975364;color:#ffd5db}
+.studio-training-simulated-touches{display:flex;gap:5px;align-items:center;flex-wrap:wrap;max-height:95px;overflow-y:auto}
+.studio-simulated-touch{background:#47361e;border:1px solid #7b643b;border-radius:6px;color:#fadd9d;padding:5px 8px;font-size:10px;white-space:nowrap}
+.studio-simulated-touch:hover{background:#69502c;border-color:#ffcf81}
+.studio-training-compare-title>small{font-size:11px;color:#a6c2d4;line-height:1.4}
+.studio-training-legacy-tools>summary{font-size:11px;font-weight:500}
+@media(max-width:690px){#studio-preview-view.training-workspace .viewer-head{align-items:flex-start}#studio-preview-view.training-workspace .studio-training-video-actions{width:100%}}

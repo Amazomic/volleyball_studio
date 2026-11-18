@@ -395,10 +395,18 @@ fn response(state: &AppState, run: &ValidatedRun, source: &str) -> Result<Value,
         )
     })
 }
+pub(crate) fn compare_touch_frames(reference: &[u64], predicted: &[u64]) -> Value {
+    let mut reference = reference.to_vec();
+    let mut predicted = predicted.to_vec();
+    reference.sort_unstable();
+    predicted.sort_unstable();
+    json!(accuracy(&reference, &predicted, 3, 30.0))
+}
+
 pub(crate) fn comparison_truth(
     state: &AppState,
     run: &ValidatedRun,
-) -> Result<Option<(Vec<(u64, u64)>, bool)>, ApiError> {
+) -> Result<Option<(Vec<(u64, u64)>, Vec<u64>, bool)>, ApiError> {
     let source = source_sha(run)?;
     lock(|| {
         let library = read(state)?;
@@ -414,6 +422,7 @@ pub(crate) fn comparison_truth(
         Ok(selected.map(|v| {
             (
                 v.rallies.iter().map(|r| (r.start, r.end)).collect(),
+                v.touches.iter().map(|t| t.frame).collect(),
                 v.reviewed,
             )
         }))
