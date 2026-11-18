@@ -51,6 +51,7 @@ const fetch=async(url,options={})=>{
   if(url==="/api/montage/native/audio")return reply({audio_file:audio,duration_sec:31});
   if(url==="/api/montage/native/player-highlights"||url==="/api/montage/native/game-report") {
     assert.deepEqual(body.rally_run_ids,[expectedRun]);
+    if(url==="/api/montage/native/player-highlights")assert.equal(body.include_statistics,undefined);
     assert.equal(body.project_id,"1234abcdef01");
     assert.equal(body.start_frame,undefined);assert.equal(body.end_frame,undefined);
     if(body.operation==="start") {

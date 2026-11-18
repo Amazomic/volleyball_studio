@@ -135,9 +135,9 @@
       layout:ui.layout.value==="vertical"&&ui.camera.value==="on"?
         "vertical_follow":ui.layout.value,
       camera_zoom:Number(ui.zoom.value),
-      encoder:ui.encoder.value,audio_volume:Number(ui.volume.value),
-      include_statistics:ui.mode.value==="report"&&ui.statistics.checked
+      encoder:ui.encoder.value,audio_volume:Number(ui.volume.value)
     };
+    if(ui.mode.value==="report")value.include_statistics=ui.statistics.checked;
     if(ui.mode.value==="player")Object.assign(value,{
       player_id:ui.player.value,action_kind:ui.action.value,
       clip_context_sec:Number(ui.context.value),selection_mode:"auto",max_clips:80
