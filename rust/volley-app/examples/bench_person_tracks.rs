@@ -173,7 +173,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let duration = started.elapsed().as_secs_f64();
     let report = serde_json::json!({
         "model": match detector_variant {
-            DetectorVariant::RtmDetNano => "RTMDet-Nano+RTMPose+ProvisionalTracker",
             DetectorVariant::RfDetrMedium => "RF-DETR-Medium-Native+RTMPose+ProvisionalTracker",
         },
         "frames": next_frame,

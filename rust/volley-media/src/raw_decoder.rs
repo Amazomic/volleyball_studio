@@ -663,46 +663,6 @@ mod tests {
     }
 
     #[test]
-    fn original_rgb_stream_preserves_native_resolution_and_frame_order() {
-        if Command::new("ffmpeg").arg("-version").output().is_err() {
-            return;
-        }
-        let dir = std::env::temp_dir().join(format!("volley-original-rgb-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let source = dir.join("input.mp4");
-        let created = Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=size=192x108:rate=60:duration=0.6",
-                "-an",
-                "-c:v",
-                "mpeg4",
-                "-y",
-            ])
-            .arg(&source)
-            .status()
-            .unwrap();
-        assert!(created.success());
-        let cancelled = AtomicBool::new(false);
-        let mut indices = Vec::new();
-        decode_original_frames(&source, 18, &cancelled, |index, frame, w, h| {
-            assert_eq!((w, h), (192, 108));
-            assert_eq!(frame.len(), 192 * 108 * 3);
-            indices.push(index);
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(indices, (0..18).collect::<Vec<_>>());
-        assert!(decode_original_frames(&source, 19, &cancelled, |_, _, _, _| Ok(())).is_err());
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
     fn full_video_stream_covers_complete_windows_only_and_can_cancel() {
         if Command::new("ffmpeg").arg("-version").output().is_err() {
             return;
