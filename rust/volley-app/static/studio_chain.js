@@ -6,6 +6,12 @@
       day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit"
     }):"";
   const key=(video,kind,run)=>JSON.stringify([video,kind,run]);
+  const latestRun=(rows,preferred="")=>{
+    if(rows.some(row=>row.rally_run_id===preferred))return preferred;
+    return [...rows].sort((a,b)=>
+      (Number(b.created_at)||0)-(Number(a.created_at)||0)||
+      String(b.rally_run_id||"").localeCompare(String(a.rally_run_id||"")))[0]?.rally_run_id||"";
+  };
   const call=(operation,value)=>{
     if(!engine&&root?.VolleyballUi?.isReady())engine=root.VolleyballUi.engine;
     if(!engine)throw Error("Rust/WASM module is not ready");
@@ -33,7 +39,7 @@
     result.runToAnalysis=new Map(Object.entries(result.runToAnalysis));
     return result;
   };
-  const api={build,key,stamp,call,setRuntime:exports=>{engine=exports;}};
+  const api={build,key,stamp,latestRun,call,setRuntime:exports=>{engine=exports;}};
   if(root)root.VolleyStudioChain=api;
   if(typeof module==="object"&&module.exports)module.exports=api;
 })(typeof window!=="undefined"?window:null);

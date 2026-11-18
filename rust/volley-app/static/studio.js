@@ -36,6 +36,7 @@
     playbackMode:"sequence",generation:0,busy:false,jobId:"",timer:null,
     loadingMore:false,canLoadMore:true,pageLoading:false,pageError:""
   };
+  const previewLoad={key:"",epoch:0,pending:false,retries:0,timer:null};
   // Persist selected source IDs only; restored IDs are validated against each catalog.
   const sourceSelection=(()=>{
     const key="volley:studio-source-selection:v1";
@@ -982,6 +983,8 @@
   // links produced by CPU postprocessing. Refresh the preview's name snapshot
   // on re-entry as well; the cached frame coordinates remain SHA-bound.
   window.addEventListener("volley:tab-change",event=>{
+    if(event.detail?.tab==="preview"&&s.project&&s.video)
+      ensurePreviewVideo();
     if(event.detail?.tab==="preview"&&s.project&&s.run){
       invalidateOverlayLabels();
       drawOverlay();
@@ -1623,29 +1626,65 @@
     }
     return left>0&&rows[left-1].end_frame>=frame?rows[left-1]:null;
   };
+  const schedulePreviewRecovery=key=>{
+    if(s.videoKey!==key||previewLoad.key!==key||previewLoad.pending||
+       previewLoad.timer||previewLoad.retries>=2)return;
+    const delay=800*(++previewLoad.retries);
+    previewLoad.timer=setTimeout(()=>{
+      previewLoad.timer=null;
+      if(s.videoKey===key&&previewLoad.key===key&&!previewLoad.pending)
+        loadPreviewVideo();
+    },delay);
+  };
   const loadPreviewVideo=(autoplay=false)=>{
     const project=s.project,video=s.video,key=project+":"+video;
+    if(!project||!video)return;
+    if(previewLoad.timer)clearTimeout(previewLoad.timer);
+    previewLoad.timer=null;
+    if(previewLoad.key!==key){previewLoad.key=key;previewLoad.retries=0;}
+    previewLoad.pending=true;
+    const epoch=++previewLoad.epoch;
+    const onLoaded=()=>{
+      if(epoch!==previewLoad.epoch||s.videoKey!==key)return;
+      previewLoad.pending=false;
+      if(!ui.video.getAttribute("src"))schedulePreviewRecovery(key);
+    };
+    const onFailed=error=>{
+      if(epoch!==previewLoad.epoch||s.videoKey!==key)return;
+      previewLoad.pending=false;
+      message("Не удалось загрузить видео: "+String(error?.message||error),"error");
+      schedulePreviewRecovery(key);
+    };
     if(window.VolleyballBrowserVideo?.load){
-      window.VolleyballBrowserVideo.load(ui.video,project,video,{
-        autoplay,seek:s.seekAt
-      }).catch(error=>{
-        if(s.videoKey===key)
-          message("Не удалось загрузить видео: "+error.message,"error");
-      });
+      try{
+        Promise.resolve(window.VolleyballBrowserVideo.load(ui.video,project,video,{
+          autoplay,seek:s.seekAt
+        })).then(onLoaded,onFailed);
+      }catch(error){onFailed(error);}
     }else{
       ui.video.src=url("/api/video-media",{project_id:project,video});
       ui.video.load();
+      onLoaded();
       if(autoplay)ui.video.play().catch(()=>{});
     }
   };
   const ensurePreviewVideo=()=>{
     if(!s.project||!s.video)return;
     const key=s.project+":"+s.video;
-    if(s.videoKey===key)return;
+    if(s.videoKey===key){
+      if(!previewLoad.pending&&!previewLoad.timer&&
+         (!ui.video.getAttribute("src")||ui.video.error))
+        loadPreviewVideo();
+      return;
+    }
     s.videoKey=key;
     ui.emptyVideo.classList.add("hidden");
     loadPreviewVideo();
   };
+  window.addEventListener("volley:playback-status",event=>{
+    if(event.detail?.video===ui.video&&event.detail?.state==="failed")
+      schedulePreviewRecovery(s.project+":"+s.video);
+  });
   const seekTimeline=seconds=>{
     if((!overlay.raw&&!timeline.data)||!s.video||(!overlay.raw&&!s.run))return;
     const duration=timelineDuration();
@@ -1793,7 +1832,11 @@
     wasmReady=true;syncFavoritesSelection();cards();
   };
   const clearVideo=()=>{
-    ui.video.pause();ui.video.removeAttribute("src");ui.video.load();
+    previewLoad.epoch++;previewLoad.key="";previewLoad.pending=false;previewLoad.retries=0;
+    if(previewLoad.timer)clearTimeout(previewLoad.timer);
+    previewLoad.timer=null;
+    if(window.VolleyballBrowserVideo?.cancel)window.VolleyballBrowserVideo.cancel(ui.video);
+    else{ui.video.pause();ui.video.removeAttribute("src");ui.video.load();}
     s.videoKey="";s.current="";s.stopAt=null;s.clipStart=null;s.clipEnd=null;s.seekAt=0;
     setOverlaySource(null);
     ui.emptyVideo.classList.remove("hidden");
@@ -1875,7 +1918,6 @@
     if(source?.video){
       s.video=source.video;
       s.fps=30;
-      ensurePreviewVideo();
       if(overlay.raw)setOverlaySource({});
     }
     const rows=s.chain?.byAnalysis.get(s.analysis)||[];
@@ -1885,10 +1927,11 @@
       !s.analysis?"Сначала выберите анализ":
         rows.length?"Выберите постобработку":"Нет CPU-версий для анализа");
     ui.run.disabled=!s.analysis||!rows.length;
-    ui.run.value=rows.some(row=>row.rally_run_id===preferred)?preferred:
-      rows.length===1?rows[0].rally_run_id:"";
+    ui.run.value=window.VolleyStudioChain.latestRun(rows,preferred);
     refreshPicker(ui.run);
     s.run=ui.run.value;
+    s.video=rows.find(row=>row.rally_run_id===s.run)?.video||source?.video||"";
+    if(s.video){s.fps=30;ensurePreviewVideo();}
     // Overlay playback follows the selected CPU snapshot, not a rally card.
     // reset() clears the canvas source; restore it for full-video preview too.
     setOverlaySource(overlay.raw||s.run?{}:null);

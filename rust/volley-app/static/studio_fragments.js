@@ -145,15 +145,19 @@
   // Explicit source selection happens BEFORE assigning the original HEVC to a video.
   // This prevents a queued MEDIA_ERR_SRC_NOT_SUPPORTED from the original file
   // from leaking into the browser-safe MediaSource playback.
-  async function load(video,project,name,options={}){
-    if(!video||!project||!name)return;
-    const token=Symbol("video-load");
-    pendingLoads.set(video,token);
+  function cancel(video){
+    pendingLoads.set(video,Symbol("video-cancel"));
     const previous=sessions.get(video);
     previous?.close();sessions.delete(video);
     video.pause();
     video.removeAttribute("src");
     video.load();
+  }
+  async function load(video,project,name,options={}){
+    if(!video||!project||!name)return;
+    cancel(video);
+    const token=Symbol("video-load");
+    pendingLoads.set(video,token);
     const source=urlFor("/api/video-media",{project_id:project,video:name});
     const ready=await window.VolleyballPlayback?.primary?.(project,name).catch(()=>null);
     if(pendingLoads.get(video)!==token)return;
@@ -184,7 +188,7 @@
     return sourceInfo.get(key);
   }
   window.VolleyballBrowserVideo={
-    load,
+    load,cancel,
     canStream:(project,name)=>readInfo(project,name).then(info=>
       info?.codec==="hevc"||info?.codec==="h265")
   };
