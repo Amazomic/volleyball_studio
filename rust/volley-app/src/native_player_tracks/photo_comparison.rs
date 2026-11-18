@@ -1,5 +1,17 @@
 use super::*;
+use std::sync::{Mutex, OnceLock};
 use tokio::io::AsyncWriteExt;
+
+// Allow full multi-angle albums from several players without rejecting the
+// comparison. The 64 MiB source-data bound still applies.
+const MAX_COMPARISON_REFERENCE_PHOTOS: usize = 1024;
+const MAX_CACHED_REFERENCE_FEATURES: usize = 2048;
+type ReferenceFeatureCache = BTreeMap<(String, String), Vec<f32>>;
+static REFERENCE_FEATURES: OnceLock<Mutex<ReferenceFeatureCache>> = OnceLock::new();
+
+fn reference_features() -> &'static Mutex<ReferenceFeatureCache> {
+    REFERENCE_FEATURES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
 
 struct PhotoInput {
     player_id: String,
@@ -94,9 +106,9 @@ pub(super) fn snapshot(state: &AppState, req: &ReidReviewRequest) -> Result<Snap
             if !seen.insert(sha.to_owned()) {
                 continue;
             }
-            if photos.len() >= 256 {
+            if photos.len() >= MAX_COMPARISON_REFERENCE_PHOTOS {
                 return Err(storage::bad_request(
-                    "Too many reference photos for one comparison (maximum 256)",
+                    "Too many reference photos for one comparison (maximum 1024)",
                 ));
             }
             let id = row["id"]
@@ -391,24 +403,60 @@ pub(super) async fn compare(
         .acquire()
         .await
         .map_err(|e| storage::internal(format!("Photo decoder gate: {e}")))?;
-    let mut inputs = Vec::new();
-    for photo in &snap.photos {
-        inputs.push(decode(&photo.bytes).await?);
+    // Reuse features for identical saved images and model fingerprints across
+    // explicit refresh and auto-link; neither user data nor cache schema changes.
+    let mut photo_vectors = vec![None; snap.photos.len()];
+    {
+        let cache = reference_features()
+            .lock()
+            .map_err(|_| storage::internal("Reference ReID cache lock poisoned"))?;
+        for (index, photo) in snap.photos.iter().enumerate() {
+            photo_vectors[index] = cache
+                .get(&(snap.model.clone(), photo.image_sha256.clone()))
+                .cloned();
+        }
     }
-    let library = std::env::var("VOLLEY_OPENVINO_C_LIB")
-        .map_err(|_| storage::bad_request("Native OpenVINO C runtime is not configured"))?;
-    let repo = state.repository_root.clone();
-    let vectors = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<f32>>, ApiError> {
-        let mut encoder =
-            volley_inference::reid_openvino::Encoder::load(&repo, Path::new(&library))
-                .map_err(storage::bad_request)?;
-        inputs
-            .iter()
-            .map(|input| encoder.infer(input).map_err(storage::bad_request))
-            .collect()
-    })
-    .await
-    .map_err(|e| storage::internal(format!("Photo ReID worker: {e}")))??;
+    let mut missing_indices = Vec::new();
+    let mut inputs = Vec::new();
+    for (index, photo) in snap.photos.iter().enumerate() {
+        if photo_vectors[index].is_none() {
+            missing_indices.push(index);
+            inputs.push(decode(&photo.bytes).await?);
+        }
+    }
+    if !inputs.is_empty() {
+        let library = std::env::var("VOLLEY_OPENVINO_C_LIB")
+            .map_err(|_| storage::bad_request("Native OpenVINO C runtime is not configured"))?;
+        let repo = state.repository_root.clone();
+        let inferred = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<f32>>, ApiError> {
+            let mut encoder =
+                volley_inference::reid_openvino::Encoder::load(&repo, Path::new(&library))
+                    .map_err(storage::bad_request)?;
+            inputs
+                .iter()
+                .map(|input| encoder.infer(input).map_err(storage::bad_request))
+                .collect()
+        })
+        .await
+        .map_err(|e| storage::internal(format!("Photo ReID worker: {e}")))??;
+        let mut cache = reference_features()
+            .lock()
+            .map_err(|_| storage::internal("Reference ReID cache lock poisoned"))?;
+        if cache.len() + inferred.len() > MAX_CACHED_REFERENCE_FEATURES {
+            cache.clear();
+        }
+        for (index, vector) in missing_indices.into_iter().zip(inferred) {
+            cache.insert(
+                (snap.model.clone(), snap.photos[index].image_sha256.clone()),
+                vector.clone(),
+            );
+            photo_vectors[index] = Some(vector);
+        }
+    }
+    let vectors = photo_vectors
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| storage::internal("Reference ReID vectors incomplete"))?;
     let check_state = state.clone();
     let check_req = req.clone();
     let current = tokio::task::spawn_blocking(move || snapshot(&check_state, &check_req))
@@ -508,6 +556,15 @@ pub(super) async fn compare(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_multi_athlete_photo_albums_fit_in_one_comparison() {
+        // Six existing athlete albums with 46+64+48+32+55+64 photos
+        // previously failed at the old hard cap of 256.
+        assert!(MAX_COMPARISON_REFERENCE_PHOTOS >= 46 + 64 + 48 + 32 + 55 + 64);
+        assert!(MAX_COMPARISON_REFERENCE_PHOTOS >= 8 * MAX_PLAYER_PHOTOS);
+        assert!(MAX_CACHED_REFERENCE_FEATURES >= MAX_COMPARISON_REFERENCE_PHOTOS);
+    }
 
     #[test]
     fn duplicate_image_shared_by_two_athletes_cannot_identify_either() {
