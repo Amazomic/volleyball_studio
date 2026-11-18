@@ -530,7 +530,9 @@ impl TryFrom<StartRequestWire> for StartRequest {
             .and_then(Value::as_str)
             == Some("legacy")
         {
-            return Err("Legacy не поддерживается для новых запусков; выберите PoseMotion или TCN".into());
+            return Err(
+                "Legacy не поддерживается для новых запусков; выберите PoseMotion или TCN".into(),
+            );
         }
         let (gpu, mut post) = decode_profiles(wire.gpu, wire.post)?;
         // TouchSettings::default() remains legacy for old saved data. An API
@@ -2658,7 +2660,8 @@ mod tests {
         let tcn: StartRequest = serde_json::from_value(json!({
             "project_id":"abc123def456","video":"match.mp4",
             "post":{"touches":{"algorithm":"trajectory_tcn"}}
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(tcn.post.touches.algorithm, TouchAlgorithm::TrajectoryTcn);
 
         let mut previous_choice = base;
