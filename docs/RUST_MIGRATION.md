@@ -2445,3 +2445,10 @@ Studio показывает кнопку перехода между debug и re
 - PASS: cargo fmt --all -- --check; cargo test -p volley-app montage_recognition --offline --locked (2/2); node test_studio_montage_builder.mjs, test_studio_montage_tab.mjs, test_studio_dom_ids.mjs, test_studio_wasm_ui.mjs, test_volley_web_wasm.mjs; сборка volley-web WASM; git diff --check.
 - Полный scripts/check-all.ps1: FAIL — Clippy в существующих частях volley-inference/volley-core; cargo test 364 PASS, 1 FAIL (ранее зафиксированный storage::tests::shared_storage_statistics_preserve_missing_exact_bytes_and_http_errors); Windows bash packaging и несвязанные JS-harness сбои. Первоначальная нехватка трёх RU/EN подписей исправлена, test_volley_web_wasm.mjs теперь PASS (287/287). GPU, реальный экспорт MP4 и ручная визуальная проверка NOT TESTED.
 - Основная рабочая копия содержит посторонние незавершённые изменения и отстаёт от origin/rust; применение в работающей Studio не выполнялось.
+
+## 2026-11-19 — Дообучение: сравнение разметки по мячу с CPU
+
+- Введён read-only `/api/training/rally-comparison` (`rally_training_comparison.rs`): строгая привязка GPU/CPU/replay по SHA-256, пересчёт интервалов по сохранённым перегибам траектории без нового GPU-инференса, сопоставление с подтверждённым эталоном и навигация по расхождениям.
+- UI `studio.{html,js,css}`: одна шкала под видео, метрики CPU/траектории/ручного эталона, редактируемые пороги, фильтр эпизодов; RTMPose и библиотека примеров сохранены в сворачиваемых разделах.
+- Добавлены `scripts/ci/test_training_rally_comparison.mjs`, Rust unit-тесты и записи в `docs/RUST_CANONICAL_OWNERS.json`. Контракт UI обновлён до 2; двуязычный каталог дополнен.
+- Проверки: 4 Rust-теста сравнения, тесты UI дообучения, уникальности DOM, владельцев маршрутов и WASM i18n — успешно. Общий `scripts/check-all.ps1` по-прежнему содержит ранее существовавшие несвязанные падения `test_studio_pose_modes`, `test_studio_preview_source`, `test_studio_raw_detector`, `test_studio_raw_gpu_preview` (подтверждены на чистом исходном worktree).
