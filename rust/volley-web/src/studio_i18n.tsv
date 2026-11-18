@@ -210,7 +210,6 @@ VballNet · мяч, RF-DETR + RTMPose · игроки. Два независим
 Предыдущий алгоритм	Previous algorithm
 Использовать	Use
 Не использовать	Do not use
-Подтверждение точками тела	Body keypoint requirement
 Не обязательно	Optional
 Обязательно	Required
 Мин. уверенность точки тела	Min. keypoint confidence

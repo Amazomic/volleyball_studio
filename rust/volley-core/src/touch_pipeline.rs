@@ -564,14 +564,26 @@ mod tests {
                 }],
             });
         }
-        let contacts =
-            evaluate_pose_block(&frames, &poses, 640, 360, 0, 80, TouchSettings::default())
-                .unwrap();
+        let contacts = evaluate_pose_block(
+            &frames,
+            &poses,
+            640,
+            360,
+            0,
+            80,
+            TouchSettings {
+                require_pose: true,
+                ..TouchSettings::default()
+            },
+        )
+        .unwrap();
         assert_eq!(contacts.len(), 1);
         assert_eq!(contacts[0].provisional_track_id, Some(1));
+        assert!(contacts[0].body_contact_supported);
+        assert!(contacts[0].contact_landmark.is_some());
         assert!(
-            contacts[0].action_prediction.is_some(),
-            "Keep geometry classification when wrists are inconclusive"
+            contacts[0].action_prediction.is_none(),
+            "Wrist-only evidence confirms contact, not the technique"
         );
         let mut unrelated = poses.clone();
         unrelated.insert(

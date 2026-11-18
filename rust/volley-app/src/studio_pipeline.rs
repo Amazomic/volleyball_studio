@@ -433,6 +433,7 @@ impl Default for PostProfile {
             tracking: TrackingOptions::default(),
             touches: TouchSettings {
                 algorithm: TouchAlgorithm::PoseMotion,
+                require_pose: true,
                 ..TouchSettings::default()
             },
             rallies: RallySettings::default(),
@@ -540,6 +541,7 @@ impl TryFrom<StartRequestWire> for StartRequest {
         if post.touches.algorithm != TouchAlgorithm::TrajectoryTcn {
             post.touches.algorithm = TouchAlgorithm::PoseMotion;
         }
+        post.touches.require_pose = true;
         Ok(Self {
             project_id: wire.project_id,
             video: wire.video,
@@ -945,6 +947,9 @@ fn cpu_lineage_valid(
         && track["video"] == request.video
         && touches["schema"] == "volley-native-cpu-touch-proposals/1"
         && touches["state"] == "motion_gated_touch_proposals"
+        && touches["body_trajectory_intersection_required"] == true
+        && touches["settings"]["require_pose"] == true
+        && touches["automatic_action_prediction_method"] == "pose_keypoints_v1_or_unknown_touch"
         && touches["preliminary_rally_scope_version"] == "ball_down_up_v1"
         && touches["preliminary_rally_settings"] == json!(request.post.rallies)
         && touches["preliminary_rally_scope_applied"].as_bool().is_some()
@@ -1414,7 +1419,7 @@ async fn pipeline(
             .as_deref()
             .ok_or("Не выбран первичный GPU-анализ в верхней панели")?;
         let source = selected_gpu(app, request, &identity, source_id)?;
-        if request.post.touches.algorithm == TouchAlgorithm::PoseMotion
+        if request.post.touches.require_pose
             && crate::native_preview_pose::source_info(
                 &projects::project_root(app).join(&request.project_id),
                 source_id,
@@ -2118,7 +2123,7 @@ pub async fn start(
         ));
     }
     if request.mode == PipelineMode::Full
-        && request.post.touches.algorithm == TouchAlgorithm::PoseMotion
+        && request.post.touches.require_pose
         && !request.gpu.pose_enabled
     {
         return Err(storage::bad_request(
@@ -2676,18 +2681,27 @@ mod tests {
         let base = json!({"project_id":"abc123def456","video":"match.mp4"});
         let fresh: StartRequest = serde_json::from_value(base.clone()).unwrap();
         assert_eq!(fresh.post.touches.algorithm, TouchAlgorithm::PoseMotion);
+        assert!(fresh.post.touches.require_pose);
 
         let mut partial = base.clone();
         partial["post"] = json!({"touches":{"threshold":0.62}});
         let active: StartRequest = serde_json::from_value(partial).unwrap();
         assert_eq!(active.post.touches.algorithm, TouchAlgorithm::PoseMotion);
         assert_eq!(active.post.touches.threshold, 0.62);
+        assert!(active.post.touches.require_pose);
+        let ignored_optional: StartRequest = serde_json::from_value(json!({
+            "project_id":"abc123def456","video":"match.mp4",
+            "post":{"touches":{"require_pose":false}}
+        }))
+        .unwrap();
+        assert!(ignored_optional.post.touches.require_pose);
         let tcn: StartRequest = serde_json::from_value(json!({
             "project_id":"abc123def456","video":"match.mp4",
             "post":{"touches":{"algorithm":"trajectory_tcn"}}
         }))
         .unwrap();
         assert_eq!(tcn.post.touches.algorithm, TouchAlgorithm::TrajectoryTcn);
+        assert!(tcn.post.touches.require_pose);
 
         let mut previous_choice = base;
         previous_choice["post"] = json!({"touches":{"algorithm":"legacy"}});
@@ -2971,6 +2985,9 @@ mod branching_tests {
                 "schema":"volley-native-cpu-touch-proposals/1","state":"motion_gated_touch_proposals","touch_id":touch,
                 "project_id":request.project_id,"video":request.video,
                 "source_replay_id":replay,"method":"vballnet_gravity_player_geometry_pose_contact_v11","sha256":sha,
+                "body_trajectory_intersection_required":true,
+                "settings":{"require_pose":true},
+                "automatic_action_prediction_method":"pose_keypoints_v1_or_unknown_touch",
                 "preliminary_rally_scope_version":"ball_down_up_v1",
                 "preliminary_rally_settings":request.post.rallies,
                 "preliminary_rally_scope_applied":false,
@@ -3084,6 +3101,32 @@ mod branching_tests {
         legacy["gpu_model_stack"] = json!("vballnet_rtmdet_rtmpose_tiled_coco17_v3");
         assert!(!compatible_version(&legacy, &request, &identity));
         assert!(gpu_lineage_valid(&project_dir, &request, &identity, &saved));
+        assert!(cpu_lineage_valid(&project_dir, &request, &saved, None));
+        let touch_manifest = project_dir
+            .join("native_cpu_touch_runs")
+            .join(&touch)
+            .join("manifest.json");
+        let original_touch: Value =
+            serde_json::from_slice(&fs::read(&touch_manifest).unwrap()).unwrap();
+        for (field, old_value) in [
+            ("body_trajectory_intersection_required", json!(false)),
+            (
+                "automatic_action_prediction_method",
+                json!("pose_keypoints_v1_with_geometry_fallback"),
+            ),
+        ] {
+            let mut incompatible = original_touch.clone();
+            incompatible[field] = old_value;
+            storage::write_json_atomic(&touch_manifest, &incompatible).unwrap();
+            assert!(
+                !cpu_lineage_valid(&project_dir, &request, &saved, None),
+                "Old CPU evidence must not be reused after pose policy changes: {field}"
+            );
+            let reusable = find_reusable(&state, &request, &identity, &"2".repeat(32));
+            assert!(reusable.full.is_none());
+            assert!(reusable.gpu.is_some());
+        }
+        storage::write_json_atomic(&touch_manifest, &original_touch).unwrap();
         assert!(cpu_lineage_valid(&project_dir, &request, &saved, None));
         request.post.touches.algorithm = TouchAlgorithm::PoseMotion;
         let obsolete_pose = find_reusable(&state, &request, &identity, &"2".repeat(32));

@@ -674,7 +674,10 @@ pub fn evaluate_pose_block(
                     context: CourtContext::Unavailable,
                 })
             })
-            .map(|geometry| pose_classification::refine(&evidence, &geometry).unwrap_or(geometry));
+            .and_then(|geometry| {
+                pose_classification::refine(&evidence, &geometry)
+                    .or_else(|| (!settings.require_pose).then_some(geometry))
+            });
         result.push(PhysicalTouchCandidate {
             frame_index: frame.frame_index,
             provisional_track_id: Some(track_id),
@@ -803,11 +806,11 @@ pub fn evaluate_pose_block(
                     context: CourtContext::Unavailable,
                 })
             })
-            .map(|geometry| {
+            .and_then(|geometry| {
                 witness
                     .as_ref()
                     .and_then(|evidence| pose_classification::refine(evidence, &geometry))
-                    .unwrap_or(geometry)
+                    .or_else(|| (!settings.require_pose).then_some(geometry))
             });
         result.push(PhysicalTouchCandidate {
             frame_index: frame.frame_index,
@@ -1043,9 +1046,36 @@ mod tests {
                 ],
             });
         }
-        let events =
-            evaluate_pose_block(&frames, &[], 1280, 720, 695, 709, TouchSettings::default())
-                .unwrap();
+        let events = evaluate_pose_block(
+            &frames,
+            &[],
+            1280,
+            720,
+            695,
+            709,
+            TouchSettings {
+                require_pose: true,
+                ..TouchSettings::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            events.is_empty(),
+            "Without a body landmark the impact is not a final touch"
+        );
+        let events = evaluate_pose_block(
+            &frames,
+            &[],
+            1280,
+            720,
+            695,
+            709,
+            TouchSettings {
+                require_pose: false,
+                ..TouchSettings::default()
+            },
+        )
+        .unwrap();
         assert!(
             events
                 .iter()
@@ -1060,11 +1090,20 @@ mod tests {
         for frame in &mut frames {
             frame.players.clear();
         }
-        assert!(
-            evaluate_pose_block(&frames, &[], 1280, 720, 695, 709, TouchSettings::default())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(evaluate_pose_block(
+            &frames,
+            &[],
+            1280,
+            720,
+            695,
+            709,
+            TouchSettings {
+                require_pose: true,
+                ..TouchSettings::default()
+            }
+        )
+        .unwrap()
+        .is_empty());
     }
 
     fn sparse_rebound(rebound: bool) -> (Vec<TouchFrame>, Vec<PoseFrame>) {
@@ -1354,8 +1393,19 @@ mod tests {
         assert!(geometry::stable_ball_source_with_min_samples(
             &frames, 32, 2
         ));
-        let found = evaluate_pose_block(&frames, &poses, 640, 360, 0, 80, TouchSettings::default())
-            .unwrap();
+        let found = evaluate_pose_block(
+            &frames,
+            &poses,
+            640,
+            360,
+            0,
+            80,
+            TouchSettings {
+                require_pose: true,
+                ..TouchSettings::default()
+            },
+        )
+        .unwrap();
         assert_eq!(
             found.len(),
             1,
@@ -1363,9 +1413,11 @@ mod tests {
         );
         assert_eq!(found[0].frame_index, 32);
         assert_eq!(found[0].provisional_track_id, Some(42));
+        assert!(found[0].body_contact_supported);
+        assert!(found[0].contact_landmark.is_some());
         assert!(
-            found[0].action_prediction.is_some(),
-            "geometry label is retained"
+            found[0].action_prediction.is_none(),
+            "Uncertain action remains a generic touch"
         );
 
         let (straight, _) = sparse_rebound(false);

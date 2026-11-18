@@ -41,15 +41,11 @@
         const raw=localStorage.getItem(prefix+project);
         if(!raw||raw.length>8192)return null;
         const data=JSON.parse(raw);
-        if(!data||![1,2].includes(data.version)||!data.fields||typeof data.fields!=="object")return null;
-        // The calibrated hybrid defaults to optional RTMPose. An override from
-        // the previous form was silently forcing the strict filter to discard
-        // 10 of 11 real-project contacts, resulting in zero rallies.
-        // Migrate only that old field; preserve every other customized value.
-        if(data.version===1){
+        if(!data||![1,2,3].includes(data.version)||!data.fields||typeof data.fields!=="object")return null;
+        if(data.version!==3){
           const fields={...data.fields};
           delete fields["studio-post-require-pose"];
-          const migrated={version:2,video:data.video,fields};
+          const migrated={version:3,video:data.video,fields};
           localStorage.setItem(prefix+project,JSON.stringify(migrated));
           return migrated;
         }
@@ -59,7 +55,7 @@
     const write=(project,video,fields)=>{
       if(!/^[a-f0-9]{12}$/.test(project||""))return;
       try{localStorage.setItem(prefix+project,JSON.stringify({
-        version:2,video,fields
+        version:3,video,fields
       }));}catch{}
     };
     return {read,write};
@@ -234,7 +230,7 @@
       max_reach_ratio:inputValue("studio-post-reach"),
       min_interval_sec:inputValue("studio-post-interval"),
       use_ravel_touch:false,
-      require_pose:$("studio-post-require-pose").value==="1",
+      require_pose:true,
       pose_min_confidence:inputValue("studio-post-pose-confidence"),
       pose_max_distance:inputValue("studio-post-pose-distance"),
       occluded_min_turn_deg:inputValue("studio-post-occluded-turn")
@@ -305,9 +301,6 @@
         "Эталонный профиль активен. Совпадающие готовые версии используются повторно.";
       if($("studio-post-tcn-experimental").checked){
         ui.profileDelta.textContent+=" Экспериментальная TCN: требуется обученная модель models/volley3d_touch_tcn.onnx.";
-      }
-      if($("studio-post-require-pose").value==="1"){
-        ui.profileDelta.textContent+=" Внимание: обязательное подтверждение RTMPose отбрасывает касания без уверенной позы и может оставить розыгрыш без событий.";
       }
     }
     const running=Boolean(state.pipelineId);

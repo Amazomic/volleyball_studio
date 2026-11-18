@@ -242,40 +242,13 @@ mod ball_confidence_tests {
     }
 }
 
-// Gap reconstruction is useful for geometry and tracking continuity, but it
-// may add a player that was absent from the immutable CPU source frame. Do
-// not persist a Touch for such an inferred-only observation: Rally consumers
-// verify the exact frame/Track ID pair against the signed replay.
-fn nearest_source_track_for_ball(
-    frames: &[TouchFrame],
-    event: &PhysicalTouchCandidate,
-    width: u32,
-    height: u32,
-) -> Option<u64> {
-    let first = frames.first()?.frame_index;
-    let frame = event
-        .frame_index
-        .checked_sub(first)
-        .and_then(|index| frames.get(index as usize))
-        .filter(|frame| frame.frame_index == event.frame_index)?;
-    let (w, h) = (width as f64, height as f64);
-    frame
-        .players
-        .iter()
-        .filter(|player| player.track_id > 0 && player.score.is_finite() && player.score > 0.0)
-        .map(|player| {
-            let [left, top, right, bottom] = player.bbox_xyxy_norm;
-            let px = event.ball_x_px;
-            let py = event.ball_y_px;
-            let dx = (left * w - px).max(px - right * w).max(0.0);
-            let dy = (top * h - py).max(py - bottom * h).max(0.0);
-            let cx = (left + right) * 0.5 * w;
-            let cy = (top + bottom) * 0.5 * h;
-            let rank = dx.hypot(dy) + 0.01 * (cx - px).hypot(cy - py);
-            (rank, player.track_id)
-        })
-        .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
-        .map(|(_, track_id)| track_id)
+fn retain_pose_confirmed_events(events: &mut Vec<PhysicalTouchCandidate>) {
+    events.retain(|event| {
+        event.physical_motion_supported
+            && event.body_contact_supported
+            && event.contact_landmark.is_some()
+            && event.provisional_track_id.is_some()
+    });
 }
 
 fn source_frame_contains_track(frames: &[TouchFrame], frame_index: u64, track_id: u64) -> bool {
@@ -336,55 +309,6 @@ mod source_track_integrity_tests {
         assert!(select_pending_touch(&mut pending, foot, 3).is_none());
         assert!(select_pending_touch(&mut pending, hand, 3).is_none());
         assert_eq!(pending.unwrap().provisional_track_id, Some(42));
-    }
-
-    #[test]
-    fn unverified_touch_uses_nearest_observed_player_not_original_guess() {
-        let source = vec![TouchFrame {
-            frame_index: 32,
-            selected_ball: None,
-            players: vec![
-                TouchPlayer {
-                    track_id: 3,
-                    score: 0.9,
-                    bbox_xyxy_norm: [0.10, 0.20, 0.30, 0.75],
-                    touch_probability: None,
-                },
-                TouchPlayer {
-                    track_id: 8,
-                    score: 0.9,
-                    bbox_xyxy_norm: [0.60, 0.20, 0.80, 0.75],
-                    touch_probability: None,
-                },
-            ],
-        }];
-        let event = PhysicalTouchCandidate {
-            frame_index: 32,
-            provisional_track_id: Some(3),
-            probability: 0.8,
-            ball_x_px: 430.0,
-            ball_y_px: 155.0,
-            motion_frame_index: 32,
-            direction_change_deg: 150.0,
-            speed_before_px_frame: 10.0,
-            speed_after_px_frame: 20.0,
-            velocity_residual_px_frame: 30.0,
-            technique: "unknown_touch",
-            action_prediction: None,
-            court: None,
-            physical_motion_supported: true,
-            body_contact_supported: false,
-            contact_landmark: None,
-            contact_pose_sample_frame: None,
-            ball_occluded_at_contact: false,
-            inferred_body_reach_supported: false,
-            athlete_identity_verified: false,
-        };
-        assert_eq!(
-            nearest_source_track_for_ball(&source, &event, 640, 360),
-            Some(8)
-        );
-        assert_eq!(nearest_source_track_for_ball(&[], &event, 640, 360), None);
     }
 
     #[test]
@@ -469,7 +393,6 @@ fn select_pending_touch(
 /// RTMPose is read from the same saved GPU fusion as the selected CPU replay.
 /// A single-frame pose overlap cannot promote a candidate to a real Touch:
 /// require same-Track-ID body intersection before/at/after a motion-gated hit.
-/// When pose is optional, legacy results remain *unverified proposals*.
 #[cfg(test)]
 fn refine_pose_events(
     events: &mut Vec<PhysicalTouchCandidate>,
@@ -561,8 +484,7 @@ fn refine_pose_events_policy(
                 )
                 .map(|(evidence, point)| (id, evidence, point, None))
                 .or_else(|| {
-                    if settings.require_pose
-                        || event.ball_occluded_at_contact
+                    if event.ball_occluded_at_contact
                         || event.direction_change_deg < 75.0
                         || event.velocity_residual_px_frame < 18.0
                         || event.motion_frame_index.abs_diff(event.frame_index) > 3
@@ -597,12 +519,11 @@ fn refine_pose_events_policy(
         } else if let Some(geometry) = event.action_prediction.as_ref() {
             if let Some(refined) = pose_classification::refine(&evidence, geometry) {
                 event.action_prediction = Some(refined);
+            } else if settings.require_pose {
+                event.action_prediction = None;
             }
         }
     }
-    // PoseMotion supplements physical motion with RTMPose, but does not imply
-    // mandatory pose evidence. Keep unconfirmed physical proposals when body
-    // keypoints are sparse at impact; only explicit strict mode rejects them.
     if settings.require_pose {
         let mut index = 0;
         events.retain(|_| {
@@ -996,22 +917,15 @@ fn detect_stream_with_pose(
                 settings,
                 training,
             )?;
+            if settings.require_pose {
+                retain_pose_confirmed_events(&mut events);
+            }
             if let Some(intervals) = preliminary_intervals {
                 events.retain(|event| {
                     intervals.iter().any(|(first, last)| {
                         event.frame_index >= *first && event.frame_index <= *last
                     })
                 });
-            }
-            for event in &mut events {
-                if !event.body_contact_supported || event.contact_landmark.is_none() {
-                    event.provisional_track_id =
-                        nearest_source_track_for_ball(&block, event, width, height);
-                    event.action_prediction = None;
-                    event.body_contact_supported = false;
-                    event.contact_landmark = None;
-                    event.contact_pose_sample_frame = None;
-                }
             }
             if let Some(calibration) = court {
                 court_touch::annotate(&mut events, evidence_frames, calibration);
@@ -1103,6 +1017,12 @@ fn detect_stream_with_pose(
     ))
 }
 
+fn published_touch_settings(requested: Option<TouchSettings>) -> Result<TouchSettings, String> {
+    let mut settings = requested.unwrap_or_default().validate()?;
+    settings.require_pose = true;
+    Ok(settings)
+}
+
 pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, ApiError> {
     process_with_ball_scope_and_rally_settings(
         state,
@@ -1144,11 +1064,7 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
     if !opaque_id(&req.replay_id) {
         return Err(storage::bad_request("Invalid CPU track replay ID"));
     }
-    let settings = req
-        .settings
-        .unwrap_or_default()
-        .validate()
-        .map_err(storage::bad_request)?;
+    let settings = published_touch_settings(req.settings).map_err(storage::bad_request)?;
     let rally_settings = rally_settings.validate().map_err(storage::bad_request)?;
     // Fail before creating run artifacts if no trained checkpoint exists.
     // Model bytes never replace or mutate saved VBallNet inference evidence.
@@ -1377,7 +1293,7 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
             "action_technique_classification_complete":false,
             "automatic_action_predictions_enabled":true,
             "automatic_action_prediction_method":if pose_requested {
-                "pose_keypoints_v1_with_geometry_fallback"
+                "pose_keypoints_v1_or_unknown_touch"
             } else { "contact_geometry_v1" },
             "cpu_processing_complete":false,
         });
@@ -1524,6 +1440,38 @@ mod tests {
             ..impact.clone()
         };
         [impact, departure]
+    }
+
+    #[test]
+    fn published_settings_ignore_old_optional_pose_override() {
+        assert!(published_touch_settings(None).unwrap().require_pose);
+        let optional = TouchSettings {
+            require_pose: false,
+            ..TouchSettings::default()
+        };
+        assert!(
+            published_touch_settings(Some(optional))
+                .unwrap()
+                .require_pose
+        );
+    }
+
+    #[test]
+    fn only_pose_confirmed_motion_events_are_saved_as_touches() {
+        let [mut candidate, geometry_only] = recorded_rebound_and_departure(235);
+        let no_landmark = candidate.clone();
+        candidate.contact_landmark = Some(volley_core::pose_contact::BodyContact {
+            joint_indices: [9, 9],
+            point_px: [496.25, 350.0],
+            distance_px: 0.0,
+            normalized_distance: 0.0,
+        });
+        let mut touches = vec![geometry_only, no_landmark, candidate];
+        retain_pose_confirmed_events(&mut touches);
+        assert_eq!(touches.len(), 1);
+        assert_eq!(touches[0].technique, "unknown_touch");
+        assert!(touches[0].action_prediction.is_none());
+        assert!(touches[0].contact_landmark.is_some());
     }
 
     #[test]

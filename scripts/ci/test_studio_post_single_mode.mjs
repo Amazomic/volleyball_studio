@@ -22,7 +22,6 @@ for(const id of [
   "studio-post-touch-threshold",
   "studio-post-player-score",
   "studio-post-max-gap",
-  "studio-post-require-pose",
   "studio-post-rally-min",
   "studio-analysis-reset"
 ]){
@@ -30,6 +29,8 @@ for(const id of [
   assert.ok(panel.indexOf(token)>details&&panel.indexOf(token)<close,
     "Parameter "+id+" must be accessible inside the single collapsed section");
 }
+assert.doesNotMatch(panel,/id="studio-post-require-pose"/,
+  "Pose confirmation must be mandatory, not configurable");
 assert.doesNotMatch(panel.slice(0,details),/id="studio-post-(?:touch|player|require|rally)[^"]*"/,
   "No individual postprocessing parameters may remain visible when collapsed");
 
@@ -50,6 +51,7 @@ env.$=id=>({checked:true,value:"1",id});
 assert.equal(env.profile().touches.algorithm,"trajectory_tcn",
   "TCN opt-in must be passed to backend");
 assert.equal(profile.touches.threshold,0.48);
+assert.equal(profile.touches.require_pose,true);
 assert.equal(profile.interpolate_players,true);
 assert.doesNotMatch(tabs,/\$\("studio-post-touch-algorithm"\)/,
   "No hidden DOM dependency on the removed algorithm selector");
