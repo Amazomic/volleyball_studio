@@ -454,3 +454,4 @@ VBallNet + RTMPose: контакты и изломы ±0,1 с	VBallNet + RTMPose
 Параметры постобработки	Post-processing parameters
 Строгость сопоставления ID ByteTrack	ByteTrack ID matching strictness
 Порог отклонения спорных ID	Ambiguous ID rejection threshold
+Экспериментальная TCN Volley3D (нужен обученный ONNX)	Experimental Volley3D TCN (trained ONNX required)

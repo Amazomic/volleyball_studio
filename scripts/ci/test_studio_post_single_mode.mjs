@@ -38,12 +38,17 @@ const a=tabs.indexOf("  const postProfile=()=>({");
 const b=tabs.indexOf("  const allProfileFields=()=>",a);
 assert.ok(a>=0&&b>a,"Postprocessing request factory is missing");
 const env={
-  $:id=>({checked:true,value:"1",id}),
+  $:id=>({checked:id==="studio-post-tcn-experimental"?false:true,value:"1",id}),
   inputValue:()=>0.48
 };
 runInNewContext(tabs.slice(a,b)+"\nthis.profile=postProfile;",env);
 const profile=env.profile();
 assert.equal(profile.touches.algorithm,"pose_motion");
+assert.match(panel,/id="studio-post-tcn-experimental"/,
+  "TCN must be an explicitly opted-in advanced feature, not a default selector");
+env.$=id=>({checked:true,value:"1",id});
+assert.equal(env.profile().touches.algorithm,"trajectory_tcn",
+  "TCN opt-in must be passed to backend");
 assert.equal(profile.touches.threshold,0.48);
 assert.equal(profile.interpolate_players,true);
 assert.doesNotMatch(tabs,/\$\("studio-post-touch-algorithm"\)/,

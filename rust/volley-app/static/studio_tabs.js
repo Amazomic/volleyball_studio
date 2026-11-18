@@ -225,7 +225,7 @@
       ambiguity_margin:inputValue("studio-post-margin")
     },
     touches:{
-      algorithm:"pose_motion", // Единственный алгоритм новых CPU-анализов.
+      algorithm:$("studio-post-tcn-experimental").checked?"trajectory_tcn":"pose_motion", // PoseMotion default; explicit experimental opt-in.
       threshold:inputValue("studio-post-touch-threshold"),
       min_ball_score:inputValue("studio-post-ball-score"),
       smooth:inputValue("studio-post-smooth"),
@@ -301,6 +301,9 @@
         "Изменено параметров: "+changed.length+
         ". При изменении GPU создаётся новый анализ; при изменении только CPU — новая постобработка.":
         "Эталонный профиль активен. Совпадающие готовые версии используются повторно.";
+      if($("studio-post-tcn-experimental").checked){
+        ui.profileDelta.textContent+=" Экспериментальная TCN: требуется обученная модель models/volley3d_touch_tcn.onnx.";
+      }
       if($("studio-post-require-pose").value==="1"){
         ui.profileDelta.textContent+=" Внимание: обязательное подтверждение RTMPose отбрасывает касания без уверенной позы и может оставить розыгрыш без событий.";
       }

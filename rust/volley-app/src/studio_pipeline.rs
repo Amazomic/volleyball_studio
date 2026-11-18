@@ -523,19 +523,23 @@ impl TryFrom<StartRequestWire> for StartRequest {
 
     fn try_from(wire: StartRequestWire) -> Result<Self, Self::Error> {
         // Historical CPU snapshots may still deserialize the old algorithm,
-        // but new Studio requests have a single supported contact method.
+        // but new Studio requests have one default plus a separate opt-in TCN.
         if wire
             .post
             .pointer("/touches/algorithm")
             .and_then(Value::as_str)
             == Some("legacy")
         {
-            return Err("Для новой постобработки используется только pose_motion".into());
+            return Err(
+                "Legacy не поддерживается для новых запусков; выберите PoseMotion или TCN".into(),
+            );
         }
         let (gpu, mut post) = decode_profiles(wire.gpu, wire.post)?;
         // TouchSettings::default() remains legacy for old saved data. An API
-        // request with partial touch parameters must use the current method.
-        post.touches.algorithm = TouchAlgorithm::PoseMotion;
+        // request with partial touch parameters uses PoseMotion unless TCN is explicit.
+        if post.touches.algorithm != TouchAlgorithm::TrajectoryTcn {
+            post.touches.algorithm = TouchAlgorithm::PoseMotion;
+        }
         Ok(Self {
             project_id: wire.project_id,
             video: wire.video,
@@ -876,7 +880,12 @@ fn gpu_lineage_valid(
     }
     true
 }
-fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> bool {
+fn cpu_lineage_valid(
+    project: &Path,
+    request: &StartRequest,
+    saved: &Value,
+    tcn_sha: Option<&str>,
+) -> bool {
     let (Some(fusion), Some(replay), Some(touch), Some(rally)) = (
         saved["analysis_id"].as_str().filter(|id| valid_id(id)),
         saved["cpu_runs"]["tracking"]
@@ -946,6 +955,9 @@ fn cpu_lineage_valid(project: &Path, request: &StartRequest, saved: &Value) -> b
         && (match request.post.touches.algorithm {
             TouchAlgorithm::PoseMotion => touches["method"] == "vballnet_trajectory_body_contact_v12",
             TouchAlgorithm::Legacy => touches["method"] == "vballnet_gravity_player_geometry_pose_contact_v11",
+            TouchAlgorithm::TrajectoryTcn => tcn_sha.is_some()
+                && touches["method"] == "vballnet_volley3d_tcn_v1"
+                && touches["tcn_model_sha256"] == serde_json::json!(tcn_sha),
         })
         && rallies["schema"] == "volley-native-cpu-rally-proposals/1"
         && rallies["state"] == "provisional_rally_segments"
@@ -1001,6 +1013,19 @@ fn find_reusable(
     current_id: &str,
 ) -> ExistingVersions {
     let mut matches = ExistingVersions::default();
+    // A newly trained or replaced TCN must never reuse a cached CPU Touch run
+    // produced by different weights, even if all sliders are identical.
+    let tcn_sha = if request.post.touches.algorithm == TouchAlgorithm::TrajectoryTcn {
+        volley_inference::trajectory_tcn::checkpoint_sha256(
+            &state
+                .repository_root
+                .join("models")
+                .join(volley_inference::trajectory_tcn::MODEL_FILENAME),
+        )
+        .ok()
+    } else {
+        None
+    };
     let Ok(root) = folder(state, &request.project_id, false) else {
         return matches;
     };
@@ -1052,7 +1077,7 @@ fn find_reusable(
             )
             .is_ok_and(|(_, post)| json!(post) == json!(request.post))
             && saved["court_revision"] == json!(court_revision)
-            && cpu_lineage_valid(&project, request, &saved)
+            && cpu_lineage_valid(&project, request, &saved, tcn_sha.as_deref())
         {
             matches.full = Some(saved);
             return matches;
@@ -2041,6 +2066,15 @@ pub async fn start(
             "Запуск анализа возможен только в рабочем хранилище",
         ));
     }
+    if request.post.touches.algorithm == TouchAlgorithm::TrajectoryTcn {
+        volley_inference::trajectory_tcn::checkpoint_sha256(
+            &state
+                .repository_root
+                .join("models")
+                .join(volley_inference::trajectory_tcn::MODEL_FILENAME),
+        )
+        .map_err(storage::bad_request)?;
+    }
     storage::project_id(&request.project_id)?;
     storage::video_name(&request.video)?;
     if request.mode == PipelineMode::Post
@@ -2623,6 +2657,12 @@ mod tests {
         let active: StartRequest = serde_json::from_value(partial).unwrap();
         assert_eq!(active.post.touches.algorithm, TouchAlgorithm::PoseMotion);
         assert_eq!(active.post.touches.threshold, 0.62);
+        let tcn: StartRequest = serde_json::from_value(json!({
+            "project_id":"abc123def456","video":"match.mp4",
+            "post":{"touches":{"algorithm":"trajectory_tcn"}}
+        }))
+        .unwrap();
+        assert_eq!(tcn.post.touches.algorithm, TouchAlgorithm::TrajectoryTcn);
 
         let mut previous_choice = base;
         previous_choice["post"] = json!({"touches":{"algorithm":"legacy"}});
@@ -2975,7 +3015,7 @@ mod branching_tests {
             let changed = find_reusable(&state, &request, &identity, &"2".repeat(32));
             assert!(changed.full.is_none());
             assert!(changed.gpu.is_some());
-            assert!(!cpu_lineage_valid(&project_dir, &request, &saved));
+            assert!(!cpu_lineage_valid(&project_dir, &request, &saved, None));
         }
         request.post.interpolate_players = true;
         request.post.interpolate_pose = true;
@@ -2984,7 +3024,7 @@ mod branching_tests {
         legacy["gpu_model_stack"] = json!("vballnet_rtmdet_rtmpose_tiled_coco17_v3");
         assert!(!compatible_version(&legacy, &request, &identity));
         assert!(gpu_lineage_valid(&project_dir, &request, &identity, &saved));
-        assert!(cpu_lineage_valid(&project_dir, &request, &saved));
+        assert!(cpu_lineage_valid(&project_dir, &request, &saved, None));
         request.post.touches.algorithm = TouchAlgorithm::PoseMotion;
         let obsolete_pose = find_reusable(&state, &request, &identity, &"2".repeat(32));
         assert!(
@@ -3040,7 +3080,7 @@ mod branching_tests {
         ));
         tampered = saved.clone();
         tampered["cpu_runs"]["tracking"] = json!("8".repeat(32));
-        assert!(!cpu_lineage_valid(&project_dir, &request, &tampered));
+        assert!(!cpu_lineage_valid(&project_dir, &request, &tampered, None));
         // Diagnostics persist the exact native arguments and process argv.
         let logfile = directory.join("status.json");
         log_native(
