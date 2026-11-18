@@ -447,6 +447,15 @@ pub fn decode_full_video(
     })
 }
 
+fn configure_original_rgb_output(ff: &mut Command, prefix: &str, expected_frames: u64) {
+    ff.args(["-map", "0:v:0", "-an", "-sn", "-dn"])
+        .args(["-filter_threads", "2"])
+        .args(["-vf", &format!("{prefix}fps=30,format=rgb24")])
+        .args(["-frames:v", &expected_frames.to_string()])
+        .args(["-threads:v", "1"])
+        .args(["-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]);
+}
+
 pub fn decode_original_frames(
     source: &Path,
     expected_frames: u64,
@@ -469,10 +478,7 @@ pub fn decode_original_frames(
         .and_then(|pixels| pixels.checked_mul(3))
         .ok_or("Original RGB frame size overflow")?;
     let (mut ff, prefix) = auto_decode_input(source, cancelled)?;
-    ff.args(["-map", "0:v:0", "-an", "-sn", "-dn"])
-        .args(["-vf", &format!("{prefix}fps=30,format=rgb24")])
-        .args(["-frames:v", &expected_frames.to_string()])
-        .args(["-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]);
+    configure_original_rgb_output(&mut ff, &prefix, expected_frames);
     ff.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -560,6 +566,62 @@ pub fn decode_original_frames(
 mod tests {
     use super::*;
     use std::{fs, process::Command};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn original_rgb_4k_output_completes_with_two_gib_address_space() {
+        let dir = std::env::temp_dir().join(format!("volley-rgb-memory-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("input.mp4");
+        let created = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=3840x2160:rate=30:duration=2",
+                "-c:v",
+                "mpeg4",
+                "-threads",
+                "2",
+                "-y",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(created.success());
+        let mut command = Command::new("prlimit");
+        command
+            .args([
+                "--as=2147483648",
+                "--",
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-threads",
+                "1",
+                "-i",
+            ])
+            .arg(&source);
+        configure_original_rgb_output(&mut command, "", 60);
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let errors = stderr_tail(child.stderr.take().unwrap());
+        let bytes = io::copy(&mut child.stdout.take().unwrap(), &mut io::sink()).unwrap();
+        let status = child.wait().unwrap();
+        let errors = errors.join().unwrap();
+        assert!(status.success(), "{status}: {errors}");
+        assert_eq!(bytes, 60 * 3840 * 2160 * 3);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn original_rgb_stream_preserves_native_resolution_and_frame_order() {
         if Command::new("ffmpeg").arg("-version").output().is_err() {
