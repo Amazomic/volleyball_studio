@@ -38,7 +38,8 @@ for(const id of ["studio-montage","studio-montage-presets","studio-montage-mode"
 }
 assert.ok(!montage.includes('id="studio-highlights-panel"'),
     "Highlights must not be a second independent montage block");
-assert.ok(montage.includes('data-profile="report"'));
+assert.ok(!montage.includes('data-profile="report"'));
+assert.ok(montage.includes('id="studio-montage-statistics"'));
 assert.ok(montage.includes('data-profile="player"'));
 assert.ok(montage.includes('data-profile="attacks"'));
 assert.ok(montage.includes('data-profile="favorites"'));

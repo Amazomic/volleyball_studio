@@ -330,7 +330,6 @@
                 <button class="secondary" type="button" data-profile="favorites">Избранное</button>
                 <button class="secondary" type="button" data-profile="player">Рилс игрока</button>
                 <button class="secondary" type="button" data-profile="attacks">Лучшие атаки</button>
-                <button class="secondary" type="button" data-profile="report">Отчёт об игре</button>
               </div>
             </header>
             <div class="montage-builder-grid">
@@ -340,8 +339,9 @@
                     <select id="studio-montage-mode">
                       <option value="favorites">Избранные розыгрыши</option>
                       <option value="player">Касания выбранного игрока</option>
-                      <option value="report">Лучшие и длинные розыгрыши + статистика</option>
-                    </select></div>
+                      <option value="report">Лучшие и длинные розыгрыши</option>
+                    </select>
+                    <label id="studio-montage-statistics-field" class="montage-builder-check hidden"><input id="studio-montage-statistics" type="checkbox"> Включить статистику</label></div>
                   <div id="studio-montage-player-field"><label class="field-label" for="studio-montage-player">Игрок</label><select id="studio-montage-player"><option value="">Выберите игрока</option></select></div>
                   <div id="studio-montage-action-field"><label class="field-label" for="studio-montage-action">Тип касаний</label>
                     <select id="studio-montage-action">

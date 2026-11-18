@@ -27,6 +27,8 @@ pub struct ReportRequest {
     operation: String,
     #[serde(default)]
     expected_source_fingerprint: Option<String>,
+    #[serde(default)]
+    include_statistics: bool,
     #[serde(default = "default_duration")]
     target_duration_sec: f64,
     #[serde(default)]
@@ -45,6 +47,13 @@ fn default_operation() -> String {
 }
 fn default_duration() -> f64 {
     60.0
+}
+fn statistics_outro_seconds(enabled: bool) -> f64 {
+    if enabled {
+        5.0
+    } else {
+        0.0
+    }
 }
 fn default_zoom() -> f64 {
     1.25
@@ -114,43 +123,44 @@ fn report_plan(state: &AppState, req: &ReportRequest) -> Result<ReportPlan, ApiE
                 coverage,
             });
         }
-        let (owners, _auto_ids) = native_player_tracks::statistics_owners(
-            state,
-            &req.project_id,
-            &run.video,
-            &run.replay_id,
-        )?;
-        if owners.source_sha != run.replay_sha {
-            return Err(storage::conflict(
-                "Привязки игроков принадлежат другой GPU-версии",
-            ));
-        }
-        let reviewed = native_action_review::verified_actions(state, &run)?;
-        if reviewed["source_rally_sha256"] != run.rally_sha
-            || reviewed["source_touch_sha256"] != run.touch_sha
-        {
-            return Err(storage::conflict(
-                "Метки действий принадлежат другой CPU-версии",
-            ));
-        }
-        // Exactly the same SHA-verified, rally-scoped body-contact counts
-        // as the Report tab. Unreviewed identity stays an explicit Track ID.
-        for (name, (touches, attacks, blocks)) in
-            crate::native_player_statistics::rally_report_counts(state, &run, &owners)?
-        {
-            let entry = stats.entry(name).or_default();
-            entry.0 += touches;
-            entry.1 += attacks;
-            entry.2 += blocks;
-        }
-        sources.push(json!({
+        let mut source = json!({
             "video":run.video, "rally_run_id":run.run_id,
             "replay_sha":run.replay_sha, "touch_sha":run.touch_sha,
             "rally_sha":run.rally_sha,
-            "identity_revision":owners.revision,
-            "resolved_identity_mapping":owners.owners,
-            "action_revision":reviewed["revision"],
-        }));
+        });
+        if req.include_statistics {
+            let (owners, _auto_ids) = native_player_tracks::statistics_owners(
+                state,
+                &req.project_id,
+                &run.video,
+                &run.replay_id,
+            )?;
+            if owners.source_sha != run.replay_sha {
+                return Err(storage::conflict(
+                    "Привязки игроков принадлежат другой GPU-версии",
+                ));
+            }
+            let reviewed = native_action_review::verified_actions(state, &run)?;
+            if reviewed["source_rally_sha256"] != run.rally_sha
+                || reviewed["source_touch_sha256"] != run.touch_sha
+            {
+                return Err(storage::conflict(
+                    "Метки действий принадлежат другой CPU-версии",
+                ));
+            }
+            for (name, (touches, attacks, blocks)) in
+                crate::native_player_statistics::rally_report_counts(state, &run, &owners)?
+            {
+                let entry = stats.entry(name).or_default();
+                entry.0 += touches;
+                entry.1 += attacks;
+                entry.2 += blocks;
+            }
+            source["identity_revision"] = json!(owners.revision);
+            source["resolved_identity_mapping"] = json!(owners.owners);
+            source["action_revision"] = reviewed["revision"].clone();
+        }
+        sources.push(source);
         runs.insert(id.clone(), run);
     }
     ranked.sort_by(|a, b| {
@@ -165,7 +175,7 @@ fn report_plan(state: &AppState, req: &ReportRequest) -> Result<ReportPlan, ApiE
     });
     let mut chosen = Vec::new();
     let mut length = 0.0;
-    let budget = req.target_duration_sec - 5.0;
+    let budget = req.target_duration_sec - statistics_outro_seconds(req.include_statistics);
     for row in ranked {
         let seconds = (row.end - row.start + 1) as f64 / 30.0;
         if length >= budget || chosen.len() == MAX_CLIPS {
@@ -222,14 +232,17 @@ fn report_plan(state: &AppState, req: &ReportRequest) -> Result<ReportPlan, ApiE
     } else {
         None
     };
-    let mut lines = vec![
-        "СТАТИСТИКА МАТЧА".to_owned(),
-        format!("Розыгрышей в ролике: {}", chosen.len()),
-        "Оценочные действия внутри розыгрышей:".to_owned(),
-    ];
-    if stats.is_empty() {
+    let mut lines = Vec::new();
+    if req.include_statistics {
+        lines.extend([
+            "СТАТИСТИКА МАТЧА".to_owned(),
+            format!("Розыгрышей в ролике: {}", chosen.len()),
+            "Оценочные действия внутри розыгрышей:".to_owned(),
+        ]);
+    }
+    if req.include_statistics && stats.is_empty() {
         lines.push("Не обнаружены касания с подтверждённой точкой тела".into());
-    } else {
+    } else if req.include_statistics {
         let mut rows = stats.iter().collect::<Vec<_>>();
         rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| a.0.cmp(b.0)));
         for (name, (total, attacks, blocks)) in rows.into_iter().take(9) {
@@ -240,13 +253,16 @@ fn report_plan(state: &AppState, req: &ReportRequest) -> Result<ReportPlan, ApiE
             ));
         }
     }
-    lines.push("Подтверждены контакты тела; неподписанные игроки обозначены Track ID".into());
+    if req.include_statistics {
+        lines.push("Подтверждены контакты тела; неподписанные игроки обозначены Track ID".into());
+    }
     let source_fingerprint = format!(
         "{:x}",
         Sha256::digest(
             serde_json::to_vec(&json!({
                 "project_id":req.project_id,
                 "target_duration_sec":req.target_duration_sec,
+                "include_statistics":req.include_statistics,
                 "sources":sources,
             }))
             .map_err(|e| storage::internal(format!("Report fingerprint: {e}")))?
@@ -275,6 +291,7 @@ fn report_plan(state: &AppState, req: &ReportRequest) -> Result<ReportPlan, ApiE
             "touches":row.touches,"ball_coverage":row.coverage
         })).collect::<Vec<_>>(),
         "statistics":lines,
+        "include_statistics":req.include_statistics,
         "statistics_reviewed_only":false
     });
     Ok(ReportPlan {
@@ -283,6 +300,27 @@ fn report_plan(state: &AppState, req: &ReportRequest) -> Result<ReportPlan, ApiE
         preview,
         camera_tracks,
     })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_statistics_require_explicit_opt_in() {
+        let base = json!({
+            "project_id": "1234abcdef01",
+            "rally_run_ids": ["a".repeat(32)]
+        });
+        let absent: ReportRequest = serde_json::from_value(base.clone()).unwrap();
+        assert!(!absent.include_statistics);
+        assert_eq!(statistics_outro_seconds(absent.include_statistics), 0.0);
+
+        let mut opted_in = base;
+        opted_in["include_statistics"] = json!(true);
+        let enabled: ReportRequest = serde_json::from_value(opted_in).unwrap();
+        assert!(enabled.include_statistics);
+        assert_eq!(statistics_outro_seconds(enabled.include_statistics), 5.0);
+    }
 }
 pub async fn report(
     State(state): State<Arc<AppState>>,
@@ -297,6 +335,7 @@ pub async fn report(
     let encoder = req.encoder.clone();
     let layout = req.layout;
     let target = req.target_duration_sec;
+    let include_statistics = req.include_statistics;
     let camera_zoom = req.camera_zoom;
     let worker = state.clone();
     let plan = tokio::task::spawn_blocking(move || {
@@ -331,7 +370,7 @@ pub async fn report(
             camera_zoom,
             camera_tracks: plan.camera_tracks,
             verified_highlights: None,
-            report_outro: Some(plan.outro),
+            report_outro: include_statistics.then_some(plan.outro),
         }),
     )
     .await?;

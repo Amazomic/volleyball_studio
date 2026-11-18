@@ -5,6 +5,8 @@
   const ui={
     project:$("studio-project"),presets:$("studio-montage-presets"),
     mode:$("studio-montage-mode"),player:$("studio-montage-player"),action:$("studio-montage-action"),
+    run:$("studio-run"),statistics:$("studio-montage-statistics"),
+    statisticsField:$("studio-montage-statistics-field"),
     context:$("studio-montage-context"),duration:$("studio-montage-duration"),
     playerField:$("studio-montage-player-field"),actionField:$("studio-montage-action-field"),
     contextField:$("studio-montage-context-field"),sources:$("studio-montage-sources"),
@@ -19,7 +21,7 @@
     cancel:$("studio-cancel"),download:$("studio-download"),help:$("studio-montage-help")
   };
   if(!ui.mode)return;
-  const st={project:"",token:0,busy:false,runs:new Map(),fingerprint:"",key:"",
+  const st={project:"",token:0,busy:false,runs:new Map(),available:new Map(),fingerprint:"",key:"",
     jobId:"",timer:null,audioSeconds:null,audioURL:"",profile:"favorites"};
   const option=(label,value)=>{const node=document.createElement("option");
     node.textContent=String(label);node.value=String(value);return node;};
@@ -43,6 +45,7 @@
     project:st.project,mode:ui.mode.value,player:ui.player.value,action:ui.action.value,
     context:ui.context.value,duration:lengthSec(),runs:selectedRuns(),layout:ui.layout.value,
     camera:ui.camera.value,zoom:ui.zoom.value,encoder:ui.encoder.value,
+    include_statistics:ui.mode.value==="report"&&ui.statistics.checked,
     music:ui.music.files?.[0]?.name||"",volume:ui.volume.value
   });
   const sync=()=>{
@@ -51,6 +54,7 @@
     ui.actionField.classList.toggle("hidden",!person);
     ui.contextField.classList.toggle("hidden",!person);
     ui.sources.classList.toggle("hidden",favorite);
+    ui.statisticsField.classList.toggle("hidden",ui.mode.value!=="report");
     ui.favorites.classList.toggle("hidden",!favorite);
     ui.cameraField.classList.toggle("hidden",ui.layout.value==="original");
     ui.zoomField.classList.toggle("hidden",ui.layout.value==="original"||ui.camera.value!=="on");
@@ -62,13 +66,13 @@
     ui.help.textContent=favorite?
       "Избранные розыгрыши собираются из оригинального видео.":
       person?"В рилс входят только фрагменты вокруг проверенных касаний выбранного игрока.":
-      "Лучшие и длинные розыгрыши. В конце — подтверждённая статистика по игрокам.";
+      "Лучшие и длинные розыгрыши."+
+        (ui.statistics.checked?" В конце — подтверждённая статистика по игрокам.":"");
   };
   const profiles={
     favorites:{mode:"favorites",duration:60,layout:"original",action:"all",context:"1"},
     player:{mode:"player",duration:30,layout:"vertical",action:"all",context:"1"},
-    attacks:{mode:"player",duration:30,layout:"vertical",action:"attack",context:"0.5"},
-    report:{mode:"report",duration:90,layout:"original",action:"all",context:"1"}
+    attacks:{mode:"player",duration:30,layout:"vertical",action:"attack",context:"0.5"}
   };
   const chooseProfile=profile=>{
     if(!profiles[profile])return;
@@ -83,6 +87,7 @@
   };
   const load=async()=>{
     const token=++st.token;st.project=ui.project.value;st.runs.clear();
+    st.available.clear();
     invalidate();ui.sourceList.replaceChildren();ui.player.replaceChildren();
     ui.player.append(option("Выберите игрока",""));
     if(!st.project){show("Выберите проект.");sync();return;}
@@ -110,19 +115,13 @@
           .find(row=>row.key==="rallies");
         if(stage?.truncated)throw Error("Индекс CPU-версий "+video+" неполный");
         const versions=(Array.isArray(stage?.items)?stage.items:[]).filter(row=>validRun(row.id));
-        if(versions.length)st.runs.set(video,versions[0].id);
-        const label=document.createElement("label");label.className="montage-builder-source-row";
+        const ids=new Set(versions.map(row=>row.id));
+        st.available.set(video,ids);
+        const selected=ids.has(ui.run.value)?ui.run.value:null;
+        if(selected)st.runs.set(video,selected);
+        const row=document.createElement("div");row.className="montage-builder-source-row";
         const caption=document.createElement("span");caption.textContent=video;
-        const select=document.createElement("select");
-        select.append(option("Пропустить видео",""));
-        for(const row of versions)select.append(option(
-          row.id.slice(0,10)+" · "+(row.count??"—")+" розыгрышей",row.id));
-        select.value=st.runs.get(video)||"";
-        select.addEventListener("change",()=>{
-          if(select.value)st.runs.set(video,select.value);else st.runs.delete(video);
-          invalidate();show("Источник изменён, проверьте подборку.");
-        });
-        label.append(caption,select);ui.sourceList.append(label);
+        row.append(caption);ui.sourceList.append(row);
       }
       show("Найдено CPU-версий: "+selectedRuns().length+
         "; игроков: "+players.length+". Можно создавать варианты монтажа.");
@@ -136,7 +135,8 @@
       layout:ui.layout.value==="vertical"&&ui.camera.value==="on"?
         "vertical_follow":ui.layout.value,
       camera_zoom:Number(ui.zoom.value),
-      encoder:ui.encoder.value,audio_volume:Number(ui.volume.value)
+      encoder:ui.encoder.value,audio_volume:Number(ui.volume.value),
+      include_statistics:ui.mode.value==="report"&&ui.statistics.checked
     };
     if(ui.mode.value==="player")Object.assign(value,{
       player_id:ui.player.value,action_kind:ui.action.value,
@@ -166,9 +166,9 @@
     }else{
       const intro=document.createElement("p");
       intro.textContent="Игра: около "+Number(result.selected_content_sec||0).toFixed(1)+
-        " сек. + финальная статистика 5 сек.";
+        " сек."+(ui.statistics.checked?" + финальная статистика 5 сек.":"");
       ui.previewList.append(intro);
-      if(Array.isArray(result.statistics))for(const line of result.statistics.slice(0,15)){
+      if(ui.statistics.checked&&Array.isArray(result.statistics))for(const line of result.statistics.slice(0,15)){
         const node=document.createElement("div");node.className="montage-builder-item";
         node.textContent=String(line);ui.previewList.append(node);
       }
@@ -292,7 +292,7 @@
     invalidate();sync();
   });
   for(const input of [ui.player,ui.action,ui.context,ui.duration,ui.layout,ui.encoder,
-    ui.volume,ui.camera,ui.zoom])input.addEventListener("change",()=>{invalidate();sync();});
+    ui.volume,ui.camera,ui.zoom,ui.statistics])input.addEventListener("change",()=>{invalidate();sync();});
   ui.music.addEventListener("change",audioChanged);
   ui.audioFit.addEventListener("change",()=>{
     if(ui.audioFit.checked&&st.audioSeconds){
@@ -310,6 +310,19 @@
     }catch(e){ui.job.textContent=e.message;}
   });
   ui.project.addEventListener("change",load);
+  window.addEventListener("volley:postprocessing-change",event=>{
+    if(event.detail?.project_id!==st.project)return;
+    const run=event.detail.rally_run_id;
+    if(!validRun(run)){
+      st.runs.clear();invalidate();show("Выберите CPU-версию в верхней панели.");return;
+    }
+    const video=[...st.available].find(([,ids])=>ids.has(run))?.[0];
+    if(!video){load();return;}
+    if(selectedRuns().length!==1||st.runs.get(video)!==run){
+      st.runs.clear();st.runs.set(video,run);
+      invalidate();show("CPU-версия изменена, проверьте подборку.");
+    }
+  });
   window.addEventListener("volley:project-ready",()=>{if(ui.project.value!==st.project)load();});
   window.addEventListener("pagehide",()=>{
     stopPoll();if(st.audioURL)URL.revokeObjectURL(st.audioURL);

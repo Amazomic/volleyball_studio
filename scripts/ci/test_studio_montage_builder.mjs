@@ -30,8 +30,10 @@ const tick=async()=>{for(let i=0;i<6;i++)await new Promise(resolve=>setImmediate
 get("studio-project").value="1234abcdef01";
 get("studio-encoder").value="cpu";get("studio-volume").value="40";
 montage("zoom").value="1.25";
-const run="a".repeat(32),job="montage_"+"1".repeat(32),audio="track_"+"d".repeat(32)+".wav";
+const run="a".repeat(32),otherRun="b".repeat(32),job="montage_"+"1".repeat(32),audio="track_"+"d".repeat(32)+".wav";
+get("studio-run").value=run;
 let requests=[],jobState="running",clips=2,invalidFingerprint=false,wrongProject=false,failPreview=false;
+let expectedRun=run;
 const reply=(data,ok=true)=>({ok,status:ok?200:409,json:async()=>data});
 const fetch=async(url,options={})=>{
   const body=typeof options.body==="string"?JSON.parse(options.body):null;
@@ -44,11 +46,11 @@ const fetch=async(url,options={})=>{
   ]});
   if(url.startsWith("/api/studio/analysis-overview?"))return reply({
     schema:"volley-native-analysis-overview/1",project_id:"1234abcdef01",video:"match.mp4",metadata_only:true,
-    stages:[{key:"rallies",items:[{id:run,count:4}],truncated:false}]
+    stages:[{key:"rallies",items:[{id:otherRun,count:6},{id:run,count:4}],truncated:false}]
   });
   if(url==="/api/montage/native/audio")return reply({audio_file:audio,duration_sec:31});
   if(url==="/api/montage/native/player-highlights"||url==="/api/montage/native/game-report") {
-    assert.deepEqual(body.rally_run_ids,[run]);
+    assert.deepEqual(body.rally_run_ids,[expectedRun]);
     assert.equal(body.project_id,"1234abcdef01");
     assert.equal(body.start_frame,undefined);assert.equal(body.end_frame,undefined);
     if(body.operation==="start") {
@@ -70,8 +72,9 @@ const fetch=async(url,options={})=>{
   }
   throw Error("Unexpected request "+url);
 };
+const windowListeners=new Map();
 const context={document:{getElementById:get,createElement:tag=>new Element(tag)},
-  window:{addEventListener(){},VolleyballStudioActivity:{fetch}},
+  window:{addEventListener:(event,fn)=>windowListeners.set(event,fn),VolleyballStudioActivity:{fetch}},
   URLSearchParams,setInterval:()=>1,clearInterval(){},
   URL:{createObjectURL:()=>"blob:test",revokeObjectURL(){}},
   FormData:class {append(){}}};
@@ -79,10 +82,26 @@ vm.runInNewContext(text("rust/volley-app/static/studio_overview.js"),context);
 vm.runInNewContext(source,context);await tick();
 assert.equal(montage("player").value,"athlete1");
 assert.equal(montage("player").children.length,2);
+assert.ok(!html.includes('data-profile="report"'));
+assert.equal(montage("statistics").checked,false);
+assert.equal(montage("source-list").children.length,1);
+assert.ok(montage("source-list").children[0].children.every(child=>child.tagName!=="select"));
 const choose=async profile=>montage("presets").fire("click",{
   target:{closest:()=>({dataset:{profile}})}
 });
 const starts=()=>requests.filter(r=>r.body?.operation==="start");
+await choose("attacks");
+get("studio-run").value=otherRun;expectedRun=otherRun;
+windowListeners.get("volley:postprocessing-change")({
+  detail:{project_id:"1234abcdef01",rally_run_id:otherRun}
+});
+await montage("preview").fire("click");
+assert.deepEqual(requests.at(-1).body.rally_run_ids,[otherRun]);
+get("studio-run").value=run;expectedRun=run;
+windowListeners.get("volley:postprocessing-change")({
+  detail:{project_id:"1234abcdef01",rally_run_id:run}
+});
+requests=[];
 await choose("attacks");await montage("preview").fire("click");
 let request=requests.at(-1);
 assert.equal(request.url,"/api/montage/native/player-highlights");
@@ -109,10 +128,16 @@ for(const failure of ["empty","fingerprint","project","server"]) {
   await montage("start").fire("click");assert.equal(starts().length,before,failure+" must prevent launch");
 }
 clips=2;invalidFingerprint=false;wrongProject=false;failPreview=false;
-await choose("report");await montage("start").fire("click");
+montage("mode").value="report";await montage("mode").fire("change");
+await montage("start").fire("click");
 assert.equal(starts().at(-1).url,"/api/montage/native/game-report");
 assert.equal(starts().at(-1).body.player_id,undefined);
-assert.equal(starts().at(-1).body.target_duration_sec,90);
+assert.equal(starts().at(-1).body.include_statistics,false);
+assert.equal(starts().at(-1).body.target_duration_sec,30);
+assert.ok(!montage("preview-list").children.some(row=>row.textContent.includes("финальная статистика")));
+montage("statistics").checked=true;await montage("statistics").fire("change");
+await montage("start").fire("click");
+assert.equal(starts().at(-1).body.include_statistics,true);
 jobState="cancelled";await get("studio-cancel").fire("click");
 await choose("favorites");await montage("start").fire("click");
 assert.equal(get("studio-render").clicks,1);
