@@ -259,6 +259,8 @@
       if(!/^montage_[a-f0-9]{32}$/.test(result.job_id||"")||result.status!=="queued")
         throw Error("Монтаж не подтверждён");
       st.jobId=result.job_id;ui.cancel.classList.remove("hidden");
+      window.VolleyballTasks?.set("montage",{label:"Монтаж",stage:"В очереди",progress:0});
+      window.VolleyballTasks?.refresh();
       stopPoll();st.timer=setInterval(poll,1300);await poll();
     }catch(e){ui.job.textContent=e.message;}
     finally{st.busy=false;sync();}

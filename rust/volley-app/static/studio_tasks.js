@@ -28,7 +28,7 @@
   const tasks=new Map(),rows=new Map();
   let pollTimer=null;
   const preparationProjects=new Set();
-  const labels={analysis:"Полный анализ",gpu:"Анализ GPU",cpu:"Постобработка CPU",quick:"Быстрый рилс"};
+  const labels={analysis:"Полный анализ",gpu:"Анализ GPU",cpu:"Постобработка CPU",quick:"Быстрый рилс",montage:"Монтаж"};
   let trackedGpuProject="",trackedAnalysisProject="",polling=false,refreshPending=false;
   const clamp=p=>Math.max(0,Math.min(100,p));
   const create=(tag,css,text)=>{
@@ -158,7 +158,7 @@
     if(!project){clear("analysis");return;}
     const data=await api(query("/api/studio/pipeline/status",{project_id:project}));
     if(data.schema!=="volley-studio-pipeline/1"||data.project_id!==project)return;
-    if(!["queued","running"].includes(data.status)){
+    if(!["queued","running","cancelling"].includes(data.status)){
       if(project===trackedAnalysisProject)trackedAnalysisProject="";
       clear("analysis");return;
     }
@@ -200,6 +200,17 @@
     set("quick",{label:"Быстрый рилс",stage,
       progress:Number.isFinite(data.progress)?data.progress:null});
   }
+  async function readMontage(){
+    const data=await api("/api/montage/native/status");
+    if(!["queued","running"].includes(data.state)){
+      clear("montage");
+      return;
+    }
+    set("montage",{label:"Монтаж",
+      stage:typeof data.stage==="string"&&data.stage.trim()?data.stage:
+        (data.state==="queued"?"В очереди":"Сборка видео"),
+      progress:Number.isFinite(data.overall_percent)?data.overall_percent:null});
+  }
   async function refresh(){
     if(document.hidden)return;
     if(polling){refreshPending=true;return;}
@@ -208,7 +219,7 @@
     try{
       // A failing status request never hides a still-running task.
       await readPipeline().catch(()=>{});
-      await Promise.allSettled([readGpu(),readQuick(),readPreparation()]);
+      await Promise.allSettled([readGpu(),readQuick(),readPreparation(),readMontage()]);
     }finally{
       polling=false;
       if(refreshPending){refreshPending=false;void refresh();}

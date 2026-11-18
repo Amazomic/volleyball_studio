@@ -11,6 +11,11 @@ const web=readFileSync(join(root,"rust/volley-app/src/studio_web.rs"),"utf8");
 const main=readFileSync(join(root,"rust/volley-app/src/main.rs"),"utf8");
 const tabs=readFileSync(join(root,"rust/volley-app/static/studio_tabs.js"),"utf8");
 const quick=readFileSync(join(root,"rust/volley-app/static/studio_quick_reel.js"),"utf8");
+const montageBuilder=readFileSync(join(root,"rust/volley-app/static/studio_montage_builder.js"),"utf8");
+const studio=readFileSync(join(root,"rust/volley-app/static/studio.js"),"utf8");
+const report=readFileSync(join(root,"rust/volley-app/static/studio_stats.js"),"utf8");
+const players=readFileSync(join(root,"rust/volley-app/static/studio_tracks.js"),"utf8");
+const montageServer=readFileSync(join(root,"rust/volley-app/src/montage.rs"),"utf8");
 
 assert.match(html,/<section id="studio-sidebar-tasks"[^>]*class="[^"]*hidden"/);
 assert.match(html,/<div id="studio-sidebar-task-list"/);
@@ -22,6 +27,16 @@ assert.match(web,/static\/studio_tasks\.js/);
 assert.match(tabs,/VolleyballTasks\?\.set\("analysis"/);
 assert.match(tabs,/VolleyballTasks\?\.clear\("analysis"\)/);
 assert.match(quick,/VolleyballTasks\?\.set\("quick"/);
+assert.match(players,/VolleyballTasks\?\.set\("track-grouping"/);
+assert.match(studio,/VolleyballTasks\?\.set\("training-annotation"/);
+assert.match(studio,/VolleyballTasks\?\.clear\("training-annotation"/);
+assert.match(studio,/VolleyballTasks\?\.set\("training-save"/);
+assert.match(studio,/VolleyballTasks\?\.clear\("training-save"/);
+assert.match(report,/VolleyballTasks\?\.set\("report-recalculate"/);
+assert.match(report,/VolleyballTasks\?\.clear\("report-recalculate"/);
+assert.match(montageBuilder,/VolleyballTasks\?\.set\("montage"/);
+assert.match(studio,/VolleyballTasks\?\.set\("montage"/);
+assert.match(montageServer,/"overall_percent":self\.overall_percent/);
 
 class Node {
   constructor(){
@@ -44,6 +59,8 @@ const listeners=new Map();
 for(const el of nodes.values())el.addEventListener=(name,fn)=>listeners.set(name,fn);
 let gpu={schema:"volley-native-active-gpu/1",project_id:"project-a",active:false};
 let reel={status:"idle"};
+let montage={state:"idle"};
+let failMontage=false;
 let failQuick=false;
 let preparation={project_id:"project-a",videos:[]};
 let failPreparation=false;
@@ -54,6 +71,10 @@ const doc={hidden:false,getElementById:id=>nodes.get(id),createElement:()=>new N
 const win={addEventListener:(name,fn)=>listeners.set(name,fn),VolleyballStudioActivity:{
   async fetch(url){
     hits.push(url);
+    if(url==="/api/montage/native/status"){
+      if(failMontage)throw Error("network");
+      return {ok:true,json:async()=>montage};
+    }
     if(url.startsWith("/api/quick-reel/")){
       if(quickGate)await quickGate;
       if(failQuick)throw Error("network");
@@ -76,6 +97,7 @@ await new Promise(resolve=>setImmediate(resolve));
 await win.VolleyballTasks.refresh();
 assert.ok(container.classList.contains("hidden"),"idle card must be hidden");
 assert.ok(hits.some(s=>s.includes("project_id=project-a")));
+assert.ok(hits.includes("/api/montage/native/status"),"montage status must be restored after reload");
 
 gpu={schema:"volley-native-active-gpu/1",project_id:"project-a",
   active:true,model:"players",phase:"running",progress_percent:35.6};
@@ -96,6 +118,19 @@ assert.equal(cpu.children[1].textContent,"Касания");
 win.VolleyballTasks.clear("cpu");
 assert.equal(list.children.length,2);
 
+montage={id:"montage_123",project_id:"project-a",state:"running",stage:"Склейка",overall_percent:58.7};
+await win.VolleyballTasks.refresh();
+assert.equal(list.children.length,3,"montage must appear alongside GPU and Quick Reel");
+assert.equal(list.children[2].children[0].children[0].textContent,"Монтаж");
+assert.equal(list.children[2].children[0].children[1].textContent,"59%");
+assert.equal(list.children[2].children[1].textContent,"Склейка");
+failMontage=true;
+await win.VolleyballTasks.refresh();
+assert.equal(list.children.length,3,"temporary montage status failure must keep active progress");
+failMontage=false;
+montage={id:"montage_123",state:"complete",overall_percent:100};
+await win.VolleyballTasks.refresh();
+assert.equal(list.children.length,2,"completed montage must disappear");
 failQuick=true;
 await win.VolleyballTasks.refresh();
 assert.equal(list.children.length,2,"network error must not falsely clear running job");
@@ -142,4 +177,4 @@ await polling;
 await new Promise(resolve=>setImmediate(resolve));
 assert.ok(hits.some(url=>url.startsWith("/api/project-preparation?")&&url.includes("project_id=new-project")),
   "project created during a poll must be observed even after immediate project switch");
-console.log("PASS: anchored sidebar task card, GPU+Quick server status, CPU indeterminate bar, reload polling, network failures and idle cleanup");
+console.log("PASS: sidebar statuses for GPU, Quick Reel and montage; indeterminate stages, reload, failures and cleanup");
