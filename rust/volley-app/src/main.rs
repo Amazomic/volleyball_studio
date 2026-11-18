@@ -47,6 +47,7 @@ mod quick_reel;
 mod quick_reel_source;
 mod rallies;
 mod rally_marks;
+mod rally_training_comparison;
 mod reid_group_edits;
 mod reid_native;
 mod reid_npz;
@@ -188,6 +189,10 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
         .route(
             "/api/training/examples",
             get(training_samples::list).post(training_samples::edit),
+        )
+        .route(
+            "/api/training/rally-comparison",
+            get(rally_training_comparison::get),
         )
         .route(
             "/api/training/annotations",

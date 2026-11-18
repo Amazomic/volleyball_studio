@@ -233,6 +233,7 @@
                                          "rust/volley-app/src/native_rally_evidence.rs",
                                          "rust/volley-app/src/native_rally_evidence/camera.rs",
                                          "rust/volley-app/src/cpu_rallies.rs",
+                                         "rust/volley-app/src/rally_training_comparison.rs",
                                          "rust/volley-app/src/native_rally_preview.rs",
                                          "rust/volley-app/src/native_preview_overlay.rs",
                                          "rust/volley-app/src/native_preview_overlay/continuity.rs"
@@ -253,6 +254,10 @@
                                        {
                                            "path":  "/api/cpu/native/rallies/timeline",
                                            "handler":  "native_rally_preview::timeline"
+                                       },
+                                       {
+                                           "path":  "/api/training/rally-comparison",
+                                           "handler":  "rally_training_comparison::get"
                                        },
                                        {
                                            "path":  "/api/cpu/native/rallies/overlays",
