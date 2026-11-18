@@ -26,18 +26,21 @@ use std::{
 use uuid::Uuid;
 use volley_core::{
     fusion::Candidate,
-    tracker::{ProvisionalTracker, TrackConfirmation, TrackingOptions},
+    tracker::{bytetrack::ByteTracker, TrackConfirmation, TrackingOptions},
 };
 
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const POSE_TRACK_ASSOCIATION_VERSION: &str = "pose_coco17_recency_v2";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_xyah_two_stage_v1";
 pub(crate) mod ball_track;
 mod gap_interpolation;
+#[cfg(test)]
 mod identity_handoff;
+#[cfg(test)]
 mod identity_turnover;
 mod pose_source;
+#[cfg(test)]
 mod track_merge;
 
 pub(crate) use volley_core::contracts::job_id as opaque_id;
@@ -89,6 +92,7 @@ struct ReplayTotals {
     identity_turnover_splits: u64,
     identity_handoff_splits: u64,
     pose_detections: u64,
+    bytetrack_low_confidence_matches: u64,
 }
 
 /// Replay once with provisional IDs, then filter complete-video track evidence
@@ -336,7 +340,7 @@ fn replay_frames_verified(
         .map_err(|e| format!("Create unconfirmed CPU tracking snapshot: {e}"))?;
     let mut writer = BufWriter::new(file);
     let mut tentative_sha = Sha256::new();
-    let mut tracker = ProvisionalTracker::new(config)?;
+    let mut tracker = ByteTracker::new(config)?;
     let mut confirmations = TrackConfirmation::default();
     let mut totals = ReplayTotals::default();
     for expected_frame in 0..count {
@@ -430,6 +434,7 @@ fn replay_frames_verified(
     totals.unconfirmed_tracks = summary.discarded_tracks;
     totals.short_track_detections = summary.discarded_detections;
     totals.tentative_tracks = tracker.next_id() - 1;
+    totals.bytetrack_low_confidence_matches = tracker.low_confidence_matches();
     debug_assert_eq!(
         totals.tentative_tracks,
         summary.confirmed_tracks + summary.discarded_tracks
@@ -497,13 +502,19 @@ fn replay_frames_verified(
         .map_err(|e| format!("Sync confirmed CPU frames: {e}"))?;
     drop(writer);
     let observed_sha = format!("{:x}", sha.finalize());
-    // Merge genuinely duplicated bodies while every observation is still
-    // independent. Never use the later visual interpolation for identity.
-    let (canonical_sha, merged) = track_merge::merge(output, &observed_sha, count)?;
+    // ByteTrack's matching is authoritative: disable the previous custom
+    // automatic Track ID merges and handoff-splitting stages. A true A/B
+    // evaluation must not silently rewrite ByteTrack's association decisions.
+    // TODO(bytetrack-removal): delete track_merge, identity_turnover,
+    // identity_handoff, and the legacy ProvisionalTracker after ByteTrack
+    // passes labeled ID-switch/fragmentation benchmarks. See the agent run
+    // document for deletion criteria.
+    let merged = 0_u64;
+    let splits = 0_u64;
     totals.duplicate_track_ids_merged = merged;
-    let (turnover_sha, splits, handoffs) = identity_turnover::split(output, &canonical_sha, count)?;
     totals.identity_turnover_splits = splits;
-    totals.identity_handoff_splits = handoffs;
+    totals.identity_handoff_splits = 0;
+    let turnover_sha = observed_sha;
     let (continuous_sha, _inferred_positions) = if interpolate_players {
         fill_confirmed_track_gaps(output, &turnover_sha, count)?
     } else {
@@ -654,7 +665,7 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
         }
         fs::rename(part, directory.join(OUTPUT_FILE))
             .map_err(|e| format!("Publish CPU replay output: {e}"))?;
-        let record = json!({
+        let mut record = json!({
             "schema":"volley-native-cpu-tracking/1",
             "state":"provisional_tracklets_rebuilt",
             "interpolated_positions_version":if req.interpolate_players {"bounded_same_track_3s_v2"} else {"disabled_v1"},
@@ -666,7 +677,7 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             "replay_id":replay_id,
             "source_fusion_id":req.fusion_id,
             "source_fusion_sha256":expected,
-            "track_association_version":if pose_source.is_some(){POSE_TRACK_ASSOCIATION_VERSION}else{"detector_box_legacy_v1"},
+             "track_association_version":TRACK_ASSOCIATION_VERSION,
             "source_pose_run_id":pose_source.as_ref().map(|s| s.id.as_str()),
             "source_pose_sha256":pose_source.as_ref().map(|s| s.sha.as_str()),
             "pose_measured_track_proposals":totals.pose_detections,
@@ -682,7 +693,7 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             "discarded_short_track_ids":totals.unconfirmed_tracks,
             "tentative_track_count":totals.tentative_tracks,
             "duplicate_track_ids_merged":totals.duplicate_track_ids_merged,
-            "identity_turnover_version":"measured_roster_turnover_handoff_v3",
+            "identity_turnover_version":"disabled_bytetrack_v1",
             "identity_turnover_splits":totals.identity_turnover_splits,
             "identity_handoff_splits":totals.identity_handoff_splits,
             "ambiguous_detections":totals.ambiguous,
@@ -694,6 +705,17 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             "athlete_identities_confirmed":false,
             "touches_confirmed":false,
             "cpu_processing_complete":false,
+        });
+        record["track_detector_low_score"] =
+            json!(volley_core::tracker::bytetrack::LOW_DETECTION_SCORE);
+        record["track_detector_high_score"] =
+            json!(volley_core::tracker::bytetrack::HIGH_DETECTION_SCORE);
+        record["legacy_tracker_enabled"] = json!(false);
+        record["bytetrack_low_confidence_matches"] = json!(totals.bytetrack_low_confidence_matches);
+        record["pose_proposal_role"] = json!(if pose_source.is_some() {
+            "measured_rgb_pose_crops_only"
+        } else {
+            "detector_boxes_only"
         });
         storage::write_json_atomic(&directory.join("manifest.json"), &record)
             .map_err(|e| format!("Persist CPU tracking manifest: {e:?}"))?;
