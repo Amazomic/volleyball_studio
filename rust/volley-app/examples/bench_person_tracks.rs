@@ -14,7 +14,10 @@ use volley_core::{
     fusion::Candidate,
     tracker::{ProvisionalTracker, TrackingOptions},
 };
-use volley_inference::{person::PersonEngine, Device};
+use volley_inference::{
+    person::{DetectorVariant, PersonEngine},
+    Device,
+};
 
 fn fingerprint(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let mut reader = BufReader::new(File::open(path)?);
@@ -35,6 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let repo = args.next().ok_or("need repo directory")?;
     let input = args.next().ok_or("need sample video MP4")?;
     let output = args.next().ok_or("need .jsonl output")?;
+    let detector_variant = DetectorVariant::from_env()?;
     let mut engine = PersonEngine::load(Path::new(&repo), Device::Cuda, 8, 0)?;
     let mut tracker = ProvisionalTracker::new(TrackingOptions::default())?;
     let mut ffmpeg = Command::new("ffmpeg")
@@ -61,6 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = BufWriter::new(File::create(&output)?);
     let mut next_frame = 0u64;
     let mut total_boxes = 0u64;
+    let mut total_detected_before_tracker = 0u64;
     let bytes = 640 * 360 * 3;
     let mut frames_batch = Vec::with_capacity(bytes * 9);
     let started = Instant::now();
@@ -76,6 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         engine.detect_frames(&frames_batch, |_, detected| {
+            total_detected_before_tracker += detected.len() as u64;
             let candidates = detected
                 .into_iter()
                 .enumerate()
@@ -117,6 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if !frames_batch.is_empty() {
         engine.detect_frames(&frames_batch, |_, detected| {
+            total_detected_before_tracker += detected.len() as u64;
             let candidates = detected
                 .into_iter()
                 .enumerate()
@@ -165,9 +172,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let duration = started.elapsed().as_secs_f64();
     let report = serde_json::json!({
-        "model": "RTMDet-Nano+RTMPose+ProvisionalTracker",
+        "model": match detector_variant {
+            DetectorVariant::RtmDetNano => "RTMDet-Nano+RTMPose+ProvisionalTracker",
+            DetectorVariant::RfDetrMedium => "RF-DETR-Medium-Native+RTMPose+ProvisionalTracker",
+        },
         "frames": next_frame,
         "total_observed_boxes": total_boxes,
+        "total_detector_boxes_before_tracker": total_detected_before_tracker,
         "video": input,
         "video_sha256": fingerprint(Path::new(&input))?,
         "fps": (next_frame as f64 / duration),
