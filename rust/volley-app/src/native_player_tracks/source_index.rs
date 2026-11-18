@@ -479,6 +479,8 @@ fn observe_track(
         best_frame: frame_idx,
         best_score: 0.0,
         best_box: [0.0; 4],
+        first_box: tracked.detection.bbox_xyxy_norm,
+        last_box: tracked.detection.bbox_xyxy_norm,
         photo_samples: Vec::new(),
         visible_spans: Vec::new(),
         observed_pairs: BTreeMap::new(),
@@ -493,6 +495,7 @@ fn observe_track(
         record.visible_spans.push((frame_idx, frame_idx));
     }
     record.last = frame_idx;
+    record.last_box = tracked.detection.bbox_xyxy_norm;
     record.observed += 1;
     if record.photo_samples.is_empty() || frame_idx.is_multiple_of(6) {
         let sample = PhotoSample {

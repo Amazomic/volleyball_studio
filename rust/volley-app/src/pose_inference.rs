@@ -1,5 +1,6 @@
 //! Immutable, versioned RTMPose evidence from observed player detector boxes.
 //! Uses the prepared video and selected GPU fusion, never CPU Track IDs.
+pub(crate) mod interpolation;
 #[cfg(unix)]
 mod stream;
 use crate::{inference_stream, preparation, projects, AppState};
@@ -20,7 +21,7 @@ use volley_inference::{
     pose::{PoseEngine, MODEL_FILE, MODEL_SHA256},
     Device,
 };
-use volley_media::raw_decoder::{decode_full_video, ModelPixels};
+use volley_media::raw_decoder::decode_original_frames;
 
 const MAX_FUSION: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_LINE: u64 = 512 * 1024;
@@ -89,7 +90,7 @@ fn iou(a: [f64; 4], b: [f64; 4]) -> f64 {
     intersection / (sa + sb - intersection).max(1e-10)
 }
 
-fn boxes(frame: &Value) -> Vec<[f64; 4]> {
+pub(crate) fn boxes(frame: &Value) -> Vec<[f64; 4]> {
     let mut unique = Vec::new();
     if let Some(candidates) = frame["player_candidates"].as_array() {
         for candidate in candidates {
@@ -163,6 +164,91 @@ fn sampled_boxes(
         return Err("RTMPose frame does not match the RF-DETR sampling timeline".into());
     }
     Ok(boxes(frame))
+}
+
+/// Reads a bounded detector neighborhood without materializing a whole video.
+/// Only measured RF-DETR proposals can become interpolation anchors.
+struct FusionBoxWindow {
+    reader: BufReader<File>,
+    frames: std::collections::VecDeque<interpolation::FrameBoxes>,
+    next: u64,
+    total: u64,
+    stride: usize,
+}
+
+impl FusionBoxWindow {
+    fn open(path: &Path, total: u64, stride: usize) -> Result<Self, String> {
+        Ok(Self {
+            reader: BufReader::new(File::open(path).map_err(|e| e.to_string())?),
+            frames: std::collections::VecDeque::new(),
+            next: 0,
+            total,
+            stride,
+        })
+    }
+
+    fn at(&mut self, index: u64) -> Result<(Vec<[f64; 4]>, Vec<[f64; 4]>), String> {
+        if index >= self.total || index % self.stride as u64 != 0 {
+            return Err("RTMPose sample exceeds verified detector timeline".into());
+        }
+        let until = index
+            .saturating_add(interpolation::MAX_GAP_FRAMES)
+            .min(self.total - 1);
+        while self.next <= until {
+            let mut line = Vec::new();
+            let n = self
+                .reader
+                .read_until(b'\n', &mut line)
+                .map_err(|e| e.to_string())?;
+            if n == 0 || n as u64 > MAX_LINE || line.last() != Some(&b'\n') {
+                return Err("GPU fusion stream truncated or malformed".into());
+            }
+            let frame: Value = serde_json::from_slice(&line)
+                .map_err(|e| format!("Invalid GPU fusion row: {e}"))?;
+            if frame["frame_index"].as_u64() != Some(self.next) {
+                return Err("GPU fusion frame index mismatch".into());
+            }
+            let selected = if self.next % self.stride as u64 == 0 {
+                sampled_boxes(&frame, self.next, self.stride)?
+            } else {
+                Vec::new()
+            };
+            self.frames.push_back(interpolation::FrameBoxes {
+                frame: self.next,
+                boxes: selected,
+            });
+            self.next += 1;
+        }
+        while self
+            .frames
+            .front()
+            .is_some_and(|row| row.frame.saturating_add(interpolation::MAX_GAP_FRAMES) < index)
+        {
+            self.frames.pop_front();
+        }
+        let real = self
+            .frames
+            .iter()
+            .find(|row| row.frame == index)
+            .ok_or("Missing RTMPose detector sample")?
+            .boxes
+            .clone();
+        let inferred = interpolation::interpolate_boxes(&self.frames, index, &real);
+        Ok((real, inferred))
+    }
+}
+
+/// Both measured and ReID/geometry-eligible interpolated crop coordinates
+/// must be submitted to the same RTMPose model on the actual source frame.
+/// Provenance survives inference for all downstream pose and motion consumers.
+fn pose_proposals(
+    observed: Vec<[f64; 4]>,
+    interpolated: Vec<[f64; 4]>,
+) -> Vec<([f64; 4], &'static str)> {
+    let mut proposals = Vec::with_capacity(observed.len() + interpolated.len());
+    proposals.extend(observed.into_iter().map(|bb| (bb, "observed")));
+    proposals.extend(interpolated.into_iter().map(|bb| (bb, "interpolated_box")));
+    proposals
 }
 
 /// Probe the selected fusion and run ONNX using one persistent CUDA session.
@@ -244,81 +330,71 @@ pub fn process(
             .filter(|n| *n > 0 && *n <= 48 * 3600 * 30)
             .ok_or("Fusion does not declare a valid number of frames")?;
         on_progress("pose", 0.0)?;
+        let mut box_window = FusionBoxWindow::open(&frames_file, frames_expected, stride)?;
         let mut engine = PoseEngine::load(&app.repository_root, Device::Cuda, threads, memory_mb)?;
         let file = File::create(output.join("poses.jsonl.partial"))
             .map_err(|e| format!("Create pose evidence: {e}"))?;
         let mut writer = BufWriter::new(file);
         let mut checksum = Sha256::new();
-        let mut reader = BufReader::new(File::open(&frames_file).map_err(|e| e.to_string())?);
-        let mut current_index = 0u64;
-        let mut line = Vec::new();
         let mut samples = 0u64;
         let mut players = 0u64;
+        let mut observed_crops = 0u64;
+        let mut interpolated_crops = 0u64;
         let mut evidence_bytes = 0u64;
         let estimated = manifest["emitted_frames"]
             .as_u64()
             .filter(|v| *v > 0)
             .unwrap_or(1);
-        let decode = decode_full_video(
+        let decoded_frames = manifest["decoded_frames"]
+            .as_u64()
+            .filter(|n| *n >= frames_expected && *n <= frames_expected + 8)
+            .ok_or("GPU fusion decoded frame count is invalid")?;
+        let native_video = volley_media::probe(&plan.source)?;
+        decode_original_frames(
             &plan.source,
-            ModelPixels::PlayersRgb,
-            stride,
+            decoded_frames,
             cancel,
-            |window| {
-                while current_index <= window.first_frame {
-                    line.clear();
-                    let n = reader
-                        .read_until(b'\n', &mut line)
-                        .map_err(|e| e.to_string())?;
-                    if n == 0 || n as u64 > MAX_LINE || line.last() != Some(&b'\n') {
-                        return Err("GPU fusion stream truncated or malformed".into());
-                    }
-                    let frame: Value = serde_json::from_slice(&line)
-                        .map_err(|e| format!("Invalid GPU fusion row: {e}"))?;
-                    if frame["frame_index"].as_u64() != Some(current_index) {
-                        return Err("GPU fusion frame index mismatch".into());
-                    }
-                    if current_index < window.first_frame {
-                        current_index += 1;
-                        continue;
-                    }
-                    if current_index >= frames_expected {
-                        return Err("RTMPose sample exceeds fusion frame range".into());
-                    }
-                    let pose_boxes = sampled_boxes(&frame, current_index, stride)?;
-                    let rgb = window
-                        .data
-                        .get(..640 * 360 * 3)
-                        .ok_or("Pose decoder RGB frame too short")?;
-                    let mut poses = Vec::with_capacity(pose_boxes.len());
-                    for bb in pose_boxes {
-                        let points = engine.infer(rgb, bb)?;
-                        let keypoints = points.map(|p| [p.x as f64, p.y as f64, p.score as f64]);
-                        poses
-                            .push(json!({"box":bb,"keypoints":keypoints,"crop_origin":"observed"}));
-                    }
-                    players += poses.len() as u64;
-                    samples += 1;
-                    let mut row = serde_json::to_vec(&json!({
-                        "frame":current_index,"players":poses
-                    }))
-                    .map_err(|e| e.to_string())?;
-                    row.push(b'\n');
-                    evidence_bytes += row.len() as u64;
-                    if row.len() > 64 * 1024 || evidence_bytes > MAX_FUSION {
-                        return Err("RTMPose evidence exceeds bounded output".into());
-                    }
-                    writer
-                        .write_all(&row)
-                        .map_err(|e| format!("Write pose evidence: {e}"))?;
-                    checksum.update(&row);
-                    current_index += 1;
+            |index, rgb, width, height| {
+                if index >= frames_expected || index % stride as u64 != 0 {
+                    return Ok(());
                 }
+                let (observed, inferred) = box_window.at(index)?;
+                let proposals = pose_proposals(observed, inferred);
+                let mut poses = Vec::with_capacity(proposals.len());
+                for group in proposals.chunks(8) {
+                    let boxes = group.iter().map(|(bb, _)| *bb).collect::<Vec<_>>();
+                    let measured = engine.infer_batch_original(rgb, width, height, &boxes)?;
+                    for ((bb, origin), points) in group.iter().zip(measured) {
+                        if *origin == "interpolated_box" {
+                            interpolated_crops += 1;
+                        } else {
+                            observed_crops += 1;
+                        }
+                        let keypoints = points.map(|p| [p.x as f64, p.y as f64, p.score as f64]);
+                        poses.push(json!({
+                            "box":bb,
+                            "keypoints":keypoints,
+                            "crop_origin":origin
+                        }));
+                    }
+                }
+                players += poses.len() as u64;
+                samples += 1;
+                let mut row = serde_json::to_vec(&json!({
+                    "frame":index,"players":poses
+                }))
+                .map_err(|e| e.to_string())?;
+                row.push(b'\n');
+                evidence_bytes += row.len() as u64;
+                if row.len() > 64 * 1024 || evidence_bytes > MAX_FUSION {
+                    return Err("RTMPose evidence exceeds bounded output".into());
+                }
+                writer
+                    .write_all(&row)
+                    .map_err(|e| format!("Write pose evidence: {e}"))?;
+                checksum.update(&row);
                 if samples.is_multiple_of(40) {
-                    on_progress(
-                        "pose",
-                        (window.first_frame as f64 / estimated as f64).clamp(0.0, 1.0),
-                    )?;
+                    on_progress("pose", (index as f64 / estimated as f64).clamp(0.0, 1.0))?;
                 }
                 Ok(())
             },
@@ -326,8 +402,12 @@ pub fn process(
         if cancel.load(Ordering::Acquire) {
             return Err("cancelled".into());
         }
-        if decode.decoded_frames != manifest["decoded_frames"].as_u64().unwrap_or_default() {
-            return Err("RTMPose decoded timeline differs from RF-DETR".into());
+        let expected_samples = (frames_expected + stride as u64 - 1) / stride as u64;
+        if samples != expected_samples {
+            return Err("RTMPose sample timeline differs from RF-DETR".into());
+        }
+        if observed_crops + interpolated_crops != players {
+            return Err("RTMPose pose inputs were not all passed through model inference".into());
         }
         if inference_stream::source_stamp(prepared)? != source {
             return Err("Prepared video changed during RTMPose analysis".into());
@@ -349,14 +429,19 @@ pub fn process(
             "pose_run_id":run_id, "fusion_id":fusion_id,
             "project_id":project_id, "video":video, "fps":30,
             "stride":stride, "pose_mode":"photo", "photo_stride":stride,
-            "decoded_frames":decode.decoded_frames,
+            "decoded_frames":decoded_frames,
             "sampled_frames":samples, "player_poses":players,
+            "observed_pose_crops":observed_crops,
+            "interpolated_pose_crops":interpolated_crops,
             "model":"RTMPose-M-Body7","model_sha256":hash,
             "original_source":manifest["original_source"],
             "working_stream":"original_rgb_fps30_v1",
             "original_source":manifest["original_source"],
             "source_fusion_sha256":manifest["sha256"], "source_identity":manifest["source_identity"],
-            "box_source_version":"detector_observed_sampling_v1",
+            "box_source_version":"detector_observed_and_bounded_interpolated_v1",
+            "pixel_source_version":"original_full_resolution_rgb24_v1",
+            "pixel_dimensions":[native_video.width,native_video.height],
+            "coordinate_system":"normalized_original_display_v1",
             "source_person_sampling_period_frames":stride,
             "interpolate_players":false,
             "file":POSE_FILE, "sha256":format!("{:x}",checksum.finalize())
@@ -389,6 +474,59 @@ mod tests {
             assert_eq!(sampled_boxes(&row, frame, step).unwrap().len(), 1);
             assert!(sampled_boxes(&row, frame + 1, step).is_err() || step == 1);
         }
+    }
+
+    #[test]
+    fn observed_and_interpolated_boxes_are_both_rtmpose_inputs() {
+        let measured = [0.11, 0.20, 0.20, 0.80];
+        let filled = [0.45, 0.20, 0.55, 0.80];
+        let crops = pose_proposals(vec![measured], vec![filled]);
+        assert_eq!(
+            crops,
+            vec![(measured, "observed"), (filled, "interpolated_box")]
+        );
+        // Model inference loops over every returned crop in both the
+        // standalone and the shared stream; an inferred box is never
+        // represented as an interpolated joint array.
+    }
+
+    #[test]
+    fn rtmpose_proposals_use_interpolated_boxes_only_for_missing_real_detection() {
+        let root = std::env::temp_dir().join(format!("volley-pose-box-gap-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("frames.jsonl");
+        let mut evidence = Vec::new();
+        for frame in 0..21_u64 {
+            let players = if frame == 0 || frame == 20 {
+                vec![json!({
+                    "frame_index":frame,"class_name":"player","score":0.8,
+                    "bbox_xyxy_norm":if frame == 0 {
+                        [0.2,0.2,0.3,0.8]
+                    } else {
+                        [0.22,0.2,0.32,0.8]
+                    }
+                })]
+            } else {
+                Vec::new()
+            };
+            evidence.extend(
+                serde_json::to_vec(&json!({
+                    "frame_index":frame,"player_candidates":players
+                }))
+                .unwrap(),
+            );
+            evidence.push(b'\n');
+        }
+        fs::write(&file, evidence).unwrap();
+        let mut reader = FusionBoxWindow::open(&file, 21, 10).unwrap();
+        let (real, inferred) = reader.at(10).unwrap();
+        assert!(real.is_empty());
+        assert_eq!(inferred.len(), 1);
+        assert!((inferred[0][0] - 0.21).abs() < 1e-9);
+        let (real, inferred) = reader.at(20).unwrap();
+        assert_eq!(real.len(), 1);
+        assert!(inferred.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

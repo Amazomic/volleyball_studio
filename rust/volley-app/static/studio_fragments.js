@@ -1,5 +1,6 @@
 "use strict";
 (()=>{
+  // The original HEVC file stays immutable; only short browser-compatible MP4 fragments are fetched.
   const SEGMENT_SECONDS=18;
   const MIME='video/mp4; codecs="avc1.42C01F, mp4a.40.2"';
   if(!window.MediaSource||!MediaSource.isTypeSupported(MIME))return;
@@ -67,6 +68,7 @@
         const bytes=await response.arrayBuffer();
         if(!isCurrent()||!buffer||bytes.byteLength<1024)return;
         const seekStart=index*SEGMENT_SECONDS;
+        // Discard far-away buffered ranges before jumping several minutes.
         if(buffer.buffered.length){
           const first=buffer.buffered.start(0);
           const end=buffer.buffered.end(buffer.buffered.length-1);
@@ -140,6 +142,9 @@
     video.load();
   }
 
+  // Explicit source selection happens BEFORE assigning the original HEVC to a video.
+  // This prevents a queued MEDIA_ERR_SRC_NOT_SUPPORTED from the original file
+  // from leaking into the browser-safe MediaSource playback.
   async function load(video,project,name,options={}){
     if(!video||!project||!name)return;
     const token=Symbol("video-load");
@@ -235,6 +240,8 @@
     }
     inspect(video,source);
   }
+  // Hold the first decode error until the codec is known. Otherwise the legacy
+  // fallback starts transcoding the entire multi-hour HEVC file.
   const replaying=new WeakSet();
   document.addEventListener("error",event=>{
     const video=event.target;

@@ -1,5 +1,22 @@
 use super::*;
 
+pub(crate) fn conflicting_frame_tracks(
+    owners: &BTreeMap<u64, String>,
+    tracks: impl IntoIterator<Item = u64>,
+) -> BTreeSet<u64> {
+    let mut grouped = BTreeMap::<&str, Vec<u64>>::new();
+    for id in tracks {
+        if let Some(owner) = owners.get(&id) {
+            grouped.entry(owner).or_default().push(id);
+        }
+    }
+    grouped
+        .into_values()
+        .filter(|ids| ids.len() > 1)
+        .flatten()
+        .collect()
+}
+
 /// An overlap of lifespan ranges is not evidence of co-visibility:
 /// the same athlete may have a lost/reacquired track during those ranges.
 pub(super) fn tracks_co_visible(a: &Aggregate, b: &Aggregate) -> bool {
@@ -26,6 +43,7 @@ pub(super) fn tracks_co_visible(a: &Aggregate, b: &Aggregate) -> bool {
 /// This is deliberately based on two *measured* detections in the same
 /// video frame, not overlapping Track ID lifetimes or interpolated boxes.
 /// Distinct detections represent two bodies and cannot share an athlete.
+#[cfg(test)]
 fn measured_conflict_frame(ctx: &Inputs, a: u64, b: u64) -> Option<u64> {
     let pair = (a.min(b), a.max(b));
     ctx.tracks
@@ -39,6 +57,7 @@ fn measured_conflict_frame(ctx: &Inputs, a: u64, b: u64) -> Option<u64> {
 /// existing automatic owners, before changing a single saved link. Otherwise
 /// manually assigning one ID silently evicts another automatic ID with that
 /// owner and makes a different gallery card appear unexpectedly.
+#[cfg(test)]
 pub(super) fn new_manual_owner_conflict(
     ctx: &Inputs,
     reviewed: &BTreeMap<u64, String>,
@@ -191,6 +210,8 @@ pub(super) fn choose_automatic_photo_links(
         {
             continue;
         }
+        // Reject only *measured co-visible* tracks owned by the same athlete.
+        // Sequential reacquisitions remain eligible for that athlete.
         if !occupied_in_frame(owner) {
             chosen.insert(id, (*owner).clone());
         }
@@ -848,32 +869,6 @@ pub(super) fn change(state: &AppState, req: &TrackEdit) -> Result<Value, ApiErro
     let whole_source = source(state, &req.project_id, &req.video, &req.replay_id)?;
     let saved_scope = automatic_assignment_scope(state, &whole_source, &doc)?;
     let conflict_tracks = saved_scope.as_ref().unwrap_or(&ctx);
-    if req.action == "assign" {
-        if let Some((id, other, frame)) = new_manual_owner_conflict(
-            &ctx,
-            &review.assignments,
-            &doc["automatic_assignments"],
-            &req.track_ids,
-        ) {
-            let time = format!("{:.1}", frame as f64 / 30.0).replace('.', ",");
-            let name = review
-                .assignments
-                .get(&id)
-                .and_then(|owner| ctx.roster.get(owner))
-                .map(String::as_str)
-                .unwrap_or("этого игрока");
-            return Err(storage::conflict(format!(
-                "ID {id} нельзя привязать к {name}: на {time}с одновременно обнаружен ID {other}, уже привязанный к этому игроку. Привязки не изменены."
-            )));
-        }
-        let collisions = assigned_visibility_conflicts(&ctx, &review.assignments);
-        if !collisions.is_empty() {
-            return Err(storage::conflict(format!(
-                "Одновременные Track ID в розыгрыше: {}. Проверьте конкретный кадр; привязки не изменены.",
-                collisions.iter().map(u64::to_string).collect::<Vec<_>>().join(", ")
-            )));
-        }
-    }
     let previous_automatic = doc["automatic_assignments"].clone();
     if let Some(automatic) = doc
         .get_mut("automatic_assignments")

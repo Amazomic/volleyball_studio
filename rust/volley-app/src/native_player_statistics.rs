@@ -20,7 +20,7 @@ use std::{
 };
 const MAX_SOURCE: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_STATS: u64 = 8 * 1024 * 1024;
-const REPORT_ALGORITHM: &str = "rally-roster-attributed-touches-v3";
+const REPORT_ALGORITHM: &str = "rally-roster-attributed-touches-v4";
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatsSource {
@@ -161,7 +161,15 @@ fn count_native_contacts(
                 if !windows.contains(frame) {
                     total.outside_rally_proposals += 1;
                 } else if let Some(id) = track {
-                    if !final_touch.attributed {
+                    if native_player_tracks::conflicting_frame_tracks(
+                        &owners.owners,
+                        observed.iter().copied(),
+                    )
+                    .contains(&id)
+                    {
+                        total.unassigned += 1;
+                        total.unverified_proposals += 1;
+                    } else if !final_touch.attributed {
                         total.unverified_proposals += 1;
                     } else if owners.excluded.contains(&id) {
                         total.excluded_proposals += 1;
@@ -723,6 +731,48 @@ mod tests {
         };
         (root, run, replay, owner)
     }
+    #[test]
+    fn conflicting_same_frame_does_not_credit_touch_but_later_frame_does() {
+        let (root, mut run, replay, mut owners) = fixture();
+        let input = fs::read_to_string(&replay).unwrap();
+        let mut bytes = Vec::new();
+        for line in input.lines() {
+            let mut row: Value = serde_json::from_str(line).unwrap();
+            if row["frame_index"] == 10 {
+                row["tracked_players"].as_array_mut().unwrap().push(json!({
+                    "track_id":8,"is_verified_athlete":false,
+                    "detection":{"frame_index":10,"class_name":"player"}
+                }));
+            }
+            bytes.extend(serde_json::to_vec(&row).unwrap());
+            bytes.push(b'\n');
+        }
+        fs::write(&replay, &bytes).unwrap();
+        run.replay_sha = format!("{:x}", Sha256::digest(&bytes));
+        owners.source_sha = run.replay_sha.clone();
+        owners.owners.insert(8, "player1".into());
+        let counted = count_native_contacts(
+            &run,
+            &replay,
+            &owners,
+            &native_rally_evidence::RallyWindows {
+                intervals: vec![(0, 79)],
+                contexts: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(counted.unassigned, 1);
+        assert!(!counted
+            .montage_contacts
+            .iter()
+            .any(|event| event.frame == 10));
+        assert!(counted
+            .montage_contacts
+            .iter()
+            .any(|event| event.frame == 20));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn native_contact_count_credits_only_same_frame_reviewed_owners() {
         let (root, run, replay, mut owners) = fixture();

@@ -18,7 +18,7 @@ fn ready(pending: &mut VecDeque<PendingFrame>, latest: u64) -> Vec<PendingFrame>
     let mut samples = Vec::new();
     while pending
         .front()
-        .is_some_and(|s| s.index.saturating_add(8) <= latest)
+        .is_some_and(|s| s.index.saturating_add(interpolation::MAX_GAP_FRAMES) <= latest)
     {
         if let Some(sample) = pending.pop_front() {
             samples.push(sample);
@@ -48,9 +48,12 @@ pub(crate) struct PoseStream {
     model_sha: String,
     sample_stride: usize,
     pending: VecDeque<PendingFrame>,
+    history: VecDeque<interpolation::FrameBoxes>,
     next_frame: u64,
     sampled: u64,
     people: u64,
+    observed_crops: u64,
+    interpolated_crops: u64,
     bytes: u64,
     original_source: Value,
     source_identity: Value,
@@ -69,6 +72,8 @@ pub(crate) struct PendingPose {
     decoded_frames: u64,
     sampled: u64,
     people: u64,
+    observed_crops: u64,
+    interpolated_crops: u64,
     original_source: Value,
     source_identity: Value,
     project_id: String,
@@ -125,9 +130,12 @@ impl PoseStream {
             model_sha,
             sample_stride,
             pending: VecDeque::new(),
+            history: VecDeque::new(),
             next_frame: 0,
             sampled: 0,
             people: 0,
+            observed_crops: 0,
+            interpolated_crops: 0,
             bytes: 0,
             original_source,
             source_identity,
@@ -161,7 +169,7 @@ impl PoseStream {
             });
         }
         self.next_frame += 9;
-        if self.pending.len() > 18 {
+        if self.pending.len() > 40 {
             return Err("Pose lookahead queue exceeded its bounded capacity".into());
         }
         self.flush_ready(batch.first_frame + 8, cancelled)
@@ -187,18 +195,45 @@ impl PoseStream {
     }
 
     fn flush_ready(&mut self, latest: u64, cancelled: &AtomicBool) -> Result<(), String> {
+        // Retain previous real anchors while a bounded future lookahead is
+        // available. Interpolated proposals never become new anchor points.
+        let snapshots: VecDeque<interpolation::FrameBoxes> = self
+            .history
+            .iter()
+            .cloned()
+            .chain(self.pending.iter().map(|item| interpolation::FrameBoxes {
+                frame: item.index,
+                boxes: item.boxes.clone(),
+            }))
+            .collect();
         for frame in ready(&mut self.pending, latest) {
             if cancelled.load(Ordering::Acquire) {
                 return Err("cancelled".into());
             }
-            let mut poses = Vec::with_capacity(frame.boxes.len());
-            for bb in frame.boxes {
+            let inferred = interpolation::interpolate_boxes(&snapshots, frame.index, &frame.boxes);
+            let proposals = pose_proposals(frame.boxes.clone(), inferred);
+            let mut poses = Vec::with_capacity(proposals.len());
+            for (bb, origin) in proposals {
                 if cancelled.load(Ordering::Acquire) {
                     return Err("cancelled".into());
                 }
                 let points = self.engine.infer(&frame.rgb, bb)?;
+                if origin == "interpolated_box" {
+                    self.interpolated_crops += 1;
+                } else {
+                    self.observed_crops += 1;
+                }
                 let keypoints = points.map(|p| [p.x as f64, p.y as f64, p.score as f64]);
-                poses.push(json!({"box": bb, "keypoints":keypoints, "crop_origin":"observed"}));
+                poses.push(json!({"box": bb, "keypoints":keypoints, "crop_origin":origin}));
+            }
+            self.history.push_back(interpolation::FrameBoxes {
+                frame: frame.index,
+                boxes: frame.boxes,
+            });
+            while self.history.front().is_some_and(|record| {
+                record.frame.saturating_add(interpolation::MAX_GAP_FRAMES) < frame.index
+            }) {
+                self.history.pop_front();
             }
             self.people += poses.len() as u64;
             self.sampled += 1;
@@ -235,6 +270,15 @@ impl PoseStream {
         {
             return Err("Shared pose frames do not match the detector timeline".into());
         }
+        self.flush_ready(u64::MAX, cancelled)?;
+        let expected_samples =
+            (emitted_frames + self.sample_stride as u64 - 1) / self.sample_stride as u64;
+        if self.sampled != expected_samples {
+            return Err("Streamed RTMPose sampled frame count mismatch".into());
+        }
+        if self.observed_crops + self.interpolated_crops != self.people {
+            return Err("Streamed RTMPose crop provenance count mismatch".into());
+        }
         let mut writer = self.writer.take().ok_or("Pose writer already finished")?;
         writer
             .flush()
@@ -266,6 +310,8 @@ impl PoseStream {
             decoded_frames,
             sampled: self.sampled,
             people: self.people,
+            observed_crops: self.observed_crops,
+            interpolated_crops: self.interpolated_crops,
             original_source: self.original_source,
             source_identity: self.source_identity,
             project_id: self.project_id,
@@ -316,13 +362,15 @@ impl PendingPose {
             "decoded_frames":self.decoded_frames,
             "sampled_frames":self.sampled,
             "player_poses":self.people,
+            "observed_pose_crops":self.observed_crops,
+            "interpolated_pose_crops":self.interpolated_crops,
             "model":"RTMPose-M-Body7",
             "model_sha256":self.model_sha,
             "original_source":self.original_source,
             "working_stream":"original_rgb_fps30_v1",
             "source_fusion_sha256":fusion["sha256"],
             "source_identity":self.source_identity,
-            "box_source_version":"detector_observed_sampling_v1",
+            "box_source_version":"detector_observed_and_bounded_interpolated_v1",
             "source_person_sampling_period_frames":self.sample_stride,
             "interpolate_players":false,
             "file":POSE_FILE,

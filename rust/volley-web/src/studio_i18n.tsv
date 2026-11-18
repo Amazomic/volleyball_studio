@@ -390,6 +390,7 @@ VBallNet определяет мяч.	VBallNet detects the ball.
 Игроки и позы · шаг, кадров	Players and poses · stride, frames
 Детектор игроков и RTMPose работают на одних кадрах, по реальным рамкам детектора. Промежуточные кадры не передаются в эти нейросети.	The player detector and RTMPose use the same frames and observed detector boxes. Intermediate frames are not sent to these models.
 Видео: 30 кадров в секунду (30 FPS). Каждый 10-й кадр → 3 раза/с.	Video: 30 frames per second (30 FPS). Every 10th frame → 3 samples/s.
+Видео: 30 кадров в секунду (30 FPS). Каждый кадр → 30 раз/с.	Video: 30 frames per second (30 FPS). Every frame → 30 samples/s.
 Дополнительные настройки	Additional settings
 Определить поле и сетку	Detect court and net
 Трекинг · касания · розыгрыши. Повторный GPU-анализ не требуется.	Tracking · contacts · rallies. GPU analysis is reused.
@@ -427,3 +428,5 @@ VBallNet + RTMPose: контакты и изломы ±0,1 с	VBallNet + RTMPose
 Фильтры и режимы плеера	Player filters and modes
 Фильтры отображения	Display filters
 Разметка: двигайте отдельные углы или всю площадку вместе с сеткой, удерживая курсор внутри. Масштаб 10–124%: кнопки, колесо мыши, тачпад или жест двумя пальцами. Масштаб не меняет координаты, исходное видео не изменяется; обрезка пока не ограничивает GPU-анализ.	Marking mode: drag individual corners or drag inside the court to move all corners with the net. Zoom from 10% to 124% using buttons, the mouse wheel, touchpad or two-finger gestures. Zoom preserves annotation coordinates; the source video stays unchanged, and the trim range does not yet limit GPU analysis.
+
+Видео пока не выбраны. Добавьте исходные файлы выше.	No videos selected yet. Add source files above.

@@ -108,6 +108,22 @@ pub async fn player_labels(
     Ok(Json(result))
 }
 
+fn mark_identity_conflicts(frames: &mut [Value], owners: &std::collections::BTreeMap<u64, String>) {
+    for frame in frames {
+        if let Some(players) = frame["players"].as_array_mut() {
+            let conflicts = native_player_tracks::conflicting_frame_tracks(
+                owners,
+                players.iter().filter_map(|player| player["id"].as_u64()),
+            );
+            for player in players {
+                player["identity_conflict"] = json!(player["id"]
+                    .as_u64()
+                    .is_some_and(|id| conflicts.contains(&id)));
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ReplayIndex {
     path: PathBuf,
@@ -746,6 +762,7 @@ pub async fn get(
         None
     };
     let pose_root = projects::project_root(&state).join(&query.project_id);
+    let identity_state = state.clone();
     let continuity_state = state.clone();
     let (frames, poses_available) = tokio::task::spawn_blocking(move || {
         let windows = native_rally_evidence::verified_track_windows(&preview_run)
@@ -776,6 +793,14 @@ pub async fn get(
                 .as_ref()
                 .map(|(starts, score)| (starts.as_slice(), *score)),
         )?;
+        let (owners, _) = native_player_tracks::statistics_owners(
+            &identity_state,
+            &preview_run.project_id,
+            &preview_run.video,
+            &preview_run.replay_id,
+        )
+        .map_err(|_| "Player identity unavailable for overlay")?;
+        mark_identity_conflicts(&mut frames, &owners.owners);
         let reviewed = native_player_tracks::reviewed_owners(
             &continuity_state,
             &preview_run.project_id,
@@ -935,22 +960,49 @@ fn extract_gpu_frames(
     start: u64,
     end: u64,
 ) -> Result<Vec<Value>, String> {
+    use crate::pose_inference::interpolation::{interpolate_boxes, FrameBoxes, MAX_GAP_FRAMES};
+    use std::collections::VecDeque;
+
+    // Read real detections on both sides of an API window. The synthetic
+    // overlay must not change when the player crosses a 180-frame boundary.
+    let context_start = start.saturating_sub(MAX_GAP_FRAMES);
+    let context_end = end.saturating_add(MAX_GAP_FRAMES).min(total);
     let index = index_for(path, sha, total)?;
-    let anchor = start / STRIDE * STRIDE;
-    let offset = index.offsets[(start / STRIDE) as usize];
+    let anchor = context_start / STRIDE * STRIDE;
+    let offset = index.offsets[(context_start / STRIDE) as usize];
     let mut file = File::open(path).map_err(|e| format!("Open GPU frames: {e}"))?;
     file.seek(SeekFrom::Start(offset))
         .map_err(|e| format!("Seek GPU frames: {e}"))?;
     let mut reader = BufReader::new(file);
     let mut output = Vec::with_capacity((end - start) as usize);
-    for i in anchor..end {
+    let mut measured = VecDeque::with_capacity((context_end - context_start) as usize);
+    for i in anchor..context_end {
         let line = bounded_line(&mut reader)?.ok_or("GPU frame evidence truncated")?;
-        if i < start {
+        if i < context_start {
             continue;
         }
         let row: Value =
             serde_json::from_slice(&line).map_err(|_| "Malformed GPU frame evidence")?;
-        output.push(json!({"frame":i,"raw":gpu_raw_frame(&row,i)?}));
+        let raw = gpu_raw_frame(&row, i)?;
+        measured.push_back(FrameBoxes {
+            frame: i,
+            boxes: crate::pose_inference::boxes(&row),
+        });
+        if i >= start && i < end {
+            output.push(json!({"frame":i,"raw":raw}));
+        }
+    }
+    for item in &mut output {
+        let current = item["frame"].as_u64().ok_or("Invalid raw frame index")?;
+        let original = measured
+            .iter()
+            .find(|v| v.frame == current)
+            .ok_or("Missing raw detector frame")?;
+        let predicted = interpolate_boxes(&measured, current, &original.boxes);
+        item["raw"]["players_interpolated"] = json!(predicted
+            .into_iter()
+            .map(|bbox| json!({"box":bbox}))
+            .collect::<Vec<_>>());
     }
     Ok(output)
 }
@@ -1209,6 +1261,51 @@ mod tests {
         changed[16] ^= 1;
         fs::write(&path, changed).unwrap();
         assert!(extract_gpu_frames(&path, &sha, 9, 3, 6).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn raw_gpu_overlay_keeps_real_boxes_and_marks_bounded_interpolation_separately() {
+        let root = std::env::temp_dir().join(format!("volley-raw-gap-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("frames.jsonl");
+        let mut evidence = Vec::new();
+        for frame in 0..21_u64 {
+            let players = if frame == 0 || frame == 20 {
+                vec![json!({
+                    "frame_index":frame,"class_name":"player","score":0.91,"query_index":0,
+                    "bbox_xyxy_norm":if frame == 0 {
+                        [0.2,0.2,0.3,0.8]
+                    } else {
+                        [0.22,0.2,0.32,0.8]
+                    }
+                })]
+            } else {
+                Vec::new()
+            };
+            let row = json!({
+                "frame_index":frame,"player_candidates":players,"ball_candidates":[],
+                "player_track_ids_confirmed":false,"touches_confirmed":false
+            });
+            evidence.extend(serde_json::to_vec(&row).unwrap());
+            evidence.push(b'\n');
+        }
+        fs::write(&path, &evidence).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&evidence));
+        let window = extract_gpu_frames(&path, &sha, 21, 8, 13).unwrap();
+        assert_eq!(window.len(), 5);
+        assert!(window[2]["raw"]["players"].as_array().unwrap().is_empty());
+        let interpolated = window[2]["raw"]["players_interpolated"].as_array().unwrap();
+        assert_eq!(interpolated.len(), 1);
+        let x = interpolated[0]["box"][0].as_f64().unwrap();
+        assert!((x - 0.21).abs() < 1e-9);
+        assert!(interpolated[0].get("track_id").is_none());
+        let anchor = extract_gpu_frames(&path, &sha, 21, 0, 1).unwrap();
+        assert_eq!(anchor[0]["raw"]["players"].as_array().unwrap().len(), 1);
+        assert!(anchor[0]["raw"]["players_interpolated"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1600,6 +1697,19 @@ mod tests {
         }
         assert_eq!(overlay[2]["players"][0]["id"], 7);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn player_identity_conflicts_are_marked_only_on_simultaneous_frames() {
+        let owners = std::collections::BTreeMap::from([(12, "p".into()), (14, "p".into())]);
+        let mut frames = vec![
+            json!({"players":[{"id":12},{"id":14}]}),
+            json!({"players":[{"id":14}]}),
+        ];
+        mark_identity_conflicts(&mut frames, &owners);
+        assert_eq!(frames[0]["players"][0]["identity_conflict"], true);
+        assert_eq!(frames[0]["players"][1]["identity_conflict"], true);
+        assert_eq!(frames[1]["players"][0]["identity_conflict"], false);
     }
 
     #[test]

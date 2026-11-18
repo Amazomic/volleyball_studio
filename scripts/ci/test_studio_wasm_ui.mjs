@@ -12,6 +12,15 @@ const tick=async()=>{for(let i=0;i<8;i++)await new Promise(r=>setImmediate(r));}
 const markup=readFileSync(join(root,"rust/volley-app/static/studio.html"),"utf8");
 const navMarkup=markup.match(/<nav class="menu">([\s\S]*?)<\/nav>/)?.[1]||"";
 const navOrder=[...navMarkup.matchAll(/id="studio-nav-([^"]+)"/g)].map(row=>row[1]);
+// Project roster stays beside the gallery at desktop widths and must precede
+// it when the responsive grid collapses (not land at the page bottom).
+const playersCss=readFileSync(join(root,"rust/volley-app/static/studio.css"),"utf8");
+assert.match(playersCss,/grid-template-areas:"gallery roster"/,
+  "Wide Players layout must keep the roster in the right-hand column");
+assert.match(playersCss,/@media\(max-width:650px\)\{\s*#studio-players-view \.players-workspace-layout\{[^}]*grid-template-areas:"roster" "gallery"/,
+  "Narrow Players layout must render the roster above the Track ID gallery");
+assert.match(playersCss,/grid-area:roster;position:sticky;top:18px;align-self:start/,
+  "Desktop roster must align with the gallery top and stick near the viewport top");
 assert.deepEqual(navOrder,["players","analysis","preview","report","montage"],
   "Sidebar must follow the requested five-step navigation order");
 const reportStart=markup.indexOf('id="studio-report-view"');
@@ -284,7 +293,7 @@ const golden=JSON.parse(pipelineStarts()[0].options.body);
 assert.equal(golden.project_id,"1234abcdef01");
 assert.equal(golden.video,"rally.mp4");
 assert.equal(golden.mode,"full");
-assert.deepEqual(golden.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:8,pose_enabled:true,pose_mode:"photo",pose_stride:10});
+assert.deepEqual(golden.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:8,pose_enabled:true,pose_mode:"photo",pose_stride:1});
 assert.equal(golden.post.pose_classification,true);
 assert.equal(golden.post.interpolate_players,true);
 assert.equal(golden.post.interpolate_pose,true);
@@ -292,6 +301,7 @@ assert.equal(golden.post.tracking.min_player_score,0.25);
 assert.equal(golden.post.tracking.nms_iou,0.72);
 assert.equal(golden.post.tracking.min_track_observations,12);
 assert.equal(golden.post.touches.threshold,0.48);
+assert.equal(golden.post.touches.algorithm,"pose_motion");
 assert.equal(golden.post.touches.min_ball_score,0.35);
 assert.equal(golden.post.rallies.min_ball_score,0.35);
 assert.equal(golden.post.rallies.min_rally_frames,45);
@@ -309,7 +319,7 @@ a.nodes.get("studio-analysis-start").dispatch("click");
 await tick();
 assert.equal(pipelineStarts().length,2,"Second explicit pipeline launch only");
 const override=JSON.parse(pipelineStarts()[1].options.body);
-assert.deepEqual(override.gpu,{stride:3,gpu_memory_limit_mb:8192,cpu_threads:12,pose_enabled:true,pose_mode:"photo",pose_stride:10});
+assert.deepEqual(override.gpu,{stride:3,gpu_memory_limit_mb:8192,cpu_threads:12,pose_enabled:true,pose_mode:"photo",pose_stride:1});
 assert.equal(override.post.tracking.min_player_score,0.25);
 a.nodes.get("studio-gpu-memory").value="-1";
 a.nodes.get("studio-gpu-memory").dispatch("input");
@@ -334,7 +344,7 @@ assert.equal(pipelineStarts().length,3,"GPU-only button must launch the pipeline
 const gpuOnly=JSON.parse(pipelineStarts()[2].options.body);
 assert.equal(gpuOnly.mode,"gpu");
 assert.equal(gpuOnly.post,undefined,"GPU-only must not include CPU settings");
-assert.deepEqual(gpuOnly.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:8,pose_enabled:true,pose_mode:"photo",pose_stride:10});
+assert.deepEqual(gpuOnly.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:8,pose_enabled:true,pose_mode:"photo",pose_stride:1});
 a.nodes.get("studio-inference").value=JSON.stringify([
   "rally.mp4","fusion","b".repeat(32)]);
 a.window.dispatchEvent({type:"volley:chain-change",

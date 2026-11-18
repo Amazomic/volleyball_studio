@@ -3,6 +3,26 @@
 // CPU endpoints currently run synchronously, so their bar is indeterminate.
 (() => {
   const $=id=>document.getElementById(id);
+  // Read the active model from Rust, not an outdated HTML label.
+  const personDetector={variant:"",label:"Детектор игроков + RTMPose"};
+  window.VolleyballPersonDetector=personDetector;
+  const setPersonDetector=variant=>{
+    personDetector.variant=variant;
+    personDetector.label=variant==="rfdetr-medium"?"RF-DETR Medium + RTMPose":
+      variant==="rtmdet-nano"?"RTMDet-Nano + RTMPose":"Детектор игроков + RTMPose";
+    for(const id of ["studio-primary-person-model","studio-raw-person-model"]){
+      const el=$(id);
+      if(el)el.textContent=personDetector.label;
+    }
+  };
+  const refreshPersonDetector=async()=>{
+    try{
+      const response=await fetch("/internal/rewrite-status",{cache:"no-store",credentials:"same-origin"});
+      if(!response.ok)throw Error("HTTP "+response.status);
+      const status=await response.json();
+      setPersonDetector(status.person_detector);
+    }catch{setPersonDetector("");}
+  };
   const root=$("studio-sidebar-tasks"),list=$("studio-sidebar-task-list");
   if(!root||!list)return;
   const tasks=new Map(),rows=new Map();
@@ -127,7 +147,7 @@
       clear("gpu");
       return;
     }
-    const model=data.model==="players"?"RF-DETR Medium + RTMPose":data.model==="ball"?"VballNet":"GPU";
+    const model=data.model==="players"?personDetector.label:data.model==="ball"?"VballNet":"GPU";
     set("gpu",{projectId:project,label:"Анализ GPU · "+model,
       stage:{"queued":"В очереди","loading_model":"Загрузка модели","running":"Инференс"}[data.phase]||
         String(data.phase||"Обработка"),progress:Number.isFinite(data.progress_percent)?data.progress_percent:null});
@@ -258,6 +278,7 @@
   $("studio-project")?.addEventListener("change",wake);
   window.addEventListener("volley:project-ready",wake);
   document.addEventListener("visibilitychange",()=>{if(!document.hidden)wake();});
+  refreshPersonDetector();
   schedule();
   refresh();
 })();

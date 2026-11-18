@@ -2,6 +2,7 @@
 //! Cosine is a similarity, not an identification probability. Grouping is
 //! provisional; only explicitly reviewed human assignments carry identity.
 //! No Python or OpenVINO runtime is needed to compare existing embeddings.
+pub mod tracklet_stitch;
 
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

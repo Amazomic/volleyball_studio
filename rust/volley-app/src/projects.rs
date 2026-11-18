@@ -128,12 +128,13 @@ pub async fn native_pick(
                 .file_name()
                 .and_then(|s| s.to_str())
                 .ok_or_else(|| storage::bad_request("Invalid video filename"))?;
+            let duration_sec = video_duration_secs(&path)?;
             storage::write_json_atomic(
                 &folder.join(format!("{name}.json")),
                 &json!({"path":path.to_string_lossy().to_string()}),
             )?;
             result.push(json!({"name":name,"display_name":display_name,
-                "size_gb":row["size_gb"],"origin":"linked"}));
+                "duration_sec":duration_sec,"size_gb":row["size_gb"],"origin":"linked"}));
         }
         Ok::<_, ApiError>(result)
     })

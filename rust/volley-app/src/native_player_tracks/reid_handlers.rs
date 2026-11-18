@@ -102,7 +102,61 @@ pub(super) fn native_reid_report(
         FeatureMode::OpenVino,
         threshold,
     )?;
-    Ok(json!(report))
+    // These are proposals only: the CPU replay, original detector boxes,
+    // and immutable pose evidence must not be rewritten by a preview.
+    // The full ReID embedding (not skeleton shape or bounding-box geometry)
+    // is the identity gate; geometry only rejects physically impossible joins.
+    let tracklets = ctx
+        .tracks
+        .iter()
+        .filter(|(&id, row)| {
+            id <= i64::MAX as u64
+                && !excluded.contains(&(id as i64))
+                && cached.contains_key(&id)
+                && row.first_box != [0.0; 4]
+                && row.last_box != [0.0; 4]
+        })
+        .filter_map(|(&id, row)| {
+            Some(reid::tracklet_stitch::Tracklet {
+                id,
+                first_frame: row.first,
+                last_frame: row.last,
+                observations: u32::try_from(row.observed).ok()?,
+                first_box: row.first_box,
+                last_box: row.last_box,
+                reid: cached.get(&id)?.clone(),
+                confirmed_owner: doc["assignments"][id.to_string()]
+                    .as_str()
+                    .map(str::to_owned),
+            })
+        })
+        .take(1024)
+        .collect::<Vec<_>>();
+    let links = reid::tracklet_stitch::propose_links(
+        &tracklets,
+        threshold.max(reid::tracklet_stitch::DEFAULT_REID_STITCH_THRESHOLD_PERCENT),
+        reid::tracklet_stitch::DEFAULT_STITCH_MAX_GAP_FRAMES,
+    )?;
+    let mut result = json!(report);
+    result["tracklet_links"] = json!(links
+        .into_iter()
+        .map(|link| json!({
+            "previous_id":link.previous_id,
+            "next_id":link.next_id,
+            "last_observed_frame":link.last_observed_frame,
+            "first_resumed_frame":link.first_resumed_frame,
+            "last_observed_box":link.last_observed_box,
+            "first_resumed_box":link.first_resumed_box,
+            "cosine_similarity":link.cosine_similarity,
+            "gap_frames":link.first_resumed_frame.saturating_sub(link.last_observed_frame + 1),
+            "provenance":"measured_track_boundaries",
+            "status":"suggested_uncommitted"
+        }))
+        .collect::<Vec<_>>());
+    result["tracklet_stitch_threshold_percent"] =
+        json!(threshold.max(reid::tracklet_stitch::DEFAULT_REID_STITCH_THRESHOLD_PERCENT));
+    result["tracklet_links_applied"] = json!(false);
+    Ok(result)
 }
 pub async fn reid_preview(
     State(state): State<Arc<AppState>>,
@@ -485,9 +539,7 @@ pub(super) fn player_match_candidates(
         };
         let mut nearest = BTreeMap::<String, (f64, u64)>::new();
         for &(anchor_id, player_id, reference, other) in &anchors {
-            if candidate.first <= reference.last && reference.first <= candidate.last
-                || other.len() != vector.len()
-            {
+            if tracks_co_visible(candidate, reference) || other.len() != vector.len() {
                 continue;
             }
             let cosine = vector
@@ -629,6 +681,9 @@ pub(super) fn review_response(
         "source_replay_sha256":ctx.source_sha,"revision":version,
         "threshold_percent":threshold,"writable":can_write,
         "groups":preview["groups"],"unmatched_ids":preview["unmatched_ids"],
+        "tracklet_links":preview["tracklet_links"],
+        "tracklet_stitch_threshold_percent":preview["tracklet_stitch_threshold_percent"],
+        "tracklet_links_applied":false,
         "player_matches":player_matches,
         "embedded_count":preview["embedded_count"],
         "missing_embedding_count":preview["missing_visual_ids"].as_array().map_or(0, Vec::len),

@@ -608,6 +608,47 @@ fn shorter_correct_track_beats_longer_wrong_co_visible_track() {
 }
 
 #[test]
+fn conflicting_owners_are_limited_to_tracks_visible_in_the_same_frame() {
+    let owners = BTreeMap::from([
+        (12, "a".to_owned()),
+        (14, "a".to_owned()),
+        (15, "b".to_owned()),
+    ]);
+    assert_eq!(
+        conflicting_frame_tracks(&owners, [12, 14, 15]),
+        BTreeSet::from([12, 14])
+    );
+    assert!(conflicting_frame_tracks(&owners, [14, 15]).is_empty());
+}
+
+#[test]
+fn automatic_photo_links_allow_player_already_linked_to_another_track() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    // Model an actual lost/reacquired track handoff. Two copies of the same
+    // measured time span would be co-visible and must NOT share one athlete.
+    let mut first = ctx.tracks[&7].clone();
+    first.first = 0;
+    first.last = 8;
+    first.visible_spans = vec![(0, 8)];
+    first.observed_pairs.clear();
+    let mut next = first.clone();
+    next.first = 9;
+    next.last = 17;
+    next.visible_spans = vec![(9, 17)];
+    ctx.tracks.insert(7, first);
+    ctx.tracks.insert(8, next);
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
+    let mut doc = base_document(&ctx);
+    doc["assignments"] = json!({"7":"abcdef012345"});
+    let matches = json!({"8":[{"player_id":"abcdef012345","cosine_similarity":0.8}]});
+    let chosen = choose_automatic_photo_links(&ctx, &doc, &matches).unwrap();
+    assert_eq!(chosen.get(&8).map(String::as_str), Some("abcdef012345"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn strongest_long_lived_track_wins_overlapping_assignment() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
@@ -991,6 +1032,8 @@ fn reid_player_matches_require_reviewed_nonoverlapping_photo_evidence() {
     let mut second = ctx.tracks[&7].clone();
     second.first = 20;
     second.last = 30;
+    second.visible_spans = vec![(20, 30)];
+    second.visible_spans = vec![(20, 30)];
     ctx.tracks.insert(8, second);
     ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
     let mut identity = base_document(&ctx);
@@ -1014,15 +1057,44 @@ fn reid_player_matches_require_reviewed_nonoverlapping_photo_evidence() {
     );
     // Same-frame player boxes cannot be the same athlete.
     ctx.tracks.get_mut(&8).unwrap().first = 10;
+    ctx.tracks.get_mut(&8).unwrap().visible_spans = vec![(10, 30)];
     assert_eq!(
         player_match_candidates(&ctx, &identity, &features).unwrap(),
         json!({})
     );
     ctx.tracks.get_mut(&8).unwrap().first = 20;
+    ctx.tracks.get_mut(&8).unwrap().visible_spans = vec![(20, 30)];
     identity["excluded_ids"] = json!([8]);
     assert_eq!(
         player_match_candidates(&ctx, &identity, &features).unwrap(),
         json!({})
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn overlapping_lifetimes_without_same_frame_detection_allow_reid_reacquisition() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    let mut second = ctx.tracks[&7].clone();
+    second.first = 8;
+    second.last = 30;
+    second.visible_spans = vec![(20, 25)];
+    second.observed_pairs.clear();
+    ctx.tracks.insert(8, second);
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
+    let mut identity = base_document(&ctx);
+    identity["assignments"] = json!({"7":"abcdef012345"});
+    let mut reference = vec![0.0_f32; 256];
+    reference[0] = 1.0;
+    let features = BTreeMap::from([(7, reference.clone()), (8, reference)]);
+    let matches = player_match_candidates(&ctx, &identity, &features).unwrap();
+    assert_eq!(matches["8"][0]["reference_track_id"], 7);
+    ctx.tracks.get_mut(&8).unwrap().visible_spans = vec![(10, 13)];
+    assert_eq!(
+        player_match_candidates(&ctx, &identity, &features).unwrap(),
+        json!({}),
+        "Only real same-frame co-visibility may prohibit an ID reacquisition"
     );
     fs::remove_dir_all(root).unwrap();
 }
@@ -1131,6 +1203,47 @@ fn native_reid_cached_features_are_proposals_with_hard_identity_and_overlap_gate
     ctx.tracks.get_mut(&8).unwrap().first = 10;
     let simultaneous = native_reid_report(&ctx, &doc, &features, 85).unwrap();
     assert!(simultaneous["groups"].as_array().unwrap().is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn native_reid_tracklet_links_need_verified_features_and_real_endpoints() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    let first = ctx.tracks.get_mut(&7).unwrap();
+    first.first = 0;
+    first.last = 90;
+    first.observed = 20;
+    first.first_box = [0.20, 0.20, 0.30, 0.76];
+    first.last_box = [0.22, 0.20, 0.32, 0.76];
+    let mut second = first.clone();
+    second.first = 101;
+    second.last = 132;
+    second.observed = 8;
+    second.first_box = [0.24, 0.20, 0.34, 0.76];
+    second.last_box = [0.26, 0.20, 0.36, 0.76];
+    ctx.tracks.insert(8, second);
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
+    let mut features = BTreeMap::new();
+    features.insert(7, vec![1.0, 0.0, 0.0]);
+    features.insert(8, vec![0.99, 0.03, 0.0]);
+    let doc = base_document(&ctx);
+    let report = native_reid_report(&ctx, &doc, &features, 85).unwrap();
+    assert_eq!(report["tracklet_links"].as_array().unwrap().len(), 1);
+    let link = &report["tracklet_links"][0];
+    assert_eq!(link["previous_id"], 7);
+    assert_eq!(link["next_id"], 8);
+    assert_eq!(link["last_observed_frame"], 90);
+    assert_eq!(link["first_resumed_frame"], 101);
+    assert_eq!(link["last_observed_box"], json!([0.22, 0.20, 0.32, 0.76]));
+    assert_eq!(link["first_resumed_box"], json!([0.24, 0.20, 0.34, 0.76]));
+    assert_eq!(report["tracklet_links_applied"], false);
+    features.remove(&8);
+    let missing = native_reid_report(&ctx, &doc, &features, 85).unwrap();
+    assert!(missing["tracklet_links"].as_array().unwrap().is_empty());
+    features.insert(8, vec![0.0, 1.0, 0.0]);
+    let unrelated = native_reid_report(&ctx, &doc, &features, 85).unwrap();
+    assert!(unrelated["tracklet_links"].as_array().unwrap().is_empty());
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
@@ -1265,7 +1378,26 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
     if Command::new("ffmpeg").arg("-version").output().is_err() {
         return;
     }
-    let (root, source_bytes, source_sha) = fixture();
+    let (root, original_bytes, _) = fixture();
+    let mut source_bytes = Vec::new();
+    for line in original_bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let mut row: Value = serde_json::from_slice(line).unwrap();
+        if let Some(player) = row["tracked_players"]
+            .as_array()
+            .and_then(|players| players.first())
+            .cloned()
+        {
+            let mut other = player;
+            other["track_id"] = json!(8);
+            row["tracked_players"].as_array_mut().unwrap().push(other);
+        }
+        source_bytes.extend(serde_json::to_vec(&row).unwrap());
+        source_bytes.push(b'\n');
+    }
+    let source_sha = format!("{:x}", Sha256::digest(&source_bytes));
     let repo = root.join("repo");
     let data = root.join("sandbox");
     let id = "123456abcdef";
@@ -1359,7 +1491,7 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
         view_player_id: None,
     };
     let original = read_internal(&state, &query).unwrap();
-    assert_eq!(original["total_tracks"], 1);
+    assert_eq!(original["total_tracks"], 2);
     assert_eq!(original["revision"], "absent");
     assert_eq!(original["source_kind"], "native_gpu_cpu_replay");
     assert_eq!(
@@ -1382,6 +1514,16 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
     let saved = change(&state, &assign).unwrap();
     assert_eq!(saved["assigned_count"], 1);
     assert_eq!(saved["tracks"][0]["assigned_player_name"], "Ильнур");
+    let saved = change(
+        &state,
+        &TrackEdit {
+            track_ids: vec![8],
+            expected_revision: saved["revision"].as_str().unwrap().into(),
+            ..assign.clone()
+        },
+    )
+    .unwrap();
+    assert_eq!(saved["assigned_count"], 2);
     assert_eq!(saved["evidence_source"], original["evidence_source"]);
     let sidecar = data
         .join("projects")
@@ -1391,7 +1533,7 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
     let stored: Value = serde_json::from_slice(&fs::read(sidecar).unwrap()).unwrap();
     assert!(stored.get("evidence_source").is_none());
     assert_eq!(stored["source_replay_sha256"], source_sha);
-    assert_eq!(read_internal(&state, &query).unwrap()["assigned_count"], 1);
+    assert_eq!(read_internal(&state, &query).unwrap()["assigned_count"], 2);
     assert_eq!(
         change(&state, &assign).unwrap_err().0,
         axum::http::StatusCode::CONFLICT
@@ -1416,7 +1558,7 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
     )
     .unwrap();
     assert_eq!(excluded["excluded_count"], 1);
-    assert_eq!(excluded["assigned_count"], 0);
+    assert_eq!(excluded["assigned_count"], 1);
     assert!(change(
         &state,
         &TrackEdit {
@@ -1465,7 +1607,7 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
         },
     )
     .unwrap();
-    assert_eq!(reassigned["assigned_count"], 1);
+    assert_eq!(reassigned["assigned_count"], 2);
     assert!(!repo.join("results").exists());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

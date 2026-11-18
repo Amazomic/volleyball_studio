@@ -11,6 +11,7 @@
   <script src="/studio/chain.js" defer></script>
   <script src="/studio/hash.js" defer></script>
   <script src="/studio/upload.js" defer></script>
+  <script src="/studio/fragments.js?v=1" defer></script>
   <script src="/studio/playback.js?v=1" defer></script>
   <script src="/studio/tasks.js" defer></script>
   <script src="/studio/overview.js" defer></script>
@@ -92,7 +93,7 @@
               </div>
               <input id="studio-project-file-input" class="sr-only" tabindex="-1" type="file" accept=".mp4,.mov,.mkv,.avi,.webm,.m4v,.mts,video/*" multiple aria-label="Выбрать видео для проекта">
               <p id="studio-project-upload-progress" class="studio-project-upload-status" role="status" aria-live="polite"></p>
-              <div id="studio-project-videos" class="studio-project-video-options" role="group" aria-label="Видео для нового проекта">Загрузка списка…</div>
+              <div id="studio-project-videos" class="studio-project-video-options" role="group" aria-label="Видео для нового проекта"><p class="studio-project-video-empty">Видео пока не выбраны. Добавьте исходные файлы выше.</p></div>
               <p class="studio-project-help">Выберите исходные видео через проводник. Сохраняются только ссылки на оригиналы: без копирования и SHA-256.</p>
             </section>
             <section class="studio-project-create-col" aria-label="Игроки проекта">
@@ -168,13 +169,15 @@
                 <video id="studio-video" tabindex="0" preload="metadata" playsinline aria-label="Просмотр исходного видео. Пробел — воспроизведение или пауза"></video>
                 <canvas id="studio-video-overlay" class="video-overlay" aria-hidden="true"></canvas>
                 <div class="video-overlay-controls">
-                <div class="video-overlay-toggles" role="group" aria-label="Визуальные фильтры плеера">
+                <div class="video-overlay-toggles" role="group" aria-label="Фильтры и режимы плеера">
+                  <div class="video-overlay-filters" role="group" aria-label="Фильтры отображения">
                   <button type="button" id="studio-overlay-rallies" class="video-overlay-toggle" aria-pressed="true" title="Показывать или скрывать блоки розыгрышей на шкале">▰ Розыгрыши</button>
                   <button type="button" id="studio-overlay-touches" class="video-overlay-toggle" aria-pressed="true" title="Касания только из выбранной CPU-постобработки">● Касания</button>
                   <button type="button" id="studio-overlay-trajectory" class="video-overlay-toggle" aria-pressed="true" title="Показывать или скрывать траекторию мяча">⌁ Траектория</button>
                   <button type="button" id="studio-overlay-players" class="video-overlay-toggle" aria-pressed="true" title="Показывать или скрывать рамки игроков">▢ Игроки</button>
                   <button type="button" id="studio-overlay-court" class="video-overlay-toggle" aria-pressed="true" title="Показать сохранённые границы площадки и сетку">▱ Поле и сетка</button>
                   <button type="button" id="studio-overlay-pose" class="video-overlay-toggle" aria-pressed="false" title="Показывать точки суставов и скелеты RTMPose">♧ Скелеты</button>
+                  </div>
                   <div class="video-overlay-modes" role="tablist" aria-label="Режим данных">
                     <button type="button" id="studio-overlay-processed" role="tab" aria-selected="true">Обработанные</button>
                     <button type="button" id="studio-overlay-raw" role="tab" aria-selected="false">Сырые</button>
@@ -196,8 +199,9 @@
                     <label>Мяч <input id="studio-raw-ball" type="range" min="0" max="100" value="0"><output id="studio-raw-ball-value">0%</output></label>
                   </fieldset>
                   <fieldset class="raw-model-control">
-                    <legend><label><input id="studio-raw-people-visible" type="checkbox" checked> RF-DETR Medium</label></legend>
+                    <legend><label><input id="studio-raw-people-visible" type="checkbox" checked> <span id="studio-raw-person-model">Детектор игроков + RTMPose</span></label></legend>
                     <label>Игроки <input id="studio-raw-player" type="range" min="0" max="100" value="50"><output id="studio-raw-player-value">50%</output></label>
+                    <label id="studio-raw-player-interpolated-option" class="hidden"><input id="studio-raw-player-interpolated" type="checkbox" checked> Интерполированные рамки <small style="color:#ffbc69">— —</small></label>
                   </fieldset>
                   <fieldset class="raw-model-control">
                     <legend><label><input id="studio-raw-pose-visible" type="checkbox" checked> RTMPose-M · плавные точки (между измерениями — интерполяция)</label></legend>
@@ -241,7 +245,29 @@
                   <button class="primary" id="studio-training-save" type="button">Сохранить пример</button>
                   <button class="secondary" id="studio-training-refresh" type="button">Обновить базу</button>
                 </div>
-                <div class="studio-training-library"><strong>Обучающие примеры <span id="studio-training-count">0</span></strong><div id="studio-training-list" aria-live="polite"></div></div>
+                <section class="studio-temporal-labels" aria-label="Эталонная разметка касаний и розыгрышей">
+                  <div class="studio-training-head"><strong>Эталонная разметка</strong><small>Кадр <output id="studio-annotation-current">—</output> · касания можно перетаскивать по шкале</small></div>
+                  <div class="studio-annotation-tools">
+                    <button type="button" class="secondary" id="studio-annotation-seed">Взять автоматические метки за основу</button>
+                    <button type="button" class="secondary" id="studio-annotation-add-touch">+ Касание</button>
+                    <button type="button" class="secondary" id="studio-annotation-move-touch" disabled>Перенести касание сюда</button>
+                    <button type="button" class="secondary" id="studio-annotation-delete-touch" disabled>Удалить касание</button>
+                  </div>
+                  <div id="studio-annotation-touch-lane" class="studio-annotation-touch-lane" aria-label="Эталонные касания по всему видео" role="group"></div>
+                  <div id="studio-annotation-touch-list" class="studio-annotation-touch-list" aria-label="Касания для коррекции"></div>
+                  <div class="studio-annotation-rally-controls">
+                    <button type="button" class="secondary" id="studio-annotation-new-rally">Новый розыгрыш</button>
+                    <button type="button" class="secondary" id="studio-annotation-rally-start">Установить начало розыгрыша</button>
+                    <button type="button" class="secondary" id="studio-annotation-rally-end">Установить конец розыгрыша</button>
+                    <small id="studio-annotation-rally-pending" aria-live="polite"></small>
+                  </div>
+                  <div class="studio-annotation-rally-header"><strong>Размеченные розыгрыши</strong><small>3 строки · прокрутка · выбрать для изменения границ</small></div>
+                  <div id="studio-annotation-rallies" class="studio-annotation-rallies" aria-label="Сохранённые розыгрыши"></div>
+                  <div class="studio-annotation-evaluation"><span id="studio-annotation-metrics">Точность появится после разметки.</span>
+                    <button type="button" class="primary" id="studio-annotation-review">Завершить проверку видео</button></div>
+                  <p id="studio-annotation-status" role="status" aria-live="polite">Исправления сохраняются как независимый эталон для проверки и настройки детектора.</p>
+                </section>
+                <div class="studio-training-library"><strong>Обучающие примеры поз <span id="studio-training-count">0</span></strong><div id="studio-training-list" aria-live="polite"></div></div>
               </section>
               <div class="viewer-details" hidden aria-hidden="true">
                 <h3 id="studio-view-title">Розыгрыш не выбран</h3>
@@ -383,8 +409,8 @@
                 <div><div class="analysis-field-heading"><label class="field-label" for="studio-gpu-stride">Шаг анализа мяча</label><button class="analysis-help" type="button" aria-label="О шаге анализа мяча" aria-describedby="studio-ball-step-help">i<span id="studio-ball-step-help" class="analysis-tooltip" role="tooltip">Шаг окон VBallNet в кадрах: от 1 до 9. Меньший шаг увеличивает перекрытие окон и время анализа.</span></button></div>
                                   <input id="studio-gpu-stride" type="number" min="1" max="9" step="1" value="9" data-default="9"></div>
                 <div>
-                  <div class="analysis-field-heading"><label class="field-label" for="studio-gpu-person-stride">Игроки и позы · шаг, кадров</label><button class="analysis-help" type="button" aria-label="О частоте определения игроков и поз" aria-describedby="studio-person-step-help">i<span id="studio-person-step-help" class="analysis-tooltip" role="tooltip">Детектор игроков и RTMPose работают на одних кадрах, по реальным рамкам детектора. Промежуточные кадры не передаются в эти нейросети.<span id="studio-gpu-person-rate" class="analysis-tooltip-rate" role="status" aria-live="polite">Видео: 30 кадров в секунду (30 FPS). Каждый 10-й кадр → 3 раза/с.</span></span></button></div>
-                  <input id="studio-gpu-person-stride" type="number" min="1" max="30" step="1" value="10" data-default="10" aria-describedby="studio-gpu-person-rate">
+                  <div class="analysis-field-heading"><label class="field-label" for="studio-gpu-person-stride">Игроки и позы · шаг, кадров</label><button class="analysis-help" type="button" aria-label="О частоте определения игроков и поз" aria-describedby="studio-person-step-help">i<span id="studio-person-step-help" class="analysis-tooltip" role="tooltip">Детектор игроков и RTMPose работают на одних кадрах, по реальным рамкам детектора. Промежуточные кадры не передаются в эти нейросети.<span id="studio-gpu-person-rate" class="analysis-tooltip-rate" role="status" aria-live="polite">Видео: 30 кадров в секунду (30 FPS). Каждый кадр → 30 раз/с.</span></span></button></div>
+                  <input id="studio-gpu-person-stride" type="number" min="1" max="30" step="1" value="1" data-default="1" aria-describedby="studio-gpu-person-rate">
                 </div>
               </div>
               <details class="analysis-profile-advanced">
@@ -460,7 +486,7 @@
                 <button id="studio-analysis-post-only" class="primary analysis-stage-launch" type="button" title="Запустить CPU на выбранной в шапке GPU-версии и сохранить новую постобработку">▶ Начать анализ</button>
               </div>
               <div class="analysis-profile-fields analysis-profile-core analysis-profile-core-post">
-                <div><label class="field-label" for="studio-post-touch-algorithm">Алгоритм касаний</label><select id="studio-post-touch-algorithm" data-default="legacy"><option value="pose_motion">Строгий: траектория + точки тела</option><option value="legacy" selected>VBallNet + RTMPose: контакты и изломы ±0,1 с</option></select></div>
+                <div><label class="field-label" for="studio-post-touch-algorithm">Алгоритм касаний</label><select id="studio-post-touch-algorithm" data-default="pose_motion"><option value="pose_motion" selected>Строгий: траектория + точки тела</option><option value="legacy">VBallNet + RTMPose: контакты и изломы ±0,1 с</option></select></div>
                 <div><label class="field-label" for="studio-post-touch-threshold">Мин. уверенность физического касания</label><input id="studio-post-touch-threshold" type="number" min="0" max="1" step="0.01" value="0.48" data-default="0.48"></div>
               </div>
               <details class="analysis-profile-advanced">

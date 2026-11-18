@@ -1,4 +1,4 @@
-// Dependency-free regression for creation modal: DnD upload + global players + linked project.
+// Dependency-free regression for creation modal: native source picker, global players and linked project.
 import {readFileSync} from "node:fs";
 import {join} from "node:path";
 import {fileURLToPath} from "node:url";
@@ -55,13 +55,16 @@ ui.createForm.reset=()=>{ui.projectName.value="";ui.projectPlayerName.value="";}
 const tick=async()=>{for(let i=0;i<12;i++)await new Promise(resolve=>setImmediate(resolve));};
 const videoName="match--"+("a".repeat(32))+".mp4";
 const athleteId="b".repeat(12),projectId="c".repeat(12);
-let uploads=0,createdPayload=null,selectedProject=null,playerList=[];
+let nativePicks=0,createdPayload=null,selectedProject=null,playerList=[];
 const request=async path=>{
-  if(path.startsWith("/api/project-source/lookup?"))return {duplicate:false};
-  assert.equal(path,"/api/videos");
-  return {videos:uploads?[{name:videoName,display_name:"match.mp4",origin:"uploaded",size_gb:0.2}]:[]};
+  assert.notEqual(path,"/api/videos","Global video catalog must not be loaded");
+  throw Error("Unexpected request: "+path);
 };
 const post=async(path,payload)=>{
+  if(path==="/api/project-source/native-pick"){
+    nativePicks++;
+    return {videos:[{name:videoName,display_name:"match.mp4",duration_sec:125}]};
+  }
   if(path==="/api/players/library/native"){
     if(payload.action==="read")return {players:playerList,revision:playerList.length?"x".repeat(64):"absent"};
     assert.equal(payload.action,"create");
@@ -84,7 +87,6 @@ class XMLHttpRequest {
   setRequestHeader(){}
   send(form){
     assert.equal(form.file.name,"match.mp4");
-    uploads++;
     this.onProgress?.({lengthComputable:true,total:100,loaded:100});
     this.responseText=JSON.stringify({name:videoName,display_name:"match.mp4"});
     this.events.get("load")();
@@ -104,7 +106,8 @@ assert.ok(start>0&&stop>start,"project creation controller not found");
 vm.runInNewContext(source.slice(start,stop),{
   ui,make,request,post,window,Event,projects,message,failed,
   invalidateCatalog:()=>{},FormData,XMLHttpRequest,TextEncoder,Set,URLSearchParams,
-  document:{createElement:tag=>new Elem(tag)},
+  document:{createElement:tag=>new Elem(tag),
+    getElementById:id=>({click(){assert.equal(id,"studio-nav-analysis");}})},
 });
 ui.projectNew.click();await tick();
 assert.equal(ui.projectDialog.open,true);
@@ -114,7 +117,19 @@ ui.projectAddPlayer.click();await tick();
 assert.deepEqual(ui.projectPlayers.querySelectorAll("input[type=checkbox]:checked").map(x=>x.value),[athleteId]);
 ui.projectDrop.dispatch("drop",{dataTransfer:{files:[{name:"match.mp4",size:2048}]}});
 await tick();
-assert.deepEqual(ui.projectVideos.querySelectorAll("input[type=checkbox]:checked").map(x=>x.value),[videoName]);
+assert.equal(nativePicks,1);
+assert.equal(ui.projectVideos.children.length,1,"Only explicitly picked videos must appear");
+assert.match(ui.projectVideos.children[0].className,/studio-project-linked-video/);
+assert.equal(ui.projectVideos.children[0].children[0].textContent,"match.mp4");
+assert.equal(ui.projectVideos.children[0].children[1].textContent,"02:05");
+ui.projectVideos.children[0].children[2].click();
+assert.equal(ui.projectVideos.children.length,1);
+assert.match(ui.projectVideos.children[0].textContent,/Видео пока не выбраны/);
+assert.equal(ui.projectSubmit.disabled,true);
+ui.projectDrop.dispatch("drop",{dataTransfer:{files:[{name:"match.mp4",size:2048}]}});
+await tick();
+assert.equal(nativePicks,2);
+assert.equal(ui.projectVideos.children[0].children[0].textContent,"match.mp4");
 ui.projectName.value="Тестовый матч";
 ui.projectName.dispatch("input");
 assert.equal(ui.projectSubmit.disabled,false);

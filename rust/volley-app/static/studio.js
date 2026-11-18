@@ -346,7 +346,7 @@
     trajectory:$("studio-overlay-trajectory"),players:$("studio-overlay-players"),
     pose:$("studio-overlay-pose"),court:$("studio-overlay-court"),
     mode:$("studio-overlay-processed"),rawMode:$("studio-overlay-raw"),rawControls:$("studio-overlay-raw-controls"),actionControls:$("studio-overlay-actions"),
-    rawBall:$("studio-raw-ball"),rawBallTrail:$("studio-raw-ball-trail"),rawVballVisible:$("studio-raw-vball-visible"),rawPeopleVisible:$("studio-raw-people-visible"),rawPlayer:$("studio-raw-player"),
+    rawBall:$("studio-raw-ball"),rawBallTrail:$("studio-raw-ball-trail"),rawVballVisible:$("studio-raw-vball-visible"),rawPeopleVisible:$("studio-raw-people-visible"),rawPlayer:$("studio-raw-player"),rawPlayerInterpolated:$("studio-raw-player-interpolated"),
     rawPose:$("studio-raw-pose"),rawPoseVisible:$("studio-raw-pose-visible"),
     raw:false,
     actionFlags:{attack:true,block:true,serve:true,overhead_pass:true,dig:true,low_touch:true},
@@ -476,6 +476,7 @@
       variant==="legacy"?"Архивный анализ":
       "\u0414\u0435\u0442\u0435\u043a\u0442\u043e\u0440 \u0438\u0433\u0440\u043e\u043a\u043e\u0432";
     input.disabled=!fusion;
+    $("studio-raw-player-interpolated-option")?.classList.toggle("hidden",variant!=="rfdetr-medium");
   };
   const overlayWindowStart=frame=>Math.max(0,Math.floor(frame/90)*90-60);
   const overlayWindowKey=(project,run,video,start)=>
@@ -655,7 +656,9 @@
       ctx.font="bold 12px Inter, sans-serif";
       ctx.textBaseline="bottom";
       const labelsKey=playerLabelKey(project,run,video,record.replay_sha256);
-      const owner=overlayLabels.loaded&&overlayLabels.key===labelsKey?
+      const conflict=record.frames?.find(row=>row.frame===frame)?.players?.some(player=>
+        player.id===event.provisional_track_id&&player.identity_conflict===true);
+      const owner=!conflict&&overlayLabels.loaded&&overlayLabels.key===labelsKey?
         overlayLabels.names.get(String(event.provisional_track_id)):null;
       const touchLabel=label+" · "+(owner||String(event.provisional_track_id));
       const textWidth=ctx.measureText(touchLabel).width;
@@ -810,6 +813,22 @@
             ctx.fillStyle="#d9eaff";ctx.fillText(Math.round(player.score*100)+"%",px+2,py+2);
           }
         }
+        if(overlay.rawPlayerInterpolated?.checked &&
+          overlay.rawDetectors.get(rawDetectorKey(project,run,video))==="rfdetr-medium"){
+          ctx.save();
+          ctx.strokeStyle="#ffbc69";ctx.fillStyle="#ffe0b0";ctx.lineWidth=1.8;
+          ctx.setLineDash([6,4]);
+          for(const person of raw.players_interpolated||[]){
+            if(!Array.isArray(person.box)||person.box.length!==4||
+              !person.box.every(Number.isFinite))continue;
+            const [x1,y1,x2,y2]=person.box;
+            if(x1>=x2||y1>=y2)continue;
+            const px=x+x1*width,py=y+y1*height;
+            ctx.strokeRect(px,py,(x2-x1)*width,(y2-y1)*height);
+            ctx.fillText("Интерп.",px+2,py+2);
+          }
+          ctx.restore();
+        }
         const poseBoxes=raw.poses?.length?raw.poses:(raw.poses_interpolated||[]);
         if(Array.isArray(poseBoxes)&&poseBoxes.length){
           ctx.save();ctx.setLineDash([5,4]);ctx.strokeStyle="#98a9d3";ctx.lineWidth=1.5;
@@ -917,7 +936,7 @@
         ctx.strokeRect(px,py,rw,rh);
         ctx.restore();
         const labelsKey=playerLabelKey(project,run,video,record.replay_sha256);
-        const owner=overlayLabels.loaded&&overlayLabels.key===labelsKey?
+        const owner=!player.identity_conflict&&overlayLabels.loaded&&overlayLabels.key===labelsKey?
           overlayLabels.names.get(String(player.id)):null;
         // Show the linked player's name, or the numeric ID when unassigned.
         const name=owner||String(player.id);
@@ -955,6 +974,7 @@
     const detail=event.detail||{};
     if(detail.project_id===s.project&&(!detail.video||detail.video===s.video)){
       invalidateOverlayLabels();
+      overlay.cache.clear();
       drawOverlay();
     }
   });
@@ -1029,6 +1049,251 @@
       if(!data.examples.length)training.list.textContent="Пока нет примеров касаний и разметки площадки.";
     }catch(error){training.list.textContent="Не удалось загрузить примеры: "+error.message;}
   };
+  // Source-scoped human truth. Separate from automatic CPU predictions and
+  // from pose examples: training mode never rewrites immutable inference.
+  const annotation={
+    data:null,epoch:0,busy:false,touchId:null,rallyId:null,pendingStart:null,
+    status:$("studio-annotation-status"),current:$("studio-annotation-current"),
+    lane:$("studio-annotation-touch-lane"),touchList:$("studio-annotation-touch-list"),
+    rallies:$("studio-annotation-rallies"),metrics:$("studio-annotation-metrics"),
+    pending:$("studio-annotation-rally-pending"),
+    seed:$("studio-annotation-seed"),add:$("studio-annotation-add-touch"),
+    move:$("studio-annotation-move-touch"),remove:$("studio-annotation-delete-touch"),
+    next:$("studio-annotation-new-rally"),begin:$("studio-annotation-rally-start"),
+    finish:$("studio-annotation-rally-end"),review:$("studio-annotation-review")
+  };
+  const annotationFrame=()=>Math.max(0,Math.min(
+    (annotation.data?.total_frames||1)-1,
+    Math.round((Number(ui.video.currentTime)||s.seekAt||0)*fps())));
+  const annotationClock=frame=>(frame/fps()).toFixed(3).replace(".",",")+" с";
+  const annotationNotice=(value,error=false)=>{
+    annotation.status.textContent=value;
+    annotation.status.classList.toggle("is-error",error);
+  };
+  const annotationReady=()=>annotation.data&&Array.isArray(annotation.data.touches);
+  const annotationSorted=type=>[...(annotation.data?.[type]||[])]
+    .sort((a,b)=>(a.frame??a.start)-(b.frame??b.start));
+  const annotationPosition=frame=>100*Math.max(0,Math.min(1,
+    frame/Math.max(1,(annotation.data?.total_frames||1)-1)));
+  const annotationMarkCurrent=()=>{
+    if(!training.active)return;
+    annotation.current.textContent=annotationClock(annotationFrame())+
+      " · кадр "+annotationFrame();
+    const cursor=annotation.lane.querySelector(".studio-annotation-playhead");
+    if(cursor)cursor.style.left=annotationPosition(annotationFrame())+"%";
+  };
+  const drawAnnotation=()=>{
+    if(!training.active)return;
+    const data=annotation.data,ready=annotationReady();
+    annotation.seed.disabled=annotation.busy||!s.run;
+    annotation.seed.textContent=ready?"Сбросить метки к автоматическим":"Взять автоматические метки за основу";
+    for(const key of ["add","begin","finish","review","next"])
+      annotation[key].disabled=annotation.busy||!ready;
+    annotation.move.disabled=annotation.busy||!ready||!annotation.touchId;
+    annotation.remove.disabled=annotation.move.disabled;
+    annotation.review.textContent=data?.reviewed?"Проверено ✓":"Завершить проверку видео";
+    annotation.review.disabled=annotation.review.disabled||Boolean(data?.reviewed);
+    annotation.pending.textContent=annotation.rallyId?
+      "Выбран розыгрыш: границы меняются кнопками":
+      annotation.pendingStart!==null?
+      "Начало "+annotationClock(annotation.pendingStart)+" · установите конец":"";
+    annotation.lane.replaceChildren();
+    annotation.touchList.replaceChildren();
+    annotation.rallies.replaceChildren();
+    if(!ready){
+      annotation.metrics.textContent="Сначала создайте эталон из автоматических меток.";
+      annotation.lane.textContent="Нет разметки";
+      annotation.rallies.textContent="Нет размеченных розыгрышей";
+      annotationMarkCurrent();return;
+    }
+    const cursor=document.createElement("div");
+    cursor.className="studio-annotation-playhead";cursor.setAttribute("aria-hidden","true");
+    annotation.lane.append(cursor);
+    // Scrubbable touch lane: individual marks are pointer and keyboard editable.
+    for(const item of annotationSorted("touches")){
+      const tick=document.createElement("button");
+      tick.type="button";tick.className="studio-annotation-tick"+
+        (item.id===annotation.touchId?" selected":"");
+      tick.style.left=annotationPosition(item.frame)+"%";
+      tick.title="Касание "+annotationClock(item.frame)+
+        ". Перетащите или выберите и нажмите «Перенести»";
+      tick.setAttribute("aria-label",tick.title);
+      let pointer=null;
+      tick.addEventListener("pointerdown",e=>{
+        if(e.button!==0)return;
+        e.preventDefault();e.stopPropagation();
+        annotation.touchId=item.id;
+        pointer={id:e.pointerId,initialX:e.clientX,frame:item.frame};
+        tick.setPointerCapture?.(e.pointerId);
+        tick.classList.add("selected");
+        annotation.move.disabled=false;annotation.remove.disabled=false;
+      });
+      tick.addEventListener("pointermove",e=>{
+        if(!pointer||pointer.id!==e.pointerId)return;
+        const box=annotation.lane.getBoundingClientRect();
+        if(!box.width)return;
+        pointer.frame=Math.max(0,Math.min(data.total_frames-1,Math.round(
+          (e.clientX-box.left)/box.width*(data.total_frames-1))));
+        tick.style.left=annotationPosition(pointer.frame)+"%";
+      });
+      tick.addEventListener("pointerup",e=>{
+        if(!pointer||pointer.id!==e.pointerId)return;
+        const destination=pointer.frame;
+        pointer=null;
+        if(destination!==item.frame)editAnnotation("move_touch",{id:item.id,frame:destination});
+        else {seekTimeline(item.frame/fps());drawAnnotation();}
+      });
+      tick.addEventListener("pointercancel",()=>{pointer=null;drawAnnotation();});
+      tick.addEventListener("keydown",e=>{
+        if(e.key==="ArrowLeft"||e.key==="ArrowRight"){
+          e.preventDefault();
+          annotation.touchId=item.id;
+          editAnnotation("move_touch",{id:item.id,frame:Math.max(0,Math.min(
+            data.total_frames-1,item.frame+(e.key==="ArrowRight"?1:-1)))});
+        }
+      });
+      annotation.lane.append(tick);
+    }
+    const touches=annotationSorted("touches");
+    for(const item of touches){
+      const row=document.createElement("button");row.type="button";
+      row.className="studio-annotation-touch"+(item.id===annotation.touchId?" selected":"");
+      row.textContent="● "+annotationClock(item.frame);
+      row.title="Выбрать касание и перейти к нему";
+      row.addEventListener("click",()=>{
+        annotation.touchId=item.id;seekTimeline(item.frame/fps());drawAnnotation();
+      });
+      annotation.touchList.append(row);
+    }
+    const rallies=annotationSorted("rallies");
+    for(let index=0;index<rallies.length;index++){
+      const item=rallies[index];
+      const row=document.createElement("div");
+      row.className="studio-annotation-rally"+(item.id===annotation.rallyId?" selected":"");
+      const jump=document.createElement("button");
+      jump.type="button";jump.className="studio-annotation-rally-jump";
+      jump.textContent="№"+(index+1)+" · "+annotationClock(item.start)+" — "+
+        annotationClock(item.end);
+      jump.addEventListener("click",()=>{
+        annotation.rallyId=item.id;annotation.pendingStart=null;
+        seekTimeline(item.start/fps());drawAnnotation();
+      });
+      const remove=document.createElement("button");remove.type="button";
+      remove.className="secondary";remove.textContent="×";remove.title="Удалить розыгрыш";
+      remove.setAttribute("aria-label","Удалить размеченный розыгрыш");
+      remove.addEventListener("click",()=>editAnnotation("delete_rally",{id:item.id}));
+      row.append(jump,remove);annotation.rallies.append(row);
+    }
+    if(!rallies.length)annotation.rallies.textContent="Розыгрышей пока нет.";
+    const m=data.metrics?.touches;
+    annotation.metrics.textContent=m?
+      (data.reviewed?"ПРОВЕРЕНО · ":"ЧЕРНОВИК · ")+
+      "Совпадений "+m.matched+" · лишних "+m.extra+" · пропущено "+m.missed+
+      " · F1 "+(100*m.f1).toFixed(1)+"% · ошибка времени "+
+      (m.matched?Number(m.mean_error_ms).toFixed(1)+" мс":"—")+" · окно ±1 кадр (33 мс)"+
+      " · границы "+(data.metrics.rallies.boundary_mean_error_ms===null?"—":
+      Number(data.metrics.rallies.boundary_mean_error_ms).toFixed(1)+" мс"):
+      "Нет результатов сравнения.";
+    const overall=data.overall;
+    if(overall?.reviewed_videos>0)annotation.metrics.textContent+=
+      " | Вся проверенная база: "+overall.reviewed_videos+" видео · F1 "+
+      (100*overall.f1).toFixed(1)+"% · лишних "+overall.extra+
+      " · пропущено "+overall.missed+" · средняя ошибка "+
+      (overall.matched?Number(overall.mean_error_ms).toFixed(1)+" мс":"—");
+    annotationMarkCurrent();
+  };
+  const refreshAnnotation=async()=>{
+    const epoch=++annotation.epoch,project=s.project,run=s.run;
+    annotation.data=null;annotation.touchId=null;annotation.rallyId=null;
+    annotation.pendingStart=null;
+    if(!training.active||!project||!run){
+      annotationNotice("Для разметки выберите CPU-анализ и видео.");
+      drawAnnotation();return;
+    }
+    annotationNotice("Загрузка эталонных меток…");
+    try{
+      const data=await request(url("/api/training/annotations",{
+        project_id:project,rally_run_id:run
+      }));
+      if(epoch!==annotation.epoch||project!==s.project||run!==s.run)return;
+      if(data.schema!=="volley-touch-annotations/1"||data.video!==s.video)
+        throw Error("Неверный источник эталонной разметки");
+      annotation.data=data;drawAnnotation();
+      annotationNotice(data.reviewed?"Эталон проверен. Метрики рассчитаны по исходным CPU-детекциям.":
+        "Корректируйте касания и границы, затем завершите проверку видео.");
+    }catch(error){
+      if(epoch!==annotation.epoch)return;
+      annotationNotice("Не удалось загрузить метки: "+error.message,true);drawAnnotation();
+    }
+  };
+  const editAnnotation=async(action,fields={})=>{
+    if(annotation.busy||!s.project||!s.run)return;
+    if(annotation.data&&(annotation.data.project_id!==s.project||
+        annotation.data.rally_run_id!==s.run||annotation.data.video!==s.video)){
+      annotationNotice("Источник сменился. Дождитесь загрузки его разметки.",true);return;
+    }
+    const project=s.project,run=s.run,epoch=annotation.epoch;
+    if(!annotation.data&&action!=="seed"){
+      annotationNotice("Сначала создайте разметку из автоматических меток.",true);return;
+    }
+    annotation.busy=true;
+    annotationNotice("Сохранение разметки…");
+    try{
+      const result=await post("/api/training/annotations",{
+        action,project_id:project,rally_run_id:run,
+        revision:annotation.data?.revision||0,...fields
+      });
+      if(epoch!==annotation.epoch||project!==s.project||run!==s.run)return;
+      annotation.data=result;
+      if(action==="seed"||action==="delete_touch"){annotation.touchId=null;}
+      if(action==="seed"||action==="delete_rally"){annotation.rallyId=null;annotation.pendingStart=null;}
+      drawAnnotation();drawTimeline();
+      annotationNotice(action==="review"?
+        "Видео подтверждено. Результат проверки сохранён отдельно от автоматической детекции.":
+        "Метки сохранены. Проверка сброшена до повторного подтверждения.");
+    }catch(error){
+      if(epoch!==annotation.epoch)return;
+      annotationNotice("Ошибка сохранения: "+error.message,true);
+    }finally{annotation.busy=false;drawAnnotation();}
+  };
+  annotation.seed.addEventListener("click",()=>{
+    if(annotationReady()&&!window.confirm("Заменить текущую ручную разметку автоматической?"))return;
+    editAnnotation("seed");
+  });
+  annotation.add.addEventListener("click",()=>editAnnotation("add_touch",{frame:annotationFrame()}));
+  annotation.move.addEventListener("click",()=>{
+    if(annotation.touchId)editAnnotation("move_touch",{id:annotation.touchId,frame:annotationFrame()});
+  });
+  annotation.remove.addEventListener("click",()=>{
+    if(annotation.touchId)editAnnotation("delete_touch",{id:annotation.touchId});
+  });
+  annotation.next.addEventListener("click",()=>{
+    annotation.rallyId=null;annotation.pendingStart=null;
+    annotationNotice("Новый розыгрыш: выберите кадр начала, затем кадр конца.");
+    drawAnnotation();
+  });
+  annotation.begin.addEventListener("click",()=>{
+    const frame=annotationFrame();
+    const row=annotation.data?.rallies?.find(x=>x.id===annotation.rallyId);
+    if(row)editAnnotation("move_rally",{id:row.id,start:frame,end:row.end});
+    else{annotation.pendingStart=frame;drawAnnotation();}
+  });
+  annotation.finish.addEventListener("click",()=>{
+    const frame=annotationFrame();
+    const row=annotation.data?.rallies?.find(x=>x.id===annotation.rallyId);
+    if(row)editAnnotation("move_rally",{id:row.id,start:row.start,end:frame});
+    else if(annotation.pendingStart!==null){
+      const start=annotation.pendingStart;
+      editAnnotation("add_rally",{start,end:frame}).then(()=>{
+        if(annotation.data?.rallies?.some(x=>x.start===start&&x.end===frame)){
+          annotation.pendingStart=null;drawAnnotation();
+        }
+      });
+    }else annotationNotice("Сначала установите начало нового розыгрыша.",true);
+  });
+  annotation.review.addEventListener("click",()=>editAnnotation("review"));
+  ui.video.addEventListener("timeupdate",annotationMarkCurrent);
+  ui.video.addEventListener("seeked",annotationMarkCurrent);
   const pickTrainingPlayer=event=>{
     if(!training.active||!ui.video.paused||!s.run||!s.video)return;
     const frame=Math.max(0,Math.floor(ui.video.currentTime*fps()+0.001));
@@ -1123,13 +1388,14 @@
       drawTimeline();drawOverlay();
       trainingMessage("Остановите видео в момент удара и щёлкните по рамке игрока. Нужны сохранённые RTMPose и VBallNet.");
       refreshTraining();
+      refreshAnnotation();
     });
     for(const [input,value] of [[overlay.rawBall,$("studio-raw-ball-value")],
       [overlay.rawPlayer,$("studio-raw-player-value")],
       [overlay.rawPose,$("studio-raw-pose-value")]]){
       input.addEventListener("input",()=>{value.textContent=input.value+"%";drawOverlay();});
     }
-    for(const input of [overlay.rawVballVisible,overlay.rawPeopleVisible,overlay.rawPoseVisible,overlay.rawBallTrail].filter(Boolean))
+    for(const input of [overlay.rawVballVisible,overlay.rawPeopleVisible,overlay.rawPlayerInterpolated,overlay.rawPoseVisible,overlay.rawBallTrail].filter(Boolean))
       input.addEventListener("change",drawOverlay);
     for(const input of overlay.actionControls.querySelectorAll("[data-overlay-action]")){
       input.addEventListener("change",()=>{overlay.actionFlags[input.dataset.overlayAction]=input.checked;drawOverlay();});
@@ -1255,6 +1521,17 @@
           ctx.fillRect(x,y,Math.max(1,x2-x),bandHeight);
         }
       }
+      if(training.active&&annotationReady()){
+        for(const mark of annotation.data.rallies){
+          const x=mark.start/fps()/duration*width;
+          const x2=(mark.end+1)/fps()/duration*width;
+          ctx.fillStyle="#00ad9470";ctx.fillRect(x,y,Math.max(1,x2-x),bandHeight);
+        }
+        for(const mark of annotation.data.touches){
+          const x=mark.frame/fps()/duration*width;
+          ctx.fillStyle="#10deb2";ctx.fillRect(x,y,Math.max(2,Math.ceil(dpr)),bandHeight);
+        }
+      }
       if(overlay.flags.touches&&Array.isArray(data.touch_annotations)){
         for(const classified of [false,true]){
           for(const touch of data.touch_annotations){
@@ -1275,6 +1552,8 @@
   };
   const clearTimeline=()=>{
     timeline.epoch++;timeline.dragging=false;timeline.data=null;
+    if(training.active){annotation.epoch++;annotation.data=null;annotation.touchId=null;
+      annotation.rallyId=null;annotation.pendingStart=null;drawAnnotation();}
     timeline.status.textContent="Выберите CPU-версию";
     timeline.middle.textContent="—";timeline.end.textContent="—";
     timeline.track.title="";drawTimeline();refreshRallyCardTouchTicks();
@@ -1317,6 +1596,7 @@
       timeline.end.textContent=timeLabel(duration);
       drawTimeline();syncFavoritesSelection();drawOverlay();
       refreshRallyCardTouchTicks();updateRallyCardProgress();
+      if(training.active)refreshAnnotation();
       if(s.current){
         const selected=s.items.find(item=>item.candidate_id===s.current);
         if(selected){
@@ -1343,14 +1623,28 @@
     }
     return left>0&&rows[left-1].end_frame>=frame?rows[left-1]:null;
   };
+  const loadPreviewVideo=(autoplay=false)=>{
+    const project=s.project,video=s.video,key=project+":"+video;
+    if(window.VolleyballBrowserVideo?.load){
+      window.VolleyballBrowserVideo.load(ui.video,project,video,{
+        autoplay,seek:s.seekAt
+      }).catch(error=>{
+        if(s.videoKey===key)
+          message("Не удалось загрузить видео: "+error.message,"error");
+      });
+    }else{
+      ui.video.src=url("/api/video-media",{project_id:project,video});
+      ui.video.load();
+      if(autoplay)ui.video.play().catch(()=>{});
+    }
+  };
   const ensurePreviewVideo=()=>{
     if(!s.project||!s.video)return;
     const key=s.project+":"+s.video;
     if(s.videoKey===key)return;
     s.videoKey=key;
     ui.emptyVideo.classList.add("hidden");
-    ui.video.src=url("/api/video-media",{project_id:s.project,video:s.video});
-    ui.video.load();
+    loadPreviewVideo();
   };
   const seekTimeline=seconds=>{
     if((!overlay.raw&&!timeline.data)||!s.video||(!overlay.raw&&!s.run))return;
@@ -1376,8 +1670,7 @@
     const key=s.project+":"+s.video;
     if(s.videoKey!==key){
       s.videoKey=key;
-      ui.video.src=url("/api/video-media",{project_id:s.project,video:s.video});
-      ui.video.load();
+      loadPreviewVideo();
     }else if(ui.video.readyState>=1){
       try{ui.video.currentTime=position;}catch{}
     }
@@ -1998,16 +2291,16 @@
     setOverlaySource(item);
     prefetchOverlayAtFrame(Math.floor(s.seekAt*fps()));
     drawTimeline();
+    let deferredPlay=false;
     if(s.videoKey!==key){
       s.videoKey=key;
-      ui.video.src=url("/api/video-media",{project_id:s.project,video:s.video});
-      ui.video.load();
+      loadPreviewVideo(previewIsVisible());
+      deferredPlay=true;
     }else if(ui.video.readyState>=1){
       try{ui.video.currentTime=s.seekAt;}catch{}
     }
-    // A card click starts playback only while the preview is visible.
     // Metadata/seek is restored by loadedmetadata without background playback.
-    if(previewIsVisible())ui.video.play().catch(error=>
+    if(previewIsVisible()&&!deferredPlay)ui.video.play().catch(error=>
       message("Воспроизведение недоступно: "+error.message,"error"));
   };
   const cards=()=>{
@@ -2240,8 +2533,7 @@
     let creating=false,uploading=false,addingPlayer=false,activeUpload=null;
     let playerRevision="absent",dialogEpoch=0; const linkedFiles=new Map();
     const maxVideoBytes=window.VolleyballUpload.maxVideoBytes;
-    const selectedVideos=()=>[...ui.projectVideos.querySelectorAll("input[type=checkbox]:checked")]
-      .map(input=>input.value);
+    const selectedVideos=()=>[...linkedFiles.keys()];
     const selectedPlayers=()=>[...ui.projectPlayers.querySelectorAll("input[type=checkbox]:checked")]
       .map(input=>input.value);
     const updateSubmit=()=>{
@@ -2254,49 +2546,34 @@
     const alertCreate=error=>{
       ui.projectCreateError.textContent=String(error?.message||error);
     };
-    const makeChoice=(row,chosen)=>{
-      const label=make("label","studio-project-video-option");
-      label.title=String(row.display_name||row.name);
-      const box=document.createElement("input");
-      box.type="checkbox";box.value=row.name;box.checked=chosen;
-      box.addEventListener("change",updateSubmit);
-      label.append(box,make("span","",
-        (row.display_name||row.name)+(row.origin==="uploaded"?" · загружено":" · локально")+
-        (Number.isFinite(row.size_gb)?" · "+row.size_gb+" ГБ":"")));
-      return label;
+    const formatVideoDuration=seconds=>{
+      if(!Number.isFinite(seconds)||seconds<0)return "--:--";
+      const total=Math.round(seconds);
+      return String(Math.floor(total/60)).padStart(2,"0")+":"+
+        String(total%60).padStart(2,"0");
     };
     const renderLinkedFiles=()=>{
-      ui.projectVideos.querySelectorAll(".studio-project-pending").forEach(row=>row.remove());
-      for(const [key,file] of linkedFiles){
-        const row=make("div","studio-project-video-option studio-project-pending");
-        const checkbox=document.createElement("input");
-        checkbox.type="checkbox";checkbox.value=key;checkbox.checked=true;
-        checkbox.addEventListener("change",updateSubmit);
-        const name=make("span","",file.display_name+" · оригинал на диске");
-        name.style.flex="1";
-        const remove=make("button","secondary","×");
-        remove.type="button";remove.title="Убрать из проекта";
-        remove.setAttribute("aria-label","Убрать "+file.display_name);
-        remove.addEventListener("click",()=>{
-          linkedFiles.delete(key);row.remove();updateSubmit();
-        });
-        row.append(checkbox,name,remove);
-        ui.projectVideos.prepend(row);
-      }
-    };
-    const refreshVideos=async(autoChecked=new Set(),token=dialogEpoch)=>{
-      const previous=new Set(selectedVideos());
-      const raw=await request("/api/videos");
-      if(!ui.projectDialog.open||token!==dialogEpoch)return;
-      const list=(Array.isArray(raw.videos)?raw.videos:[]).filter(row=>
-        typeof row.name==="string"&&row.name.length>0);
+      const scrollTop=ui.projectVideos.scrollTop;
       ui.projectVideos.replaceChildren();
-      for(const row of list){
-        ui.projectVideos.append(makeChoice(row,previous.has(row.name)||autoChecked.has(row.name)));
+      for(const [key,file] of linkedFiles){
+        const row=make("div","studio-project-video-option studio-project-linked-video");
+        row.title=String(file.display_name||file.name);
+        const name=make("span","studio-project-video-name",file.display_name||file.name);
+        const duration=make("time","studio-project-video-duration",
+          formatVideoDuration(file.duration_sec));
+        duration.title="Продолжительность видео";
+        const remove=make("button","secondary studio-project-video-remove","×");
+        remove.type="button";remove.title="Отвязать видео от нового проекта";
+        remove.setAttribute("aria-label","Отвязать "+(file.display_name||file.name));
+        remove.addEventListener("click",()=>{
+          linkedFiles.delete(key);renderLinkedFiles();
+        });
+        row.append(name,duration,remove);
+        ui.projectVideos.append(row);
       }
-      if(!list.length)ui.projectVideos.append(make("p","panel-note",
-        "Пока нет видео. Перетащите MP4 сюда или выберите его через проводник."));
-      renderLinkedFiles();
+      if(!linkedFiles.size)ui.projectVideos.append(make("p","studio-project-video-empty",
+        "Видео пока не выбраны. Добавьте исходные файлы выше."));
+      ui.projectVideos.scrollTop=scrollTop;
       updateSubmit();
     };
     const renderPlayers=(players,selected)=>{
@@ -2329,14 +2606,12 @@
       playerRevision="absent"; linkedFiles.clear();
       ui.projectCreateError.textContent="";
       ui.projectUploadStatus.textContent="";
-      ui.projectVideos.replaceChildren(make("p","panel-note","Загрузка видео…"));
+      renderLinkedFiles();
       ui.projectPlayers.replaceChildren(make("p","panel-note","Загрузка игроков…"));
       ui.projectSubmit.disabled=true;
       ui.projectDialog.showModal();
       ui.projectName.focus();
-      const results=await Promise.allSettled([
-        refreshVideos(new Set(),token),refreshPlayers(new Set(),token)
-      ]);
+      const results=await Promise.allSettled([refreshPlayers(new Set(),token)]);
       if(token!==dialogEpoch)return;
       for(const result of results)if(result.status==="rejected")alertCreate(result.reason);
     };
@@ -2592,7 +2867,12 @@
   ui.video.addEventListener("ended",()=>{
     if(s.stopAt!==null&&s.playbackMode!=="free")onRallyBoundary();
   });
+  let videoDecodeErrorShown=false;
+  ui.video.addEventListener("loadeddata",()=>{
+    if(videoDecodeErrorShown){videoDecodeErrorShown=false;overlayMessage("");}
+  });
   ui.video.addEventListener("error",()=>{
+    videoDecodeErrorShown=true;
     overlay.presentedTime=null;overlayContext();
     if(s.videoKey)overlayMessage("Видео не декодируется (код "+
       (ui.video.error?.code||"?")+"). Нажмите «Воспроизвести» для повторной загрузки.");
@@ -2628,7 +2908,8 @@
       if(ui.video.error){
         // A failed byte-range request must not permanently poison this player.
         overlay.presentedTime=null;
-        ui.video.load();
+        loadPreviewVideo(true);
+        return;
       }
       // Replay a completed selection from its beginning, not a fraction past its end.
       if(s.playbackMode!=="free"&&s.clipStart!==null&&s.clipEnd!==null&&

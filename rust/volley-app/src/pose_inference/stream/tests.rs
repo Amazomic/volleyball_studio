@@ -1,21 +1,16 @@
 #[test]
-fn shared_pose_sampling_indices_match_legacy_windows_across_tail_boundaries() {
-    use std::io::Cursor;
-    use volley_media::frame_windows::FrameWindows;
+fn shared_pose_sampling_includes_every_emitted_sample_after_bounded_lookahead() {
     for frames in [
         8u64, 9, 10, 17, 18, 19, 27, 28, 36, 40, 48, 49, 50, 71, 72, 73,
     ] {
         for stride in [1usize, 2, 3, 5, 9, 10, 30] {
-            let source = Cursor::new(vec![7u8; frames as usize]);
-            let mut legacy = FrameWindows::new(source, 1, stride).unwrap();
-            let mut expected = Vec::new();
-            while let Some(window) = legacy.next_window().unwrap() {
-                expected.push(window.first_frame);
-            }
+            let emitted = frames / 9 * 9;
+            let expected: Vec<_> = (0..emitted)
+                .filter(|frame| frame % stride as u64 == 0)
+                .collect();
             let mut pending = VecDeque::new();
             let mut actual = Vec::new();
-            let full_frames = frames / 9 * 9;
-            for first in (0..full_frames).step_by(9) {
+            for first in (0..emitted).step_by(9) {
                 for idx in first..first + 9 {
                     if idx % stride as u64 == 0 {
                         pending.push_back(sample(idx));
@@ -23,12 +18,10 @@ fn shared_pose_sampling_indices_match_legacy_windows_across_tail_boundaries() {
                 }
                 actual.extend(ready(&mut pending, first + 8).into_iter().map(|v| v.index));
             }
-            if frames > full_frames {
-                actual.extend(ready(&mut pending, frames - 1).into_iter().map(|v| v.index));
-            }
+            actual.extend(ready(&mut pending, u64::MAX).into_iter().map(|v| v.index));
             assert_eq!(
                 actual, expected,
-                "Failed 30-FPS pose sampling parity for N={frames}, stride={stride}"
+                "Pose sample loss at {frames} frames / stride {stride}"
             );
         }
     }
@@ -46,34 +39,32 @@ fn sample(index: u64) -> PendingFrame {
 }
 
 #[test]
-fn pose_window_requires_eight_future_frames_and_uses_tail_lookahead() {
-    let mut queue = VecDeque::from([sample(0), sample(10), sample(20)]);
+fn pose_window_requires_thirty_future_frames_or_terminal_drain() {
+    let mut queue = VecDeque::from([sample(0), sample(10), sample(20), sample(30), sample(40)]);
+    assert!(ready(&mut queue, 29).is_empty());
     assert_eq!(
-        ready(&mut queue, 8)
+        ready(&mut queue, 30)
             .iter()
-            .map(|v| v.index)
+            .map(|p| p.index)
             .collect::<Vec<_>>(),
         vec![0]
     );
-    assert!(ready(&mut queue, 17).is_empty());
+    assert!(ready(&mut queue, 39).is_empty());
     assert_eq!(
-        ready(&mut queue, 21)
+        ready(&mut queue, 50)
             .iter()
-            .map(|v| v.index)
+            .map(|p| p.index)
             .collect::<Vec<_>>(),
-        vec![10]
+        vec![10, 20]
     );
-    assert_eq!(queue.len(), 1);
-    assert!(ready(&mut queue, 27).is_empty());
-    assert_eq!(ready(&mut queue, 28)[0].index, 20);
-    // A 49-frame source emits five model windows (45 frames), but
-    // frame 40's pose sample needs frames 45..48 from the final tail.
-    let mut last = VecDeque::from([sample(30), sample(40)]);
-    assert_eq!(ready(&mut last, 44)[0].index, 30);
-    assert_eq!(ready(&mut last, 48)[0].index, 40);
-    let mut short = VecDeque::from([sample(30), sample(40)]);
-    assert_eq!(ready(&mut short, 38)[0].index, 30);
-    assert!(ready(&mut short, 47).is_empty());
+    assert_eq!(
+        ready(&mut queue, u64::MAX)
+            .iter()
+            .map(|p| p.index)
+            .collect::<Vec<_>>(),
+        vec![30, 40]
+    );
+    assert!(queue.is_empty());
 }
 
 fn fake_pending() -> (PendingPose, Value) {
@@ -98,6 +89,8 @@ fn fake_pending() -> (PendingPose, Value) {
         decoded_frames: 22,
         sampled: 1,
         people: 0,
+        observed_crops: 0,
+        interpolated_crops: 0,
         original_source: original.clone(),
         source_identity: source.clone(),
         project_id: "1234abcdef01".into(),
@@ -129,6 +122,8 @@ fn streamed_pose_manifest_is_published_only_after_verified_fusion() {
     assert_eq!(manifest["source_fusion_sha256"], fusion["sha256"]);
     assert_eq!(manifest["decoded_frames"], 22);
     assert_eq!(manifest["sampled_frames"], 1);
+    assert_eq!(manifest["observed_pose_crops"], 0);
+    assert_eq!(manifest["interpolated_pose_crops"], 0);
     assert!(manifest.get("interpolate_pose").is_none());
     assert_eq!(
         manifest["sha256"],

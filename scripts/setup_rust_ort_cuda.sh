@@ -81,7 +81,7 @@ done
 if [[ -n "$existing" ]];then LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$existing";fi
 export LD_LIBRARY_PATH
 if command -v nm >/dev/null;then
-  nm -D "$lib" 2>/dev/null|grep -q "OrtGetApiBase" ||
+  nm -D "$lib" 2>/dev/null|grep "OrtGetApiBase" >/dev/null ||
     { echo "Invalid ONNX Runtime 1.22 C API" >&2;exit 3; }
 fi
 if command -v ldd >/dev/null;then

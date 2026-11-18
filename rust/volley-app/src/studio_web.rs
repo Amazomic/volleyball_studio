@@ -25,6 +25,7 @@ const VOLLEYBALL_PHOTO_PNG: &[u8] = include_bytes!("../static/volleyball-photo.p
 const SCRIPT: &str = include_str!("../static/studio.js");
 const UPLOAD_SCRIPT: &str = include_str!("../static/studio_upload.js");
 const PLAYBACK_SCRIPT: &str = include_str!("../static/studio_playback.js");
+const FRAGMENTS_SCRIPT: &str = include_str!("../static/studio_fragments.js");
 const HASH_SCRIPT: &str = include_str!("../static/studio_hash.js");
 const EDITOR_SCRIPT: &str = include_str!("../static/studio_editor.js");
 const TASKS_SCRIPT: &str = include_str!("../static/studio_tasks.js");
@@ -151,6 +152,13 @@ pub async fn playback_js() -> Response {
         "text/javascript; charset=utf-8",
         "studio_playback.js",
         PLAYBACK_SCRIPT,
+    )
+}
+pub async fn fragments_js() -> Response {
+    studio_asset(
+        "text/javascript; charset=utf-8",
+        "studio_fragments.js",
+        FRAGMENTS_SCRIPT,
     )
 }
 pub async fn tasks_js() -> Response {

@@ -93,6 +93,10 @@ struct Aggregate {
     best_frame: u64,
     best_score: f64,
     best_box: [f64; 4],
+    #[serde(default)]
+    first_box: [f64; 4],
+    #[serde(default)]
+    last_box: [f64; 4],
     photo_samples: Vec<PhotoSample>,
     visible_spans: Vec<(u64, u64)>,
     #[serde(with = "source_index::pair_geometry_keys")]
