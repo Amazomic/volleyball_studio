@@ -381,7 +381,7 @@ fn finalize_model_output(
         "model":context.config.model,
         "person_pipeline":if context.config.model == ModelKind::Players {
             let _ = volley_inference::person::DetectorVariant::from_env()?;
-            Some("rfdetr_medium_18250b5a_detector_boxes_pose_deferred_sampled_v3")
+            Some("rfdetr_medium_18250b5a_detector_boxes_pose_deferred_sampled_bytetrack_lowconf_v4")
         } else { None },
         "person_sampling_period_frames":if context.config.model == ModelKind::Players {
             context.person_stride
