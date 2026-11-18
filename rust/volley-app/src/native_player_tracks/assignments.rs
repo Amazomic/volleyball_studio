@@ -43,13 +43,17 @@ pub(super) fn tracks_co_visible(a: &Aggregate, b: &Aggregate) -> bool {
 /// This is deliberately based on two *measured* detections in the same
 /// video frame, not overlapping Track ID lifetimes or interpolated boxes.
 /// Distinct detections represent two bodies and cannot share an athlete.
-fn measured_conflict_frame(ctx: &Inputs, a: u64, b: u64) -> Option<u64> {
+pub(super) fn measured_conflict_frame(ctx: &Inputs, a: u64, b: u64) -> Option<u64> {
     let pair = (a.min(b), a.max(b));
-    ctx.tracks
+    let evidence = ctx
+        .tracks
         .get(&a)?
         .observed_pairs
-        .get(&pair)?
-        .first_distinct_frame
+        .get(&pair)
+        .or_else(|| ctx.tracks.get(&b)?.observed_pairs.get(&pair))?;
+    (evidence.distinct_position >= 2)
+        .then_some(evidence.first_distinct_frame)
+        .flatten()
 }
 
 /// Check the newly requested manual links against **both** confirmed and
@@ -59,18 +63,13 @@ fn measured_conflict_frame(ctx: &Inputs, a: u64, b: u64) -> Option<u64> {
 pub(super) fn new_manual_owner_conflict(
     ctx: &Inputs,
     reviewed: &BTreeMap<u64, String>,
-    automatic: &Value,
+    _automatic: &Value,
     changed: &[u64],
 ) -> Option<(u64, u64, u64)> {
-    let mut existing = reviewed.clone();
-    for (id, owner) in automatic.as_object().into_iter().flat_map(|m| m.iter()) {
-        if let (Ok(id), Some(owner)) = (id.parse::<u64>(), owner.as_str()) {
-            existing.entry(id).or_insert_with(|| owner.to_owned());
-        }
-    }
+    let existing = reviewed;
     for &id in changed {
         let owner = reviewed.get(&id)?;
-        for (&other, other_owner) in &existing {
+        for (&other, other_owner) in existing {
             if id != other && owner == other_owner {
                 if let Some(frame) = measured_conflict_frame(ctx, id, other) {
                     return Some((id, other, frame));
@@ -79,6 +78,29 @@ pub(super) fn new_manual_owner_conflict(
         }
     }
     None
+}
+pub(super) fn conflicting_automatic_links(
+    ctx: &Inputs,
+    reviewed: &BTreeMap<u64, String>,
+    automatic: &Value,
+) -> BTreeSet<u64> {
+    automatic
+        .as_object()
+        .into_iter()
+        .flat_map(|map| map.iter())
+        .filter_map(|(id, owner)| {
+            let id = id.parse::<u64>().ok()?;
+            let owner = owner.as_str()?;
+            reviewed
+                .iter()
+                .any(|(other, assigned)| {
+                    *other != id
+                        && assigned == owner
+                        && measured_conflict_frame(ctx, id, *other).is_some()
+                })
+                .then_some(id)
+        })
+        .collect()
 }
 /// A conflict is an actual contradictory assignment, not an unassigned
 /// photo suggestion that could not be safely accepted.
@@ -96,7 +118,7 @@ fn assigned_visibility_conflicts(
     for ids in by_owner.values() {
         for (index, first) in ids.iter().enumerate() {
             for second in ids.iter().skip(index + 1) {
-                if tracks_co_visible(&ctx.tracks[first], &ctx.tracks[second]) {
+                if measured_conflict_frame(ctx, *first, *second).is_some() {
                     conflicts.insert(*first);
                     conflicts.insert(*second);
                 }
@@ -880,21 +902,33 @@ pub(super) fn change(state: &AppState, req: &TrackEdit) -> Result<Value, ApiErro
             &previous_automatic,
             &req.track_ids,
         ) {
-            return Err(storage::conflict(format!(
-                "ID {id} и уже привязанный ID {other} показывают разных людей в одном кадре {frame}. Привязка не выполнена."
-            )));
+            let message = if req.track_ids.contains(&other) {
+                format!(
+                    "В выбранных Track ID {id} и {other} обнаружены разные люди в кадре {frame}. Нельзя привязать их к одному игроку: исключите ошибочный ID из группы или снимите его выбор."
+                )
+            } else {
+                format!(
+                    "ID {id} конфликтует с ранее подтверждённым ID {other}: разные люди в кадре {frame}. Проверьте кадр и при ошибке сначала снимите прежнюю привязку ID {other}."
+                )
+            };
+            return Err(storage::conflict(message));
         }
     }
+    let displaced_automatic = if req.action == "assign" {
+        conflicting_automatic_links(conflict_tracks, &review.assignments, &previous_automatic)
+    } else {
+        BTreeSet::new()
+    };
     if let Some(automatic) = doc
         .get_mut("automatic_assignments")
         .and_then(Value::as_object_mut)
     {
-        // Explicit confirmation changes only the selected ID. Do not evict
-        // unrelated automatic IDs: a rejected conflict must be atomic.
-        for id in &req.track_ids {
+        for id in req.track_ids.iter().chain(displaced_automatic.iter()) {
             automatic.remove(&id.to_string());
         }
     }
+    suppressed.extend(displaced_automatic.iter().copied());
+    doc["automatic_suppressed_ids"] = json!(suppressed);
     // Legacy sidecars contain only whole-album revisions. Capture the exact
     // reference hashes before a manual assignment enrolls a new photo; that
     // subsequent append must not unassign every remaining automatic Track ID.
@@ -922,7 +956,9 @@ pub(super) fn change(state: &AppState, req: &TrackEdit) -> Result<Value, ApiErro
             {
                 continue;
             }
-            if doc["automatic_assignments"][id] != *previous_owner {
+            if !displaced_automatic.contains(&id.parse::<u64>().unwrap_or_default())
+                && doc["automatic_assignments"][id] != *previous_owner
+            {
                 return Err(storage::conflict(format!(
                     "Привязка ID {id} изменила бы другого игрока. Изменения отменены; обновите распознавание или проверьте кадры."
                 )));
@@ -947,14 +983,16 @@ pub(super) fn change(state: &AppState, req: &TrackEdit) -> Result<Value, ApiErro
         reconcile_automatic_photo_links(&conflict_tracks, &mut view)
             .map_err(storage::bad_request)?;
     }
-    page(
+    let mut result = page(
         &ctx,
         &view,
         &revision(new.as_deref()),
         req.offset,
         req.limit,
     )
-    .map_err(storage::bad_request)
+    .map_err(storage::bad_request)?;
+    result["displaced_automatic_track_ids"] = json!(displaced_automatic);
+    Ok(result)
 }
 
 pub(super) fn refresh_automatic_photo_links(

@@ -657,6 +657,8 @@
       const result=await post("/api/players/native/tracks",payload);
       if(project!==state.project||video!==state.video||replay!==state.replay)return false;
       state.revision=String(result.revision);
+      state.lastDisplacedAutomatic=Array.isArray(result.displaced_automatic_track_ids)?
+        result.displaced_automatic_track_ids.map(Number):[];
       state.selected.clear();
       applyLocalTrackEdit(action,ids,owner,result);
       window.dispatchEvent(new CustomEvent("volley:track-assignments-updated",{detail:{
@@ -702,7 +704,12 @@
     }));
     if(!await edit("assign",ids,playerId))return;
     if(scope.project_id!==state.project||scope.replay_id!==state.replay)return;
-    note("Track ID привязаны. Фото сохраняются отдельно; можно продолжать работу.");
+    const displaced=Array.isArray(state.lastDisplacedAutomatic)?
+      state.lastDisplacedAutomatic:[];
+    const notice=displaced.length?
+      " Автоматические привязки ID "+displaced.join(", ")+" сняты из-за подтверждения; проверьте их.":"";
+    note("Track ID привязаны. Фото сохраняются отдельно; можно продолжать работу."+notice,
+      displaced.length>0);
     return enqueuePhotoEnrollment(playerId,async()=>{
       let saved=0,alreadySaved=0;
       const failures=[];
@@ -738,8 +745,8 @@
         if(scope.project_id===state.project&&scope.replay_id===state.replay){
           const summary="Track ID привязаны. Сохранено фото: "+saved+
             (alreadySaved?" · уже было: "+alreadySaved:"");
-          note(failures.length?summary+" · ошибки: "+failures.join("; "):summary,
-            failures.length>0);
+          note((failures.length?summary+" · ошибки: "+failures.join("; "):summary)+notice,
+            failures.length>0||displaced.length>0);
         }
       }catch(error){
         if(scope.project_id===state.project&&scope.replay_id===state.replay)

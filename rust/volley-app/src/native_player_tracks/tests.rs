@@ -338,8 +338,11 @@ fn ilnur_late_id_13_can_join_id_12_after_measured_track_handoff() {
     let confirm_early = BTreeMap::from([(14, "abcdef012345".into())]);
     assert_eq!(
         new_manual_owner_conflict(&ctx, &confirm_early, &original, &[14]),
-        Some((14, 12, 930)),
-        "the different person actually visible at 31s must still be rejected"
+        None
+    );
+    assert_eq!(
+        conflicting_automatic_links(&ctx, &confirm_early, &original),
+        BTreeSet::from([12])
     );
     let mut doc = base_document(&ctx);
     doc["automatic_assignments"] = original;
@@ -382,7 +385,11 @@ fn manual_link_never_steals_an_automatically_linked_athlete_in_the_same_frame() 
     let existing = json!({"11":"abcdef012345"});
     assert_eq!(
         new_manual_owner_conflict(&ctx, &reviewed, &existing, &[13]),
-        Some((13, 11, 1020))
+        None
+    );
+    assert_eq!(
+        conflicting_automatic_links(&ctx, &reviewed, &existing),
+        BTreeSet::from([11])
     );
     // This timestamp is a true pair measurement, not an inferred frame,
     // and no other frame can prohibit rejoining the same player.
@@ -404,6 +411,77 @@ fn manual_link_never_steals_an_automatically_linked_athlete_in_the_same_frame() 
     assert_eq!(
         new_manual_owner_conflict(&ctx, &reviewed, &existing, &[13]),
         None
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn conflicting_automatic_owner_yields_to_explicit_confirmation() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    ctx.tracks.insert(8, ctx.tracks[&7].clone());
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
+    ctx.tracks.get_mut(&7).unwrap().observed_pairs.insert(
+        (7, 8),
+        PairGeometry {
+            same_position: 0,
+            distinct_position: 3,
+            first_distinct_frame: Some(5),
+        },
+    );
+    let reviewed = BTreeMap::from([(8, "abcdef012345".to_owned())]);
+    let automatic = json!({"7":"abcdef012345"});
+    assert_eq!(
+        new_manual_owner_conflict(&ctx, &reviewed, &automatic, &[8]),
+        None
+    );
+    assert_eq!(
+        conflicting_automatic_links(&ctx, &reviewed, &automatic),
+        BTreeSet::from([7])
+    );
+    let mut doc = base_document(&ctx);
+    doc["assignments"] = json!({"8":"abcdef012345"});
+    doc["automatic_assignments"] = json!({});
+    let page = filtered_page(&ctx, &doc, "rev", 0, 10, Some("unassigned"), None).unwrap();
+    assert_eq!(page["unassigned_track_ids"], json!([7]));
+    assert_eq!(page["assigned_count"], 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn single_distinct_pair_frame_is_not_conclusive_manual_conflict() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    ctx.tracks.insert(8, ctx.tracks[&7].clone());
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
+    ctx.tracks.get_mut(&7).unwrap().observed_pairs.insert(
+        (7, 8),
+        PairGeometry {
+            same_position: 0,
+            distinct_position: 1,
+            first_distinct_frame: Some(5),
+        },
+    );
+    let reviewed = BTreeMap::from([
+        (7, "abcdef012345".to_owned()),
+        (8, "abcdef012345".to_owned()),
+    ]);
+    assert_eq!(
+        new_manual_owner_conflict(&ctx, &reviewed, &json!({}), &[8]),
+        None
+    );
+    ctx.tracks
+        .get_mut(&7)
+        .unwrap()
+        .observed_pairs
+        .get_mut(&(7, 8))
+        .unwrap()
+        .distinct_position = 3;
+    assert_eq!(
+        new_manual_owner_conflict(&ctx, &reviewed, &json!({}), &[8]),
+        Some((8, 7, 5))
     );
     fs::remove_dir_all(root).unwrap();
 }
@@ -436,6 +514,14 @@ fn real_simultaneous_owner_assignments_are_reported_as_conflicts() {
     let mut ctx = context(&root, sha, tracks);
     ctx.tracks.insert(8, ctx.tracks[&7].clone());
     ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
+    ctx.tracks.get_mut(&7).unwrap().observed_pairs.insert(
+        (7, 8),
+        PairGeometry {
+            same_position: 0,
+            distinct_position: 3,
+            first_distinct_frame: Some(5),
+        },
+    );
     let mut doc = base_document(&ctx);
     doc["assignments"] = json!({"7":"abcdef012345","8":"abcdef012345"});
     let conflicts = filtered_page(&ctx, &doc, "rev", 0, 10, Some("conflict"), None).unwrap();
@@ -1047,6 +1133,41 @@ fn photo_reference_matches_skip_assigned_excluded_and_overlapping_tracks() {
     assert!(result.get("9").is_none());
     ctx.tracks.get_mut(&8).unwrap().first = 10;
     ctx.tracks.get_mut(&8).unwrap().visible_spans = vec![(10, 30)];
+    assert_eq!(
+        photo_match_candidates(&ctx, &identity, &vectors, &references).unwrap(),
+        json!({})
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn photo_match_does_not_suggest_player_already_confirmed_in_same_frame() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    ctx.tracks.insert(8, ctx.tracks[&7].clone());
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
+    ctx.tracks.get_mut(&7).unwrap().observed_pairs.insert(
+        (7, 8),
+        PairGeometry {
+            same_position: 0,
+            distinct_position: 25,
+            first_distinct_frame: Some(5),
+        },
+    );
+    let mut identity = base_document(&ctx);
+    identity["assignments"] = json!({"7":"abcdef012345"});
+    let mut vector = vec![0.0_f32; 256];
+    vector[0] = 1.0;
+    let vectors = BTreeMap::from([(8, vector.clone())]);
+    let references = vec![PhotoReference {
+        player_id: "abcdef012345".into(),
+        vector,
+        project_id: "different-project".into(),
+        video: "different-video".into(),
+        replay_id: "different-replay".into(),
+        track_id: 7,
+    }];
     assert_eq!(
         photo_match_candidates(&ctx, &identity, &vectors, &references).unwrap(),
         json!({})
