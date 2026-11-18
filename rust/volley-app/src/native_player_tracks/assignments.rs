@@ -2,6 +2,13 @@ use super::*;
 
 const AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD: f64 = 0.80;
 
+fn saved_automatic_photo_threshold(doc: &Value) -> f64 {
+    doc["automatic_identity_evidence"]["threshold"]
+        .as_f64()
+        .filter(|value| value.is_finite() && (0.01..=0.99).contains(value))
+        .unwrap_or(AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD)
+}
+
 pub(crate) fn conflicting_frame_tracks(
     owners: &BTreeMap<u64, String>,
     tracks: impl IntoIterator<Item = u64>,
@@ -135,6 +142,23 @@ pub(super) fn choose_automatic_photo_links(
     doc: &Value,
     matches: &Value,
 ) -> Result<BTreeMap<u64, String>, String> {
+    choose_automatic_photo_links_at_threshold(
+        ctx,
+        doc,
+        matches,
+        AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD,
+    )
+}
+
+pub(super) fn choose_automatic_photo_links_at_threshold(
+    ctx: &Inputs,
+    doc: &Value,
+    matches: &Value,
+    threshold: f64,
+) -> Result<BTreeMap<u64, String>, String> {
+    if !threshold.is_finite() || !(0.01..=0.99).contains(&threshold) {
+        return Err("Invalid automatic similarity threshold".into());
+    }
     let assigned = doc["assignments"]
         .as_object()
         .ok_or("Invalid assignments")?;
@@ -171,7 +195,7 @@ pub(super) fn choose_automatic_photo_links(
             };
             let Some(score) = row["cosine_similarity"]
                 .as_f64()
-                .filter(|score| score.is_finite() && *score > AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD && *score <= 1.0)
+                .filter(|score| score.is_finite() && *score >= threshold && *score <= 1.0)
             else {
                 continue;
             };
@@ -250,7 +274,12 @@ pub(super) fn reconcile_automatic_photo_links(ctx: &Inputs, doc: &mut Value) -> 
         .filter(|(id, _)| saved.contains_key(*id))
         .map(|(id, rows)| (id.clone(), rows.clone()))
         .collect();
-    let expected = choose_automatic_photo_links(ctx, doc, &Value::Object(preserved_matches))?;
+    let expected = choose_automatic_photo_links_at_threshold(
+        ctx,
+        doc,
+        &Value::Object(preserved_matches),
+        saved_automatic_photo_threshold(doc),
+    )?;
     let safe = saved
         .iter()
         .filter_map(|(id, owner)| {
@@ -560,6 +589,7 @@ pub(super) fn filtered_page(
         "identity_conflict_track_ids":actual_conflicts,
         "roster":roster,"tracks":rows,
         "automatic_identity_matches":doc["automatic_identity_evidence"]["matches"],
+        "automatic_assignment_threshold_percent":(saved_automatic_photo_threshold(doc) * 100.0).round() as u8,
         "athlete_links_require_manual_confirmation":true,
         "automatic_reid_binding":doc["automatic_assignments"].as_object().is_some_and(|map| !map.is_empty()),"photos_auto_registered":false,
     }))
@@ -974,9 +1004,8 @@ pub(super) fn change(state: &AppState, req: &TrackEdit) -> Result<Value, ApiErro
     )
     .map_err(storage::bad_request)?;
     result["displaced_automatic_track_ids"] = json!(displaced_automatic);
-    result["manual_overlap"] = json!(manual_overlap.map(|(id, other, frame)| {
-        json!({"track_id":id,"other_track_id":other,"frame":frame})
-    }));
+    result["manual_overlap"] = json!(manual_overlap
+        .map(|(id, other, frame)| { json!({"track_id":id,"other_track_id":other,"frame":frame}) }));
     Ok(result)
 }
 
@@ -984,10 +1013,11 @@ pub(super) fn refresh_automatic_photo_links(
     ctx: &Inputs,
     doc: &Value,
     matches: &Value,
+    threshold: f64,
 ) -> Result<(Value, BTreeMap<u64, String>), String> {
     let mut updated = doc.clone();
     updated["automatic_assignments"] = json!({});
-    let chosen = choose_automatic_photo_links(ctx, &updated, matches)?;
+    let chosen = choose_automatic_photo_links_at_threshold(ctx, &updated, matches, threshold)?;
     updated["automatic_assignments"] = json!(chosen
         .iter()
         .map(|(id, player)| (id.to_string(), player.clone()))
@@ -1056,9 +1086,16 @@ fn persist_photo_comparison(
         req.rally_run_id.as_deref(),
     )?;
     let matches = &comparison["player_matches"];
+    let threshold = if return_automatic_result {
+        req.auto_threshold_percent
+            .map(|percent| percent as f64 / 100.0)
+            .unwrap_or_else(|| saved_automatic_photo_threshold(&doc))
+    } else {
+        saved_automatic_photo_threshold(&doc)
+    };
     let chosen = if auto_assign {
-        let (updated, chosen) =
-            refresh_automatic_photo_links(&scoped, &doc, matches).map_err(storage::bad_request)?;
+        let (updated, chosen) = refresh_automatic_photo_links(&scoped, &doc, matches, threshold)
+            .map_err(storage::bad_request)?;
         doc = updated;
         chosen
     } else {
@@ -1072,7 +1109,7 @@ fn persist_photo_comparison(
         ));
     }
     doc["automatic_identity_evidence"] = json!({
-        "threshold":AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD, "matches":matches,
+        "threshold":threshold, "matches":matches,
         "rally_run_id":req.rally_run_id,
         "album_revisions":comparison["album_revisions"],
         "reference_photo_sha256":reference_hashes,
@@ -1103,7 +1140,8 @@ fn persist_photo_comparison(
         Ok(
             json!({"automatic_count":chosen.len(),"automatic_assignments":chosen,
             "unassigned_track_ids":unassigned,
-            "identity_revision":revision(saved.as_deref()),"confirmed":false}),
+            "identity_revision":revision(saved.as_deref()),"confirmed":false,
+            "threshold_percent":(threshold * 100.0).round() as u8}),
         )
     } else {
         let mut response = comparison.clone();

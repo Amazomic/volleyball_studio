@@ -60,7 +60,7 @@ fn photo_refresh_preserves_confirmed_links_and_manual_exclusions() {
         "9":[{"player_id":"123456abcdef","cosine_similarity":0.99}]
     });
 
-    let (updated, chosen) = refresh_automatic_photo_links(&ctx, &previous, &matches).unwrap();
+    let (updated, chosen) = refresh_automatic_photo_links(&ctx, &previous, &matches, 0.80).unwrap();
     assert!(chosen.is_empty());
     assert_eq!(updated["assignments"], json!({"7":"abcdef012345"}));
     assert_eq!(updated["automatic_assignments"], json!({}));
@@ -87,7 +87,7 @@ fn photo_refresh_assigns_new_track_without_swapping_confirmed_player() {
         {"player_id":"123456abcdef","cosine_similarity":0.92},
         {"player_id":"abcdef012345","cosine_similarity":0.84}
     ]});
-    let (updated, chosen) = refresh_automatic_photo_links(&ctx, &previous, &matches).unwrap();
+    let (updated, chosen) = refresh_automatic_photo_links(&ctx, &previous, &matches, 0.80).unwrap();
     assert_eq!(chosen.get(&8).map(String::as_str), Some("123456abcdef"));
     assert_eq!(updated["assignments"], json!({"7":"abcdef012345"}));
     let rows = page(&ctx, &updated, "rev", 0, 20).unwrap()["tracks"]
@@ -113,9 +113,12 @@ fn highest_similarity_over_80_wins_even_when_runner_up_is_close() {
         {"player_id":"123456abcdef","cosine_similarity":0.92},
         {"player_id":"abcdef012345","cosine_similarity":0.90}
     ]});
-    let (updated, chosen) = refresh_automatic_photo_links(&ctx, &previous, &matches).unwrap();
+    let (updated, chosen) = refresh_automatic_photo_links(&ctx, &previous, &matches, 0.80).unwrap();
     assert_eq!(chosen.get(&7).map(String::as_str), Some("123456abcdef"));
-    assert_eq!(updated["automatic_assignments"], json!({"7":"123456abcdef"}));
+    assert_eq!(
+        updated["automatic_assignments"],
+        json!({"7":"123456abcdef"})
+    );
     let view = page(&ctx, &updated, "rev", 0, 20).unwrap();
     assert_eq!(view["tracks"][0]["assigned_player_id"], "123456abcdef");
     assert_eq!(view["tracks"][0]["identity_source"], "automatic_photo");
@@ -670,11 +673,11 @@ fn rally_scope_excludes_nonplaying_boundary_overlap_from_auto_assignment() {
     let mut manually_linked = base_document(&full);
     manually_linked["assignments"] = json!({"8":"abcdef012345"});
     let (updated, chosen) =
-        refresh_automatic_photo_links(&scoped, &manually_linked, &matches).unwrap();
+        refresh_automatic_photo_links(&scoped, &manually_linked, &matches, 0.80).unwrap();
     assert_eq!(chosen.get(&7).map(String::as_str), Some("abcdef012345"));
     assert_eq!(updated["assignments"], json!({"8":"abcdef012345"}));
     let (_, wrongly_rejected) =
-        refresh_automatic_photo_links(&full, &manually_linked, &matches).unwrap();
+        refresh_automatic_photo_links(&full, &manually_linked, &matches, 0.80).unwrap();
     assert!(
         wrongly_rejected.is_empty(),
         "full-video cross-play check is the original bug"
@@ -835,13 +838,13 @@ fn automatic_photo_links_enforce_threshold_and_conflicting_tracks() {
     let mut doc = base_document(&ctx);
     let matches = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.80}],"8":[{"player_id":"abcdef012345","cosine_similarity":0.70}]});
     let chosen = choose_automatic_photo_links(&ctx, &doc, &matches).unwrap();
-    assert!(chosen.is_empty());
+    assert_eq!(chosen.get(&7).map(String::as_str), Some("abcdef012345"));
     let above = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.80001}],"8":[{"player_id":"abcdef012345","cosine_similarity":0.70}]});
     let selected = choose_automatic_photo_links(&ctx, &doc, &above).unwrap();
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[&7], "abcdef012345");
     doc["excluded_ids"] = json!([7]);
-    let below = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.99}],"8":[{"player_id":"abcdef012345","cosine_similarity":0.80}]});
+    let below = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.99}],"8":[{"player_id":"abcdef012345","cosine_similarity":0.799}]});
     assert!(choose_automatic_photo_links(&ctx, &doc, &below)
         .unwrap()
         .is_empty());
@@ -854,6 +857,62 @@ fn automatic_photo_links_enforce_threshold_and_conflicting_tracks() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+#[test]
+fn threshold_slider_assigns_only_matching_ids_to_the_best_player() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    ctx.roster.insert("123456abcdef".into(), "Second".into());
+    let mut late = ctx.tracks[&7].clone();
+    late.visible_spans = vec![(16, 17)];
+    late.first = 16;
+    late.last = 17;
+    ctx.tracks.insert(8, late.clone());
+    ctx.tracks.insert(9, late);
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8, 9]).unwrap();
+    let evidence = json!({
+        "7":[{"player_id":"abcdef012345","cosine_similarity":0.919},
+             {"player_id":"123456abcdef","cosine_similarity":0.95}],
+        "8":[{"player_id":"abcdef012345","cosine_similarity":0.81}]
+    });
+    let mut doc = base_document(&ctx);
+    doc["assignments"] = json!({"9":"123456abcdef"});
+    let (high, chosen) = refresh_automatic_photo_links(&ctx, &doc, &evidence, 0.92).unwrap();
+    assert_eq!(chosen.get(&7).map(String::as_str), Some("123456abcdef"));
+    assert!(!chosen.contains_key(&8));
+    assert_eq!(high["assignments"]["9"], "123456abcdef");
+    let view = filtered_page(&ctx, &high, "rev", 0, 10, Some("unassigned"), None).unwrap();
+    assert_eq!(view["unassigned_track_ids"], json!([8]));
+    let (_, low) = refresh_automatic_photo_links(&ctx, &doc, &evidence, 0.80).unwrap();
+    assert_eq!(low.get(&8).map(String::as_str), Some("abcdef012345"));
+    assert!(choose_automatic_photo_links_at_threshold(&ctx, &doc, &evidence, 0.0).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn saved_threshold_is_used_to_reconcile_auto_matches_and_restore_slider() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let ctx = context(&root, sha, tracks);
+    let mut doc = base_document(&ctx);
+    doc["automatic_assignments"] = json!({"7":"abcdef012345"});
+    doc["automatic_identity_evidence"] = json!({
+        "threshold":0.94,
+        "matches":{"7":[{"player_id":"abcdef012345","cosine_similarity":0.91}]}
+    });
+    reconcile_automatic_photo_links(&ctx, &mut doc).unwrap();
+    assert_eq!(doc["automatic_assignments"], json!({}));
+    assert_eq!(
+        page(&ctx, &doc, "rev", 0, 10).unwrap()["automatic_assignment_threshold_percent"],
+        94
+    );
+    doc["automatic_identity_evidence"]["threshold"] = json!(0.89);
+    doc["automatic_assignments"] = json!({"7":"abcdef012345"});
+    reconcile_automatic_photo_links(&ctx, &mut doc).unwrap();
+    assert_eq!(doc["automatic_assignments"]["7"], "abcdef012345");
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn automatic_links_do_not_fall_back_to_the_wrong_player() {
     let (root, _, sha) = fixture();
@@ -1685,8 +1744,12 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
     assert_eq!(saved["evidence_source"], original["evidence_source"]);
     let unassigned = read_internal(
         &state,
-        &TrackQuery { view: Some("unassigned".into()), ..query.clone() },
-    ).unwrap();
+        &TrackQuery {
+            view: Some("unassigned".into()),
+            ..query.clone()
+        },
+    )
+    .unwrap();
     assert_eq!(unassigned["unassigned_track_ids"], json!([]));
     let sidecar = data
         .join("projects")

@@ -239,6 +239,8 @@ pub struct ReidReviewRequest {
     pub(crate) expected_revision: Option<String>,
     #[serde(default = "default_reid_threshold")]
     pub(crate) threshold_percent: u8,
+    #[serde(default)]
+    pub(crate) auto_threshold_percent: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -748,6 +750,14 @@ pub async fn reid_review(
 ) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
     if req.action == "auto_assign" {
+        if req
+            .auto_threshold_percent
+            .is_some_and(|percent| !(1..=99).contains(&percent))
+        {
+            return Err(storage::bad_request(
+                "Invalid automatic similarity threshold",
+            ));
+        }
         let comparison =
             super::photo_comparison::compare(state.clone(), headers, req.clone()).await?;
         let result = tokio::task::spawn_blocking(move || {

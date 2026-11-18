@@ -38,11 +38,13 @@ const slice=(start,end)=> {
     source_replay_sha256:"a".repeat(64),automatic_reid_binding:true,
     tracks:[],rally_track_ids:[2],total_tracks:1,filtered_total:0,
     unassigned_track_ids:[],comparison_track_ids:[],roster:[],
-    revision:"new-revision",writable:true,assigned_count:1,excluded_count:0};
+    revision:"new-revision",writable:true,assigned_count:1,excluded_count:0,
+    automatic_assignment_threshold_percent:92};
   const calls=[];
   const context={
     state,ui:{list:{replaceChildren(){}},page:{textContent:""},
       assigned:{textContent:""},excluded:{textContent:""}},
+    galleryAutoThreshold:{value:"80"},galleryAutoValue:{textContent:"80%"},
     node:()=>({}),path:()=>"/api/players/native/tracks",
     read:async()=>response,
     unlock:()=>{},note:()=>{},updateUnassignedLabel:()=>{},
@@ -57,6 +59,8 @@ const slice=(start,end)=> {
     "\nthis.loadPage=loadPage;",context);
   await context.loadPage({preserveCards:true});
   assert.equal(state.revision,"new-revision");
+  assert.equal(context.galleryAutoThreshold.value,"92");
+  assert.equal(context.galleryAutoValue.textContent,"92%");
   assert.equal(events.length,1);
   assert.equal(events[0].type,"volley:track-assignments-updated");
   assert.equal(events[0].detail.replay_id,"replay");
