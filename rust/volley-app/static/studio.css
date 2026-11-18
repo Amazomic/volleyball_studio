@@ -1608,9 +1608,14 @@ body[data-ui-theme="light"] .analysis-history-eta{color:#285e9a!important}
 .studio-training-library{border-top:1px solid #334057;padding-top:10px;display:grid;gap:9px}
 .studio-training-library>strong{font-size:12px}
 #studio-training-list{max-height:175px;overflow-y:auto;display:grid;gap:5px;font-size:12px;color:#a9bad0}
-.studio-training-example{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 8px;background:#1b2b41;border-radius:7px}
-.studio-training-example span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.studio-training-example{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:7px;padding:8px;background:#1b2b41;border:1px solid transparent;border-radius:7px}
+.studio-training-example.selected{border-color:#29cfa5;background:#213d4b}
+.studio-training-example span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.studio-training-example-actions{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}
 .studio-training-example button{padding:5px 8px;flex:none;font-size:11px}
+.studio-training-example-editor{grid-column:1/-1;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.studio-training-example-editor select{width:auto;max-width:210px;padding:6px;font-size:12px}
+#studio-training-list{max-height:320px}
 
 #studio-players-view .track-group-photo-mosaic{
   position:relative;display:block;aspect-ratio:5/3;min-height:170px;
@@ -1679,11 +1684,8 @@ body[data-ui-theme="light"] .analysis-history-eta{color:#285e9a!important}
 .studio-annotation-tools,.studio-annotation-rally-controls{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
 .studio-annotation-tools button,.studio-annotation-rally-controls button{padding:7px 10px;font-size:11px}
 .studio-annotation-rally-controls small{color:#80d3bc}
-.studio-annotation-touch-lane{height:38px;border:1px solid #385773;border-radius:8px;position:relative;background:linear-gradient(180deg,#192e48,#122940);margin:1px 5px}
-.studio-annotation-touch-lane:empty{display:grid;place-items:center}
-.studio-annotation-playhead{position:absolute;top:0;bottom:0;width:2px;background:#f6e2a8;pointer-events:none;z-index:3}
-.studio-annotation-tick{position:absolute;top:5px;bottom:5px;width:7px;min-width:7px;padding:0;border:0;border-radius:4px;background:#12d8ad;transform:translateX(-50%);cursor:ew-resize;touch-action:none;z-index:2}
-.studio-annotation-tick.selected{background:#fff4ba;box-shadow:0 0 0 3px #278872}
+#studio-preview-view .video-timeline-track .studio-annotation-tick{position:absolute;top:3px;bottom:3px;width:7px;min-width:7px;padding:0;border:0;border-radius:4px;background:#12d8ad;transform:translateX(-50%);cursor:ew-resize;touch-action:none;z-index:2}
+#studio-preview-view .video-timeline-track .studio-annotation-tick.selected{background:#fff4ba;box-shadow:0 0 0 3px #278872}
 .studio-annotation-touch-list{display:flex;gap:5px;overflow-x:auto;overflow-y:hidden;max-width:100%;padding-bottom:3px;min-height:28px}
 .studio-annotation-touch{flex:0 0 auto;border:1px solid #446b82;background:#1c3550;color:#bde4e2;border-radius:6px;font-size:11px;padding:5px 8px;cursor:pointer}
 .studio-annotation-touch.selected{border-color:#f1d48c;background:#354739;color:#fff0cf}

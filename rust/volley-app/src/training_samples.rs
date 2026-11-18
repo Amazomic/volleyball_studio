@@ -229,7 +229,7 @@ fn locked<T>(callback: impl FnOnce() -> Result<T, ApiError>) -> Result<T, ApiErr
         .map_err(|_| storage::internal("Training lock poisoned"))?;
     callback()
 }
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EditRequest {
     action: String,
@@ -239,6 +239,7 @@ pub(crate) struct EditRequest {
     frame_index: Option<u64>,
     track_id: Option<u64>,
     label: Option<ActionKind>,
+    revision: Option<u64>,
     corners: Option<[[f64; 2]; 4]>,
     net: Option<[[f64; 2]; 2]>,
     id: Option<String>,
@@ -537,10 +538,12 @@ pub async fn list(
                 frame_index,
                 track_id,
                 label,
+                rally_run_id,
                 ..
             } => json!({
                 "id":id,"type":"touch","project_id":project_id,"video":video,
-                "frame_index":frame_index,"track_id":track_id,"label":label
+                "frame_index":frame_index,"track_id":track_id,"label":label,
+                "rally_run_id":rally_run_id
             }),
             Example::Court {
                 id,
@@ -558,6 +561,148 @@ pub async fn list(
         json!({"schema":SCHEMA,"revision":library.revision,"examples":items}),
     ))
 }
+fn apply_example_edit(
+    library: &mut Library,
+    req: &EditRequest,
+    example: Option<Example>,
+) -> Result<(), ApiError> {
+    if matches!(req.action.as_str(), "relabel" | "replace_touch")
+        && req.revision != Some(library.revision)
+    {
+        return Err(storage::conflict(
+            "Training library changed; refresh examples",
+        ));
+    }
+    if req.action == "relabel" {
+        let id = req
+            .id
+            .as_deref()
+            .ok_or_else(|| storage::bad_request("Missing example ID"))?;
+        let label = req
+            .label
+            .ok_or_else(|| storage::bad_request("Missing touch label"))?;
+        let target = library
+            .examples
+            .iter_mut()
+            .find(|row| {
+                matches!(
+                    row,
+                    Example::Touch { id: existing, project_id, .. }
+                        if existing == id && project_id == &req.project_id
+                )
+            })
+            .ok_or_else(|| storage::bad_request("Touch training example not found in project"))?;
+        if let Example::Touch { label: old, .. } = target {
+            *old = label;
+        }
+    } else if req.action == "replace_touch" {
+        let id = req
+            .id
+            .as_deref()
+            .ok_or_else(|| storage::bad_request("Missing example ID"))?;
+        let index = library
+            .examples
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    Example::Touch { id: existing, project_id, video, rally_run_id, .. }
+                        if existing == id && project_id == &req.project_id
+                        && req.video.as_deref() == Some(video)
+                        && req.rally_run_id.as_deref() == Some(rally_run_id)
+                )
+            })
+            .ok_or_else(|| {
+                storage::bad_request("Touch source changed; open the original example")
+            })?;
+        let mut captured = example.ok_or_else(|| storage::bad_request("No captured touch"))?;
+        if let Example::Touch { id: new_id, .. } = &mut captured {
+            *new_id = id.to_owned();
+        } else {
+            return Err(storage::bad_request("Replacement must be a touch"));
+        }
+        if let Example::Touch {
+            project_id,
+            video,
+            frame_index,
+            track_id,
+            ..
+        } = &captured
+        {
+            if library.examples.iter().enumerate().any(|(position, row)| {
+                position != index
+                    && matches!(row,
+                    Example::Touch {project_id:p, video:v, frame_index:f, track_id:t, ..}
+                    if p == project_id && v == video && f == frame_index && t == track_id)
+            }) {
+                return Err(storage::conflict(
+                    "Another training example already labels that player/frame",
+                ));
+            }
+        }
+        library.examples[index] = captured;
+    } else if let Some(example) = example {
+        library.examples.retain(|row| match (&example, row) {
+            (
+                Example::Touch {
+                    project_id: p,
+                    video: v,
+                    frame_index: f,
+                    track_id: t,
+                    ..
+                },
+                Example::Touch {
+                    project_id: q,
+                    video: w,
+                    frame_index: g,
+                    track_id: u,
+                    ..
+                },
+            ) => p != q || v != w || f != g || t != u,
+            (
+                Example::Court {
+                    project_id: p,
+                    video: v,
+                    ..
+                },
+                Example::Court {
+                    project_id: q,
+                    video: w,
+                    ..
+                },
+            ) => p != q || v != w,
+            _ => true,
+        });
+        if library.examples.len() >= MAX_EXAMPLES {
+            return Err(storage::bad_request(
+                "Training library is full; delete incorrect or obsolete examples",
+            ));
+        }
+        library.examples.push(example);
+    } else {
+        let id = req
+            .id
+            .as_deref()
+            .ok_or_else(|| storage::bad_request("Missing training example id"))?;
+        if Uuid::parse_str(id).is_err() {
+            return Err(storage::bad_request("Invalid training example id"));
+        }
+        let count = library.examples.len();
+        library.examples.retain(|e| {
+            e.id() != id
+                || match e {
+                    Example::Touch { project_id, .. } | Example::Court { project_id, .. } => {
+                        project_id != &req.project_id
+                    }
+                }
+        });
+        if count == library.examples.len() {
+            return Err(storage::bad_request("Training example not found"));
+        }
+    }
+    Ok(())
+}
+
 pub async fn edit(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -569,76 +714,24 @@ pub async fn edit(
     }
     projects::existing_project(&state, &req.project_id)?;
     let example = match req.action.as_str() {
-        "touch" | "court" => {
+        "touch" | "court" | "replace_touch" => {
             let video = req
                 .video
                 .as_deref()
                 .ok_or_else(|| storage::bad_request("Missing training video"))?;
             source(&state, &req.project_id, video)?;
-            Some(if req.action == "touch" {
+            Some(if req.action != "court" {
                 capture_touch(state.clone(), &req, video).await?
             } else {
                 capture_court(state.clone(), &req, video).await?
             })
         }
-        "delete" => None,
+        "delete" | "relabel" => None,
         _ => return Err(storage::bad_request("Invalid training action")),
     };
     let revision = locked(|| {
         let mut library = read(&state)?;
-        if let Some(example) = example {
-            // One source frame/type is one label: correcting it replaces the old example.
-            library.examples.retain(|row| match (&example, row) {
-                (
-                    Example::Touch {
-                        project_id: p,
-                        video: v,
-                        frame_index: f,
-                        track_id: t,
-                        ..
-                    },
-                    Example::Touch {
-                        project_id: q,
-                        video: w,
-                        frame_index: g,
-                        track_id: u,
-                        ..
-                    },
-                ) => p != q || v != w || f != g || t != u,
-                (
-                    Example::Court {
-                        project_id: p,
-                        video: v,
-                        ..
-                    },
-                    Example::Court {
-                        project_id: q,
-                        video: w,
-                        ..
-                    },
-                ) => p != q || v != w,
-                _ => true,
-            });
-            if library.examples.len() >= MAX_EXAMPLES {
-                return Err(storage::bad_request(
-                    "Training library is full; delete incorrect or obsolete examples",
-                ));
-            }
-            library.examples.push(example);
-        } else {
-            let id = req
-                .id
-                .as_deref()
-                .ok_or_else(|| storage::bad_request("Missing training example id"))?;
-            if Uuid::parse_str(id).is_err() {
-                return Err(storage::bad_request("Invalid training example id"));
-            }
-            let count = library.examples.len();
-            library.examples.retain(|e| e.id() != id);
-            if count == library.examples.len() {
-                return Err(storage::bad_request("Training example not found"));
-            }
-        }
+        apply_example_edit(&mut library, &req, example)?;
         library.revision += 1;
         write(&state, &library)?;
         Ok(library.revision)
@@ -966,6 +1059,85 @@ mod tests {
         }
         assert!(predict(&evidence, &geometry, &[competitor, sample], &motion).is_none());
     }
+    #[test]
+    fn training_example_changes_are_versioned_and_preserve_source_evidence() {
+        let id = Uuid::new_v4().to_string();
+        let bbox = [0.2, 0.2, 0.7, 0.8];
+        let joints = [[0.5, 0.5, 0.9]; 17];
+        let sample = Example::Touch {
+            id: id.clone(),
+            project_id: "project-a".into(),
+            video: "match.mp4".into(),
+            rally_run_id: "cpu-run".into(),
+            replay_sha256: "a".repeat(64),
+            frame_index: 30,
+            track_id: 4,
+            label: ActionKind::Attack,
+            keypoints: joints,
+            bbox,
+            ball: [0.5, 0.5],
+            width: 1920,
+            height: 1080,
+            contact_joint_index: 9,
+            motion: vec![MotionSample {
+                offset: 0,
+                keypoints: joints,
+                bbox,
+                ball: Some([0.5, 0.5]),
+            }],
+        };
+        assert!(valid_example(&sample));
+        let mut library = Library {
+            schema: SCHEMA.into(),
+            revision: 4,
+            examples: vec![sample.clone()],
+        };
+        let before = serde_json::to_value(&sample).unwrap();
+        let mut request = EditRequest {
+            action: "relabel".into(),
+            project_id: "project-a".into(),
+            id: Some(id.clone()),
+            label: Some(ActionKind::Block),
+            revision: Some(4),
+            ..EditRequest::default()
+        };
+        assert!(apply_example_edit(&mut library, &request, None).is_ok());
+        let updated = serde_json::to_value(&library.examples[0]).unwrap();
+        assert_eq!(updated["label"], "block");
+        assert_eq!(updated["keypoints"], before["keypoints"]);
+        assert_eq!(updated["motion"], before["motion"]);
+        assert_eq!(updated["replay_sha256"], before["replay_sha256"]);
+
+        request.revision = Some(3);
+        assert!(apply_example_edit(&mut library, &request, None).is_err());
+        request.revision = Some(4);
+        request.project_id = "project-b".into();
+        assert!(apply_example_edit(&mut library, &request, None).is_err());
+        request.project_id = "project-a".into();
+
+        let mut replacement = sample.clone();
+        if let Example::Touch {
+            frame_index, label, ..
+        } = &mut replacement
+        {
+            *frame_index = 34;
+            *label = ActionKind::Dig;
+        }
+        request.action = "replace_touch".into();
+        request.video = Some("match.mp4".into());
+        request.rally_run_id = Some("cpu-run".into());
+        request.frame_index = Some(34);
+        assert!(apply_example_edit(&mut library, &request, Some(replacement)).is_ok());
+        let replaced = serde_json::to_value(&library.examples[0]).unwrap();
+        assert_eq!(replaced["id"], id);
+        assert_eq!(replaced["frame_index"], 34);
+        assert_eq!(replaced["label"], "dig");
+        assert_eq!(replaced["motion"], before["motion"]);
+
+        request.rally_run_id = Some("other-run".into());
+        assert!(apply_example_edit(&mut library, &request, Some(sample)).is_err());
+    }
+
     #[test]
     fn pose_similarity_rejects_unrelated() {
         let e = PoseEvidence {

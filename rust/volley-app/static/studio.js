@@ -1010,54 +1010,172 @@
   const training={
     panel:$("studio-training-panel"),
     status:$("studio-training-status"),label:$("studio-training-label"),
-    save:$("studio-training-save"),refresh:$("studio-training-refresh"),
+    save:$("studio-training-save"),newExample:$("studio-training-new"),
+    refresh:$("studio-training-refresh"),
     list:$("studio-training-list"),count:$("studio-training-count"),
-    active:false,track:null,frame:null,busy:false
+    active:false,track:null,frame:null,busy:false,viewBusy:false,
+    revision:0,epoch:0,selectedId:null,editId:null
   };
   const trainingMessage=(text,error=false)=>{
     training.status.textContent=text;
     training.status.classList.toggle("is-error",error);
   };
+  const trainingNames={attack:"Атака",block:"Блок",serve:"Подача",
+    overhead_pass:"Передача сверху",dig:"Приём снизу",low_touch:"Нижнее касание"};
+  const trainingEditorReset=()=>{
+    training.editId=null;
+    training.save.textContent="Сохранить пример";
+    training.newExample.classList.add("hidden");
+  };
+  const openTrainingExample=async item=>{
+    if(training.viewBusy)return;
+    training.viewBusy=true;
+    trainingMessage("Открываем исходный кадр обучающего примера…");
+    try{
+      if(s.project!==item.project_id)await projects(item.project_id);
+      if(s.project!==item.project_id)
+        throw Error("Проект примера недоступен в каталоге");
+      if(item.type==="touch"){
+        const source=s.chain?.runToAnalysis.get(item.rally_run_id);
+        if(!source)throw Error("CPU-версия примера больше не доступна");
+        if(s.run!==item.rally_run_id){
+          ui.analysis.value=source;
+          await setAnalysis(item.rally_run_id);
+        }
+        if(s.run!==item.rally_run_id)
+          throw Error("Не удалось открыть CPU-версию примера");
+      }else if(s.video!==item.video){
+        const choice=s.chain?.choices.find(row=>row.video===item.video&&row.kind==="fusion");
+        if(!choice)throw Error("Для камеры примера нет доступной GPU-версии");
+        ui.analysis.value=choice.value;
+        await setAnalysis();
+      }
+      if(s.video!==item.video)throw Error("Исходное видео примера не совпало");
+      const second=item.frame_index/fps();
+      s.seekAt=second;
+      ensurePreviewVideo();
+      await loadTimeline();
+      if(s.project!==item.project_id||s.video!==item.video)throw Error("Источник изменился");
+      ui.video.pause();
+      if(timeline.data)seekTimeline(second);
+      else if(ui.video.readyState>=1)ui.video.currentTime=second;
+      prefetchOverlayAtFrame(item.frame_index);
+      training.selectedId=item.id;
+      training.track=null;training.frame=null;
+      trainingEditorReset();
+      if(item.type==="touch"){
+        training.editId=item.id;
+        training.label.value=item.label;
+        training.save.textContent="Перезаписать кадр и игрока";
+        training.newExample.classList.remove("hidden");
+      }
+      for(const row of training.list.querySelectorAll(".studio-training-example"))
+        row.classList.toggle("selected",row.dataset.exampleId===item.id);
+      trainingMessage(item.type==="touch"?
+        "Открыт пример ID "+item.track_id+" · кадр "+item.frame_index+
+        ". Тип можно изменить в списке; для замены кадра выберите игрока на паузе и нажмите «Перезаписать».":
+        "Открыт сохранённый кадр разметки поля. Геометрию площадки изменяйте в редакторе анализа.");
+    }catch(error){trainingMessage("Не удалось открыть пример: "+error.message,true);}
+    finally{training.viewBusy=false;}
+  };
   const refreshTraining=async()=>{
+    const epoch=++training.epoch;
     if(!s.project){training.list.textContent="Сначала выберите проект.";return;}
     training.list.textContent="Загрузка обучающих примеров…";
     try{
       const data=await request(url("/api/training/examples",{project_id:s.project}));
-      if(data.schema!=="volley-human-training-library/1"||!Array.isArray(data.examples))
+      if(epoch!==training.epoch)return;
+      if(data.schema!=="volley-human-training-library/1"||!Array.isArray(data.examples)||
+          !Number.isSafeInteger(data.revision))
         throw Error("Некорректная версия обучающей базы");
+      training.revision=data.revision;
       training.list.replaceChildren();
       training.count.textContent=String(data.examples.length);
-      const names={attack:"Атака",block:"Блок",serve:"Подача",
-        overhead_pass:"Передача сверху",dig:"Приём снизу",low_touch:"Нижнее касание"};
       for(const item of data.examples){
-        const row=document.createElement("div");row.className="studio-training-example";
+        const row=document.createElement("div");
+        row.className="studio-training-example"+(item.id===training.selectedId?" selected":"");
+        row.dataset.exampleId=item.id;
         const label=document.createElement("span");
-        label.textContent=(item.type==="court"?"Поле и сетка":names[item.label]||item.label)+
-          " · "+item.video+" · "+(Number(item.frame_index)/30).toFixed(1)+" с"+
-          (item.type==="touch"?" · ID "+item.track_id:"");
+        label.textContent=(item.type==="court"?"Поле и сетка":trainingNames[item.label]||item.label)+
+          " · "+item.video+" · "+(Number(item.frame_index)/30).toFixed(2)+" с"+
+          (item.type==="touch"?" · ID "+item.track_id:"")+
+          (item.project_id===s.project?"":" · другой проект");
         label.title=item.project_id;
+        const actions=document.createElement("div");actions.className="studio-training-example-actions";
+        const open=document.createElement("button");
+        open.type="button";open.className="secondary";open.textContent="Просмотреть";
+        open.addEventListener("click",()=>void openTrainingExample(item));
+        actions.append(open);
+        if(item.type==="touch"){
+          const change=document.createElement("button");
+          change.type="button";change.className="secondary";change.textContent="Изменить";
+          const editor=document.createElement("div");
+          editor.className="studio-training-example-editor hidden";
+          const select=document.createElement("select");
+          select.setAttribute("aria-label","Исправленный тип касания");
+          for(const [value,title] of Object.entries(trainingNames)){
+            const option=document.createElement("option");
+            option.value=value;option.textContent=title;select.append(option);
+          }
+          select.value=item.label;
+          const accept=document.createElement("button");
+          accept.type="button";accept.className="primary";accept.textContent="Сохранить тип";
+          accept.addEventListener("click",async()=>{
+            accept.disabled=true;
+            try{
+              await post("/api/training/examples",{
+                action:"relabel",project_id:item.project_id,
+                id:item.id,label:select.value,revision:training.revision
+              });
+              if(training.editId===item.id)training.label.value=select.value;
+              trainingMessage("Тип касания исправлен. Новая метка применяется в следующем CPU-анализе.");
+              await refreshTraining();
+            }catch(error){
+              trainingMessage("Не удалось изменить пример: "+error.message,true);
+              await refreshTraining();
+            }finally{accept.disabled=false;}
+          });
+          const cancel=document.createElement("button");
+          cancel.type="button";cancel.className="secondary";cancel.textContent="Отмена";
+          cancel.addEventListener("click",()=>editor.classList.add("hidden"));
+          editor.append(select,accept,cancel);
+          change.addEventListener("click",()=>{
+            for(const other of training.list.querySelectorAll(".studio-training-example-editor"))
+              other.classList.add("hidden");
+            editor.classList.remove("hidden");
+          });
+          actions.append(change);
+          row.append(label,actions,editor);
+        }else row.append(label,actions);
         const remove=document.createElement("button");
         remove.type="button";remove.className="secondary";remove.textContent="Удалить";
         remove.setAttribute("aria-label","Удалить обучающий пример");
         remove.addEventListener("click",async()=>{
+          if(!window.confirm("Удалить этот обучающий пример?"))return;
           remove.disabled=true;
           try{
-            await post("/api/training/examples",{action:"delete",project_id:s.project,id:item.id});
+            await post("/api/training/examples",{
+              action:"delete",project_id:item.project_id,id:item.id
+            });
+            if(training.selectedId===item.id){training.selectedId=null;trainingEditorReset();}
             await refreshTraining();
             trainingMessage("Пример удалён. Следующий CPU-анализ будет использовать обновлённую базу.");
           }catch(error){trainingMessage(error.message,true);remove.disabled=false;}
         });
-        row.append(label,remove);training.list.append(row);
+        actions.append(remove);
+        training.list.append(row);
       }
       if(!data.examples.length)training.list.textContent="Пока нет примеров касаний и разметки площадки.";
-    }catch(error){training.list.textContent="Не удалось загрузить примеры: "+error.message;}
+    }catch(error){
+      if(epoch===training.epoch)training.list.textContent="Не удалось загрузить примеры: "+error.message;
+    }
   };
   // Source-scoped human truth. Separate from automatic CPU predictions and
   // from pose examples: training mode never rewrites immutable inference.
   const annotation={
     data:null,epoch:0,busy:false,touchId:null,rallyId:null,pendingStart:null,
     status:$("studio-annotation-status"),current:$("studio-annotation-current"),
-    lane:$("studio-annotation-touch-lane"),touchList:$("studio-annotation-touch-list"),
+    lane:$("studio-timeline-track"),touchList:$("studio-annotation-touch-list"),
     rallies:$("studio-annotation-rallies"),metrics:$("studio-annotation-metrics"),
     pending:$("studio-annotation-rally-pending"),
     seed:$("studio-annotation-seed"),add:$("studio-annotation-add-touch"),
@@ -1076,14 +1194,15 @@
   const annotationReady=()=>annotation.data&&Array.isArray(annotation.data.touches);
   const annotationSorted=type=>[...(annotation.data?.[type]||[])]
     .sort((a,b)=>(a.frame??a.start)-(b.frame??b.start));
-  const annotationPosition=frame=>100*Math.max(0,Math.min(1,
-    frame/Math.max(1,(annotation.data?.total_frames||1)-1)));
+  const annotationPosition=frame=>{
+    const duration=timelineDuration();
+    return 100*Math.max(0,Math.min(1,frame/fps()/Math.max(1/fps(),duration)));
+  };
   const annotationMarkCurrent=()=>{
     if(!training.active)return;
     annotation.current.textContent=annotationClock(annotationFrame())+
       " · кадр "+annotationFrame();
-    const cursor=annotation.lane.querySelector(".studio-annotation-playhead");
-    if(cursor)cursor.style.left=annotationPosition(annotationFrame())+"%";
+
   };
   const drawAnnotation=()=>{
     if(!training.active)return;
@@ -1100,30 +1219,28 @@
       "Выбран розыгрыш: границы меняются кнопками":
       annotation.pendingStart!==null?
       "Начало "+annotationClock(annotation.pendingStart)+" · установите конец":"";
-    annotation.lane.replaceChildren();
+    annotation.lane.querySelectorAll(".studio-annotation-tick").forEach(tick=>tick.remove());
     annotation.touchList.replaceChildren();
     annotation.rallies.replaceChildren();
     if(!ready){
       annotation.metrics.textContent="Сначала создайте эталон из автоматических меток.";
-      annotation.lane.textContent="Нет разметки";
       annotation.rallies.textContent="Нет размеченных розыгрышей";
       annotationMarkCurrent();return;
     }
-    const cursor=document.createElement("div");
-    cursor.className="studio-annotation-playhead";cursor.setAttribute("aria-hidden","true");
-    annotation.lane.append(cursor);
+
     // Scrubbable touch lane: individual marks are pointer and keyboard editable.
     for(const item of annotationSorted("touches")){
       const tick=document.createElement("button");
       tick.type="button";tick.className="studio-annotation-tick"+
         (item.id===annotation.touchId?" selected":"");
       tick.style.left=annotationPosition(item.frame)+"%";
+      tick.dataset.trainingTouchId=item.id;
       tick.title="Касание "+annotationClock(item.frame)+
         ". Перетащите или выберите и нажмите «Перенести»";
       tick.setAttribute("aria-label",tick.title);
       let pointer=null;
       tick.addEventListener("pointerdown",e=>{
-        if(e.button!==0)return;
+        if(e.button!==0||annotation.busy)return;
         e.preventDefault();e.stopPropagation();
         annotation.touchId=item.id;
         pointer={id:e.pointerId,initialX:e.clientX,frame:item.frame};
@@ -1133,6 +1250,7 @@
       });
       tick.addEventListener("pointermove",e=>{
         if(!pointer||pointer.id!==e.pointerId)return;
+        e.stopPropagation();
         const box=annotation.lane.getBoundingClientRect();
         if(!box.width)return;
         pointer.frame=Math.max(0,Math.min(data.total_frames-1,Math.round(
@@ -1141,12 +1259,14 @@
       });
       tick.addEventListener("pointerup",e=>{
         if(!pointer||pointer.id!==e.pointerId)return;
+        e.stopPropagation();
         const destination=pointer.frame;
         pointer=null;
         if(destination!==item.frame)editAnnotation("move_touch",{id:item.id,frame:destination});
         else {seekTimeline(item.frame/fps());drawAnnotation();}
       });
-      tick.addEventListener("pointercancel",()=>{pointer=null;drawAnnotation();});
+      tick.addEventListener("pointercancel",e=>{e.stopPropagation();pointer=null;drawAnnotation();});
+      tick.addEventListener("click",e=>e.stopPropagation());
       tick.addEventListener("keydown",e=>{
         if(e.key==="ArrowLeft"||e.key==="ArrowRight"){
           e.preventDefault();
@@ -1325,6 +1445,14 @@
   };
   overlay.canvas.addEventListener("click",pickTrainingPlayer);
   training.refresh.addEventListener("click",refreshTraining);
+  training.newExample.addEventListener("click",()=>{
+    training.selectedId=null;
+    training.track=null;training.frame=null;
+    trainingEditorReset();
+    for(const row of training.list.querySelectorAll(".studio-training-example"))
+      row.classList.remove("selected");
+    trainingMessage("Новый пример: выберите кадр и коснувшегося мяча игрока.");
+  });
   training.save.addEventListener("click",async()=>{
     if(!training.active||training.busy)return;
     if(!ui.video.paused){trainingMessage("Поставьте видео на паузу.",true);return;}
@@ -1334,14 +1462,23 @@
     }
     training.busy=true;training.save.disabled=true;
     try{
+      const editing=training.editId;
       await post("/api/training/examples",{
-        action:"touch",project_id:s.project,video:s.video,
-        rally_run_id:s.run,frame_index:frame,track_id:training.track,label:training.label.value
+        action:editing?"replace_touch":"touch",
+        project_id:s.project,video:s.video,rally_run_id:s.run,
+        frame_index:frame,track_id:training.track,label:training.label.value,
+        ...(editing?{id:editing,revision:training.revision}:{})
       });
-      trainingMessage("Пример сохранён: точки RTMPose и контакт с мячом. Влияет на следующий CPU-анализ.");
+      training.track=null;training.frame=null;
+      if(editing)trainingEditorReset();
+      trainingMessage(editing?
+        "Пример перезаписан из нового проверенного кадра и позы.":
+        "Пример сохранён: точки RTMPose и контакт с мячом. Влияет на следующий CPU-анализ.");
       await refreshTraining();
-    }catch(error){trainingMessage(error.message,true);}
-    finally{training.busy=false;training.save.disabled=false;}
+    }catch(error){
+      trainingMessage("Не удалось сохранить пример: "+error.message,true);
+      if(training.editId)await refreshTraining();
+    }finally{training.busy=false;training.save.disabled=false;}
   });
   for(const key of ["seeked","loadedmetadata"]){
     ui.video.addEventListener(key,()=>{training.track=null;training.frame=null;
@@ -1352,6 +1489,8 @@
       if(overlay.raw===raw&&!training.active)return;
       training.active=false;training.track=null;training.frame=null;
       training.panel.classList.add("hidden");
+      annotation.lane.querySelectorAll(".studio-annotation-tick").forEach(tick=>tick.remove());
+      training.selectedId=null;trainingEditorReset();
       overlay.canvas.closest(".video-wrap")?.classList.remove("training-select");
       overlay.raw=raw;
       updateRawDetectorLabel();
@@ -1368,6 +1507,7 @@
       else if(!s.run)timeline.status.textContent="Выберите CPU-версию";
       else if(timeline.data)timeline.status.textContent=
         timeline.data.rallies.length+" розыгрышей · "+timeline.data.touch_annotations.filter(event=>event.touch_attributed===true||event.contact_verified===true).length+" касаний (CPU)";
+      placeTrainingTimeline(false);
       drawTimeline();
       drawOverlay();
     };
@@ -1383,6 +1523,7 @@
       overlay.rawControls.classList.add("hidden");
       overlay.actionControls.classList.remove("hidden");
       training.panel.classList.remove("hidden");
+      placeTrainingTimeline(true);
       overlay.canvas.closest(".video-wrap")?.classList.add("training-select");
       updateOverlayToggles();
       setOverlaySource(s.run?{}:null);
@@ -1468,6 +1609,12 @@
     data:null,epoch:0,dragging:false
   };
   const rallyCardProgresses=new Map();
+  const placeTrainingTimeline=active=>{
+    const element=$("studio-timeline");
+    if(active)training.panel.before(element);
+    else document.querySelector("#studio-preview-view .viewer-layout").append(element);
+    requestAnimationFrame(drawTimeline);
+  };
   const timeLabel=value=>{
     const seconds=Math.max(0,Math.floor(Number(value)||0));
     const minutes=Math.floor(seconds/60),s=String(seconds%60).padStart(2,"0");

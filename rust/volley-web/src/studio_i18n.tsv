@@ -455,3 +455,8 @@ VBallNet + RTMPose: контакты и изломы ±0,1 с	VBallNet + RTMPose
 Строгость сопоставления ID ByteTrack	ByteTrack ID matching strictness
 Порог отклонения спорных ID	Ambiguous ID rejection threshold
 Экспериментальная TCN Volley3D (нужен обученный ONNX)	Experimental Volley3D TCN (trained ONNX required)
+Новый пример	New example
+· эталонные касания перемещаются на шкале под видео	· move ground-truth touches on the timeline under the video
+· просмотр и коррекция	· browse and correct
+Память CUDA, МБ · 0 = без лимита	CUDA memory, MB · 0 = unlimited
+Потоки CPU · 0 = авто	CPU threads · 0 = auto
