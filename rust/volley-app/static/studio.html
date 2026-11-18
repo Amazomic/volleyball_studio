@@ -225,8 +225,16 @@
                   </select>
                 </div>
               </div>
-              <section id="studio-training-panel" class="studio-training-panel hidden" aria-label="Дообучение на подтверждённых касаниях">
-                <div class="studio-training-head"><strong>Обучение на движениях игрока</strong><small>Пауза → выбрать игрока на кадре → подтвердить тип</small></div>
+              <section id="studio-training-panel" class="studio-training-panel hidden" aria-label="Дообучение и корректировка касаний по траектории мяча">
+                <div class="studio-training-mode-switch">
+                  <label>Метод анализа <select id="studio-training-method">
+                    <option value="trajectory" selected>По траектории мяча</option>
+                    <option value="pose">По позам игроков</option>
+                  </select></label>
+                  <label class="studio-training-toggle"><input type="checkbox" id="studio-annotation-hide-extra" checked> Скрыть неактуальные данные</label>
+                </div>
+                <div id="studio-training-player-tools" class="hidden">
+                <div class="studio-training-head"><strong>Обучение на движениях игрока</strong><small>Пауза → выбрать игрока → подтвердить тип</small></div>
                 <p id="studio-training-status" role="status" aria-live="polite">Выберите игрока, коснувшегося мяча, непосредственно на кадре видео.</p>
                 <div class="studio-training-actions">
                   <label for="studio-training-label">Тип касания</label>
@@ -241,16 +249,17 @@
                   <button class="primary" id="studio-training-save" type="button">Сохранить пример</button>
                   <button class="secondary" id="studio-training-refresh" type="button">Обновить базу</button>
                 </div>
+                </div>
                 <section class="studio-temporal-labels" aria-label="Эталонная разметка касаний и розыгрышей">
-                  <div class="studio-training-head"><strong>Эталонная разметка</strong><small>Кадр <output id="studio-annotation-current">—</output> · касания можно перетаскивать по шкале</small></div>
+                  <div class="studio-training-head"><strong>Касания и границы розыгрышей</strong><small>Кадр <output id="studio-annotation-current">—</output> · перетаскивайте зелёные метки на единой шкале под видео</small></div>
                   <div class="studio-annotation-tools">
-                    <button type="button" class="secondary" id="studio-annotation-seed">Взять автоматические метки за основу</button>
+                    <button type="button" class="primary" id="studio-annotation-calculate">Рассчитать касания</button>
+                    <button type="button" class="secondary" id="studio-annotation-seed" disabled>Взять результат расчёта для правок</button>
                     <button type="button" class="secondary" id="studio-annotation-add-touch">+ Касание</button>
                     <button type="button" class="secondary" id="studio-annotation-move-touch" disabled>Перенести касание сюда</button>
                     <button type="button" class="secondary" id="studio-annotation-delete-touch" disabled>Удалить касание</button>
+                    <button type="button" class="primary" id="studio-annotation-save" disabled>Сохранить данные касаний</button>
                   </div>
-                  <div id="studio-annotation-touch-lane" class="studio-annotation-touch-lane" aria-label="Эталонные касания по всему видео" role="group"></div>
-                  <div id="studio-annotation-touch-list" class="studio-annotation-touch-list" aria-label="Касания для коррекции"></div>
                   <div class="studio-annotation-rally-controls">
                     <button type="button" class="secondary" id="studio-annotation-new-rally">Новый розыгрыш</button>
                     <button type="button" class="secondary" id="studio-annotation-rally-start">Установить начало розыгрыша</button>
@@ -260,8 +269,8 @@
                   <div class="studio-annotation-rally-header"><strong>Размеченные розыгрыши</strong><small>3 строки · прокрутка · выбрать для изменения границ</small></div>
                   <div id="studio-annotation-rallies" class="studio-annotation-rallies" aria-label="Сохранённые розыгрыши"></div>
                   <div class="studio-annotation-evaluation"><span id="studio-annotation-metrics">Точность появится после разметки.</span>
-                    <button type="button" class="primary" id="studio-annotation-review">Завершить проверку видео</button></div>
-                  <p id="studio-annotation-status" role="status" aria-live="polite">Исправления сохраняются как независимый эталон для проверки и настройки детектора.</p>
+                    <button type="button" class="secondary" id="studio-annotation-review">Завершить проверку видео</button></div>
+                  <p id="studio-annotation-status" role="status" aria-live="polite">Жёлтые метки — расчёт по траектории. Зелёные — ручная разметка. Изменения вступают в силу после сохранения и следующего расчёта.</p>
                 </section>
                 <div class="studio-training-library"><strong>Обучающие примеры <span id="studio-training-count">0</span></strong><div id="studio-training-list" aria-live="polite"></div></div>
               </section>
@@ -295,6 +304,7 @@
                      role="slider" aria-label="Переход по видео" aria-valuemin="0"
                      aria-valuemax="0" aria-valuenow="0" aria-valuetext="Нет видео">
                   <canvas id="studio-timeline-canvas" aria-hidden="true"></canvas>
+                  <div id="studio-timeline-training-markers" class="studio-timeline-training-markers hidden" aria-label="Редактируемые касания"></div>
                   <div id="studio-timeline-playhead" class="video-timeline-playhead" aria-hidden="true"></div>
                 </div>
                 <div class="video-timeline-axis">

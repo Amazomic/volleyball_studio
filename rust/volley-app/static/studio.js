@@ -1029,253 +1029,362 @@
       if(!data.examples.length)training.list.textContent="Пока нет примеров касаний и разметки площадки.";
     }catch(error){training.list.textContent="Не удалось загрузить примеры: "+error.message;}
   };
-  // Source-scoped human truth. Separate from automatic CPU predictions and
-  // from pose examples: training mode never rewrites immutable inference.
+  // Exactly one seek timeline is shared with Processed mode. Green editable
+  // contacts are DOM overlays on that timeline; yellow candidates are drawn
+  // onto the same canvas. All edits stay in a local draft until explicit Save.
   const annotation={
-    data:null,epoch:0,busy:false,touchId:null,rallyId:null,pendingStart:null,
+    data:null,draft:null,prediction:null,dirty:false,busy:false,epoch:0,source:null,
+    touchId:null,rallyId:null,pendingStart:null,priorFlags:null,
+    mode:$("studio-training-method"),hide:$("studio-annotation-hide-extra"),
+    tools:$("studio-training-player-tools"),
+    markerLayer:$("studio-timeline-training-markers"),
     status:$("studio-annotation-status"),current:$("studio-annotation-current"),
-    lane:$("studio-annotation-touch-lane"),touchList:$("studio-annotation-touch-list"),
     rallies:$("studio-annotation-rallies"),metrics:$("studio-annotation-metrics"),
     pending:$("studio-annotation-rally-pending"),
-    seed:$("studio-annotation-seed"),add:$("studio-annotation-add-touch"),
-    move:$("studio-annotation-move-touch"),remove:$("studio-annotation-delete-touch"),
+    calculate:$("studio-annotation-calculate"),
+    seed:$("studio-annotation-seed"),save:$("studio-annotation-save"),
+    add:$("studio-annotation-add-touch"),move:$("studio-annotation-move-touch"),
+    remove:$("studio-annotation-delete-touch"),
     next:$("studio-annotation-new-rally"),begin:$("studio-annotation-rally-start"),
     finish:$("studio-annotation-rally-end"),review:$("studio-annotation-review")
   };
-  const annotationFrame=()=>Math.max(0,Math.min(
-    (annotation.data?.total_frames||1)-1,
+  const annotationMax=()=>Math.max(1,Number(
+    annotation.draft?.total_frames||annotation.data?.total_frames||
+    annotation.prediction?.total_frames||timeline.data?.total_frames||1));
+  const annotationFrame=()=>Math.max(0,Math.min(annotationMax()-1,
     Math.round((Number(ui.video.currentTime)||s.seekAt||0)*fps())));
   const annotationClock=frame=>(frame/fps()).toFixed(3).replace(".",",")+" с";
-  const annotationNotice=(value,error=false)=>{
-    annotation.status.textContent=value;
+  const annotationNotice=(text,error=false)=>{
+    annotation.status.textContent=text;
     annotation.status.classList.toggle("is-error",error);
   };
-  const annotationReady=()=>annotation.data&&Array.isArray(annotation.data.touches);
-  const annotationSorted=type=>[...(annotation.data?.[type]||[])]
-    .sort((a,b)=>(a.frame??a.start)-(b.frame??b.start));
+  const annotationReady=()=>Array.isArray(annotation.draft?.touches);
+  const annotationSource=()=>[s.project,s.run,s.video].join("\u0000");
+  const annotationSourceValid=()=>annotation.source===annotationSource();
   const annotationPosition=frame=>100*Math.max(0,Math.min(1,
-    frame/Math.max(1,(annotation.data?.total_frames||1)-1)));
+    frame/Math.max(1,annotationMax()-1)));
+  const annotationNewId=()=>{
+    if(window.crypto?.randomUUID)return window.crypto.randomUUID();
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{
+      const r=Math.floor(Math.random()*16);return(c==="x"?r:(r&3|8)).toString(16);
+    });
+  };
+  const annotationClone=data=>data?.touches?
+    {total_frames:data.total_frames,
+     touches:data.touches.map(x=>({id:x.id,frame:x.frame})),
+     rallies:(data.rallies||[]).map(x=>({id:x.id,start:x.start,end:x.end}))}:null;
+  const annotationSorted=type=>[...(annotation.draft?.[type]||[])]
+    .sort((a,b)=>(a.frame??a.start)-(b.frame??b.start));
   const annotationMarkCurrent=()=>{
+    if(training.active)annotation.current.textContent=
+      annotationClock(annotationFrame())+" · кадр "+annotationFrame();
+  };
+  const annotationRestoreOverlays=()=>{
+    if(annotation.priorFlags){
+      Object.assign(overlay.flags,annotation.priorFlags);
+      annotation.priorFlags=null;
+      updateOverlayToggles();
+    }
+  };
+  const annotationFocus=()=>{
     if(!training.active)return;
-    annotation.current.textContent=annotationClock(annotationFrame())+
-      " · кадр "+annotationFrame();
-    const cursor=annotation.lane.querySelector(".studio-annotation-playhead");
-    if(cursor)cursor.style.left=annotationPosition(annotationFrame())+"%";
+    const byPose=annotation.mode.value==="pose";
+    annotation.tools.classList.toggle("hidden",!byPose);
+    training.panel.dataset.method=annotation.mode.value;
+    overlay.canvas.closest(".video-wrap")?.classList.toggle("training-select",byPose);
+    if(annotation.hide.checked){
+      overlay.flags.players=byPose;overlay.flags.pose=byPose;
+      overlay.flags.court=false;overlay.flags.rallies=false;
+      overlay.flags.touches=false;overlay.flags.trajectory=true;
+    }else if(annotation.priorFlags){
+      Object.assign(overlay.flags,annotation.priorFlags);
+    }
+    overlay.actionControls.classList.toggle("hidden",annotation.hide.checked&&!byPose);
+    updateOverlayToggles();drawOverlay();drawTimeline();
   };
   const drawAnnotation=()=>{
     if(!training.active)return;
-    const data=annotation.data,ready=annotationReady();
-    annotation.seed.disabled=annotation.busy||!s.run;
-    annotation.seed.textContent=ready?"Сбросить метки к автоматическим":"Взять автоматические метки за основу";
-    for(const key of ["add","begin","finish","review","next"])
+    const validSource=annotationSourceValid();
+    const ready=validSource&&annotationReady(),data=annotation.data;
+    const hasCalc=validSource&&Boolean(annotation.prediction);
+    annotation.calculate.disabled=annotation.busy||annotation.dirty||!s.run||!validSource;
+    annotation.seed.disabled=annotation.busy||!hasCalc;
+    annotation.save.disabled=annotation.busy||!ready||!annotation.dirty;
+    for(const key of ["add","begin","finish","next","review"])
       annotation[key].disabled=annotation.busy||!ready;
     annotation.move.disabled=annotation.busy||!ready||!annotation.touchId;
     annotation.remove.disabled=annotation.move.disabled;
-    annotation.review.textContent=data?.reviewed?"Проверено ✓":"Завершить проверку видео";
-    annotation.review.disabled=annotation.review.disabled||Boolean(data?.reviewed);
+    annotation.review.disabled=annotation.review.disabled||annotation.dirty||Boolean(data?.reviewed);
+    annotation.review.textContent=data?.reviewed&&!annotation.dirty?"Проверено ✓":"Завершить проверку видео";
     annotation.pending.textContent=annotation.rallyId?
-      "Выбран розыгрыш: границы меняются кнопками":
-      annotation.pendingStart!==null?
-      "Начало "+annotationClock(annotation.pendingStart)+" · установите конец":"";
-    annotation.lane.replaceChildren();
-    annotation.touchList.replaceChildren();
+      "Редактируются границы выбранного розыгрыша":
+      annotation.pendingStart!==null?"Начало "+annotationClock(annotation.pendingStart)+" · выберите конец":"";
+    annotation.markerLayer.classList.toggle("hidden",!ready);
+    annotation.markerLayer.replaceChildren();
     annotation.rallies.replaceChildren();
     if(!ready){
-      annotation.metrics.textContent="Сначала создайте эталон из автоматических меток.";
-      annotation.lane.textContent="Нет разметки";
-      annotation.rallies.textContent="Нет размеченных розыгрышей";
+      annotation.metrics.textContent=hasCalc?
+        "Расчёт готов: возьмите его для разметки и сохраните исправления.":
+        "Нажмите «Рассчитать касания» — будут использованы сохранённые координаты мяча.";
+      annotation.rallies.textContent="Нет размеченных розыгрышей.";
       annotationMarkCurrent();return;
     }
-    const cursor=document.createElement("div");
-    cursor.className="studio-annotation-playhead";cursor.setAttribute("aria-hidden","true");
-    annotation.lane.append(cursor);
-    // Scrubbable touch lane: individual marks are pointer and keyboard editable.
     for(const item of annotationSorted("touches")){
       const tick=document.createElement("button");
-      tick.type="button";tick.className="studio-annotation-tick"+
-        (item.id===annotation.touchId?" selected":"");
+      tick.type="button";
+      tick.className="studio-annotation-tick"+(item.id===annotation.touchId?" selected":"");
       tick.style.left=annotationPosition(item.frame)+"%";
-      tick.title="Касание "+annotationClock(item.frame)+
-        ". Перетащите или выберите и нажмите «Перенести»";
+      tick.title="Разметка "+annotationClock(item.frame)+
+        " · перетащите для коррекции, стрелки ← → — один кадр";
       tick.setAttribute("aria-label",tick.title);
-      let pointer=null;
-      tick.addEventListener("pointerdown",e=>{
-        if(e.button!==0)return;
-        e.preventDefault();e.stopPropagation();
+      let dragging=null;
+      tick.addEventListener("pointerdown",event=>{
+        if(event.button!==0)return;
+        event.preventDefault();event.stopPropagation();
         annotation.touchId=item.id;
-        pointer={id:e.pointerId,initialX:e.clientX,frame:item.frame};
-        tick.setPointerCapture?.(e.pointerId);
+        dragging={pointer:event.pointerId,frame:item.frame};
+        tick.setPointerCapture?.(event.pointerId);
         tick.classList.add("selected");
         annotation.move.disabled=false;annotation.remove.disabled=false;
       });
-      tick.addEventListener("pointermove",e=>{
-        if(!pointer||pointer.id!==e.pointerId)return;
-        const box=annotation.lane.getBoundingClientRect();
-        if(!box.width)return;
-        pointer.frame=Math.max(0,Math.min(data.total_frames-1,Math.round(
-          (e.clientX-box.left)/box.width*(data.total_frames-1))));
-        tick.style.left=annotationPosition(pointer.frame)+"%";
+      tick.addEventListener("pointermove",event=>{
+        if(!dragging||event.pointerId!==dragging.pointer)return;
+        event.stopPropagation();
+        const rect=timeline.track.getBoundingClientRect();
+        if(!rect.width)return;
+        dragging.frame=Math.round(Math.max(0,Math.min(1,
+          (event.clientX-rect.left)/rect.width))*(annotationMax()-1));
+        tick.style.left=annotationPosition(dragging.frame)+"%";
       });
-      tick.addEventListener("pointerup",e=>{
-        if(!pointer||pointer.id!==e.pointerId)return;
-        const destination=pointer.frame;
-        pointer=null;
-        if(destination!==item.frame)editAnnotation("move_touch",{id:item.id,frame:destination});
-        else {seekTimeline(item.frame/fps());drawAnnotation();}
+      tick.addEventListener("pointerup",event=>{
+        if(!dragging||event.pointerId!==dragging.pointer)return;
+        event.stopPropagation();
+        const frame=dragging.frame;dragging=null;
+        if(frame!==item.frame)editAnnotation("move_touch",{id:item.id,frame});
+        else{seekTimeline(frame/fps());drawAnnotation();}
       });
-      tick.addEventListener("pointercancel",()=>{pointer=null;drawAnnotation();});
-      tick.addEventListener("keydown",e=>{
-        if(e.key==="ArrowLeft"||e.key==="ArrowRight"){
-          e.preventDefault();
+      tick.addEventListener("pointercancel",()=>{dragging=null;drawAnnotation();});
+      tick.addEventListener("keydown",event=>{
+        if(event.key==="ArrowRight"||event.key==="ArrowLeft"){
+          event.preventDefault();event.stopPropagation();
           annotation.touchId=item.id;
-          editAnnotation("move_touch",{id:item.id,frame:Math.max(0,Math.min(
-            data.total_frames-1,item.frame+(e.key==="ArrowRight"?1:-1)))});
+          editAnnotation("move_touch",{id:item.id,frame:Math.max(0,
+            Math.min(annotationMax()-1,item.frame+(event.key==="ArrowRight"?1:-1)))});
         }
       });
-      annotation.lane.append(tick);
-    }
-    const touches=annotationSorted("touches");
-    for(const item of touches){
-      const row=document.createElement("button");row.type="button";
-      row.className="studio-annotation-touch"+(item.id===annotation.touchId?" selected":"");
-      row.textContent="● "+annotationClock(item.frame);
-      row.title="Выбрать касание и перейти к нему";
-      row.addEventListener("click",()=>{
-        annotation.touchId=item.id;seekTimeline(item.frame/fps());drawAnnotation();
-      });
-      annotation.touchList.append(row);
+      annotation.markerLayer.append(tick);
     }
     const rallies=annotationSorted("rallies");
-    for(let index=0;index<rallies.length;index++){
-      const item=rallies[index];
-      const row=document.createElement("div");
-      row.className="studio-annotation-rally"+(item.id===annotation.rallyId?" selected":"");
+    for(let i=0;i<rallies.length;i++){
+      const item=rallies[i],row=document.createElement("div");
+      row.className="studio-annotation-rally"+(annotation.rallyId===item.id?" selected":"");
       const jump=document.createElement("button");
       jump.type="button";jump.className="studio-annotation-rally-jump";
-      jump.textContent="№"+(index+1)+" · "+annotationClock(item.start)+" — "+
-        annotationClock(item.end);
+      jump.textContent="№"+(i+1)+" · "+annotationClock(item.start)+" – "+annotationClock(item.end);
       jump.addEventListener("click",()=>{
         annotation.rallyId=item.id;annotation.pendingStart=null;
         seekTimeline(item.start/fps());drawAnnotation();
       });
-      const remove=document.createElement("button");remove.type="button";
-      remove.className="secondary";remove.textContent="×";remove.title="Удалить розыгрыш";
-      remove.setAttribute("aria-label","Удалить размеченный розыгрыш");
+      const remove=document.createElement("button");
+      remove.type="button";remove.className="secondary";remove.textContent="×";
+      remove.setAttribute("aria-label","Удалить розыгрыш");
       remove.addEventListener("click",()=>editAnnotation("delete_rally",{id:item.id}));
       row.append(jump,remove);annotation.rallies.append(row);
     }
-    if(!rallies.length)annotation.rallies.textContent="Розыгрышей пока нет.";
-    const m=data.metrics?.touches;
-    annotation.metrics.textContent=m?
-      (data.reviewed?"ПРОВЕРЕНО · ":"ЧЕРНОВИК · ")+
-      "Совпадений "+m.matched+" · лишних "+m.extra+" · пропущено "+m.missed+
-      " · F1 "+(100*m.f1).toFixed(1)+"% · ошибка времени "+
-      (m.matched?Number(m.mean_error_ms).toFixed(1)+" мс":"—")+" · окно ±1 кадр (33 мс)"+
-      " · границы "+(data.metrics.rallies.boundary_mean_error_ms===null?"—":
-      Number(data.metrics.rallies.boundary_mean_error_ms).toFixed(1)+" мс"):
-      "Нет результатов сравнения.";
-    const overall=data.overall;
-    if(overall?.reviewed_videos>0)annotation.metrics.textContent+=
-      " | Вся проверенная база: "+overall.reviewed_videos+" видео · F1 "+
-      (100*overall.f1).toFixed(1)+"% · лишних "+overall.extra+
-      " · пропущено "+overall.missed+" · средняя ошибка "+
-      (overall.matched?Number(overall.mean_error_ms).toFixed(1)+" мс":"—");
+    if(!rallies.length)annotation.rallies.textContent="Нет размеченных розыгрышей.";
+    const cpu=data?.metrics?.touches,trajectory=annotation.prediction?.metrics_on_labeled_video;
+    const summary=(name,m)=>m?name+": совпало "+m.matched+" · лишних "+m.extra+
+      " · пропущено "+m.missed+" · F1 "+(100*m.f1).toFixed(1)+"%":"";
+    const pieces=[summary("CPU",cpu),summary("Траектория",trajectory)].filter(Boolean);
+    if(annotation.prediction){
+      const info=annotation.prediction.calibration;
+      pieces.push("Расчёт: "+annotation.prediction.proposals.length+" событий · обучающих видео "+
+        info.training_videos+" · порог "+info.min_score+" · сдвиг "+info.shift_frames+" кадр.");
+    }
+    if(annotation.dirty)pieces.push("НЕ СОХРАНЕНО — сохраните, затем пересчитайте");
+    if(!validSource)pieces.push("ПЕРЕКЛЮЧЁН ИСТОЧНИК — вернитесь к прежней CPU-версии для сохранения");
+    if(data?.overall?.reviewed_videos)pieces.push("Проверено видео: "+data.overall.reviewed_videos);
+    annotation.metrics.textContent=pieces.join(" | ")||
+      "Ручная разметка. Для проверки точности выполните расчёт.";
     annotationMarkCurrent();
   };
   const refreshAnnotation=async()=>{
     const epoch=++annotation.epoch,project=s.project,run=s.run;
-    annotation.data=null;annotation.touchId=null;annotation.rallyId=null;
-    annotation.pendingStart=null;
+    if(annotation.dirty){annotationNotice("Есть несохранённые исправления. Сначала сохраните их.",true);return;}
+    annotation.data=null;annotation.draft=null;annotation.touchId=null;annotation.rallyId=null;
+    annotation.pendingStart=null;annotation.prediction=null;
     if(!training.active||!project||!run){
-      annotationNotice("Для разметки выберите CPU-анализ и видео.");
-      drawAnnotation();return;
+      annotation.source=null;
+      annotationNotice("Выберите проект, видео и CPU-анализ для расчёта.");drawAnnotation();return;
     }
-    annotationNotice("Загрузка эталонных меток…");
+    annotation.source=annotationSource();
+    annotationNotice("Загружаем сохранённые исправления…");
     try{
       const data=await request(url("/api/training/annotations",{
         project_id:project,rally_run_id:run
       }));
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run)return;
       if(data.schema!=="volley-touch-annotations/1"||data.video!==s.video)
-        throw Error("Неверный источник эталонной разметки");
-      annotation.data=data;drawAnnotation();
-      annotationNotice(data.reviewed?"Эталон проверен. Метрики рассчитаны по исходным CPU-детекциям.":
-        "Корректируйте касания и границы, затем завершите проверку видео.");
+        throw Error("Неверная версия разметки или видеозаписи");
+      annotation.data=data;annotation.draft=annotationClone(data);
+      drawAnnotation();drawTimeline();
+      annotationNotice(data.reviewed?"Сохранённая разметка проверена.":
+        "Сохранённые метки загружены. Нажмите «Рассчитать касания».");
     }catch(error){
       if(epoch!==annotation.epoch)return;
-      annotationNotice("Не удалось загрузить метки: "+error.message,true);drawAnnotation();
+      annotationNotice("Ошибка загрузки: "+error.message,true);drawAnnotation();
     }
   };
-  const editAnnotation=async(action,fields={})=>{
-    if(annotation.busy||!s.project||!s.run)return;
-    if(annotation.data&&(annotation.data.project_id!==s.project||
-        annotation.data.rally_run_id!==s.run||annotation.data.video!==s.video)){
-      annotationNotice("Источник сменился. Дождитесь загрузки его разметки.",true);return;
+  // The original CPU and trajectory detections remain immutable. This handler
+  // updates only a local draft, never the backend or the training profile.
+  const editAnnotation=(action,fields={})=>{
+    if(annotation.busy||!annotationReady()||!annotationSourceValid())return;
+    const draft=annotation.draft,frame=fields.frame;
+    if(frame!==undefined&&(!Number.isSafeInteger(frame)||frame<0||frame>=annotationMax())){
+      annotationNotice("Кадр за пределами видео.",true);return;
     }
-    const project=s.project,run=s.run,epoch=annotation.epoch;
-    if(!annotation.data&&action!=="seed"){
-      annotationNotice("Сначала создайте разметку из автоматических меток.",true);return;
-    }
-    annotation.busy=true;
-    annotationNotice("Сохранение разметки…");
+    if(action==="add_touch"){
+      if(draft.touches.some(x=>x.frame===frame)){annotationNotice("На кадре уже есть касание.",true);return;}
+      const id=annotationNewId();draft.touches.push({id,frame});annotation.touchId=id;
+    }else if(action==="move_touch"){
+      const selected=draft.touches.find(x=>x.id===fields.id);
+      if(!selected||draft.touches.some(x=>x.id!==selected.id&&x.frame===frame))return;
+      selected.frame=frame;annotation.touchId=selected.id;
+    }else if(action==="delete_touch"){
+      draft.touches=draft.touches.filter(x=>x.id!==fields.id);
+      annotation.touchId=null;
+    }else if(action==="add_rally"){
+      if(fields.start>=fields.end||fields.start<0||fields.end>=annotationMax()){
+        annotationNotice("Начало розыгрыша должно быть раньше конца.",true);return;
+      }
+      const id=annotationNewId();
+      draft.rallies.push({id,start:fields.start,end:fields.end});annotation.rallyId=id;
+      annotation.pendingStart=null;
+    }else if(action==="move_rally"){
+      const selected=draft.rallies.find(x=>x.id===fields.id);
+      if(!selected||fields.start>=fields.end||fields.start<0||fields.end>=annotationMax()){
+        annotationNotice("Недопустимые границы розыгрыша.",true);return;
+      }
+      selected.start=fields.start;selected.end=fields.end;
+    }else if(action==="delete_rally"){
+      draft.rallies=draft.rallies.filter(x=>x.id!==fields.id);
+      annotation.rallyId=null;annotation.pendingStart=null;
+    }else return;
+    annotation.dirty=true;
+    drawAnnotation();drawTimeline();
+    annotationNotice("Черновик изменён. Нажмите «Сохранить данные касаний», затем «Рассчитать касания».");
+  };
+  annotation.calculate.addEventListener("click",async()=>{
+    if(annotation.busy||annotation.dirty||!s.run||!annotationSourceValid())return;
+    const epoch=annotation.epoch,project=s.project,run=s.run;
+    annotation.busy=true;drawAnnotation();
+    annotationNotice("Рассчитываем отклонения траектории VBallNet по исходному видео…");
     try{
-      const result=await post("/api/training/annotations",{
-        action,project_id:project,rally_run_id:run,
-        revision:annotation.data?.revision||0,...fields
+      const result=await post("/api/training/trajectory/calculate",{
+        project_id:project,rally_run_id:run
       });
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run)return;
-      annotation.data=result;
-      if(action==="seed"||action==="delete_touch"){annotation.touchId=null;}
-      if(action==="seed"||action==="delete_rally"){annotation.rallyId=null;annotation.pendingStart=null;}
-      drawAnnotation();drawTimeline();
-      annotationNotice(action==="review"?
-        "Видео подтверждено. Результат проверки сохранён отдельно от автоматической детекции.":
-        "Метки сохранены. Проверка сброшена до повторного подтверждения.");
+      if(result.schema!=="volley-trajectory-touch-proposals/1"||result.video!==s.video||
+          !Array.isArray(result.proposals))throw Error("Неверные данные расчёта");
+      annotation.prediction=result;
+      if(!annotationReady()){
+        annotation.draft={
+          total_frames:result.total_frames,
+          touches:result.proposals.map(p=>({id:annotationNewId(),frame:p.frame})),
+          rallies:(timeline.data?.rallies||[]).map(r=>({
+            id:annotationNewId(),start:r.start_frame,end:r.end_frame}))
+        };
+        annotation.dirty=true;
+      }
+      annotationNotice("Найдено "+result.proposals.length+
+        " предполагаемых касаний. Исправьте зелёные метки, сохраните данные и повторите расчёт.");
+      drawTimeline();
     }catch(error){
-      if(epoch!==annotation.epoch)return;
-      annotationNotice("Ошибка сохранения: "+error.message,true);
+      if(epoch===annotation.epoch)annotationNotice("Ошибка расчёта: "+error.message,true);
     }finally{annotation.busy=false;drawAnnotation();}
-  };
+  });
   annotation.seed.addEventListener("click",()=>{
-    if(annotationReady()&&!window.confirm("Заменить текущую ручную разметку автоматической?"))return;
-    editAnnotation("seed");
+    if(!annotation.prediction||annotation.busy)return;
+    if(annotationReady()&&!window.confirm("Заменить черновик текущими результатами расчёта?"))return;
+    annotation.draft={
+      total_frames:annotation.prediction.total_frames,
+      touches:annotation.prediction.proposals.map(p=>({id:annotationNewId(),frame:p.frame})),
+      rallies:annotation.draft?.rallies?.map(x=>({...x}))||
+        (timeline.data?.rallies||[]).map(r=>({id:annotationNewId(),
+          start:r.start_frame,end:r.end_frame}))
+    };
+    annotation.touchId=null;annotation.rallyId=null;annotation.dirty=true;
+    drawAnnotation();drawTimeline();
+    annotationNotice("Результат принят в черновик. Исправьте метки и сохраните данные.");
+  });
+  annotation.save.addEventListener("click",async()=>{
+    if(annotation.busy||!annotation.dirty||!annotationReady()||!annotationSourceValid())return;
+    const epoch=annotation.epoch,project=s.project,run=s.run;
+    annotation.busy=true;drawAnnotation();
+    annotationNotice("Сохраняем исправления и примеры траектории для калибровки…");
+    try{
+      const data=await post("/api/training/annotations",{
+        action:"save",project_id:project,rally_run_id:run,
+        revision:annotation.data?.revision||0,
+        touches:annotation.draft.touches,rallies:annotation.draft.rallies
+      });
+      if(epoch!==annotation.epoch||project!==s.project||run!==s.run)return;
+      annotation.data=data;annotation.draft=annotationClone(data);
+      annotation.dirty=false;annotation.prediction=null;
+      drawTimeline();
+      annotationNotice("Данные сохранены. Нажмите «Рассчитать касания» повторно: параметры откалибруются по сохранённым меткам.");
+    }catch(error){
+      if(epoch===annotation.epoch)annotationNotice("Ошибка сохранения: "+error.message,true);
+    }finally{annotation.busy=false;drawAnnotation();}
+  });
+  annotation.review.addEventListener("click",async()=>{
+    if(annotation.dirty||annotation.busy||!annotation.data||!annotationSourceValid())return;
+    const epoch=annotation.epoch,project=s.project,run=s.run;
+    annotation.busy=true;drawAnnotation();
+    try{
+      const data=await post("/api/training/annotations",{action:"review",
+        project_id:project,rally_run_id:run,revision:annotation.data.revision});
+      if(epoch!==annotation.epoch||project!==s.project||run!==s.run)return;
+      annotation.data=data;drawAnnotation();annotationNotice("Видео подтверждено.");
+    }catch(error){annotationNotice(error.message,true);}
+    finally{annotation.busy=false;drawAnnotation();}
   });
   annotation.add.addEventListener("click",()=>editAnnotation("add_touch",{frame:annotationFrame()}));
   annotation.move.addEventListener("click",()=>{
-    if(annotation.touchId)editAnnotation("move_touch",{id:annotation.touchId,frame:annotationFrame()});
+    if(annotation.touchId)editAnnotation("move_touch",{
+      id:annotation.touchId,frame:annotationFrame()});
   });
   annotation.remove.addEventListener("click",()=>{
     if(annotation.touchId)editAnnotation("delete_touch",{id:annotation.touchId});
   });
   annotation.next.addEventListener("click",()=>{
     annotation.rallyId=null;annotation.pendingStart=null;
-    annotationNotice("Новый розыгрыш: выберите кадр начала, затем кадр конца.");
-    drawAnnotation();
+    drawAnnotation();annotationNotice("Новый розыгрыш: установите начало, затем конец.");
   });
   annotation.begin.addEventListener("click",()=>{
     const frame=annotationFrame();
-    const row=annotation.data?.rallies?.find(x=>x.id===annotation.rallyId);
+    const row=annotation.draft?.rallies.find(x=>x.id===annotation.rallyId);
     if(row)editAnnotation("move_rally",{id:row.id,start:frame,end:row.end});
     else{annotation.pendingStart=frame;drawAnnotation();}
   });
   annotation.finish.addEventListener("click",()=>{
     const frame=annotationFrame();
-    const row=annotation.data?.rallies?.find(x=>x.id===annotation.rallyId);
+    const row=annotation.draft?.rallies.find(x=>x.id===annotation.rallyId);
     if(row)editAnnotation("move_rally",{id:row.id,start:row.start,end:frame});
-    else if(annotation.pendingStart!==null){
-      const start=annotation.pendingStart;
-      editAnnotation("add_rally",{start,end:frame}).then(()=>{
-        if(annotation.data?.rallies?.some(x=>x.start===start&&x.end===frame)){
-          annotation.pendingStart=null;drawAnnotation();
-        }
-      });
-    }else annotationNotice("Сначала установите начало нового розыгрыша.",true);
+    else if(annotation.pendingStart!==null)
+      editAnnotation("add_rally",{start:annotation.pendingStart,end:frame});
+    else annotationNotice("Сначала установите начало нового розыгрыша.",true);
   });
-  annotation.review.addEventListener("click",()=>editAnnotation("review"));
+  annotation.mode.addEventListener("change",annotationFocus);
+  annotation.hide.addEventListener("change",annotationFocus);
   ui.video.addEventListener("timeupdate",annotationMarkCurrent);
   ui.video.addEventListener("seeked",annotationMarkCurrent);
+  window.addEventListener("beforeunload",event=>{
+    if(annotation.dirty){event.preventDefault();event.returnValue="";}
+  });
   const pickTrainingPlayer=event=>{
-    if(!training.active||!ui.video.paused||!s.run||!s.video)return;
+    if(!training.active||annotation.mode.value!=="pose"||
+        !ui.video.paused||!s.run||!s.video)return;
     const frame=Math.max(0,Math.floor(ui.video.currentTime*fps()+0.001));
     const data=cachedOverlayForFrame(s.project,s.run,s.video,frame);
     const row=data?.frames?.find(item=>item.frame===frame);
@@ -1327,6 +1436,10 @@
   if(overlay.mode){
     const selectMode=raw=>{
       if(overlay.raw===raw&&!training.active)return;
+      if(annotation.dirty&&!window.confirm("Есть несохранённая разметка. Выйти без сохранения?"))return;
+      annotationRestoreOverlays();
+      annotation.epoch++;annotation.dirty=false;
+      annotation.markerLayer.replaceChildren();annotation.markerLayer.classList.add("hidden");
       training.active=false;training.track=null;training.frame=null;
       training.panel.classList.add("hidden");
       overlay.canvas.closest(".video-wrap")?.classList.remove("training-select");
@@ -1355,18 +1468,17 @@
       if(training.active)return;
       ui.video.pause();
       overlay.raw=false;training.active=true;training.track=null;training.frame=null;
-      overlay.flags.pose=true;overlay.flags.players=true;
+      annotation.priorFlags={...overlay.flags};
       overlay.mode.setAttribute("aria-selected","false");
       overlay.rawMode.setAttribute("aria-selected","false");
       training.mode.setAttribute("aria-selected","true");
       overlay.rawControls.classList.add("hidden");
       overlay.actionControls.classList.remove("hidden");
       training.panel.classList.remove("hidden");
-      overlay.canvas.closest(".video-wrap")?.classList.add("training-select");
-      updateOverlayToggles();
+      annotationFocus();
       setOverlaySource(s.run?{}:null);
       drawTimeline();drawOverlay();
-      trainingMessage("Остановите видео в момент удара и щёлкните по рамке игрока. Нужны сохранённые RTMPose и VBallNet.");
+      trainingMessage("Для поз игрока выберите метод «По позам игроков»; для траектории используйте кнопку расчёта.");
       refreshTraining();
       refreshAnnotation();
     });
@@ -1502,14 +1614,16 @@
         }
       }
       if(training.active&&annotationReady()){
-        for(const mark of annotation.data.rallies){
+        for(const mark of annotation.draft.rallies){
           const x=mark.start/fps()/duration*width;
           const x2=(mark.end+1)/fps()/duration*width;
           ctx.fillStyle="#00ad9470";ctx.fillRect(x,y,Math.max(1,x2-x),bandHeight);
         }
-        for(const mark of annotation.data.touches){
+      }
+      if(training.active&&annotation.prediction){
+        for(const mark of annotation.prediction.proposals){
           const x=mark.frame/fps()/duration*width;
-          ctx.fillStyle="#10deb2";ctx.fillRect(x,y,Math.max(2,Math.ceil(dpr)),bandHeight);
+          ctx.fillStyle="#ffcc73";ctx.fillRect(x,y,Math.max(2,Math.ceil(dpr)),bandHeight);
         }
       }
       if(overlay.flags.touches&&Array.isArray(data.touch_annotations)){
@@ -1532,8 +1646,11 @@
   };
   const clearTimeline=()=>{
     timeline.epoch++;timeline.dragging=false;timeline.data=null;
-    if(training.active){annotation.epoch++;annotation.data=null;annotation.touchId=null;
-      annotation.rallyId=null;annotation.pendingStart=null;drawAnnotation();}
+    if(training.active&&!annotation.dirty){
+      annotation.epoch++;annotation.data=null;annotation.draft=null;
+      annotation.prediction=null;annotation.touchId=null;
+      annotation.rallyId=null;annotation.pendingStart=null;drawAnnotation();
+    }
     timeline.status.textContent="Выберите CPU-версию";
     timeline.middle.textContent="—";timeline.end.textContent="—";
     timeline.track.title="";drawTimeline();refreshRallyCardTouchTicks();

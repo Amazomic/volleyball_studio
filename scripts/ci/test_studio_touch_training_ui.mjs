@@ -1,0 +1,22 @@
+import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
+const html=readFileSync("rust/volley-app/static/studio.html","utf8");
+const js=readFileSync("rust/volley-app/static/studio.js","utf8");
+const css=readFileSync("rust/volley-app/static/studio.css","utf8");
+const server=readFileSync("rust/volley-app/src/main.rs","utf8");
+assert.equal((html.match(/id="studio-timeline-track"/g)||[]).length,1,"only one seek timeline");
+assert.ok(!html.includes("studio-annotation-touch-lane"),"no duplicate training timeline");
+assert.ok(!html.includes("studio-annotation-touch-list"),"no secondary touch scale");
+const seek=html.indexOf('id="studio-timeline-track"');
+const markers=html.indexOf('id="studio-timeline-training-markers"');
+const playhead=html.indexOf('id="studio-timeline-playhead"');
+assert.ok(seek>0&&markers>seek&&playhead>markers,"editable markers share existing timeline");
+for(const id of ["studio-training-method","studio-annotation-hide-extra","studio-annotation-calculate",
+  "studio-annotation-save","studio-annotation-rallies"])assert.ok(html.includes('id="'+id+'"'),id);
+assert.ok(css.includes(".studio-timeline-training-markers"));
+assert.ok(css.includes("height:132px"),"exactly three visible rally rows");
+assert.ok(js.includes('action:"save"'),"manual changes require explicit save");
+assert.ok(js.includes("annotation.dirty||!s.run"),"unsaved edits block recalculation");
+assert.ok(js.includes("annotation.prediction.proposals"),"trajectory predictions rendered");
+assert.ok(server.includes('"/api/training/trajectory/calculate"'),"trajectory server route");
+console.log("PASS: single shared training timeline, trajectory calculate/save/recalculate and focus toggle");
