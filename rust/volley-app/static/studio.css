@@ -1741,3 +1741,47 @@ body[data-ui-theme="light"] #studio-analysis-view .analysis-setting-help:is(:hov
 html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visible)::after{
   content:attr(data-analysis-hint-en);
 }
+
+.studio-training-comparison{display:grid;gap:12px;padding:16px;border:1px solid #355b7d;border-radius:12px;background:#11263a}
+.studio-training-compare-title{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.studio-training-compare-title>div{display:grid;gap:5px}
+.studio-training-compare-title strong{font-size:15px;color:#e3f0ff}
+.studio-training-compare-title small{font-size:11px;color:#91adc9}
+.studio-training-compare-title button{font-size:12px;padding:9px 13px}
+.studio-training-compare-controls{display:flex;gap:10px;flex-wrap:wrap;align-items:end}
+.studio-training-compare-controls label{font-size:11px;color:#a7bfd9;display:grid;gap:5px;min-width:145px;flex:1}
+.studio-training-compare-controls input{width:100%;padding:9px 10px;background:#1b3149;color:#edf5ff;border:1px solid #48617e;border-radius:8px}
+#studio-comparison-status{font-size:11px;color:#a0c3e6;line-height:1.5}
+.studio-training-compare-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:7px}
+.studio-training-compare-metric{display:grid;gap:5px;padding:10px 11px;border-radius:9px;background:#1d344b;border:1px solid #35516a;min-width:0}
+.studio-training-compare-metric small{color:#a6bed6;font-size:10px}
+.studio-training-compare-metric strong{font-size:16px;color:#f1f6fd;font-variant-numeric:tabular-nums}
+.studio-training-compare-review{display:flex;justify-content:space-between;align-items:center;gap:10px;border-top:1px solid #36516a;padding-top:12px;flex-wrap:wrap}
+.studio-training-compare-review strong{font-size:13px}
+.studio-training-compare-review label{display:flex;align-items:center;gap:8px;color:#abc1da;font-size:11px}
+.studio-training-compare-review select{width:auto;min-width:175px;padding:8px;font-size:11px}
+.studio-training-compare-differences{display:grid;gap:6px;max-height:255px;overflow:auto;overscroll-behavior:contain}
+.studio-training-compare-counter{font-size:11px;color:#8daeca;margin:2px}
+.studio-training-compare-row{width:100%;display:grid;grid-template-columns:135px minmax(0,1fr);gap:9px;align-items:center;text-align:left;background:#1b3046;color:#bacee5;border:1px solid #344c66;border-radius:8px;padding:9px 11px;font-size:11px}
+.studio-training-compare-row:hover{border-color:#6a91b9;background:#243f59}
+.studio-training-compare-row strong{font-size:11px}
+.studio-training-compare-row.cpu_only strong{color:#85aef6}
+.studio-training-compare-row.trajectory_only strong{color:#f6ca81}
+.studio-training-compare-row.shifted strong{color:#f3b07f}
+.studio-training-compare-row.both_missed strong{color:#f0a2d6}
+.studio-training-compare-row.agreed strong{color:#91d4b6}
+.studio-training-compare-legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap;color:#a9c1d9;font-size:11px}
+.studio-training-compare-legend span{display:inline-flex;align-items:center;gap:6px}
+.studio-training-compare-legend i{display:inline-block;width:13px;height:8px;border-radius:2px}
+.studio-compare-cpu{background:#597a91}
+.studio-compare-ball{background:#efb157}
+.studio-compare-manual{background:#10deb2}
+.studio-training-compare-legend small{flex-basis:100%;font-size:10px;color:#90aac5}
+.studio-training-advanced{border:1px solid #31455d;border-radius:9px;padding:10px 12px;display:grid;gap:9px}
+.studio-training-advanced:not([open])>*:not(summary){display:none}
+.studio-training-advanced>summary{cursor:pointer;font-size:12px;color:#b5c9e1;font-weight:600;list-style:disclosure-closed}
+.studio-training-advanced[open]>summary{list-style:disclosure-open;margin-bottom:5px}
+.studio-training-advanced.studio-training-library{padding:10px 12px;margin:0}
+.studio-training-advanced.studio-training-library #studio-training-list{max-height:270px;overflow:auto}
+#studio-preview-view.training-workspace .video-timeline-legend{flex-wrap:wrap}
+@media(max-width:650px){.studio-training-compare-row{grid-template-columns:1fr;gap:4px}.studio-training-comparison{padding:12px}.studio-training-compare-controls label{min-width:115px}}

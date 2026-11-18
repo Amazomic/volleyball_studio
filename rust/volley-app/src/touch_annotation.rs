@@ -395,6 +395,31 @@ fn response(state: &AppState, run: &ValidatedRun, source: &str) -> Result<Value,
         )
     })
 }
+pub(crate) fn comparison_truth(
+    state: &AppState,
+    run: &ValidatedRun,
+) -> Result<Option<(Vec<(u64, u64)>, bool)>, ApiError> {
+    let source = source_sha(run)?;
+    lock(|| {
+        let library = read(state)?;
+        let selected = library
+            .videos
+            .iter()
+            .find(|v| v.project_id == run.project_id && v.video == run.video);
+        if selected.is_some_and(|v| v.source_sha256 != source) {
+            return Err(storage::conflict(
+                "Source video changed: old labels cannot be used",
+            ));
+        }
+        Ok(selected.map(|v| {
+            (
+                v.rallies.iter().map(|r| (r.start, r.end)).collect(),
+                v.reviewed,
+            )
+        }))
+    })
+}
+
 pub async fn list(
     State(state): State<Arc<AppState>>,
     Query(q): Query<QueryLabels>,

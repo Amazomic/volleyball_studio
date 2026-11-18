@@ -1008,7 +1008,7 @@
   // Manual examples are audited in Rust; the browser only selects the saved
   // CPU frame and player, never sends arbitrary pose coordinates.
   const training={
-    panel:$("studio-training-panel"),
+    panel:$("studio-training-panel"),poseAdvanced:$("studio-training-pose-advanced"),
     status:$("studio-training-status"),label:$("studio-training-label"),
     save:$("studio-training-save"),newExample:$("studio-training-new"),
     refresh:$("studio-training-refresh"),
@@ -1356,11 +1356,13 @@
       if(data.schema!=="volley-touch-annotations/1"||data.video!==s.video)
         throw Error("Неверный источник эталонной разметки");
       annotation.data=data;drawAnnotation();
+      void refreshComparison();
       annotationNotice(data.reviewed?"Эталон проверен. Метрики рассчитаны по исходным CPU-детекциям.":
         "Корректируйте касания и границы, затем завершите проверку видео.");
     }catch(error){
       if(epoch!==annotation.epoch)return;
       annotationNotice("Не удалось загрузить метки: "+error.message,true);drawAnnotation();
+      void refreshComparison();
     }
   };
   const editAnnotation=async(action,fields={})=>{
@@ -1383,6 +1385,20 @@
       });
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run)return;
       annotation.data=result;
+      if(comparisonMatches(comparison.data)){
+        comparison.data.reference_reviewed=Boolean(result.reviewed);
+        comparison.data.reference_rallies=(result.rallies||[]).map(row=>({
+          start:row.start,end:row.end
+        }));
+        if(!result.reviewed){
+          comparison.data.metrics.cpu_reference=null;
+          comparison.data.metrics.trajectory_reference=null;
+          comparison.data.differences=comparison.data.differences.filter(
+            row=>row.kind!=="both_missed");
+        }
+        renderComparison();
+      }
+      if(action==="review")void refreshComparison(true);
       if(action==="seed"||action==="delete_touch"){annotation.touchId=null;}
       if(action==="seed"||action==="delete_rally"){annotation.rallyId=null;annotation.pendingStart=null;}
       drawAnnotation();drawTimeline();
@@ -1432,8 +1448,150 @@
   annotation.review.addEventListener("click",()=>editAnnotation("review"));
   ui.video.addEventListener("timeupdate",annotationMarkCurrent);
   ui.video.addEventListener("seeked",annotationMarkCurrent);
+  const comparison={
+    data:null,sourceKey:"",epoch:0,shown:200,
+    status:$("studio-comparison-status"),
+    metrics:$("studio-comparison-metrics"),
+    differences:$("studio-comparison-differences"),
+    filter:$("studio-comparison-filter"),
+    recalculate:$("studio-comparison-recalculate"),
+    minImpacts:$("studio-comparison-min-impacts"),
+    context:$("studio-comparison-context"),
+    duration:$("studio-comparison-duration"),
+    gap:$("studio-comparison-gap")
+  };
+  const comparisonMatches=data=>data&&
+    data.schema==="volley-rally-training-comparison/1"&&
+    data.project_id===s.project&&data.rally_run_id===s.run&&data.video===s.video;
+  const comparisonTime=frame=>(Number(frame)/fps()).toFixed(2)+" с";
+  const comparisonRange=value=>value?
+    comparisonTime(value.start)+" — "+comparisonTime(value.end):"—";
+  const renderComparison=()=>{
+    const data=comparisonMatches(comparison.data)?comparison.data:null;
+    const ready=data?.trajectory_status==="ready";
+    comparison.metrics.replaceChildren();
+    comparison.differences.replaceChildren();
+    for(const input of [comparison.minImpacts,comparison.context,comparison.duration,comparison.gap])
+      input.disabled=!ready;
+    comparison.recalculate.disabled=!ready;
+    if(!data){
+      comparison.metrics.textContent="Сравнение ещё не загружено.";
+      comparison.differences.textContent="Выберите CPU-анализ для просмотра расхождений.";
+      return;
+    }
+    if(!ready){
+      comparison.metrics.textContent=data.cpu_rallies.length+" розыгрышей CPU";
+      comparison.differences.textContent="Эта CPU-версия не содержит сохранённых перегибов траектории. Требуется новая CPU-постобработка по существующим GPU-данным. Ручная разметка остаётся доступной.";
+      return;
+    }
+    const addMetric=(title,body)=>{
+      const card=document.createElement("div");
+      card.className="studio-training-compare-metric";
+      const label=document.createElement("small");label.textContent=title;
+      const value=document.createElement("strong");value.textContent=body;
+      card.append(label,value);comparison.metrics.append(card);
+    };
+    const cpu=data.metrics.cpu_trajectory;
+    addMetric("Розыгрыши CPU",String(data.cpu_rallies.length));
+    addMetric("По мячу",String(data.trajectory_rallies.length));
+    addMetric("Совпали (IoU ≥ 0,5)",String(cpu.matched));
+    addMetric("Только CPU / только мяч",cpu.missed+" / "+cpu.extra);
+    addMetric("F1 между детекторами",(cpu.f1*100).toFixed(1)+"%");
+    if(data.reference_reviewed&&data.metrics.cpu_reference&&data.metrics.trajectory_reference){
+      addMetric("CPU против эталона · F1",(data.metrics.cpu_reference.f1*100).toFixed(1)+"%");
+      addMetric("Мяч против эталона · F1",(data.metrics.trajectory_reference.f1*100).toFixed(1)+"%");
+    }else{
+      addMetric("Ручной эталон",data.reference_rallies===null?"Нет разметки":
+        "Черновик · подтвердите разметку видео");
+    }
+    const kindLabels={agreed:"Совпадают",shifted:"Разные границы",
+      cpu_only:"Только CPU",trajectory_only:"Только траектория",
+      both_missed:"Пропущено обоими"};
+    const filter=comparison.filter.value;
+    const rows=data.differences.filter(item=>filter==="all"||
+      filter==="disagreement"&&item.kind!=="agreed"||item.kind===filter);
+    if(!rows.length){
+      comparison.differences.textContent="Нет расхождений по выбранному фильтру.";
+      return;
+    }
+    const total=document.createElement("small");
+    total.className="studio-training-compare-counter";
+    total.textContent="Найдено: "+rows.length+" · нажмите на строку для перехода к эпизоду";
+    comparison.differences.append(total);
+    for(const item of rows.slice(0,comparison.shown)){
+      const row=document.createElement("button");
+      row.type="button";
+      row.className="studio-training-compare-row "+item.kind;
+      const name=document.createElement("strong");
+      name.textContent=kindLabels[item.kind]||item.kind;
+      const range=document.createElement("span");
+      range.textContent="CPU: "+comparisonRange(item.cpu)+"  ·  Мяч: "+
+        comparisonRange(item.trajectory)+(item.reference?"  ·  Эталон: "+comparisonRange(item.reference):"")+
+        (item.iou===null?"":"  ·  IoU "+item.iou.toFixed(2));
+      row.append(name,range);
+      row.addEventListener("click",()=>{
+        ui.video.pause();
+        seekTimeline(item.seek_frame/fps());
+      });
+      comparison.differences.append(row);
+    }
+    if(rows.length>comparison.shown){
+      const more=document.createElement("button");
+      more.type="button";more.className="secondary";
+      more.textContent="Показать ещё ("+(rows.length-comparison.shown)+")";
+      more.addEventListener("click",()=>{comparison.shown+=200;renderComparison();});
+      comparison.differences.append(more);
+    }
+  };
+  const refreshComparison=async(useControls=false)=>{
+    const epoch=++comparison.epoch,project=s.project,run=s.run,video=s.video;
+    if(!training.active||!project||!run||!video){
+      comparison.data=null;comparison.sourceKey="";
+      comparison.status.textContent="Выберите видео и CPU-постобработку.";
+      renderComparison();return;
+    }
+    const key=project+":"+run+":"+video;
+    const sameSource=comparison.sourceKey===key;
+    comparison.status.textContent="Сравниваем выбранную CPU-версию и сохранённую траекторию мяча…";
+    comparison.recalculate.disabled=true;
+    const options={project_id:project,rally_run_id:run};
+    if(useControls&&sameSource){
+      options.min_impacts=Number(comparison.minImpacts.value);
+      options.context_frames=Number(comparison.context.value);
+      options.min_duration_frames=Number(comparison.duration.value);
+      options.max_touch_gap_frames=Number(comparison.gap.value);
+    }
+    try{
+      const data=await request(url("/api/training/rally-comparison",options));
+      if(epoch!==comparison.epoch||project!==s.project||run!==s.run||
+        video!==s.video||!training.active)return;
+      if(!comparisonMatches(data)||!Array.isArray(data.cpu_rallies)||
+        !Array.isArray(data.trajectory_rallies)||!Array.isArray(data.differences)||
+        !Array.isArray(data.trajectory_impacts))
+        throw Error("Источник сравнения не совпадает с выбранным анализом");
+      comparison.data=data;comparison.sourceKey=key;comparison.shown=200;
+      if(data.parameters){
+        comparison.minImpacts.value=data.parameters.min_impacts;
+        comparison.context.value=data.parameters.context_frames;
+        comparison.duration.value=data.parameters.min_duration_frames;
+        comparison.gap.value=data.parameters.max_touch_gap_frames;
+      }
+      comparison.status.textContent=data.trajectory_status==="ready"?
+        "По сохранённым перегибам VBallNet · источник CPU подтверждён SHA-256 · веса TCN не обучались.":
+        "Траекторных интервалов нет в этой CPU-версии.";
+      renderComparison();
+      drawTimeline();
+    }catch(error){
+      if(epoch!==comparison.epoch)return;
+      comparison.data=null;
+      comparison.status.textContent="Ошибка сравнения: "+error.message;
+      renderComparison();drawTimeline();
+    }
+  };
+  comparison.recalculate.addEventListener("click",()=>void refreshComparison(true));
+  comparison.filter.addEventListener("change",()=>{comparison.shown=200;renderComparison();});
   const pickTrainingPlayer=event=>{
-    if(!training.active||!ui.video.paused||!s.run||!s.video)return;
+    if(!training.active||!training.poseAdvanced.open||!ui.video.paused||!s.run||!s.video)return;
     const frame=Math.max(0,Math.floor(ui.video.currentTime*fps()+0.001));
     const data=cachedOverlayForFrame(s.project,s.run,s.video,frame);
     const row=data?.frames?.find(item=>item.frame===frame);
@@ -1459,6 +1617,9 @@
     else trainingMessage("ID "+picked.id+" · кадр "+frame+" · выберите действительное касание и нажмите «Сохранить пример».");
   };
   overlay.canvas.addEventListener("click",pickTrainingPlayer);
+  training.poseAdvanced.addEventListener("toggle",()=>{
+    overlay.canvas.closest(".video-wrap")?.classList.toggle("training-select",training.active&&training.poseAdvanced.open);
+  });
   training.refresh.addEventListener("click",refreshTraining);
   training.newExample.addEventListener("click",()=>{
     training.selectedId=null;
@@ -1503,6 +1664,7 @@
     const selectMode=raw=>{
       if(overlay.raw===raw&&!training.active)return;
       training.active=false;training.track=null;training.frame=null;
+      comparison.epoch++;comparison.data=null;comparison.sourceKey="";
       training.panel.classList.add("hidden");
       annotation.lane.querySelectorAll(".studio-annotation-tick").forEach(tick=>tick.remove());
       training.selectedId=null;trainingEditorReset();
@@ -1539,7 +1701,7 @@
       overlay.actionControls.classList.remove("hidden");
       training.panel.classList.remove("hidden");
       placeTrainingTimeline(true);
-      overlay.canvas.closest(".video-wrap")?.classList.add("training-select");
+      overlay.canvas.closest(".video-wrap")?.classList.toggle("training-select",training.poseAdvanced.open);
       updateOverlayToggles();
       setOverlaySource(s.run?{}:null);
       drawTimeline();drawOverlay();
@@ -1688,6 +1850,21 @@
           ctx.fillRect(x,y,Math.max(1,x2-x),bandHeight);
         }
       }
+      if(training.active&&comparisonMatches(comparison.data)&&
+        comparison.data.trajectory_status==="ready"){
+        for(const rally of comparison.data.trajectory_rallies){
+          const x=rally.start/fps()/duration*width;
+          const x2=(rally.end+1)/fps()/duration*width;
+          ctx.fillStyle="#efb157d0";
+          ctx.fillRect(x,y+Math.floor(bandHeight*0.55),
+            Math.max(2,x2-x),Math.max(2,Math.ceil(bandHeight*0.45)));
+        }
+        for(const impact of comparison.data.trajectory_impacts){
+          const x=impact/fps()/duration*width;
+          ctx.fillStyle="#f8ce87";
+          ctx.fillRect(x,y,Math.max(1,Math.ceil(dpr)),Math.max(2,bandHeight*0.35));
+        }
+      }
       if(training.active&&annotationReady()){
         for(const mark of annotation.data.rallies){
           const x=mark.start/fps()/duration*width;
@@ -1720,6 +1897,7 @@
   const clearTimeline=()=>{
     timeline.epoch++;timeline.dragging=false;timeline.data=null;
     if(training.active){annotation.epoch++;annotation.data=null;annotation.touchId=null;
+      comparison.epoch++;comparison.data=null;comparison.sourceKey="";
       annotation.rallyId=null;annotation.pendingStart=null;drawAnnotation();}
     timeline.status.textContent="Выберите CPU-версию";
     timeline.middle.textContent="—";timeline.end.textContent="—";

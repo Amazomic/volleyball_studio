@@ -475,3 +475,25 @@ VBallNet + RTMPose: контакты и изломы ±0,1 с	VBallNet + RTMPose
 Извлекать данные распознавания	Extract recognition data
 ZIP с видео, траекторией мяча, Track ID и точками тела для каждого кадра монтажа.	ZIP with video, ball trajectory, player track IDs and body keypoints for each montage frame.
 Скачать ZIP с распознаванием	Download ZIP with recognition data
+Розыгрыши: CPU против траектории мяча	Rallies: CPU versus ball trajectory
+Сравнение по одной версии видео, без повторного GPU-анализа	Compare one video version without rerunning GPU analysis
+Рассчитать по траектории	Calculate from trajectory
+Перегибов для розыгрыша	Deflections per rally
+Запас до/после (кадры)	Padding before/after (frames)
+Мин. длина (кадры)	Minimum duration (frames)
+Пауза между перегибами (кадры)	Gap between deflections (frames)
+Выберите видео и CPU-постобработку.	Choose a video and CPU postprocessing run.
+Проверка расхождений	Review disagreements
+Показать	Show
+Только расхождения	Disagreements only
+Только CPU	CPU only
+Только траектория	Trajectory only
+Разные границы	Different boundaries
+Пропущено обоими (эталон)	Missed by both (reference)
+Траектория мяча	Ball trajectory
+Ручной эталон	Human reference
+Цвета на общей шкале под видео. Разметка не изменяет выбранный CPU-анализ.	Colors share the timeline below the video. Labels do not change the selected CPU analysis.
+Дополнительно: классификация касаний по позам RTMPose	Advanced: classify touches with RTMPose
+База обучающих примеров RTMPose ·	RTMPose training examples ·
+Сравнение двух алгоритмов разметки розыгрышей	Compare two rally labeling algorithms
+Параметры поиска розыгрышей по мячу	Ball-only rally detection settings

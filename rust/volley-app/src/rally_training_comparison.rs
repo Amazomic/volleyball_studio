@@ -1,0 +1,455 @@
+use crate::{
+    native_rally_evidence::{generate, inspect_project, Choice, ValidatedRun},
+    projects,
+    storage::{self, safe_file, ApiError, ApiResult},
+    touch_annotation, AppState,
+};
+use axum::{
+    extract::{Query, State},
+    Json,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::{fs, sync::Arc};
+use volley_core::rally_reconstruction::{preliminary_rally_intervals, RallySettings};
+
+const MAX_MANIFEST: u64 = 16 * 1024;
+const MAX_TRAJECTORY_DATA: u64 = 16 * 1024 * 1024;
+const MAX_COMPARE_INTERVALS: usize = 4096;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompareQuery {
+    project_id: String,
+    rally_run_id: String,
+    min_impacts: Option<u64>,
+    context_frames: Option<u64>,
+    min_duration_frames: Option<u64>,
+    max_touch_gap_frames: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+struct Interval {
+    start: u64,
+    end: u64,
+}
+
+impl Interval {
+    fn new(start: u64, end: u64, frames: u64) -> Result<Self, ApiError> {
+        if start >= end || end >= frames {
+            return Err(storage::bad_request("Invalid training rally interval"));
+        }
+        Ok(Self { start, end })
+    }
+}
+
+fn intervals(value: &Value, frames: u64) -> Result<Vec<Interval>, ApiError> {
+    let rows = value
+        .as_array()
+        .ok_or_else(|| storage::bad_request("Invalid saved rally intervals"))?;
+    if rows.len() > MAX_COMPARE_INTERVALS {
+        return Err(storage::bad_request("Too many rally intervals to compare"));
+    }
+    let mut output = Vec::with_capacity(rows.len());
+    for row in rows {
+        let start = row[0]
+            .as_u64()
+            .ok_or_else(|| storage::bad_request("Invalid saved rally start"))?;
+        let end = row[1]
+            .as_u64()
+            .ok_or_else(|| storage::bad_request("Invalid saved rally end"))?;
+        output.push(Interval::new(start, end, frames)?);
+    }
+    output.sort_by_key(|v| (v.start, v.end));
+    Ok(output)
+}
+
+fn cpu_intervals(run: &ValidatedRun) -> Result<Vec<Interval>, ApiError> {
+    let timeline = generate(run, Choice::Timeline)
+        .map_err(storage::bad_request)?
+        .value;
+    let rows = timeline["rallies"]
+        .as_array()
+        .ok_or_else(|| storage::bad_request("CPU rally timeline is missing"))?;
+    if rows.len() > MAX_COMPARE_INTERVALS {
+        return Err(storage::bad_request("Too many CPU rallies to compare"));
+    }
+    let mut result = rows
+        .iter()
+        .map(|r| {
+            Interval::new(
+                r["start_frame"]
+                    .as_u64()
+                    .ok_or_else(|| storage::bad_request("CPU rally has no start"))?,
+                r["end_frame"]
+                    .as_u64()
+                    .ok_or_else(|| storage::bad_request("CPU rally has no end"))?,
+                run.frames,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    result.sort_by_key(|v| (v.start, v.end));
+    Ok(result)
+}
+
+fn overlap(a: Interval, b: Interval) -> f64 {
+    if a.end < b.start || b.end < a.start {
+        return 0.0;
+    }
+    let intersection = a.end.min(b.end) - a.start.max(b.start) + 1;
+    let union = a.end - a.start + b.end - b.start + 2 - intersection;
+    intersection as f64 / union as f64
+}
+
+fn match_intervals(
+    baseline: &[Interval],
+    proposed: &[Interval],
+) -> (Value, Vec<Option<(usize, f64)>>, Vec<bool>) {
+    let mut pairs = vec![None; baseline.len()];
+    let mut used = vec![false; proposed.len()];
+    let mut boundary_sum = 0u64;
+    for (i, &a) in baseline.iter().enumerate() {
+        let mut best: Option<(usize, f64, u64)> = None;
+        for (j, &b) in proposed.iter().enumerate() {
+            if used[j] {
+                continue;
+            }
+            let iou = overlap(a, b);
+            if iou < 0.5 {
+                continue;
+            }
+            let displacement = a.start.abs_diff(b.start) + a.end.abs_diff(b.end);
+            if best.is_none_or(|(_, score, delta)| {
+                iou > score || (iou == score && displacement < delta)
+            }) {
+                best = Some((j, iou, displacement));
+            }
+        }
+        if let Some((j, iou, displacement)) = best {
+            used[j] = true;
+            pairs[i] = Some((j, iou));
+            boundary_sum += displacement;
+        }
+    }
+    let matched = used.iter().filter(|&&v| v).count();
+    let extra = proposed.len() - matched;
+    let missed = baseline.len() - matched;
+    let precision = if proposed.is_empty() {
+        if baseline.is_empty() {
+            1.0
+        } else {
+            0.0
+        }
+    } else {
+        matched as f64 / proposed.len() as f64
+    };
+    let recall = if baseline.is_empty() {
+        if proposed.is_empty() {
+            1.0
+        } else {
+            0.0
+        }
+    } else {
+        matched as f64 / baseline.len() as f64
+    };
+    let f1 = if precision + recall == 0.0 {
+        0.0
+    } else {
+        2.0 * precision * recall / (precision + recall)
+    };
+    let mean_boundary_error_ms = if matched == 0 {
+        Value::Null
+    } else {
+        json!(boundary_sum as f64 * 1000.0 / (60.0 * matched as f64))
+    };
+    (
+        json!({"matched":matched,"extra":extra,"missed":missed,
+            "precision":precision,"recall":recall,"f1":f1,
+            "mean_boundary_error_ms":mean_boundary_error_ms,
+            "iou_threshold":0.5}),
+        pairs,
+        used,
+    )
+}
+
+fn differences(
+    cpu: &[Interval],
+    trajectory: &[Interval],
+    pairs: &[Option<(usize, f64)>],
+    matched: &[bool],
+    reviewed: &[Interval],
+) -> Vec<Value> {
+    let mut result = Vec::with_capacity(cpu.len() + trajectory.len());
+    for (index, &interval) in cpu.iter().enumerate() {
+        match pairs[index] {
+            Some((other, iou)) => {
+                let candidate = trajectory[other];
+                result.push(json!({"kind":if iou >= 0.85 {"agreed"} else {"shifted"},
+                    "cpu":interval,"trajectory":candidate,
+                    "iou":iou,"seek_frame":interval.start.min(candidate.start)}));
+            }
+            None => result.push(json!({"kind":"cpu_only","cpu":interval,
+                "trajectory":null,"iou":null,"seek_frame":interval.start})),
+        }
+    }
+    for (index, &interval) in trajectory.iter().enumerate() {
+        if !matched[index] {
+            result.push(json!({"kind":"trajectory_only","cpu":null,
+                "trajectory":interval,"iou":null,"seek_frame":interval.start}));
+        }
+    }
+    for &interval in reviewed {
+        if !cpu.iter().any(|&c| overlap(c, interval) >= 0.5)
+            && !trajectory.iter().any(|&c| overlap(c, interval) >= 0.5)
+        {
+            result.push(json!({"kind":"both_missed","cpu":null,"trajectory":null,
+                "reference":interval,"iou":null,"seek_frame":interval.start}));
+        }
+    }
+    result.sort_by_key(|row| row["seek_frame"].as_u64().unwrap_or(u64::MAX));
+    result
+}
+
+fn saved_impacts(
+    state: &AppState,
+    run: &ValidatedRun,
+) -> Result<Option<(Vec<u64>, RallySettings)>, ApiError> {
+    let root = projects::project_root(state)
+        .join(&run.project_id)
+        .join("native_cpu_touch_runs")
+        .join(&run.touch_id);
+    let manifest_path =
+        safe_file(&root, "manifest.json", MAX_MANIFEST).map_err(storage::bad_request)?;
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(manifest_path)
+            .map_err(|e| storage::internal(format!("Read touch manifest: {e}")))?,
+    )
+    .map_err(|_| storage::bad_request("Invalid saved touch manifest"))?;
+    if manifest["touch_id"] != run.touch_id
+        || manifest["source_replay_id"] != run.replay_id
+        || manifest["source_replay_sha256"] != run.replay_sha
+        || manifest["sha256"] != run.touch_sha
+    {
+        return Err(storage::conflict(
+            "Touch run lineage changed during comparison",
+        ));
+    }
+    if manifest.get("preliminary_rally_file").is_none() {
+        return Ok(None);
+    }
+    if manifest["preliminary_rally_file"] != "preliminary_rallies.json" {
+        return Err(storage::bad_request("Unexpected preliminary rally file"));
+    }
+    let expected = manifest["preliminary_rally_sha256"]
+        .as_str()
+        .filter(|s| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit()))
+        .ok_or_else(|| storage::bad_request("Preliminary rally SHA missing"))?;
+    let path = safe_file(&root, "preliminary_rallies.json", MAX_TRAJECTORY_DATA)
+        .map_err(storage::bad_request)?;
+    let bytes =
+        fs::read(path).map_err(|e| storage::internal(format!("Read saved trajectory: {e}")))?;
+    if format!("{:x}", Sha256::digest(&bytes)) != expected {
+        return Err(storage::conflict("Saved trajectory checksum changed"));
+    }
+    let data: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| storage::bad_request("Invalid trajectory rally data"))?;
+    if data["schema"] != "volley-native-preliminary-ball-rallies/1"
+        || data["source_replay_id"] != run.replay_id
+        || data["source_replay_sha256"] != run.replay_sha
+        || data["frames"].as_u64() != Some(run.frames)
+    {
+        return Err(storage::conflict(
+            "Saved trajectory belongs to a different CPU source",
+        ));
+    }
+    let impacts: Vec<u64> = serde_json::from_value(data["trajectory_impacts"].clone())
+        .map_err(|_| storage::bad_request("Invalid saved ball impacts"))?;
+    if impacts.iter().any(|&f| f >= run.frames)
+        || impacts.windows(2).any(|pair| pair[0] >= pair[1])
+        || impacts.len() > run.frames as usize
+    {
+        return Err(storage::bad_request("Trajectory impacts are inconsistent"));
+    }
+    let settings: RallySettings = serde_json::from_value(data["settings"].clone())
+        .map_err(|_| storage::bad_request("Invalid saved trajectory settings"))?;
+    settings.validate().map_err(storage::bad_request)?;
+    let saved = intervals(&data["rally_intervals"], run.frames)?;
+    let recalculated = preliminary_rally_intervals(&impacts, run.frames, settings)
+        .into_iter()
+        .map(|(start, end)| Interval::new(start, end, run.frames))
+        .collect::<Result<Vec<_>, _>>()?;
+    if saved != recalculated {
+        return Err(storage::conflict(
+            "Saved trajectory intervals do not match the detector",
+        ));
+    }
+    Ok(Some((impacts, settings)))
+}
+
+fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result<Value, ApiError> {
+    let cpu = cpu_intervals(run)?;
+    let truth = touch_annotation::comparison_truth(state, run)?;
+    let reference = truth
+        .as_ref()
+        .map(|(items, _)| {
+            let mut sorted = items
+                .iter()
+                .map(|&(start, end)| Interval::new(start, end, run.frames))
+                .collect::<Result<Vec<_>, _>>()?;
+            sorted.sort_by_key(|v| (v.start, v.end));
+            Ok(sorted)
+        })
+        .transpose()?;
+    let reviewed = truth.as_ref().is_some_and(|(_, reviewed)| *reviewed);
+    let saved = saved_impacts(state, run)?;
+    let (trajectory, impacts, parameters, status) = if let Some((impacts, mut settings)) = saved {
+        if let Some(n) = query.min_impacts {
+            settings.min_touch_candidates = n;
+        }
+        if let Some(n) = query.context_frames {
+            settings.suggested_context_frames = n;
+        }
+        if let Some(n) = query.min_duration_frames {
+            settings.min_rally_frames = n;
+        }
+        if let Some(n) = query.max_touch_gap_frames {
+            settings.max_without_touch_frames = n;
+        }
+        settings.validate().map_err(storage::bad_request)?;
+        let intervals = preliminary_rally_intervals(&impacts, run.frames, settings)
+            .into_iter()
+            .map(|(start, end)| Interval::new(start, end, run.frames))
+            .collect::<Result<Vec<_>, _>>()?;
+        (
+            intervals,
+            impacts,
+            json!({"min_impacts":settings.min_touch_candidates,
+                "context_frames":settings.suggested_context_frames,
+                "min_duration_frames":settings.min_rally_frames,
+                "max_touch_gap_frames":settings.max_without_touch_frames.min(120)}),
+            "ready",
+        )
+    } else {
+        (Vec::new(), Vec::new(), Value::Null, "unavailable")
+    };
+    let (cpu_trajectory, pairs, used) = match_intervals(&cpu, &trajectory);
+    let (cpu_reference, trajectory_reference) = if reviewed {
+        if let Some(ref marks) = reference {
+            (
+                Some(match_intervals(marks, &cpu).0),
+                (status == "ready").then(|| match_intervals(marks, &trajectory).0),
+            )
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+    Ok(json!({"schema":"volley-rally-training-comparison/1",
+        "project_id":run.project_id,"video":run.video,
+        "rally_run_id":run.run_id,"source_replay_sha256":run.replay_sha,
+        "source_touch_sha256":run.touch_sha,"source_rally_sha256":run.rally_sha,
+        "trajectory_status":status,
+        "trajectory_detector_version":"ball_down_up_v1",
+        "trajectory_impacts":impacts,"parameters":parameters,
+        "cpu_rallies":cpu,"trajectory_rallies":trajectory,
+        "reference_rallies":reference,"reference_reviewed":reviewed,
+        "metrics":{"cpu_trajectory":if status=="ready" {Some(cpu_trajectory)} else {None},
+            "cpu_reference":cpu_reference,"trajectory_reference":trajectory_reference},
+        "differences":if status=="ready" {differences(&cpu,&trajectory,&pairs,&used,
+            if reviewed {reference.as_deref().unwrap_or(&[])} else {&[]})}
+            else {Vec::new()},
+        "model_retrained":false,
+        "source":"saved_cpu_trajectory_impacts",
+        "published_cpu_unchanged":true}))
+}
+
+pub async fn get(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CompareQuery>,
+) -> ApiResult<Value> {
+    let result = tokio::task::spawn_blocking(move || {
+        let run = inspect_project(&state, &query.project_id, &query.rally_run_id)?;
+        compare(&state, &run, &query)
+    })
+    .await
+    .map_err(|e| storage::internal(format!("Training comparison task: {e}")))??;
+    Ok(Json(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_to_one_matching_distinguishes_extra_and_missing_rallies() {
+        let reference = [
+            Interval { start: 10, end: 50 },
+            Interval {
+                start: 100,
+                end: 160,
+            },
+        ];
+        let predicted = [
+            Interval { start: 10, end: 50 },
+            Interval { start: 11, end: 49 },
+            Interval {
+                start: 210,
+                end: 260,
+            },
+        ];
+        let (score, pairs, used) = match_intervals(&reference, &predicted);
+        assert_eq!(score["matched"], 1);
+        assert_eq!(score["extra"], 2);
+        assert_eq!(score["missed"], 1);
+        assert_eq!(pairs.iter().flatten().count(), 1);
+        assert_eq!(used.iter().filter(|&&x| x).count(), 1);
+        assert_eq!(
+            differences(&reference, &predicted, &pairs, &used, &[]).len(),
+            4
+        );
+    }
+
+    #[test]
+    fn reviewed_rally_missed_by_both_detectors_is_navigable() {
+        let cpu = [Interval { start: 10, end: 50 }];
+        let trajectory = [Interval { start: 12, end: 52 }];
+        let reviewed = [Interval {
+            start: 220,
+            end: 260,
+        }];
+        let (_, pairs, used) = match_intervals(&cpu, &trajectory);
+        let rows = differences(&cpu, &trajectory, &pairs, &used, &reviewed);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1]["kind"], "both_missed");
+        assert_eq!(rows[1]["seek_frame"], 220);
+    }
+
+    #[test]
+    fn tuning_reuses_saved_impacts_without_touch_inference() {
+        let impacts = [100, 200, 300];
+        let mut settings = RallySettings {
+            min_rally_frames: 15,
+            suggested_context_frames: 0,
+            ..RallySettings::default()
+        };
+        assert_eq!(
+            preliminary_rally_intervals(&impacts, 500, settings).len(),
+            1
+        );
+        settings.max_without_touch_frames = 90;
+        assert!(preliminary_rally_intervals(&impacts, 500, settings).is_empty());
+        settings.max_without_touch_frames = 120;
+        settings.min_touch_candidates = 4;
+        assert!(preliminary_rally_intervals(&impacts, 500, settings).is_empty());
+    }
+
+    #[test]
+    fn interval_overlap_is_frame_accurate() {
+        let a = Interval { start: 0, end: 29 };
+        assert_eq!(overlap(a, a), 1.0);
+        assert_eq!(overlap(a, Interval { start: 30, end: 45 }), 0.0);
+        assert!(overlap(a, Interval { start: 15, end: 44 }) < 0.5);
+    }
+}

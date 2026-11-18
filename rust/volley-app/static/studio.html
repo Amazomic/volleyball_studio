@@ -238,7 +238,43 @@
                   </div>
                   <button type="button" class="primary" id="studio-annotation-review" disabled>Сохранить разметку видео</button>
                 </div>
-                <div class="studio-training-head"><strong>Обучение на движениях игрока</strong><small>Пауза → выбрать игрока на кадре → подтвердить тип</small></div>
+                <section class="studio-training-comparison" aria-label="Сравнение двух алгоритмов разметки розыгрышей">
+                  <div class="studio-training-compare-title">
+                    <div><strong>Розыгрыши: CPU против траектории мяча</strong><small>Сравнение по одной версии видео, без повторного GPU-анализа</small></div>
+                    <button type="button" class="secondary" id="studio-comparison-recalculate">Рассчитать по траектории</button>
+                  </div>
+                  <div class="studio-training-compare-controls" role="group" aria-label="Параметры поиска розыгрышей по мячу">
+                    <label>Перегибов для розыгрыша <input id="studio-comparison-min-impacts" type="number" min="1" max="10" step="1" value="2"></label>
+                    <label>Запас до/после (кадры) <input id="studio-comparison-context" type="number" min="0" max="180" step="1" value="45"></label>
+                    <label>Мин. длина (кадры) <input id="studio-comparison-duration" type="number" min="15" max="900" step="1" value="45"></label>
+                    <label>Пауза между перегибами (кадры) <input id="studio-comparison-gap" type="number" min="90" max="120" step="1" value="120"></label>
+                  </div>
+                  <p id="studio-comparison-status" role="status" aria-live="polite">Выберите видео и CPU-постобработку.</p>
+                  <div id="studio-comparison-metrics" class="studio-training-compare-metrics" aria-live="polite"></div>
+                  <div class="studio-training-compare-review">
+                    <strong>Проверка расхождений</strong>
+                    <label>Показать
+                      <select id="studio-comparison-filter">
+                        <option value="disagreement">Только расхождения</option>
+                        <option value="all">Все розыгрыши</option>
+                        <option value="cpu_only">Только CPU</option>
+                        <option value="trajectory_only">Только траектория</option>
+                        <option value="shifted">Разные границы</option>
+                        <option value="both_missed">Пропущено обоими (эталон)</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div id="studio-comparison-differences" class="studio-training-compare-differences" aria-live="polite"></div>
+                  <div class="studio-training-compare-legend">
+                    <span><i class="studio-compare-cpu"></i> CPU</span>
+                    <span><i class="studio-compare-ball"></i> Траектория мяча</span>
+                    <span><i class="studio-compare-manual"></i> Ручной эталон</span>
+                    <small>Цвета на общей шкале под видео. Разметка не изменяет выбранный CPU-анализ.</small>
+                  </div>
+                </section>
+                <details class="studio-training-advanced" id="studio-training-pose-advanced">
+                  <summary>Дополнительно: классификация касаний по позам RTMPose</summary>
+                  <div class="studio-training-head"><strong>Обучение на движениях игрока</strong><small>Пауза → выбрать игрока на кадре → подтвердить тип</small></div>
                 <p id="studio-training-status" role="status" aria-live="polite">Выберите игрока, коснувшегося мяча, непосредственно на кадре видео.</p>
                 <div class="studio-training-actions">
                   <label for="studio-training-label">Тип касания</label>
@@ -253,7 +289,8 @@
                   <button class="primary" id="studio-training-save" type="button">Сохранить пример</button>
                   <button class="secondary hidden" id="studio-training-new" type="button">Новый пример</button>
                   <button class="secondary" id="studio-training-refresh" type="button">Обновить базу</button>
-                </div>
+                  </div>
+                </details>
                 <section class="studio-temporal-labels" aria-label="Эталонная разметка касаний и розыгрышей">
                   <div class="studio-training-head"><strong>Эталонная разметка</strong><small>Кадр <output id="studio-annotation-current">—</output> · эталонные касания перемещаются на шкале под видео</small></div>
                   <div class="studio-annotation-tools">
@@ -274,7 +311,7 @@
                   <div class="studio-annotation-evaluation"><span id="studio-annotation-metrics">Точность появится после разметки.</span></div>
                   <p id="studio-annotation-status" role="status" aria-live="polite">Исправления сохраняются как независимый эталон для проверки и настройки детектора.</p>
                 </section>
-                <div class="studio-training-library"><strong>Обучающие примеры <span id="studio-training-count">0</span> · просмотр и коррекция</strong><div id="studio-training-list" aria-live="polite"></div></div>
+                <details class="studio-training-advanced studio-training-library"><summary>База обучающих примеров RTMPose · <span id="studio-training-count">0</span></summary><div id="studio-training-list" aria-live="polite"></div></details>
               </section>
               <div class="viewer-details" hidden aria-hidden="true">
                 <h3 id="studio-view-title">Розыгрыш не выбран</h3>
