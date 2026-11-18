@@ -49,3 +49,23 @@ and reported spatial/noise/cutout augmentations. Some architecture/training
 details may differ from unpublished reference code.
 Evaluate separately on unseen beach volleyball matches, recording
 precision, recall and F1 within +/-1 and +/-3 frames before enabling by default.
+
+## Export reviewed Studio Touch labels
+
+Use scripts/training/export_reviewed_tcn.py to read confirmed human-review
+records and matching immutable CPU replay data. The script validates checksums,
+original video provenance, and uniqueness of labels; it merges overlapping
+rallies to avoid duplicate contacts. It writes to a new file outside the
+Studio data root and never alters GPU or CPU evidence.
+
+From the repository root (WSL):
+
+    python3 scripts/training/export_reviewed_tcn.py --data-root "$HOME/.cache/volley-rust-sandbox" --out results/training/volley3d_reviewed.jsonl --report results/training/volley3d_reviewed.report.json
+
+For training at least two different match/source SHA values are required,
+because one match cannot supply an independent validation match. Prefer
+five or more independently reviewed games and a separate holdout test set.
+
+Caveats: reviewed touches can be corrected auto-generated suggestions,
+not blind annotations. The exporter uses VBallNet score threshold filtering,
+but does not fully reproduce the runtime ball-track/court mask.
