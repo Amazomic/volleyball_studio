@@ -22,7 +22,8 @@
     groups:[],grouped:new Set(),groupLoaded:false,groupShown:24,singleCount:0,
     playerMatches:{},libraryPlayers:[],projectPlayerIds:new Set(),
     rosterEpoch:0,rosterBusy:false,rosterLoaded:false,tracksLoaded:false,loadingKey:null,grouping:false,
-    photoIndices:new Map(),groupNavigation:new Map(),viewPlayer:"",viewConflicts:false,filteredTotal:0,unassignedIds:new Set(),identityConflictIds:new Set(),comparisonIds:new Set()
+    photoIndices:new Map(),groupNavigation:new Map(),viewPlayer:"",viewConflicts:false,filteredTotal:0,unassignedIds:new Set(),identityConflictIds:new Set(),comparisonIds:new Set(),
+    photoScoreAttempts:new Set(),photoScoreLoading:false,forcePhotoScores:false
   };
   const node=(tag,klass,text)=>{
     const n=document.createElement(tag);if(klass)n.className=klass;
@@ -414,6 +415,20 @@
       // ReID group calculation is a secondary read, not part of the gallery
       // response. Never block card interaction while it is being refreshed.
       if(reviewReady()&&(preserveCards||!state.groupLoaded))void reviewLoad();
+      // Compute scores once for this replay on first opening the player
+      // gallery. The request runs independently of card interactions and
+      // persists photo comparisons for following page loads.
+      const unscored=[...state.comparisonIds].some(id=>
+        !Array.isArray(state.playerMatches[String(id)])||
+        !state.playerMatches[String(id)].length);
+      const scoreKey=[project,video,replay,state.sourceSha].join("|");
+      if(state.writable&&state.roster.length&&state.comparisonIds.size&&
+         (unscored||state.forcePhotoScores)&&
+         !state.photoScoreLoading&&!state.photoScoreAttempts.has(scoreKey)){
+        state.photoScoreAttempts.add(scoreKey);
+        state.forcePhotoScores=false;
+        void loadPhotoScoresOnFirstView(reviewScope(),scoreKey,token);
+      }
       note(state.roster.length?
         "Track ID получены. Выберите ID и вручную назначьте игрока из состава проекта.":
         "Добавьте игроков в состав проекта через управление проектом, чтобы разрешить ручную привязку.");
@@ -476,7 +491,8 @@
         if(!current||score>current.score){
           byPlayer.set(candidate.player_id,{
             playerId:candidate.player_id,name:roster.get(candidate.player_id),
-            score,trackId:id,reference: candidate.reference_track_id
+            score,trackId:id,reference: candidate.reference_track_id,
+            referenceKind:candidate.reference_kind
           });
         }
       }
@@ -505,8 +521,10 @@
       select.append(option);
     }
     if(candidates.length)select.value=candidates[0].playerId;
+    const kind=candidates[0]?.referenceKind==="reviewed_track"?
+      " · с подтверждённым ID":" · с фото";
     const similarity=node("small","track-match-score",candidates.length?
-      "Лучшее сходство: "+candidates[0].name+" · "+(candidates[0].score*100).toFixed(1)+"%":
+      "Лучшее сходство: "+candidates[0].name+" · "+(candidates[0].score*100).toFixed(1)+"%"+kind:
       "Сходство не рассчитано");
     const link=node("button","primary","Добавить игроку");
     link.type="button";
@@ -1138,8 +1156,8 @@
     reviewRead.disabled=!ready;
     reviewExtract.disabled=!ready||state.selected.size<1||state.selected.size>8;
     galleryExtract.disabled=reviewExtract.disabled;
-    galleryRepeat.disabled=!ready||!state.comparisonIds.size;
-    galleryAuto.disabled=!ready||!state.writable||!state.comparisonIds.size||!state.roster.length;
+    galleryRepeat.disabled=!ready||!state.comparisonIds.size||state.photoScoreLoading;
+    galleryAuto.disabled=!ready||!state.writable||!state.comparisonIds.size||!state.roster.length||state.photoScoreLoading;
     singlesExtract.disabled=reviewExtract.disabled;
     reviewMerge.disabled=!ready||!state.writable||!state.groupRevision||state.selected.size<2;
     reviewSplit.disabled=!ready||!state.writable||!state.groupRevision||state.selected.size<1;
@@ -1184,6 +1202,29 @@
     renderRows();renderGroupCards();
     return {trackCount:ids.length,photoCount:result.photo_count};
   };
+  const loadPhotoScoresOnFirstView=async(scope,scoreKey,token)=>{
+    if(state.photoScoreLoading)return;
+    state.photoScoreLoading=true;reidUnlock();
+    galleryStatus.textContent="Сравниваем непривязанные ID с сохранёнными фотографиями…";
+    try{
+      const summary=await refreshPhotoMatches(scope,token);
+      const same=scope.project_id===state.project&&scope.video===state.video&&
+        scope.replay_id===state.replay&&scope.expected_source_sha256===state.sourceSha;
+      if(!same)return;
+      // The user may have changed pages while extraction was running;
+      // refresh from persisted evidence rather than applying stale scores.
+      if(!summary)await loadPage({preserveCards:true});
+      galleryStatus.textContent=summary?
+        "Сходство рассчитано · ID: "+summary.trackCount+" · фото: "+summary.photoCount:
+        "Сохранённые совпадения обновлены";
+    }catch(error){
+      if(scope.project_id===state.project&&scope.replay_id===state.replay)
+        galleryStatus.textContent="Не удалось рассчитать совпадения: "+String(error.message||error);
+    }finally{
+      state.photoScoreLoading=false;
+      reidUnlock();
+    }
+  };
   const repeatPhotoAnalysis=async()=>{
     if(!reviewReady()||state.busy)return;
     const scope=reviewScope(),token=state.token;
@@ -1222,7 +1263,21 @@
         averageSimilarity:scoped.length===ids.length?group.average_similarity:null});
     }
     state.groups=groups;state.grouped=used;state.groupLoaded=true;
-    // Grouping evidence must not override player-photo identity scores.
+    // The initial track page has persisted photo matches only. When no
+    // photo score exists for an ID, reuse the already verified OpenVINO
+    // comparison against manually linked tracks from this replay. Do not
+    // replace any photo score, or persist track-to-track scores as photos.
+    const reviewed=record.player_matches;
+    if(reviewed&&typeof reviewed==="object"&&!Array.isArray(reviewed)){
+      for(const [id,candidates] of Object.entries(reviewed)){
+        if(!state.comparisonIds.has(Number(id))||
+           (Array.isArray(state.playerMatches[id])&&state.playerMatches[id].length)||
+           !Array.isArray(candidates)||!candidates.length)continue;
+        state.playerMatches[id]=candidates.map(candidate=>({
+          ...candidate,reference_kind:"reviewed_track"
+        }));
+      }
+    }
     state.singleCount=state.rallyIds.size-used.size;
     galleryStatus.textContent="";
     if(!deferRender){renderGroupCards();renderRows();}
@@ -1436,6 +1491,11 @@
   });
   window.addEventListener("volley:player-library-updated",()=>{
     if(active())void loadLibraryRoster();
+  });
+  window.addEventListener("volley:player-photo-saved",()=>{
+    // Added views must invalidate a previously completed photo comparison.
+    state.photoScoreAttempts.clear();state.forcePhotoScores=true;
+    if(active()&&state.tracksLoaded)void loadPage({preserveCards:true});
   });
   if(active())loadVideos();
 })();
