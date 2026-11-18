@@ -499,6 +499,36 @@ fn co_visible_tracks_do_not_fall_back_to_weaker_other_player_match() {
     fs::remove_dir_all(root).unwrap();
 }
 #[test]
+fn manual_confirmation_keeps_unrelated_existing_auto_link() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    ctx.roster.insert("123456abcdef".into(), "Player B".into());
+    ctx.tracks.insert(8, ctx.tracks[&7].clone());
+    ctx.tracks.insert(9, ctx.tracks[&7].clone());
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8, 9]).unwrap();
+
+    let mut doc = base_document(&ctx);
+    doc["automatic_assignments"] = json!({"7":"abcdef012345"});
+    doc["assignments"] = json!({"9":"123456abcdef"});
+    doc["automatic_identity_evidence"]["matches"] = json!({
+        "7":[{"player_id":"abcdef012345","cosine_similarity":0.80}],
+        "8":[
+            {"player_id":"abcdef012345","cosine_similarity":0.90},
+            {"player_id":"123456abcdef","cosine_similarity":0.88}
+        ]
+    });
+    reconcile_automatic_photo_links(&ctx, &mut doc).unwrap();
+    assert_eq!(doc["automatic_assignments"], json!({"7":"abcdef012345"}));
+    let unassigned = filtered_page(&ctx, &doc, "rev", 0, 10, Some("unassigned"), None).unwrap();
+    assert_eq!(unassigned["unassigned_track_ids"], json!([8]));
+    assert_eq!(unassigned["filtered_total"], 1);
+    assert_eq!(unassigned["tracks"][0]["track_id"], 8);
+    assert_eq!(unassigned["assigned_count"], 2);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn legacy_photo_fallback_is_removed_from_saved_assignments() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();

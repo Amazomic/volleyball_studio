@@ -43,7 +43,6 @@ pub(super) fn tracks_co_visible(a: &Aggregate, b: &Aggregate) -> bool {
 /// This is deliberately based on two *measured* detections in the same
 /// video frame, not overlapping Track ID lifetimes or interpolated boxes.
 /// Distinct detections represent two bodies and cannot share an athlete.
-#[cfg(test)]
 fn measured_conflict_frame(ctx: &Inputs, a: u64, b: u64) -> Option<u64> {
     let pair = (a.min(b), a.max(b));
     ctx.tracks
@@ -57,7 +56,6 @@ fn measured_conflict_frame(ctx: &Inputs, a: u64, b: u64) -> Option<u64> {
 /// existing automatic owners, before changing a single saved link. Otherwise
 /// manually assigning one ID silently evicts another automatic ID with that
 /// owner and makes a different gallery card appear unexpectedly.
-#[cfg(test)]
 pub(super) fn new_manual_owner_conflict(
     ctx: &Inputs,
     reviewed: &BTreeMap<u64, String>,
@@ -234,7 +232,12 @@ pub(super) fn reconcile_automatic_photo_links(ctx: &Inputs, doc: &mut Value) -> 
         doc["automatic_assignments"] = json!({});
         return Ok(());
     };
-    let expected = choose_automatic_photo_links(ctx, doc, &Value::Object(matches.clone()))?;
+    let preserved_matches = matches
+        .iter()
+        .filter(|(id, _)| saved.contains_key(*id))
+        .map(|(id, rows)| (id.clone(), rows.clone()))
+        .collect();
+    let expected = choose_automatic_photo_links(ctx, doc, &Value::Object(preserved_matches))?;
     let safe = saved
         .iter()
         .filter_map(|(id, owner)| {
@@ -870,6 +873,18 @@ pub(super) fn change(state: &AppState, req: &TrackEdit) -> Result<Value, ApiErro
     let saved_scope = automatic_assignment_scope(state, &whole_source, &doc)?;
     let conflict_tracks = saved_scope.as_ref().unwrap_or(&ctx);
     let previous_automatic = doc["automatic_assignments"].clone();
+    if req.action == "assign" {
+        if let Some((id, other, frame)) = new_manual_owner_conflict(
+            conflict_tracks,
+            &review.assignments,
+            &previous_automatic,
+            &req.track_ids,
+        ) {
+            return Err(storage::conflict(format!(
+                "ID {id} и уже привязанный ID {other} показывают разных людей в одном кадре {frame}. Привязка не выполнена."
+            )));
+        }
+    }
     if let Some(automatic) = doc
         .get_mut("automatic_assignments")
         .and_then(Value::as_object_mut)
