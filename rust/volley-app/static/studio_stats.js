@@ -217,8 +217,10 @@
     const project=ui.project.value;
     state.token++;const token=state.token;
     state.project=project;state.selections.clear();invalidate();
+    window.VolleyballTasks?.clear("report-loading");
     if(!project){note("Выберите проект для просмотра статистики.");return;}
     note("Загружаем статистику игры…");
+    window.VolleyballTasks?.set("report-loading",{label:"Отчёт",stage:"Загрузка статистики",progress:null});
     try{
       const result=await query("/api/projects");
       if(token!==state.token)return;
@@ -247,6 +249,7 @@
       ui.recalculate.disabled=false;
       if(state.selections.size<videos.length)note("Учтены не все видео: для некоторых нет результатов анализа.");
     }catch(e){if(token===state.token){invalidate();note(e.message,true);}}
+    finally{if(token===state.token)window.VolleyballTasks?.clear("report-loading");}
   };
   const recalculate=async()=>{
     const project=ui.project.value;
@@ -255,6 +258,7 @@
     const token=++state.token;
     ui.recalculate.disabled=true;
     note("Пересчитываем статистику по текущим привязкам игроков…");
+    window.VolleyballTasks?.set("report-recalculate",{label:"Отчёт",stage:"Пересчёт статистики",progress:null});
     try{
       const data=await post({project_id:project,sources:selection(),mode:"recalculate",
         expected_revision:state.savedRevision});
@@ -268,6 +272,7 @@
       if(token===state.token)note(e.message,true);
     }finally{
       if(token===state.token)ui.recalculate.disabled=false;
+      window.VolleyballTasks?.clear("report-recalculate");
     }
   };
   ui.recalculate.addEventListener("click",recalculate);

@@ -1030,6 +1030,7 @@
   const openTrainingExample=async item=>{
     if(training.viewBusy)return;
     training.viewBusy=true;
+    window.VolleyballTasks?.set("training-open",{label:"Дообучение",stage:"Открытие примера",progress:null});
     trainingMessage("Открываем исходный кадр обучающего примера…");
     try{
       if(s.project!==item.project_id)await projects(item.project_id);
@@ -1076,7 +1077,7 @@
         ". Тип можно изменить в списке; для замены кадра выберите игрока на паузе и нажмите «Перезаписать».":
         "Открыт сохранённый кадр разметки поля. Геометрию площадки изменяйте в редакторе анализа.");
     }catch(error){trainingMessage("Не удалось открыть пример: "+error.message,true);}
-    finally{training.viewBusy=false;}
+    finally{training.viewBusy=false;window.VolleyballTasks?.clear("training-open");}
   };
   const refreshTraining=async()=>{
     const epoch=++training.epoch;
@@ -1122,6 +1123,7 @@
           accept.type="button";accept.className="primary";accept.textContent="Сохранить тип";
           accept.addEventListener("click",async()=>{
             accept.disabled=true;
+            window.VolleyballTasks?.set("training-relabel",{label:"Дообучение",stage:"Изменение типа касания",progress:null});
             try{
               await post("/api/training/examples",{
                 action:"relabel",project_id:item.project_id,
@@ -1133,7 +1135,7 @@
             }catch(error){
               trainingMessage("Не удалось изменить пример: "+error.message,true);
               await refreshTraining();
-            }finally{accept.disabled=false;}
+            }finally{accept.disabled=false;window.VolleyballTasks?.clear("training-relabel");}
           });
           const cancel=document.createElement("button");
           cancel.type="button";cancel.className="secondary";cancel.textContent="Отмена";
@@ -1153,6 +1155,7 @@
         remove.addEventListener("click",async()=>{
           if(!window.confirm("Удалить этот обучающий пример?"))return;
           remove.disabled=true;
+          window.VolleyballTasks?.set("training-delete",{label:"Дообучение",stage:"Удаление примера",progress:null});
           try{
             await post("/api/training/examples",{
               action:"delete",project_id:item.project_id,id:item.id
@@ -1161,6 +1164,7 @@
             await refreshTraining();
             trainingMessage("Пример удалён. Следующий CPU-анализ будет использовать обновлённую базу.");
           }catch(error){trainingMessage(error.message,true);remove.disabled=false;}
+          finally{window.VolleyballTasks?.clear("training-delete");}
         });
         actions.append(remove);
         training.list.append(row);
@@ -1381,6 +1385,7 @@
       annotationNotice("Сначала создайте разметку из автоматических меток.",true);return;
     }
     annotation.busy=true;
+    window.VolleyballTasks?.set("training-annotation",{label:"Дообучение",stage:"Сохранение разметки",progress:null});
     drawAnnotation();
     annotationNotice("Сохранение разметки…");
     try{
@@ -1413,7 +1418,7 @@
     }catch(error){
       if(epoch!==annotation.epoch)return;
       annotationNotice("Ошибка сохранения: "+error.message,true);
-    }finally{annotation.busy=false;drawAnnotation();}
+    }finally{annotation.busy=false;window.VolleyballTasks?.clear("training-annotation");drawAnnotation();}
   };
   annotation.seed.addEventListener("click",()=>{
     if(annotationReady()&&!window.confirm("Заменить текущую ручную разметку автоматической?"))return;
@@ -1773,6 +1778,7 @@
       trainingMessage("Выберите касавшегося мяча игрока на текущем кадре.",true);return;
     }
     training.busy=true;training.save.disabled=true;
+    window.VolleyballTasks?.set("training-save",{label:"Дообучение",stage:"Сохранение примера",progress:null});
     try{
       const editing=training.editId;
       await post("/api/training/examples",{
@@ -1790,7 +1796,8 @@
     }catch(error){
       trainingMessage("Не удалось сохранить пример: "+error.message,true);
       if(training.editId)await refreshTraining();
-    }finally{training.busy=false;training.save.disabled=false;}
+    }finally{training.busy=false;training.save.disabled=false;
+      window.VolleyballTasks?.clear("training-save");}
   });
   for(const key of ["seeked","loadedmetadata"]){
     ui.video.addEventListener(key,()=>{training.track=null;training.frame=null;
@@ -3089,6 +3096,8 @@
       const id=result.id||result.job_id;
       if(typeof id!=="string"||!id)throw Error("Сервер не вернул ID монтажа.");
       s.jobId=id;ui.cancel.classList.remove("hidden");
+      window.VolleyballTasks?.set("montage",{label:"Монтаж",stage:"В очереди",progress:0});
+      window.VolleyballTasks?.refresh();
       ui.job.textContent="Монтаж запущен.";
       message("Сборка избранных розыгрышей из оригинального видео.","ok");
       stopPoll();await updateJob();
