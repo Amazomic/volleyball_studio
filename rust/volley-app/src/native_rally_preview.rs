@@ -115,6 +115,8 @@ pub struct ManualMontageRequest {
     pub target_duration_sec: Option<f64>,
     #[serde(default = "default_camera_zoom")]
     pub camera_zoom: f64,
+    #[serde(default)]
+    pub include_recognition_data: bool,
 }
 fn default_camera_zoom() -> f64 {
     1.25
@@ -173,6 +175,7 @@ pub async fn start_manual_montage(
             layout: request.layout,
             target_duration_sec: request.target_duration_sec,
             camera_zoom: request.camera_zoom,
+            include_recognition_data: request.include_recognition_data,
             camera_tracks,
             verified_highlights: None,
             report_outro: None,

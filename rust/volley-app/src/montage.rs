@@ -57,6 +57,8 @@ pub struct MontageRequest {
     #[serde(default)]
     pub layout: VideoLayout,
     #[serde(default)]
+    pub include_recognition_data: bool,
+    #[serde(default)]
     pub target_duration_sec: Option<f64>,
     #[serde(default = "default_camera_zoom")]
     pub camera_zoom: f64,
@@ -86,6 +88,7 @@ struct JobStatus {
     overall_percent: f64,
     error: String,
     output: Option<PathBuf>,
+    recognition_archive: bool,
 }
 
 impl JobStatus {
@@ -101,6 +104,9 @@ impl JobStatus {
             "error":self.error,
             "media_url": self.output.as_ref().map(|_| {
                 format!("/api/montage/native/media?project_id={}&job_id={}", self.project_id, self.id)
+            }),
+            "archive_url": self.output.as_ref().filter(|_| self.recognition_archive).map(|_| {
+                format!("/api/montage/native/media?project_id={}&job_id={}&archive=1", self.project_id, self.id)
             }),
         })
     }
@@ -156,6 +162,7 @@ struct Planned {
     camera_zoom: f64,
     camera_tracks: Option<Vec<Vec<CameraPoint>>>,
     report_outro: Option<Value>,
+    recognition_sources: Vec<crate::montage_recognition::ClipSource>,
 }
 
 fn validate_audio(state: &AppState, request: &MontageRequest) -> Result<Option<PathBuf>, ApiError> {
@@ -366,6 +373,17 @@ fn prepare_request(state: &AppState, request: MontageRequest) -> Result<Planned,
                 .map_err(storage::bad_request)
         })
         .collect::<Result<HashMap<_, _>, _>>()?;
+    let recognition_sources = if request.include_recognition_data {
+        crate::montage_recognition::resolve_sources(
+            state,
+            &request.project_id,
+            &request.clips,
+            &clips,
+            &request.materials,
+        )?
+    } else {
+        Vec::new()
+    };
     Ok(Planned {
         original_sources,
         materials: request.materials,
@@ -382,6 +400,7 @@ fn prepare_request(state: &AppState, request: MontageRequest) -> Result<Planned,
         camera_zoom: request.camera_zoom,
         camera_tracks: request.camera_tracks,
         report_outro: request.report_outro,
+        recognition_sources,
     })
 }
 
@@ -832,10 +851,23 @@ async fn render(plan: Planned, status: Arc<Mutex<JobStatus>>, mut cancel: watch:
                 "source":path.file_name().and_then(|name|name.to_str()),
                 "volume":plan.audio_volume
             })),
-            "file":"montage.mp4"
+            "file":"montage.mp4",
+            "recognition_archive": !plan.recognition_sources.is_empty()
         });
         crate::storage::write_json_atomic(&receipt_path, &report)
             .map_err(|e| format!("Cannot save montage manifest: {e:?}"))?;
+        if !plan.recognition_sources.is_empty() {
+            let stage = { status.lock().await.total - 1 };
+            advance(&status, stage, "Упаковка данных распознавания", 0.0).await;
+            let root = plan.output_dir.clone();
+            let clips = plan.clips.clone();
+            let sources = plan.recognition_sources.clone();
+            let receipt = receipt_path.clone();
+            let cancelled = cancel.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::montage_recognition::build_archive(&root, &clips, &sources, &receipt, &cancelled)
+            }).await.map_err(|e| format!("Recognition archive worker failed: {e}"))??;
+        }
         // Internal transcoding files can be reclaimed without touching
         // the final output or the input videos.
         let cleanup = segments.clone();
@@ -900,7 +932,10 @@ pub async fn start_native_montage(
     // Archive may have started while FFprobe planned this job; reject it
     // before publishing a new worker in the montage slot.
     projects::existing_project(&state, &selected.project_id)?;
-    let total = selected.clips.len() + 1 + usize::from(selected.audio.is_some());
+    let total = selected.clips.len()
+        + 1
+        + usize::from(selected.audio.is_some())
+        + usize::from(!selected.recognition_sources.is_empty());
     let job_id = selected.job_id.clone();
     let status = Arc::new(Mutex::new(JobStatus {
         id: job_id.clone(),
@@ -912,6 +947,7 @@ pub async fn start_native_montage(
         overall_percent: 0.0,
         error: String::new(),
         output: None,
+        recognition_archive: !selected.recognition_sources.is_empty(),
     }));
     let (tx, rx) = watch::channel(false);
     *current = Some(MontageJob {
@@ -1030,6 +1066,8 @@ fn list_montages(state: &AppState, project_id: &str) -> Result<Vec<Value>, ApiEr
             continue;
         };
         let url = format!("/api/montage/native/media?project_id={project_id}&job_id={id}");
+        let archive = receipt["recognition_archive"] == true
+            && output.with_file_name("montage.zip").is_file();
         results.push(json!({
             "id": id,
             "name": "montage.mp4",
@@ -1044,6 +1082,7 @@ fn list_montages(state: &AppState, project_id: &str) -> Result<Vec<Value>, ApiEr
             "size_mb": ((stat.len() as f64 / 1024.0 / 1024.0)*10.0).round()/10.0,
             "url": url,
             "download_url": url,
+            "archive_url": archive.then(|| format!("{url}&archive=1")),
         }));
     }
     results.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
@@ -1078,11 +1117,46 @@ pub async fn native_media(
         .ok_or_else(|| storage::bad_request("Укажите монтаж"))?
         .to_owned();
     let reading = state.clone();
-    let path = tokio::task::spawn_blocking(move || {
-        completed_montage(&reading, &project_id, &job_id).map(|(path, _)| path)
-    })
-    .await
-    .map_err(|error| storage::internal(format!("Montage media lookup failed: {error}")))??;
+    let (path, receipt) =
+        tokio::task::spawn_blocking(move || completed_montage(&reading, &project_id, &job_id))
+            .await
+            .map_err(|error| {
+                storage::internal(format!("Montage media lookup failed: {error}"))
+            })??;
+    if query.get("archive").is_some_and(|value| value == "1") {
+        if receipt["recognition_archive"] != true {
+            return Err(storage::not_found("Архив распознавания не создан"));
+        }
+        let folder = path
+            .parent()
+            .ok_or_else(|| storage::not_found("Каталог монтажа не найден"))?;
+        let archive = folder
+            .join("montage.zip")
+            .canonicalize()
+            .map_err(|_| storage::not_found("Архив распознавания не найден"))?;
+        if !archive.starts_with(folder) || !archive.is_file() {
+            return Err(storage::not_found("Недоступный архив распознавания"));
+        }
+        let file = tokio::fs::File::open(&archive)
+            .await
+            .map_err(|_| storage::not_found("Архив распознавания не найден"))?;
+        let size = file
+            .metadata()
+            .await
+            .map_err(|e| storage::internal(format!("Archive metadata: {e}")))?
+            .len();
+        return Ok(axum::http::Response::builder()
+            .header(axum::http::header::CONTENT_TYPE, "application/zip")
+            .header(
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"montage-with-recognition.zip\"",
+            )
+            .header(axum::http::header::CONTENT_LENGTH, size.to_string())
+            .body(axum::body::Body::from_stream(
+                tokio_util::io::ReaderStream::new(file),
+            ))
+            .expect("Static ZIP headers"));
+    }
     crate::playback::serve_mp4(path, &headers).await
 }
 
@@ -1214,6 +1288,8 @@ pub async fn native_upload_audio(
 
 #[derive(Debug, Deserialize)]
 pub struct MontageFromRunRequest {
+    #[serde(default)]
+    pub include_recognition_data: bool,
     #[serde(flatten)]
     pub selection: crate::rallies::SelectionRequest,
     #[serde(default)]
@@ -1274,6 +1350,7 @@ pub async fn start_native_from_run(
         audio_volume: request.audio_volume,
         encoder: request.encoder,
         layout: request.layout,
+        include_recognition_data: request.include_recognition_data,
         target_duration_sec: None,
         camera_zoom: default_camera_zoom(),
         camera_tracks: None,
@@ -1306,6 +1383,7 @@ mod highlight_cancellation_tests {
             overall_percent: 0.0,
             error: String::new(),
             output: None,
+            recognition_archive: false,
         }))
     }
     #[tokio::test]
@@ -1341,6 +1419,7 @@ mod highlight_cancellation_tests {
             camera_tracks: None,
             verified_highlights: Some(json!({"trusted":true})),
             report_outro: None,
+            recognition_sources: Vec::new(),
         };
         let status = fixture_status();
         let (tx, rx) = watch::channel(false);

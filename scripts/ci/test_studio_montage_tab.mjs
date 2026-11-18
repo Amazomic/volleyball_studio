@@ -31,7 +31,8 @@ assert.ok(preview.includes('id="studio-video"'),"Preview retains playback");
 assert.ok(preview.includes('id="studio-rallies"'),"Preview retains rally selection");
 for(const id of ["studio-montage","studio-montage-presets","studio-montage-mode",
     "studio-montage-action","studio-montage-duration","studio-montage-start",
-    "studio-montage-player","studio-montage-audio-fit","studio-montage-camera"]){
+    "studio-montage-player","studio-montage-audio-fit","studio-montage-camera",
+    "studio-montage-recognition","studio-download-archive"]){
   assert.ok(!preview.includes('id="'+id+'"'),id+" must not be in preview");
   assert.ok(montage.includes('id="'+id+'"'),id+" must belong to montage");
   assert.equal(html.split('id="'+id+'"').length,2,"No duplicate "+id);
@@ -40,6 +41,8 @@ assert.ok(!montage.includes('id="studio-highlights-panel"'),
     "Highlights must not be a second independent montage block");
 assert.ok(!montage.includes('data-profile="report"'));
 assert.ok(montage.includes('id="studio-montage-statistics"'));
+assert.match(readFileSync(join(root,"rust/volley-app/static/studio.js"),"utf8"),
+  /include_recognition_data:document\.getElementById\("studio-montage-recognition"\)/);
 assert.ok(montage.includes('data-profile="player"'));
 assert.ok(montage.includes('data-profile="attacks"'));
 assert.ok(montage.includes('data-profile="favorites"'));

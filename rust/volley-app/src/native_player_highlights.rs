@@ -52,6 +52,8 @@ pub struct Request {
     audio_file: Option<String>,
     #[serde(default = "default_volume")]
     audio_volume: f64,
+    #[serde(default)]
+    include_recognition_data: bool,
 }
 fn default_zoom() -> f64 {
     1.25
@@ -531,6 +533,7 @@ pub async fn highlights(
     let audio_volume = request.audio_volume;
     let target_duration_sec = request.target_duration_sec;
     let camera_zoom = request.camera_zoom;
+    let include_recognition_data = request.include_recognition_data;
     let state_copy = state.clone();
     let planned = tokio::task::spawn_blocking(move || {
         let _guard = project_guard::write_guard(&state_copy, &request.project_id)?;
@@ -584,6 +587,7 @@ pub async fn highlights(
             layout,
             target_duration_sec,
             camera_zoom,
+            include_recognition_data,
             camera_tracks: planned.camera_tracks,
             verified_highlights: Some(evidence),
             report_outro: None,

@@ -387,12 +387,15 @@
                 <p id="studio-montage-audio-length" class="panel-note">После выбора трека длительность установится автоматически.</p>
                 <label class="field-label" for="studio-volume">Громкость трека</label>
                 <input id="studio-volume" type="range" min="0" max="100" step="5" value="40">
+                <label class="montage-builder-check"><input id="studio-montage-recognition" type="checkbox"> Извлекать данные распознавания</label>
+                <p class="panel-note">ZIP с видео, траекторией мяча, Track ID и точками тела для каждого кадра монтажа.</p>
                 <button id="studio-montage-preview" class="secondary full" type="button">Проверить подборку</button>
                 <button id="studio-montage-start" class="primary full" type="button">Создать видео <span>↗</span></button>
                 <button id="studio-render" class="hidden" type="button" disabled>Внутренний запуск избранного</button>
                 <div id="studio-job" class="job" role="status" aria-live="polite"></div>
                 <button id="studio-cancel" class="secondary full hidden" type="button">Отменить монтаж</button>
                 <a id="studio-download" class="download hidden" href="#" download="montage.mp4">Скачать MP4</a>
+                <a id="studio-download-archive" class="download hidden" href="#" download="montage-with-recognition.zip">Скачать ZIP с распознаванием</a>
                 <p id="studio-montage-help" class="panel-note">Для персонального рилса используются только короткие фрагменты вокруг проверенных касаний.</p>
               </div>
             </div>

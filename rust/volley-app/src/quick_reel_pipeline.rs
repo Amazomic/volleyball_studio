@@ -269,6 +269,7 @@ async fn quick_montage(
             audio_volume: 40.0,
             encoder: Some("auto".into()),
             layout: VideoLayout::Vertical,
+            include_recognition_data: false,
             target_duration_sec: None,
             camera_zoom: 1.25,
             camera_tracks: None,

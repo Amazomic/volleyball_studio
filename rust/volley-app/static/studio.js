@@ -2695,6 +2695,12 @@
           result.media_url.startsWith("/api/montage/native/media?")){
           ui.download.href=result.media_url;ui.download.classList.remove("hidden");
         }
+        const archive=document.getElementById("studio-download-archive");
+        if(archive&&typeof result.archive_url==="string"&&
+          result.archive_url.startsWith("/api/montage/native/media?")&&
+          result.archive_url.endsWith("&archive=1")){
+          archive.href=result.archive_url;archive.classList.remove("hidden");
+        }
         message("Монтаж завершён. Видео доступно для скачивания.","ok");
       }else if(["cancelled","failed","error"].includes(result.state)){
         stopPoll();ui.cancel.classList.add("hidden");ui.render.disabled=false;
@@ -2707,6 +2713,7 @@
       s.gold.size>80||s.selected.size!==s.gold.size)return;
     const project=s.project,run=s.run,ids=Array.from(s.selected.keys());
     s.busy=true;ui.render.disabled=true;ui.download.classList.add("hidden");
+    document.getElementById("studio-download-archive")?.classList.add("hidden");
     try{
       ui.job.textContent="Загрузка музыки и проверка исходников…";
       const layout=ui.layout.value==="vertical"&&
@@ -2720,7 +2727,8 @@
         project_id:project,rally_run_id:run,candidate_ids:ids,
         audio_file:music,audio_volume:volume,
         target_duration_sec:Number(document.getElementById("studio-montage-duration")?.value)||60,
-        layout,camera_zoom,encoder
+        layout,camera_zoom,encoder,
+        include_recognition_data:document.getElementById("studio-montage-recognition")?.checked===true
       });
       const id=result.id||result.job_id;
       if(typeof id!=="string"||!id)throw Error("Сервер не вернул ID монтажа.");

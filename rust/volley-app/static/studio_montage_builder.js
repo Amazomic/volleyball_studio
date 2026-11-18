@@ -13,6 +13,7 @@
     sourceList:$("studio-montage-source-list"),favorites:$("studio-montage-favorites"),
     layout:$("studio-layout"),encoder:$("studio-encoder"),music:$("studio-music"),
     volume:$("studio-volume"),audioFit:$("studio-montage-audio-fit"),
+    recognition:$("studio-montage-recognition"),archiveDownload:$("studio-download-archive"),
     audioLength:$("studio-montage-audio-length"),camera:$("studio-montage-camera"),
     cameraField:$("studio-montage-camera-field"),zoom:$("studio-montage-zoom"),
     zoomField:$("studio-montage-zoom-field"),previewList:$("studio-montage-preview-list"),
@@ -40,12 +41,13 @@
   const post=(path,payload)=>api(path,{method:"POST",
     headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
   const invalidate=()=>{st.fingerprint="";st.key="";ui.previewList.replaceChildren();
-    ui.download.classList.add("hidden");};
+    ui.download.classList.add("hidden");ui.archiveDownload.classList.add("hidden");};
   const snapshot=()=>JSON.stringify({
     project:st.project,mode:ui.mode.value,player:ui.player.value,action:ui.action.value,
     context:ui.context.value,duration:lengthSec(),runs:selectedRuns(),layout:ui.layout.value,
     camera:ui.camera.value,zoom:ui.zoom.value,encoder:ui.encoder.value,
     include_statistics:ui.mode.value==="report"&&ui.statistics.checked,
+    include_recognition_data:ui.recognition.checked,
     music:ui.music.files?.[0]?.name||"",volume:ui.volume.value
   });
   const sync=()=>{
@@ -135,7 +137,8 @@
       layout:ui.layout.value==="vertical"&&ui.camera.value==="on"?
         "vertical_follow":ui.layout.value,
       camera_zoom:Number(ui.zoom.value),
-      encoder:ui.encoder.value,audio_volume:Number(ui.volume.value)
+      encoder:ui.encoder.value,audio_volume:Number(ui.volume.value),
+      include_recognition_data:ui.recognition.checked
     };
     if(ui.mode.value==="report")value.include_statistics=ui.statistics.checked;
     if(ui.mode.value==="player")Object.assign(value,{
@@ -223,6 +226,12 @@
           status.media_url.startsWith("/api/montage/native/media?")){
           ui.download.href=status.media_url;ui.download.classList.remove("hidden");
         }
+        if(typeof status.archive_url==="string"&&
+          status.archive_url.startsWith("/api/montage/native/media?")&&
+          status.archive_url.endsWith("&archive=1")){
+          ui.archiveDownload.href=status.archive_url;
+          ui.archiveDownload.classList.remove("hidden");
+        }
       }else if(status.state==="cancelled"||status.state==="failed"){
         stopPoll();ui.cancel.classList.add("hidden");
         ui.job.textContent=status.error||"Монтаж отменён";
@@ -240,6 +249,7 @@
     }
     if(!st.fingerprint||st.key!==snapshot())return;
     st.busy=true;sync();ui.download.classList.add("hidden");
+    ui.archiveDownload.classList.add("hidden");
     ui.job.textContent="Загрузка музыки...";
     try{
       const before=lengthSec();
@@ -292,7 +302,7 @@
     invalidate();sync();
   });
   for(const input of [ui.player,ui.action,ui.context,ui.duration,ui.layout,ui.encoder,
-    ui.volume,ui.camera,ui.zoom,ui.statistics])input.addEventListener("change",()=>{invalidate();sync();});
+    ui.volume,ui.camera,ui.zoom,ui.statistics,ui.recognition])input.addEventListener("change",()=>{invalidate();sync();});
   ui.music.addEventListener("change",audioChanged);
   ui.audioFit.addEventListener("change",()=>{
     if(ui.audioFit.checked&&st.audioSeconds){

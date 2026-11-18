@@ -19,6 +19,7 @@ mod inference_native;
 mod inference_stream;
 mod montage;
 mod montage_material;
+mod montage_recognition;
 mod native_action_review;
 mod native_player_highlights;
 mod native_player_statistics;

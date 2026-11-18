@@ -472,3 +472,6 @@ VBallNet + RTMPose: контакты и изломы ±0,1 с	VBallNet + RTMPose
 Черновик сохранён. Добавьте хотя бы один розыгрыш.	Draft saved. Add at least one rally.
 Разметка сохранена и проверена ✓	Annotations saved and reviewed ✓
 Черновик сохранён · нажмите кнопку для подтверждения.	Draft saved · click the button to confirm.
+Извлекать данные распознавания	Extract recognition data
+ZIP с видео, траекторией мяча, Track ID и точками тела для каждого кадра монтажа.	ZIP with video, ball trajectory, player track IDs and body keypoints for each montage frame.
+Скачать ZIP с распознаванием	Download ZIP with recognition data

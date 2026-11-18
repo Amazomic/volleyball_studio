@@ -67,16 +67,18 @@ const fetch=async(url,options={})=>{
       selected_manually_reviewed_actions:1,statistics:["Athlete 1: 3"],selected_content_sec:25});
   }
   if(url==="/api/montage/native/status")return reply({id:job,state:jobState,
-    overall_percent:45,media_url:"/api/montage/native/media?job_id="+job});
+    overall_percent:45,media_url:"/api/montage/native/media?job_id="+job,
+    archive_url:jobState==="complete"?"/api/montage/native/media?job_id="+job+"&archive=1":null});
   if(url==="/api/montage/native/cancel") {
     assert.equal(body.job_id,job);jobState="cancelled";return reply({cancel_requested:true});
   }
   throw Error("Unexpected request "+url);
 };
 const windowListeners=new Map();
+let pollTimer=null;
 const context={document:{getElementById:get,createElement:tag=>new Element(tag)},
   window:{addEventListener:(event,fn)=>windowListeners.set(event,fn),VolleyballStudioActivity:{fetch}},
-  URLSearchParams,setInterval:()=>1,clearInterval(){},
+  URLSearchParams,setInterval:fn=>{pollTimer=fn;return 1;},clearInterval(){} ,
   URL:{createObjectURL:()=>"blob:test",revokeObjectURL(){}},
   FormData:class {append(){}}};
 vm.runInNewContext(text("rust/volley-app/static/studio_overview.js"),context);
@@ -85,6 +87,7 @@ assert.equal(montage("player").value,"athlete1");
 assert.equal(montage("player").children.length,2);
 assert.ok(!html.includes('data-profile="report"'));
 assert.equal(montage("statistics").checked,false);
+assert.equal(montage("recognition").checked,false);
 assert.equal(montage("source-list").children.length,1);
 assert.ok(montage("source-list").children[0].children.every(child=>child.tagName!=="select"));
 const choose=async profile=>montage("presets").fire("click",{
@@ -115,6 +118,7 @@ await montage("start").fire("click");
 request=starts().at(-1);
 assert.equal(request.body.layout,"vertical");assert.equal(request.body.audio_volume,60);
 assert.equal(request.body.audio_file,audio);assert.equal(request.body.selection_mode,"auto");
+assert.equal(request.body.include_recognition_data,false);
 assert.equal(get("studio-cancel").classList.contains("hidden"),false);
 const startIndex=requests.indexOf(request);
 assert.equal(requests.slice(0,startIndex).filter(r=>r.body?.operation==="preview").length,2);
@@ -140,6 +144,14 @@ montage("statistics").checked=true;await montage("statistics").fire("change");
 await montage("start").fire("click");
 assert.equal(starts().at(-1).body.include_statistics,true);
 jobState="cancelled";await get("studio-cancel").fire("click");
+montage("recognition").checked=true;
+await montage("recognition").fire("change");
+await montage("start").fire("click");
+assert.equal(starts().at(-1).body.include_recognition_data,true);
+jobState="complete";await pollTimer();
+assert.equal(get("studio-download").classList.contains("hidden"),false);
+assert.equal(get("studio-download-archive").classList.contains("hidden"),false);
+assert.ok(get("studio-download-archive").href.endsWith("&archive=1"));
 await choose("favorites");await montage("start").fire("click");
 assert.equal(get("studio-render").clicks,1);
 console.log("Live montage builder: roster, attack/report/favorite profiles, source fingerprint, audio, start, cancel and invalid-preview veto passed");

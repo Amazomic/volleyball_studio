@@ -29,6 +29,8 @@ pub struct ReportRequest {
     expected_source_fingerprint: Option<String>,
     #[serde(default)]
     include_statistics: bool,
+    #[serde(default)]
+    include_recognition_data: bool,
     #[serde(default = "default_duration")]
     target_duration_sec: f64,
     #[serde(default)]
@@ -336,6 +338,7 @@ pub async fn report(
     let layout = req.layout;
     let target = req.target_duration_sec;
     let include_statistics = req.include_statistics;
+    let include_recognition_data = req.include_recognition_data;
     let camera_zoom = req.camera_zoom;
     let worker = state.clone();
     let plan = tokio::task::spawn_blocking(move || {
@@ -368,6 +371,7 @@ pub async fn report(
             layout,
             target_duration_sec: Some(target),
             camera_zoom,
+            include_recognition_data,
             camera_tracks: plan.camera_tracks,
             verified_highlights: None,
             report_outro: include_statistics.then_some(plan.outro),
