@@ -8,8 +8,32 @@ use crate::{
 use fs2::FileExt;
 use std::{
     fs::{self, File, OpenOptions},
-    io,
+    io, thread,
+    time::{Duration, Instant},
 };
+
+fn retry_project_lock<T>(
+    timeout: Duration,
+    mut attempt: impl FnMut() -> Result<T, ApiError>,
+) -> Result<T, ApiError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match attempt() {
+            Err(error)
+                if error.0 == axum::http::StatusCode::CONFLICT
+                    && error.1 .0["error"] == "Проект занят другой операцией студии"
+                    && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(100));
+            }
+            result => return result,
+        }
+    }
+}
+
+pub(crate) fn write_guard_for_postprocessing(state: &AppState, id: &str) -> Result<File, ApiError> {
+    retry_project_lock(Duration::from_secs(30), || write_guard(state, id))
+}
 
 pub(crate) fn write_guard(state: &AppState, id: &str) -> Result<File, ApiError> {
     if !state.writes_enabled {
@@ -67,5 +91,44 @@ pub(crate) fn write_guard(state: &AppState, id: &str) -> Result<File, ApiError> 
             Err(storage::conflict("Проект занят другой операцией студии"))
         }
         Err(e) => Err(storage::internal(format!("Lock project: {e}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deferred_postprocessing_waits_for_busy_writer_only() {
+        let mut calls = 0;
+        let result = retry_project_lock(Duration::from_secs(2), || {
+            calls += 1;
+            if calls < 3 {
+                Err(storage::conflict("Проект занят другой операцией студии"))
+            } else {
+                Ok(42)
+            }
+        });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(calls, 3);
+
+        let mut non_busy_calls = 0;
+        let invalid = retry_project_lock(Duration::from_secs(2), || -> Result<(), ApiError> {
+            non_busy_calls += 1;
+            Err(storage::conflict("Timeline identity source changed"))
+        });
+        assert_eq!(
+            invalid.unwrap_err().1 .0["error"],
+            "Timeline identity source changed"
+        );
+        assert_eq!(non_busy_calls, 1);
+
+        let mut exhausted_calls = 0;
+        let exhausted = retry_project_lock(Duration::ZERO, || -> Result<(), ApiError> {
+            exhausted_calls += 1;
+            Err(storage::conflict("Проект занят другой операцией студии"))
+        });
+        assert!(exhausted.is_err());
+        assert_eq!(exhausted_calls, 1);
     }
 }

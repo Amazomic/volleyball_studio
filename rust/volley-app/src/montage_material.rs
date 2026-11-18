@@ -142,7 +142,7 @@ pub(crate) fn publish_material(
     project: &str,
     rally: &str,
 ) -> Result<Value, ApiError> {
-    let _guard = project_guard::write_guard(state, project)?;
+    let _guard = project_guard::write_guard_for_postprocessing(state, project)?;
     let run = inspect_project(state, project, rally)?;
     let material = montage_material(state, &run)?;
     let revision = material["material_revision"]

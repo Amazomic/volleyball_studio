@@ -1039,7 +1039,11 @@ fn persist_photo_comparison(
             "Automatic links require isolated writable storage",
         ));
     }
-    let _guard = project_guard::write_guard(state, &req.project_id)?;
+    let _guard = if auto_assign {
+        project_guard::write_guard_for_postprocessing(state, &req.project_id)?
+    } else {
+        project_guard::write_guard(state, &req.project_id)?
+    };
     let snapshot = super::photo_comparison::snapshot(state, req)?;
     if comparison["identity_revision"] != json!(snapshot.identity_revision)
         || comparison["album_revisions"] != json!(snapshot.albums)
