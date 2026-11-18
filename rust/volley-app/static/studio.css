@@ -1597,6 +1597,13 @@ body[data-ui-theme="light"] .analysis-history-eta{color:#285e9a!important}
 #studio-preview-view.training-workspace .video-overlay-modes{display:none}
 #studio-preview-view.training-workspace .studio-training-caption{display:inline}
 .studio-training-panel{padding:14px 16px;border-top:1px solid #34435a;background:#121f32;display:grid;gap:12px}
+.studio-annotation-save-bar{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:12px 14px;border:1px solid #376d76;border-radius:10px;background:#163440}
+.studio-annotation-save-info{display:grid;gap:3px;min-width:0;flex:1 1 230px}
+.studio-annotation-save-info strong{font-size:14px;color:#e7fcf7}
+.studio-annotation-save-info small{font-size:11px;color:#b0d1d3;line-height:1.4}
+#studio-annotation-save-state{font-size:11px;color:#98e0c8}
+#studio-annotation-review{flex:0 0 auto;min-width:190px;justify-content:center;padding:10px 16px}
+@media(max-width:690px){#studio-annotation-review{width:100%}}
 .studio-training-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px}
 .studio-training-head small,.studio-training-panel p{font-size:12px;color:#a2b5ce}
 .studio-training-panel p{margin:0;line-height:1.5}

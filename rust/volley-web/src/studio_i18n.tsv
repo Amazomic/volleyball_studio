@@ -459,3 +459,15 @@ VBallNet + RTMPose: контакты и изломы ±0,1 с	VBallNet + RTMPose
 · просмотр и коррекция	· browse and correct
 Память CUDA, МБ · 0 = без лимита	CUDA memory, MB · 0 = unlimited
 Потоки CPU · 0 = авто	CPU threads · 0 = auto
+Сохранение разметки видео	Save video annotations
+Разметка видео	Video annotations
+Изменения сохраняются сразу. Подтвердите разметку для проверки точности.	Edits are saved immediately. Confirm annotations for accuracy evaluation.
+Выберите CPU-анализ для сохранения.	Select a CPU analysis to save annotations.
+Сохранить разметку видео	Save video annotations
+Сохранено и проверено ✓	Saved and reviewed ✓
+Сохранение изменений…	Saving changes…
+Выберите CPU-анализ для разметки.	Select a CPU analysis to annotate.
+Разметка ещё не создана. Возьмите автоматические метки за основу.	No annotations yet. Start from automatic markers.
+Черновик сохранён. Добавьте хотя бы один розыгрыш.	Draft saved. Add at least one rally.
+Разметка сохранена и проверена ✓	Annotations saved and reviewed ✓
+Черновик сохранён · нажмите кнопку для подтверждения.	Draft saved · click the button to confirm.

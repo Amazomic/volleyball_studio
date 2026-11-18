@@ -1177,6 +1177,7 @@
     status:$("studio-annotation-status"),current:$("studio-annotation-current"),
     lane:$("studio-timeline-track"),touchList:$("studio-annotation-touch-list"),
     rallies:$("studio-annotation-rallies"),metrics:$("studio-annotation-metrics"),
+    saveState:$("studio-annotation-save-state"),
     pending:$("studio-annotation-rally-pending"),
     seed:$("studio-annotation-seed"),add:$("studio-annotation-add-touch"),
     move:$("studio-annotation-move-touch"),remove:$("studio-annotation-delete-touch"),
@@ -1192,6 +1193,17 @@
     annotation.status.classList.toggle("is-error",error);
   };
   const annotationReady=()=>annotation.data&&Array.isArray(annotation.data.touches);
+  const annotationSavePresentation=(data,hasRun,busy)=>{
+    if(busy)return {text:"Сохранение изменений…",disabled:true};
+    if(!hasRun)return {text:"Выберите CPU-анализ для разметки.",disabled:true};
+    if(!data||!Array.isArray(data.touches))
+      return {text:"Разметка ещё не создана. Возьмите автоматические метки за основу.",disabled:true};
+    if(!Array.isArray(data.rallies)||!data.rallies.length)
+      return {text:"Черновик сохранён. Добавьте хотя бы один розыгрыш.",disabled:true};
+    if(data.reviewed)
+      return {text:"Разметка сохранена и проверена ✓",disabled:true};
+    return {text:"Черновик сохранён · нажмите кнопку для подтверждения.",disabled:false};
+  };
   const annotationSorted=type=>[...(annotation.data?.[type]||[])]
     .sort((a,b)=>(a.frame??a.start)-(b.frame??b.start));
   const annotationPosition=frame=>{
@@ -1209,12 +1221,14 @@
     const data=annotation.data,ready=annotationReady();
     annotation.seed.disabled=annotation.busy||!s.run;
     annotation.seed.textContent=ready?"Сбросить метки к автоматическим":"Взять автоматические метки за основу";
-    for(const key of ["add","begin","finish","review","next"])
+    for(const key of ["add","begin","finish","next"])
       annotation[key].disabled=annotation.busy||!ready;
     annotation.move.disabled=annotation.busy||!ready||!annotation.touchId;
     annotation.remove.disabled=annotation.move.disabled;
-    annotation.review.textContent=data?.reviewed?"Проверено ✓":"Завершить проверку видео";
-    annotation.review.disabled=annotation.review.disabled||Boolean(data?.reviewed);
+    const save=annotationSavePresentation(data,Boolean(s.run),annotation.busy);
+    annotation.review.textContent=data?.reviewed?"Сохранено и проверено ✓":"Сохранить разметку видео";
+    annotation.review.disabled=save.disabled;
+    annotation.saveState.textContent=save.text;
     annotation.pending.textContent=annotation.rallyId?
       "Выбран розыгрыш: границы меняются кнопками":
       annotation.pendingStart!==null?
@@ -1360,6 +1374,7 @@
       annotationNotice("Сначала создайте разметку из автоматических меток.",true);return;
     }
     annotation.busy=true;
+    drawAnnotation();
     annotationNotice("Сохранение разметки…");
     try{
       const result=await post("/api/training/annotations",{

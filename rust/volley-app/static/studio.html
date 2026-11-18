@@ -230,6 +230,14 @@
                 </div>
               </div>
               <section id="studio-training-panel" class="studio-training-panel hidden" aria-label="Дообучение на подтверждённых касаниях">
+                <div class="studio-annotation-save-bar" role="group" aria-label="Сохранение разметки видео">
+                  <div class="studio-annotation-save-info">
+                    <strong>Разметка видео</strong>
+                    <small>Изменения сохраняются сразу. Подтвердите разметку для проверки точности.</small>
+                    <span id="studio-annotation-save-state" role="status" aria-live="polite">Выберите CPU-анализ для сохранения.</span>
+                  </div>
+                  <button type="button" class="primary" id="studio-annotation-review" disabled>Сохранить разметку видео</button>
+                </div>
                 <div class="studio-training-head"><strong>Обучение на движениях игрока</strong><small>Пауза → выбрать игрока на кадре → подтвердить тип</small></div>
                 <p id="studio-training-status" role="status" aria-live="polite">Выберите игрока, коснувшегося мяча, непосредственно на кадре видео.</p>
                 <div class="studio-training-actions">
@@ -263,8 +271,7 @@
                   </div>
                   <div class="studio-annotation-rally-header"><strong>Размеченные розыгрыши</strong><small>3 строки · прокрутка · выбрать для изменения границ</small></div>
                   <div id="studio-annotation-rallies" class="studio-annotation-rallies" aria-label="Сохранённые розыгрыши"></div>
-                  <div class="studio-annotation-evaluation"><span id="studio-annotation-metrics">Точность появится после разметки.</span>
-                    <button type="button" class="primary" id="studio-annotation-review">Завершить проверку видео</button></div>
+                  <div class="studio-annotation-evaluation"><span id="studio-annotation-metrics">Точность появится после разметки.</span></div>
                   <p id="studio-annotation-status" role="status" aria-live="polite">Исправления сохраняются как независимый эталон для проверки и настройки детектора.</p>
                 </section>
                 <div class="studio-training-library"><strong>Обучающие примеры <span id="studio-training-count">0</span> · просмотр и коррекция</strong><div id="studio-training-list" aria-live="polite"></div></div>

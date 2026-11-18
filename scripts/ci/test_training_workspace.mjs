@@ -50,7 +50,7 @@ const source={touches:[{id:"touch-1",frame:60}],rallies:[],total_frames:300,revi
 const edits=[],seeks=[];
 const annotation={
   data:source,busy:false,touchId:null,rallyId:null,pendingStart:null,
-  lane,touchList:new Node(),rallies:new Node(),metrics:new Node(),pending:new Node(),
+  lane,touchList:new Node(),rallies:new Node(),metrics:new Node(),saveState:new Node(),pending:new Node(),
   seed:new Node(),add:new Node(),move:new Node(),remove:new Node(),next:new Node(),
   begin:new Node(),finish:new Node(),review:new Node(),current:new Node()
 };
