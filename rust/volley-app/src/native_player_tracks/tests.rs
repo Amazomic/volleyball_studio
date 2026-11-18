@@ -24,7 +24,7 @@ fn rally_turnover_keeps_irek_in_both_rallies_without_stealing_railya() {
     ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [4, 5, 19]).unwrap();
     let proposals = json!({
         "4":[{"player_id":"abcdef012345","cosine_similarity":0.833}],
-        "5":[{"player_id":"123456abcdef","cosine_similarity":0.800},
+        "5":[{"player_id":"123456abcdef","cosine_similarity":0.801},
              {"player_id":"abcdef012345","cosine_similarity":0.532}],
         "19":[{"player_id":"abcdef012345","cosine_similarity":0.853}]
     });
@@ -102,7 +102,7 @@ fn photo_refresh_assigns_new_track_without_swapping_confirmed_player() {
 }
 
 #[test]
-fn ambiguous_photo_evidence_does_not_swap_preview_identity() {
+fn highest_similarity_over_80_wins_even_when_runner_up_is_close() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
     let mut ctx = context(&root, sha, tracks);
@@ -114,11 +114,11 @@ fn ambiguous_photo_evidence_does_not_swap_preview_identity() {
         {"player_id":"abcdef012345","cosine_similarity":0.90}
     ]});
     let (updated, chosen) = refresh_automatic_photo_links(&ctx, &previous, &matches).unwrap();
-    assert!(chosen.is_empty());
-    assert_eq!(updated["automatic_assignments"], json!({}));
+    assert_eq!(chosen.get(&7).map(String::as_str), Some("123456abcdef"));
+    assert_eq!(updated["automatic_assignments"], json!({"7":"123456abcdef"}));
     let view = page(&ctx, &updated, "rev", 0, 20).unwrap();
-    assert_eq!(view["tracks"][0]["assigned_player_id"], Value::Null);
-    assert_eq!(view["tracks"][0]["identity_source"], "none");
+    assert_eq!(view["tracks"][0]["assigned_player_id"], "123456abcdef");
+    assert_eq!(view["tracks"][0]["identity_source"], "automatic_photo");
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -349,7 +349,7 @@ fn ilnur_late_id_13_can_join_id_12_after_measured_track_handoff() {
     let matches = json!({
         "11":[{"player_id":"123456abcdef","cosine_similarity":0.874}],
         "12":[{"player_id":"abcdef012345","cosine_similarity":0.918}],
-        "13":[{"player_id":"abcdef012345","cosine_similarity":0.682},
+        "13":[{"player_id":"abcdef012345","cosine_similarity":0.882},
               {"player_id":"123456abcdef","cosine_similarity":0.664}],
         "14":[{"player_id":"abcdef012345","cosine_similarity":0.520}]
     });
@@ -598,7 +598,7 @@ fn manual_confirmation_keeps_unrelated_existing_auto_link() {
     doc["automatic_assignments"] = json!({"7":"abcdef012345"});
     doc["assignments"] = json!({"9":"123456abcdef"});
     doc["automatic_identity_evidence"]["matches"] = json!({
-        "7":[{"player_id":"abcdef012345","cosine_similarity":0.80}],
+        "7":[{"player_id":"abcdef012345","cosine_similarity":0.81}],
         "8":[
             {"player_id":"abcdef012345","cosine_similarity":0.90},
             {"player_id":"123456abcdef","cosine_similarity":0.88}
@@ -688,7 +688,7 @@ fn automatic_photo_link_picks_the_highest_similarity_for_one_track() {
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
     let mut ctx = context(&root, sha, tracks);
     ctx.roster.insert("123456abcdef".into(), "Player B".into());
-    let matches = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.54},{"player_id":"123456abcdef","cosine_similarity":0.68}]});
+    let matches = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.84},{"player_id":"123456abcdef","cosine_similarity":0.88}]});
     let chosen = choose_automatic_photo_links(&ctx, &base_document(&ctx), &matches).unwrap();
     assert_eq!(chosen[&7], "123456abcdef");
     fs::remove_dir_all(root).unwrap();
@@ -758,7 +758,7 @@ fn automatic_photo_links_allow_player_already_linked_to_another_track() {
     ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
     let mut doc = base_document(&ctx);
     doc["assignments"] = json!({"7":"abcdef012345"});
-    let matches = json!({"8":[{"player_id":"abcdef012345","cosine_similarity":0.8}]});
+    let matches = json!({"8":[{"player_id":"abcdef012345","cosine_similarity":0.81}]});
     let chosen = choose_automatic_photo_links(&ctx, &doc, &matches).unwrap();
     assert_eq!(chosen.get(&8).map(String::as_str), Some("abcdef012345"));
     fs::remove_dir_all(root).unwrap();
@@ -835,14 +835,17 @@ fn automatic_photo_links_enforce_threshold_and_conflicting_tracks() {
     let mut doc = base_document(&ctx);
     let matches = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.80}],"8":[{"player_id":"abcdef012345","cosine_similarity":0.70}]});
     let chosen = choose_automatic_photo_links(&ctx, &doc, &matches).unwrap();
-    assert_eq!(chosen.len(), 1);
-    assert_eq!(chosen[&7], "abcdef012345");
+    assert!(chosen.is_empty());
+    let above = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.80001}],"8":[{"player_id":"abcdef012345","cosine_similarity":0.70}]});
+    let selected = choose_automatic_photo_links(&ctx, &doc, &above).unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[&7], "abcdef012345");
     doc["excluded_ids"] = json!([7]);
-    let below = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.99}],"8":[{"player_id":"abcdef012345","cosine_similarity":0.30}]});
+    let below = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.99}],"8":[{"player_id":"abcdef012345","cosine_similarity":0.80}]});
     assert!(choose_automatic_photo_links(&ctx, &doc, &below)
         .unwrap()
         .is_empty());
-    let above = json!({"8":[{"player_id":"abcdef012345","cosine_similarity":0.30001}]});
+    let above = json!({"8":[{"player_id":"abcdef012345","cosine_similarity":0.80001}]});
     assert_eq!(
         choose_automatic_photo_links(&ctx, &doc, &above)
             .unwrap()
@@ -1092,7 +1095,7 @@ fn competing_player_photo_is_checked_against_a_second_real_frame() {
     assert_eq!(verified["13"][0]["player_id"], "123456abcdef");
     let chosen = choose_automatic_photo_links(&ctx, &base_document(&ctx), &verified).unwrap();
     assert_eq!(chosen.get(&12).map(String::as_str), Some("abcdef012345"));
-    assert_eq!(chosen.get(&13).map(String::as_str), Some("123456abcdef"));
+    assert!(!chosen.contains_key(&13));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1543,6 +1546,7 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
         {
             let mut other = player;
             other["track_id"] = json!(8);
+            other["detection"]["bbox_xyxy_norm"] = json!([0.55, 0.1, 0.75, 0.65]);
             row["tracked_players"].as_array_mut().unwrap().push(other);
         }
         source_bytes.extend(serde_json::to_vec(&row).unwrap());
@@ -1675,7 +1679,15 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
     )
     .unwrap();
     assert_eq!(saved["assigned_count"], 2);
+    assert_eq!(saved["manual_overlap"]["track_id"], 8);
+    assert_eq!(saved["manual_overlap"]["other_track_id"], 7);
+    assert_eq!(saved["manual_overlap"]["frame"], 1);
     assert_eq!(saved["evidence_source"], original["evidence_source"]);
+    let unassigned = read_internal(
+        &state,
+        &TrackQuery { view: Some("unassigned".into()), ..query.clone() },
+    ).unwrap();
+    assert_eq!(unassigned["unassigned_track_ids"], json!([]));
     let sidecar = data
         .join("projects")
         .join(id)

@@ -1,5 +1,7 @@
 use super::*;
 
+const AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD: f64 = 0.80;
+
 pub(crate) fn conflicting_frame_tracks(
     owners: &BTreeMap<u64, String>,
     tracks: impl IntoIterator<Item = u64>,
@@ -169,7 +171,7 @@ pub(super) fn choose_automatic_photo_links(
             };
             let Some(score) = row["cosine_similarity"]
                 .as_f64()
-                .filter(|score| score.is_finite() && *score > 0.30 && *score <= 1.0)
+                .filter(|score| score.is_finite() && *score > AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD && *score <= 1.0)
             else {
                 continue;
             };
@@ -208,13 +210,9 @@ pub(super) fn choose_automatic_photo_links(
         };
         let mut ranked = candidates.iter().filter(|v| v.1 == id).collect::<Vec<_>>();
         ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
-        let Some((score, _, owner)) = ranked.first() else {
+        let Some((_, _, owner)) = ranked.first() else {
             continue;
         };
-        // A near-equal photo match is ambiguous only when that other athlete
-        // could actually be the current body. If the alternative has already
-        // been identified in an independently observed, co-visible track,
-        // it is not a valid contender for this same video frame.
         let occupied_in_frame = |possible_owner: &str| {
             assigned.iter().any(|(other_id, other_owner)| {
                 other_owner.as_str() == Some(possible_owner)
@@ -223,13 +221,6 @@ pub(super) fn choose_automatic_photo_links(
                 .iter()
                 .any(|(other_id, other_owner)| other_owner == possible_owner && overlaps(*other_id))
         };
-        if ranked
-            .iter()
-            .skip(1)
-            .any(|second| *score - second.0 < 0.04 && !occupied_in_frame(&second.2))
-        {
-            continue;
-        }
         // Reject only *measured co-visible* tracks owned by the same athlete.
         // Sequential reacquisitions remain eligible for that athlete.
         if !occupied_in_frame(owner) {
@@ -895,25 +886,16 @@ pub(super) fn change(state: &AppState, req: &TrackEdit) -> Result<Value, ApiErro
     let saved_scope = automatic_assignment_scope(state, &whole_source, &doc)?;
     let conflict_tracks = saved_scope.as_ref().unwrap_or(&ctx);
     let previous_automatic = doc["automatic_assignments"].clone();
-    if req.action == "assign" {
-        if let Some((id, other, frame)) = new_manual_owner_conflict(
+    let manual_overlap = if req.action == "assign" {
+        new_manual_owner_conflict(
             conflict_tracks,
             &review.assignments,
             &previous_automatic,
             &req.track_ids,
-        ) {
-            let message = if req.track_ids.contains(&other) {
-                format!(
-                    "В выбранных Track ID {id} и {other} обнаружены разные люди в кадре {frame}. Нельзя привязать их к одному игроку: исключите ошибочный ID из группы или снимите его выбор."
-                )
-            } else {
-                format!(
-                    "ID {id} конфликтует с ранее подтверждённым ID {other}: разные люди в кадре {frame}. Проверьте кадр и при ошибке сначала снимите прежнюю привязку ID {other}."
-                )
-            };
-            return Err(storage::conflict(message));
-        }
-    }
+        )
+    } else {
+        None
+    };
     let displaced_automatic = if req.action == "assign" {
         conflicting_automatic_links(conflict_tracks, &review.assignments, &previous_automatic)
     } else {
@@ -992,6 +974,9 @@ pub(super) fn change(state: &AppState, req: &TrackEdit) -> Result<Value, ApiErro
     )
     .map_err(storage::bad_request)?;
     result["displaced_automatic_track_ids"] = json!(displaced_automatic);
+    result["manual_overlap"] = json!(manual_overlap.map(|(id, other, frame)| {
+        json!({"track_id":id,"other_track_id":other,"frame":frame})
+    }));
     Ok(result)
 }
 
@@ -1015,17 +1000,15 @@ pub(super) fn save_automatic_photo_links(
     req: &ReidReviewRequest,
     comparison: &Value,
 ) -> Result<Value, ApiError> {
-    persist_photo_comparison(state, req, comparison, true)
+    persist_photo_comparison(state, req, comparison, true, true)
 }
 
-/// Save the ranked candidates without changing manual or automatic owners.
-/// This is used by the gallery's explicit refresh and survives page reloads.
 pub(super) fn save_photo_match_suggestions(
     state: &AppState,
     req: &ReidReviewRequest,
     comparison: &Value,
 ) -> Result<Value, ApiError> {
-    persist_photo_comparison(state, req, comparison, false)
+    persist_photo_comparison(state, req, comparison, true, false)
 }
 
 fn persist_photo_comparison(
@@ -1033,13 +1016,14 @@ fn persist_photo_comparison(
     req: &ReidReviewRequest,
     comparison: &Value,
     auto_assign: bool,
+    return_automatic_result: bool,
 ) -> Result<Value, ApiError> {
     if !state.writes_enabled {
         return Err(storage::conflict(
             "Automatic links require isolated writable storage",
         ));
     }
-    let _guard = if auto_assign {
+    let _guard = if return_automatic_result {
         project_guard::write_guard_for_postprocessing(state, &req.project_id)?
     } else {
         project_guard::write_guard(state, &req.project_id)?
@@ -1088,7 +1072,7 @@ fn persist_photo_comparison(
         ));
     }
     doc["automatic_identity_evidence"] = json!({
-        "threshold":0.30, "matches":matches,
+        "threshold":AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD, "matches":matches,
         "rally_run_id":req.rally_run_id,
         "album_revisions":comparison["album_revisions"],
         "reference_photo_sha256":reference_hashes,
@@ -1115,7 +1099,7 @@ fn persist_photo_comparison(
     versioned_store::write_json_checked(parent, &ctx.sidecar, &doc, MAX_LINKS)
         .map_err(storage::bad_request)?;
     let saved = existing(&ctx.sidecar).map_err(storage::bad_request)?;
-    if auto_assign {
+    if return_automatic_result {
         Ok(
             json!({"automatic_count":chosen.len(),"automatic_assignments":chosen,
             "unassigned_track_ids":unassigned,

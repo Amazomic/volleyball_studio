@@ -421,9 +421,12 @@
       const unscored=[...state.comparisonIds].some(id=>
         !Array.isArray(state.playerMatches[String(id)])||
         !state.playerMatches[String(id)].length);
+      const savedHighMatches=[...state.unassignedIds].some(id=>
+        Array.isArray(savedMatches?.[String(id)])&&
+        savedMatches[String(id)].some(match=>Number(match.cosine_similarity)>0.80));
       const scoreKey=[project,video,replay,state.sourceSha].join("|");
       if(state.writable&&state.roster.length&&state.comparisonIds.size&&
-         (unscored||state.forcePhotoScores)&&
+         (unscored||savedHighMatches||state.forcePhotoScores)&&
          !state.photoScoreLoading&&!state.photoScoreAttempts.has(scoreKey)){
         state.photoScoreAttempts.add(scoreKey);
         state.forcePhotoScores=false;
