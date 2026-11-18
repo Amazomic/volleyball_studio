@@ -452,3 +452,5 @@ VBallNet + RTMPose: контакты и изломы ±0,1 с	VBallNet + RTMPose
 Касания для коррекции	Touches to correct
 Сохранённые розыгрыши	Saved rallies
 Параметры постобработки	Post-processing parameters
+Строгость сопоставления ID ByteTrack	ByteTrack ID matching strictness
+Порог отклонения спорных ID	Ambiguous ID rejection threshold

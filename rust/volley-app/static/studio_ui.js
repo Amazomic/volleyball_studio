@@ -336,6 +336,10 @@
     const locale=output.get("locale"),theme=output.get("theme"),
       density=output.get("density"),motion=output.get("reduced_motion");
     document.documentElement.lang=locale===1?"en":"ru";
+    for(const label of document.querySelectorAll("#studio-analysis-view .analysis-setting-help")){
+      const description=locale===1?label.dataset.analysisHintEn:label.dataset.analysisHint;
+      if(description)label.setAttribute("aria-description",description);
+    }
     document.body.dataset.uiTheme=theme===1?"light":"dark";
     document.body.dataset.uiDensity=density===1?"compact":"normal";
     document.body.dataset.uiMotion=motion===1?"reduce":"normal";

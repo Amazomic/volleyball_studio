@@ -1696,3 +1696,35 @@ body[data-ui-theme="light"] .analysis-history-eta{color:#285e9a!important}
 .studio-annotation-evaluation .primary{padding:9px 12px;font-size:11px}
 #studio-annotation-status{font-size:11px;color:#9bb7cb}
 #studio-annotation-status.is-error{color:#ffc0b9}
+
+#studio-analysis-view .analysis-setting-help{
+  position:relative;cursor:help;text-decoration:underline dotted #6f90bd;
+  text-decoration-thickness:1px;text-underline-offset:3px;white-space:normal;
+  overflow-wrap:break-word;
+}
+#studio-analysis-view .analysis-setting-help:hover,
+#studio-analysis-view .analysis-setting-help:focus-visible{
+  color:#eaf4ff;text-decoration-color:#a8ceff;
+}
+#studio-analysis-view .analysis-setting-help:focus-visible{
+  outline:2px solid #85b1ff;outline-offset:3px;border-radius:2px;
+}
+#studio-analysis-view .analysis-setting-help:is(:hover,:focus-visible)::after{
+  content:attr(data-analysis-hint);position:absolute;top:calc(100% + 7px);left:0;
+  z-index:90;box-sizing:border-box;width:300px;max-width:calc(100vw - 52px);
+  border:1px solid #607c9e;border-radius:9px;padding:11px 13px;
+  background:#0c1727;color:#edf5ff;box-shadow:0 8px 25px #0007;
+  font-size:12px;font-weight:500;line-height:1.5;text-align:left;
+  letter-spacing:0;text-transform:none;text-decoration:none;
+  white-space:normal;pointer-events:none;overflow-wrap:anywhere;
+}
+#studio-analysis-view .analysis-profile-fields>div:nth-child(4n)>.analysis-setting-help::after,
+#studio-analysis-view .analysis-editor-trim label:last-child::after{
+  left:auto;right:0;
+}
+body[data-ui-theme="light"] #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visible)::after{
+  background:#f7fbff;color:#243b56;border-color:#9cb6ce;box-shadow:0 6px 20px #243b5630;
+}
+html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visible)::after{
+  content:attr(data-analysis-hint-en);
+}

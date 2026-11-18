@@ -32,7 +32,7 @@ use volley_core::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_xyah_two_stage_v1";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_xyah_two_stage_v2";
 pub(crate) mod ball_track;
 mod gap_interpolation;
 #[cfg(test)]

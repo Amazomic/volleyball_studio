@@ -319,7 +319,7 @@ impl ByteTracker {
         let mut emitted = Vec::<TrackedPlayer>::new();
         // Stage 1: match high confidence to Kalman-predicted tracked/lost IDs.
         let all_ids: Vec<usize> = (0..self.tracks.len()).collect();
-        let (matches_high, unmatched_high, unmatched_tracks, ambiguous_high) =
+        let (matches_high, unmatched_high, unmatched_tracks, ambiguous_high, blocked_high) =
             self.associate(frame, &high, &all_ids, HIGH_IOU);
         self.ambiguous += ambiguous_high;
         for (d, t) in matches_high {
@@ -334,7 +334,7 @@ impl ByteTracker {
                     && frame.saturating_sub(self.tracks[t].last_frame) <= 15
             })
             .collect::<Vec<_>>();
-        let (matches_low, _, _, ambiguous_low) =
+        let (matches_low, _, _, ambiguous_low, _) =
             self.associate(frame, &low, &recently_tracked, LOW_IOU);
         self.ambiguous += ambiguous_low;
         self.low_confidence_matches += matches_low.len() as u64;
@@ -344,7 +344,7 @@ impl ByteTracker {
         // Only unmatched HIGH detections become new tentative Track IDs.
         let activation = self.config.min_player_score.max(HIGH_DETECTION_SCORE);
         for d in unmatched_high {
-            if high[d].box_.score < activation {
+            if blocked_high.contains(&d) || high[d].box_.score < activation {
                 continue;
             }
             if self.tracks.len() >= MAX_KF_TRACKS {
@@ -406,9 +406,11 @@ impl ByteTracker {
         observations: &[Observation],
         indices: &[usize],
         min_iou: f64,
-    ) -> (Vec<(usize, usize)>, Vec<usize>, Vec<usize>, u64) {
+    ) -> (Vec<(usize, usize)>, Vec<usize>, Vec<usize>, u64, Vec<usize>) {
         let mut matrix = Vec::with_capacity(observations.len());
         let mut ambiguous = 0;
+        let mut blocked = Vec::new();
+        let strictness = (self.config.min_assignment_score - 0.43) * 0.7;
         for observation in observations {
             let scores = indices
                 .iter()
@@ -424,11 +426,12 @@ impl ByteTracker {
                     // expands enough to overlap another player's bounding box.
                     let travel = distance(predicted, observation.box_.bbox_xyxy_norm);
                     let travel_limit = (0.055 + gap as f64 * 0.005).min(0.30);
-                    let threshold = if track.status == Status::Tentative {
+                    let baseline = if track.status == Status::Tentative {
                         UNCONFIRMED_IOU
                     } else {
                         min_iou
                     };
+                    let threshold = (baseline + strictness).clamp(0.03, 0.90);
                     (overlap >= threshold && travel <= travel_limit).then_some(overlap)
                 })
                 .collect::<Vec<_>>();
@@ -436,8 +439,11 @@ impl ByteTracker {
             available.sort_by(|a, b| b.total_cmp(a));
             if available.len() > 1 && available[0] - available[1] < self.config.ambiguity_margin {
                 ambiguous += 1;
+                blocked.push(matrix.len());
+                matrix.push(vec![None; indices.len()]);
+            } else {
+                matrix.push(scores);
             }
-            matrix.push(scores);
         }
         let assigned = association::assign(&matrix);
         let mut matched = Vec::new();
@@ -456,7 +462,7 @@ impl ByteTracker {
             .enumerate()
             .filter_map(|(i, &id)| (!used[i]).then_some(id))
             .collect();
-        (matched, pending_det, unmatched_tracks, ambiguous)
+        (matched, pending_det, unmatched_tracks, ambiguous, blocked)
     }
     pub fn next_id(&self) -> u64 {
         self.next_id
@@ -617,6 +623,75 @@ mod tests {
         assert_eq!(next.tracks[0].track_id, first.tracks[0].track_id);
         assert_eq!(next.tracks[1].track_id, first.tracks[1].track_id);
     }
+    #[test]
+    fn assignment_strictness_changes_track_continuity() {
+        let run = |strict: f64| {
+            let mut options = TrackingOptions::default();
+            options.min_assignment_score = strict;
+            let mut tr = ByteTracker::new(options).unwrap();
+            let id = tr
+                .process_frame_with_poses(0, &[person(0, 0, 0.20, 0.99)], &[])
+                .unwrap()
+                .tracks[0]
+                .track_id;
+            tr.process_frame_with_poses(1, &[person(1, 0, 0.20, 0.99)], &[])
+                .unwrap();
+            let detected = tr
+                .process_frame_with_poses(2, &[person(2, 0, 0.235, 0.99)], &[])
+                .unwrap();
+            (id, detected.tracks.first().map(|p| p.track_id))
+        };
+        let (original, relaxed) = run(0.43);
+        let (_, strict) = run(1.00);
+        assert_eq!(relaxed, Some(original));
+        assert_ne!(
+            strict,
+            Some(original),
+            "Stricter IoU must prevent the uncertain old ID join"
+        );
+    }
+
+    #[test]
+    fn ambiguity_margin_blocks_unsafe_assignment_and_duplicate_new_id() {
+        let run = |margin: f64| {
+            let mut options = TrackingOptions::default();
+            options.ambiguity_margin = margin;
+            let mut tr = ByteTracker::new(options).unwrap();
+            tr.process_frame_with_poses(
+                0,
+                &[person(0, 0, 0.20, 0.99), person(0, 1, 0.28, 0.98)],
+                &[],
+            )
+            .unwrap();
+            tr.process_frame_with_poses(
+                1,
+                &[person(1, 0, 0.20, 0.99), person(1, 1, 0.28, 0.98)],
+                &[],
+            )
+            .unwrap();
+            let match_at_middle = tr
+                .process_frame_with_poses(2, &[person(2, 0, 0.24, 0.99)], &[])
+                .unwrap();
+            (
+                match_at_middle.tracks.len(),
+                match_at_middle.ambiguous_detections,
+                tr.next_id(),
+            )
+        };
+        let loose = run(0.0);
+        let strict = run(0.15);
+        assert_eq!(
+            loose.0, 1,
+            "No ambiguity gate should make the best available match"
+        );
+        assert_eq!(strict.0, 0, "Ambiguous match must not be silently assigned");
+        assert_eq!(strict.1, 1);
+        assert_eq!(
+            strict.2, 3,
+            "The rejected match must not create a new ghost Track ID"
+        );
+    }
+
     #[test]
     fn kalman_prediction_and_update_are_finite_and_close_to_observed() {
         let mut k = Kalman::new([0.2, 0.2, 0.3, 0.8]);

@@ -215,7 +215,7 @@
   const postProfile=()=>({
     interpolate_players:$("studio-gpu-interpolate-players").checked,
     interpolate_pose:$("studio-gpu-interpolate-pose").checked,
-    pose_classification:$("studio-post-pose-classify").value==="1",
+    pose_classification:true,
     tracking:{
       min_player_score:inputValue("studio-post-player-score"),
       nms_iou:inputValue("studio-post-nms"),

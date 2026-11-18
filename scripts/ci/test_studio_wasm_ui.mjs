@@ -41,7 +41,7 @@ const profileSelects=[...markup.matchAll(/<select[^>]*id="(studio-(?:gpu|post)[^
   .map(row=>Object.fromEntries([...row[0].matchAll(/([\w-]+)="([^"]*)"/g)]
     .map(attr=>[attr[1],attr[2]])));
 assert.deepEqual(profileSelects.map(attrs=>attrs.id).sort(),
-  ["studio-gpu-pose-enabled","studio-post-pose-classify","studio-post-require-pose"]);
+  ["studio-gpu-pose-enabled","studio-post-require-pose"]);
 
 const names=["preview","analysis","players","montage","quick","report"];
 class Node {
@@ -297,7 +297,7 @@ assert.deepEqual(golden.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:8,pose_e
 assert.equal(golden.post.pose_classification,true);
 assert.equal(golden.post.interpolate_players,true);
 assert.equal(golden.post.interpolate_pose,true);
-assert.equal(golden.post.tracking.min_player_score,0.25);
+assert.equal(golden.post.tracking.min_player_score,0.28);
 assert.equal(golden.post.tracking.nms_iou,0.72);
 assert.equal(golden.post.tracking.min_track_observations,12);
 assert.equal(golden.post.touches.threshold,0.48);
@@ -320,7 +320,7 @@ await tick();
 assert.equal(pipelineStarts().length,2,"Second explicit pipeline launch only");
 const override=JSON.parse(pipelineStarts()[1].options.body);
 assert.deepEqual(override.gpu,{stride:3,gpu_memory_limit_mb:8192,cpu_threads:12,pose_enabled:true,pose_mode:"photo",pose_stride:1});
-assert.equal(override.post.tracking.min_player_score,0.25);
+assert.equal(override.post.tracking.min_player_score,0.28);
 a.nodes.get("studio-gpu-memory").value="-1";
 a.nodes.get("studio-gpu-memory").dispatch("input");
 assert.match(a.nodes.get("studio-analysis-profile-delta").textContent,/недопустимое значение/);

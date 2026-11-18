@@ -725,6 +725,10 @@ pub(crate) fn detect_stream(
     )
 }
 
+fn touch_confidence_passes(probability: f64, threshold: f64) -> bool {
+    probability.is_finite() && probability >= threshold
+}
+
 #[expect(clippy::too_many_arguments)]
 fn detect_stream_with_pose(
     source: &Path,
@@ -971,6 +975,7 @@ fn detect_stream_with_pose(
                         }
                     }
                 }
+                events.retain(|event| touch_confidence_passes(event.probability, settings.threshold));
                 for event in events {
                     // Reconstructed gap positions must not acquire authority as
                     // source-frame detections. Check before cross-chunk dedup so
@@ -1325,6 +1330,20 @@ pub async fn status(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn minimum_contact_confidence_applies_to_all_pose_motion_candidates() {
+        let scores = [0.29, 0.48, 0.64, 0.83];
+        let enabled = |threshold| {
+            scores.iter().copied()
+                .filter(|score| touch_confidence_passes(*score, threshold))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(enabled(0.48), vec![0.48, 0.64, 0.83]);
+        assert_eq!(enabled(0.80), vec![0.83]);
+        assert_eq!(enabled(0.99), Vec::<f64>::new());
+        assert!(!touch_confidence_passes(f64::NAN, 0.48));
+    }
+
     use super::*;
     use std::path::PathBuf;
 

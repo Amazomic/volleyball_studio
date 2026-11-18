@@ -9,6 +9,14 @@ use crate::{
     pose_contact::{self, ContactSample, ContactTrajectory},
 };
 
+fn pose_motion_config(settings: TouchSettings) -> crate::motion::MotionConfig {
+    crate::motion::MotionConfig {
+        max_gap_frames: 9,
+        velocity_window: settings.smooth.max(2),
+        ..TOUCH_MOTION_CONFIG
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PosePlayer {
     pub track_id: u64,
@@ -599,10 +607,7 @@ pub fn evaluate_pose_block(
         };
         // Brief, explicitly discarded localization islands may span six to nine
         // frames. Both sides still require real, same-source ball samples.
-        let motion_config = crate::motion::MotionConfig {
-            max_gap_frames: 9,
-            ..TOUCH_MOTION_CONFIG
-        };
+        let motion_config = pose_motion_config(settings);
         // Pose/ball overlap identifies the contact timestamp. The fitted
         // trajectory kink can peak a few frames later because velocity is
         // estimated from multiple observations. Keep the real contact frame
@@ -834,6 +839,25 @@ pub fn evaluate_pose_block(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn smoothing_window_is_used_by_pose_motion() {
+        let default = TouchSettings::default();
+        let customized = TouchSettings {
+            smooth: 11,
+            ..default
+        };
+        assert_eq!(pose_motion_config(default).velocity_window, 5);
+        assert_eq!(pose_motion_config(customized).velocity_window, 11);
+        assert_eq!(
+            pose_motion_config(TouchSettings {
+                smooth: 1,
+                ..default
+            })
+            .velocity_window,
+            2
+        );
+    }
+
     use super::*;
     use crate::touch_pipeline::{TouchBall, TouchPlayer};
 
