@@ -626,8 +626,9 @@ pub(super) async fn compare(
             let repo = state.repository_root.clone();
             let library = std::env::var("VOLLEY_OPENVINO_C_LIB")
                 .map_err(|_| storage::bad_request("Native OpenVINO C runtime is not configured"))?;
-            let inferred = tokio::task::spawn_blocking(
-                move || -> Result<Vec<(u64, usize, String, Vec<f32>)>, ApiError> {
+            type EncodedFeature = (u64, usize, String, Vec<f32>);
+            let inferred =
+                tokio::task::spawn_blocking(move || -> Result<Vec<EncodedFeature>, ApiError> {
                     let mut encoder =
                         volley_inference::reid_openvino::Encoder::load(&repo, Path::new(&library))
                             .map_err(storage::bad_request)?;
@@ -642,10 +643,9 @@ pub(super) async fn compare(
                             ))
                         })
                         .collect()
-                },
-            )
-            .await
-            .map_err(|e| storage::internal(format!("ReID independent crop worker: {e}")))??;
+                })
+                .await
+                .map_err(|e| storage::internal(format!("ReID independent crop worker: {e}")))??;
             let mut cache = independent_features()
                 .lock()
                 .map_err(|_| storage::internal("Independent ReID cache lock poisoned"))?;
@@ -739,9 +739,11 @@ mod tests {
     fn full_multi_athlete_photo_albums_fit_in_one_comparison() {
         // Six existing athlete albums with 46+64+48+32+55+64 photos
         // previously failed at the old hard cap of 256.
-        assert!(MAX_COMPARISON_REFERENCE_PHOTOS >= 46 + 64 + 48 + 32 + 55 + 64);
-        assert!(MAX_COMPARISON_REFERENCE_PHOTOS >= 8 * MAX_PLAYER_PHOTOS);
-        assert!(MAX_CACHED_REFERENCE_FEATURES >= MAX_COMPARISON_REFERENCE_PHOTOS);
+        let album_capacity = std::hint::black_box(MAX_COMPARISON_REFERENCE_PHOTOS);
+        let cache_capacity = std::hint::black_box(MAX_CACHED_REFERENCE_FEATURES);
+        assert!(album_capacity >= 46 + 64 + 48 + 32 + 55 + 64);
+        assert!(album_capacity >= 8 * MAX_PLAYER_PHOTOS);
+        assert!(cache_capacity >= album_capacity);
     }
 
     #[test]

@@ -230,13 +230,13 @@ pub fn trajectory_body_contact(evidence: &ContactTrajectory) -> Option<BodyConta
 pub fn sampled_body_contact(
     keypoints: [[f64; 3]; 17],
     ball_px: [f64; 2],
-    width: f64,
-    height: f64,
+    dimensions: (f64, f64),
     player_height_px: f64,
     ball_radius_px: f64,
     min_confidence: f64,
     max_distance_ratio: f64,
 ) -> Option<BodyContact> {
+    let (width, height) = dimensions;
     if [
         ball_px[0],
         ball_px[1],
@@ -366,8 +366,7 @@ mod tests {
         let sampled = sampled_body_contact(
             e.impact.keypoints,
             e.impact.ball_px,
-            640.0,
-            360.0,
+            (640.0, 360.0),
             150.0,
             6.0,
             0.35,

@@ -523,18 +523,17 @@ fn gated_ball_observations(samples: &[Option<(&str, [f64; 2])>]) -> Vec<Option<[
 }
 
 fn extract_frames(
-    path: &Path,
-    sha: &str,
-    total: u64,
-    start: u64,
-    end: u64,
+    source: (&Path, &str, u64),
+    window: (u64, u64),
     scope: &native_rally_evidence::RallyWindows,
-    width: u32,
-    height: u32,
+    dimensions: (u32, u32),
     min_ball_score: f64,
     raw_thresholds: Option<(u8, u8, u8, u8)>,
     ball_scope: Option<(&[u64], f64)>,
 ) -> Result<Vec<Value>, String> {
+    let (path, sha, total) = source;
+    let (start, end) = window;
+    let (width, height) = dimensions;
     let index = index_for(path, sha, total)?;
     let starts = scope
         .intervals
@@ -779,14 +778,10 @@ pub async fn get(
         let ball_scope = crate::cpu_retrack::ball_track::saved_scope(&saved)?;
         let (context_start, context_end) = continuity::context(start, end, &windows.intervals);
         let mut frames = extract_frames(
-            &replay_path,
-            &replay_sha,
-            total,
-            context_start,
-            context_end,
+            (&replay_path, &replay_sha, total),
+            (context_start, context_end),
             &windows,
-            preview_run.width,
-            preview_run.height,
+            (preview_run.width, preview_run.height),
             preview_run.min_ball_score,
             raw_thresholds,
             ball_scope
@@ -1059,10 +1054,12 @@ fn gpu_person_detector(project_root: &Path, fusion: &Value) -> &'static str {
         _ => "unknown",
     }
 }
+type GpuSourceInspection = (PathBuf, String, u64, u32, u32, PathBuf, &'static str);
+
 fn inspect_gpu_source(
     state: &AppState,
     query: &GpuOverlayQuery,
-) -> Result<(PathBuf, String, u64, u32, u32, PathBuf, &'static str), storage::ApiError> {
+) -> Result<GpuSourceInspection, storage::ApiError> {
     storage::project_id(&query.project_id)?;
     storage::video_name(&query.video)?;
     if !volley_core::contracts::job_id(&query.fusion_id) {
@@ -1496,7 +1493,13 @@ mod tests {
             contexts: std::collections::BTreeMap::new(),
         };
         let rows = extract_frames(
-            &path, &sha, 500, 400, 405, &scope, 1280, 720, 0.35, None, None,
+            (&path, &sha, 500),
+            (400, 405),
+            &scope,
+            (1280, 720),
+            0.35,
+            None,
+            None,
         )
         .unwrap();
         assert!(rows.iter().all(|row| row["ball"].is_null()));
@@ -1547,14 +1550,10 @@ mod tests {
         // A request beginning inside the hole needs the VballNet anchors
         // outside the requested subwindow. The +/-8-frame read halo supplies them.
         let frames = extract_frames(
-            &path,
-            &sha,
-            8,
-            3,
-            5,
+            (&path, &sha, 8),
+            (3, 5),
             &scope,
-            640,
-            360,
+            (640, 360),
             0.35,
             Some((50, 50, 50, 50)),
             None,
@@ -1607,14 +1606,10 @@ mod tests {
                 contexts: std::collections::BTreeMap::new(),
             };
             let frames = extract_frames(
-                &path,
-                &sha,
-                12,
-                4,
-                6,
+                (&path, &sha, 12),
+                (4, 6),
                 &scope,
-                1280,
-                720,
+                (1280, 720),
                 0.35,
                 None,
                 Some((&[0], 0.35)),
@@ -1684,8 +1679,16 @@ mod tests {
             intervals: vec![(2, 4)],
             contexts: std::collections::BTreeMap::new(),
         };
-        let overlay =
-            extract_frames(&input, &sha, 6, 0, 6, &active, 640, 360, 0.35, None, None).unwrap();
+        let overlay = extract_frames(
+            (&input, &sha, 6),
+            (0, 6),
+            &active,
+            (640, 360),
+            0.35,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(overlay.len(), 6);
         for (frame, item) in overlay.iter().enumerate() {
             let in_rally = (2..=4).contains(&frame);

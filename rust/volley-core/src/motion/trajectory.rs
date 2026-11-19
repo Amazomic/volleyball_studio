@@ -64,13 +64,14 @@ fn fit(points: &[BallObservation], at: i64) -> Option<Flight> {
         for entry in &mut matrix[column][column..5] {
             *entry /= scale;
         }
-        for row in 0..3 {
+        let pivot_row = matrix[column];
+        for (row, entries) in matrix.iter_mut().enumerate() {
             if row == column {
                 continue;
             }
-            let scale = matrix[row][column];
-            for j in column..5 {
-                matrix[row][j] -= scale * matrix[column][j];
+            let scale = entries[column];
+            for (entry, pivot) in entries[column..5].iter_mut().zip(&pivot_row[column..5]) {
+                *entry -= scale * pivot;
             }
         }
     }

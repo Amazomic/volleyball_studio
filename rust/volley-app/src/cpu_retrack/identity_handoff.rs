@@ -128,7 +128,7 @@ impl Detector {
             let count = self.last.get(&id).map_or(1, |prev| prev.count + 1);
             self.last.insert(id, Observation { frame, rect, count });
         }
-        if frame % 300 == 0 {
+        if frame.is_multiple_of(300) {
             self.distinct
                 .retain(|_, item| frame.saturating_sub(item.last) <= 120);
         }

@@ -734,7 +734,8 @@ mod tests {
         // The upper torso crop and full-body pose share the *same* head.
         // Original tracker treated the height jump as a new player and
         // published two Track IDs around frame 46626.
-        let samples: &[(u64, [f64; 4], [f64; 2], Option<([f64; 4], [f64; 2])>)] = &[
+        type CropSample = (u64, [f64; 4], [f64; 2], Option<([f64; 4], [f64; 2])>);
+        let samples: &[CropSample] = &[
             (
                 46580,
                 [0.525055, 0.627472, 0.598560, 0.868285],

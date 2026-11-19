@@ -445,7 +445,8 @@ mod tests {
             "cpu" => Device::Cpu,
             other => panic!("Unexpected VOLLEY_TEST_ORT_DEVICE: {other}"),
         };
-        for kind in [ModelKind::Ball] {
+        let kind = ModelKind::Ball;
+        {
             let config = Config {
                 model: kind,
                 device,

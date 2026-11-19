@@ -315,7 +315,7 @@ mod tests {
         // Legacy vectors are valid for full-replay grouping but do not claim
         // to identify any particular rally crop.
         merge(&root, &src, &[(7, vector(0))]).unwrap();
-        assert!(read(&root, &src).unwrap().provenance.get(&7).is_none());
+        assert!(!read(&root, &src).unwrap().provenance.contains_key(&7));
         let mut crops = BTreeMap::new();
         crops.insert(7, first.clone());
         merge_with_crops(&root, &src, &[(7, vector(1))], &crops).unwrap();
@@ -325,7 +325,7 @@ mod tests {
         assert_eq!(cached.vectors.get(&7), Some(&vector(1)));
         // A legacy overwrite must clear the old crop claim.
         merge(&root, &src, &[(7, vector(0))]).unwrap();
-        assert!(read(&root, &src).unwrap().provenance.get(&7).is_none());
+        assert!(!read(&root, &src).unwrap().provenance.contains_key(&7));
         fs::remove_dir_all(root).unwrap();
     }
 

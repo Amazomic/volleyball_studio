@@ -145,16 +145,17 @@ fn read_stored_index(
     Some(stored.tracks)
 }
 
+type StoredSourceStamp = (u64, Option<SystemTime>, Option<(u64, u64, i64, i64)>);
+
 fn store_index(
     path: &Path,
     sha: &str,
     frames: u64,
-    size: u64,
-    modified: Option<SystemTime>,
-    change: Option<(u64, u64, i64, i64)>,
+    metadata: StoredSourceStamp,
     scope: Option<&str>,
     tracks: &TrackObservations,
 ) -> Result<(), String> {
+    let (size, modified, change) = metadata;
     let (Some(target), Some(modified), Some(change)) =
         (stored_index_path(path, scope), modified, change)
     else {
@@ -245,9 +246,7 @@ pub(crate) fn prepare_replay_index(path: &Path, sha: &str, frames: u64) -> Resul
                 path,
                 sha,
                 frames,
-                meta.len(),
-                modified,
-                change,
+                (meta.len(), modified, change),
                 None,
                 &tracks,
             )?;
@@ -423,9 +422,7 @@ fn index_with_scope(
             path,
             expected_sha,
             frames,
-            meta.len(),
-            modified,
-            change,
+            (meta.len(), modified, change),
             None,
             full.as_ref().unwrap_or(&tracks),
         );
@@ -434,9 +431,7 @@ fn index_with_scope(
                 path,
                 expected_sha,
                 frames,
-                meta.len(),
-                modified,
-                change,
+                (meta.len(), modified, change),
                 Some(sha),
                 &tracks,
             );

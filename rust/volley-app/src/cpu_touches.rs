@@ -406,8 +406,7 @@ fn refine_pose_events(
     refine_pose_events_policy(
         events,
         frames,
-        video_width,
-        video_height,
+        (video_width, video_height),
         project_root,
         fusion_id,
         settings,
@@ -418,13 +417,13 @@ fn refine_pose_events(
 fn refine_pose_events_policy(
     events: &mut Vec<PhysicalTouchCandidate>,
     frames: &[TouchFrame],
-    video_width: u32,
-    video_height: u32,
+    dimensions: (u32, u32),
     project_root: &Path,
     fusion_id: &str,
     settings: TouchSettings,
     interpolation: Option<bool>,
 ) -> Result<(), String> {
+    let (video_width, video_height) = dimensions;
     if events.is_empty() || frames.is_empty() {
         return Ok(());
     }
@@ -794,8 +793,7 @@ fn detect_stream_with_pose(
                     refine_pose_events_policy(
                         &mut events,
                         evidence_frames,
-                        width,
-                        height,
+                        (width, height),
                         root,
                         fusion,
                         settings,
@@ -819,8 +817,7 @@ fn detect_stream_with_pose(
                 refine_pose_events_policy(
                     &mut events,
                     evidence_frames,
-                    width,
-                    height,
+                    (width, height),
                     root,
                     fusion,
                     settings,
@@ -851,8 +848,7 @@ fn detect_stream_with_pose(
                     refine_pose_events_policy(
                         &mut events,
                         evidence_frames,
-                        width,
-                        height,
+                        (width, height),
                         root,
                         fusion,
                         settings,
@@ -1205,8 +1201,7 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
             &source,
             &sha,
             frames,
-            dimensions.width,
-            dimensions.height,
+            (dimensions.width, dimensions.height),
             settings.min_ball_score,
             &ball_mask.accepted,
             rally_settings,

@@ -327,7 +327,7 @@ mod tests {
                 players.push(json!({"track_id":13,"detection":{
                     "bbox_xyxy_norm":box_before}}));
             }
-            if frame >= 1044 && frame <= 1599 && (frame - 1044) % 3 == 0 {
+            if (1044..=1599).contains(&frame) && (frame - 1044).is_multiple_of(3) {
                 players.push(json!({"track_id":13,"detection":{
                     "bbox_xyxy_norm":[0.4429,0.4528,0.4793,0.6537]}}));
             }

@@ -135,7 +135,9 @@ fn source_sha(run: &ValidatedRun) -> Result<String, ApiError> {
         .map_err(|e| storage::internal(format!("Source provenance: {e}")))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
-fn auto(run: &ValidatedRun) -> Result<(Vec<u64>, Vec<(u64, u64)>), ApiError> {
+type AutoTimeline = (Vec<u64>, Vec<(u64, u64)>);
+
+fn auto(run: &ValidatedRun) -> Result<AutoTimeline, ApiError> {
     let v = generate(run, Choice::Timeline)
         .map_err(storage::bad_request)?
         .value;
@@ -403,10 +405,12 @@ pub(crate) fn compare_touch_frames(reference: &[u64], predicted: &[u64]) -> Valu
     json!(accuracy(&reference, &predicted, 3, 30.0))
 }
 
+type ReviewedComparison = (Vec<(u64, u64)>, Vec<u64>, bool);
+
 pub(crate) fn comparison_truth(
     state: &AppState,
     run: &ValidatedRun,
-) -> Result<Option<(Vec<(u64, u64)>, Vec<u64>, bool)>, ApiError> {
+) -> Result<Option<ReviewedComparison>, ApiError> {
     let source = source_sha(run)?;
     lock(|| {
         let library = read(state)?;

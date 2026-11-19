@@ -16,8 +16,9 @@ use std::{
 #[cfg(unix)]
 pub(crate) use stream::{PendingPose, PoseStream};
 use uuid::Uuid;
+#[cfg(test)]
+use volley_inference::decode::RawDetection;
 use volley_inference::{
-    decode::RawDetection,
     pose::{PoseEngine, MODEL_FILE, MODEL_SHA256},
     Device,
 };
@@ -111,6 +112,7 @@ pub(crate) fn boxes(frame: &Value) -> Vec<[f64; 4]> {
 /// fusion is written. This intentionally serializes the same RawDetection
 /// payload that the existing fusion reader validates, so score rounding,
 /// geometry, count and NMS guards all stay in this single owner.
+#[cfg(test)]
 pub(crate) fn boxes_from_raw_detections(
     detections: &[RawDetection],
     frame_index: u64,
@@ -159,7 +161,8 @@ fn sampled_boxes(
     expected_frame: u64,
     stride: usize,
 ) -> Result<Vec<[f64; 4]>, String> {
-    if expected_frame % stride as u64 != 0 || frame["frame_index"].as_u64() != Some(expected_frame)
+    if !expected_frame.is_multiple_of(stride as u64)
+        || frame["frame_index"].as_u64() != Some(expected_frame)
     {
         return Err("RTMPose frame does not match the RF-DETR sampling timeline".into());
     }
@@ -168,6 +171,8 @@ fn sampled_boxes(
 
 /// Reads a bounded detector neighborhood without materializing a whole video.
 /// Only measured RF-DETR proposals can become interpolation anchors.
+type PoseBoxPair = (Vec<[f64; 4]>, Vec<[f64; 4]>);
+
 struct FusionBoxWindow {
     reader: BufReader<File>,
     frames: std::collections::VecDeque<interpolation::FrameBoxes>,
@@ -187,8 +192,8 @@ impl FusionBoxWindow {
         })
     }
 
-    fn at(&mut self, index: u64) -> Result<(Vec<[f64; 4]>, Vec<[f64; 4]>), String> {
-        if index >= self.total || index % self.stride as u64 != 0 {
+    fn at(&mut self, index: u64) -> Result<PoseBoxPair, String> {
+        if index >= self.total || !index.is_multiple_of(self.stride as u64) {
             return Err("RTMPose sample exceeds verified detector timeline".into());
         }
         let until = index
@@ -208,7 +213,7 @@ impl FusionBoxWindow {
             if frame["frame_index"].as_u64() != Some(self.next) {
                 return Err("GPU fusion frame index mismatch".into());
             }
-            let selected = if self.next % self.stride as u64 == 0 {
+            let selected = if self.next.is_multiple_of(self.stride as u64) {
                 sampled_boxes(&frame, self.next, self.stride)?
             } else {
                 Vec::new()
@@ -402,7 +407,7 @@ pub fn process(
         if cancel.load(Ordering::Acquire) {
             return Err("cancelled".into());
         }
-        let expected_samples = (frames_expected + stride as u64 - 1) / stride as u64;
+        let expected_samples = frames_expected.div_ceil(stride as u64);
         if samples != expected_samples {
             return Err("RTMPose sample timeline differs from RF-DETR".into());
         }

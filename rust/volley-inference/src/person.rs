@@ -457,7 +457,12 @@ fn decode_rfdetr_medium(boxes: &[f32], logits: &[f32]) -> Result<Vec<(f32, [f64;
         ));
     }
     let mut proposals = Vec::new();
-    for (bbox, scores) in boxes.chunks_exact(4).zip(logits.chunks_exact(91)) {
+    for (bbox, scores) in boxes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(logits.as_chunks::<91>().0.iter())
+    {
         let [cx, cy, w, h] = [bbox[0], bbox[1], bbox[2], bbox[3]];
         let raw = scores[1];
         if ![cx, cy, w, h, raw].iter().all(|v| v.is_finite()) {

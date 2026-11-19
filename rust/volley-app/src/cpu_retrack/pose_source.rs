@@ -33,6 +33,8 @@ pub(super) fn locate(root: &std::path::Path, fusion_id: &str) -> Result<Option<S
     }))
 }
 
+type PoseFrameProjection = (Vec<Candidate>, Vec<Option<PoseEvidence>>, u64);
+
 pub(super) struct PoseRows {
     reader: BufReader<File>,
     sha: Sha256,
@@ -94,7 +96,7 @@ impl PoseRows {
         &mut self,
         frame: u64,
         detector: &[Candidate],
-    ) -> Result<(Vec<Candidate>, Vec<Option<PoseEvidence>>, u64), String> {
+    ) -> Result<PoseFrameProjection, String> {
         let sample = match self.next.as_ref().and_then(|row| row["frame"].as_u64()) {
             Some(at) if at < frame => {
                 return Err("Pose source stream fell behind CPU replay".into())

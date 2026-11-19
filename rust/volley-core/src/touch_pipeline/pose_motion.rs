@@ -75,7 +75,13 @@ pub fn pose_contact_at_frame(
     settings: TouchSettings,
 ) -> Option<(PoseEvidence, pose_contact::BodyContact)> {
     pose_contact_with_ball(
-        frames, poses, current, track_id, width, height, settings, None,
+        frames,
+        poses,
+        current,
+        track_id,
+        (width, height),
+        settings,
+        None,
     )
 }
 
@@ -86,11 +92,11 @@ fn pose_contact_with_ball(
     poses: &[PoseFrame],
     current: &TouchFrame,
     track_id: u64,
-    width: u32,
-    height: u32,
+    dimensions: (u32, u32),
     settings: TouchSettings,
     inferred_ball: Option<([f64; 2], f64)>,
 ) -> Option<(PoseEvidence, pose_contact::BodyContact)> {
+    let (width, height) = dimensions;
     let first = frames.first()?.frame_index;
     let (w, h) = (width as f64, height as f64);
     let player = current.players.iter().find(|p| p.track_id == track_id)?;
@@ -312,8 +318,7 @@ pub fn pose_contact_from_nearby_sample(
         let Some(contact) = pose_contact::sampled_body_contact(
             points,
             ball_px,
-            w,
-            h,
+            (w, h),
             player_height,
             radius,
             settings.pose_min_confidence,
@@ -717,8 +722,7 @@ pub fn evaluate_pose_block(
                 poses,
                 frame,
                 player.track_id,
-                width,
-                height,
+                (width, height),
                 settings,
                 Some((point, radius)),
             ) else {
@@ -1226,9 +1230,7 @@ mod tests {
         )
         .is_none());
         let mut remote = exact.clone();
-        for point in &mut remote[0].players[0].keypoints {
-            *point = [0.91, 0.91, 0.95];
-        }
+        remote[0].players[0].keypoints.fill([0.91, 0.91, 0.95]);
         assert!(pose_contact_from_nearby_sample(
             &frames,
             &remote,
@@ -1367,8 +1369,7 @@ mod tests {
                 &poses,
                 &frames[32],
                 42,
-                640,
-                360,
+                (640, 360),
                 TouchSettings::default(),
                 Some((inferred.0, inferred.1))
             )

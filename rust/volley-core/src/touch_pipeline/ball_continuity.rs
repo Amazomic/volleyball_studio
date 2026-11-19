@@ -564,11 +564,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let flags = flag_ball_teleports(&observed, 1280, 720);
-        for i in 0..observed.len() {
+        for (i, flagged) in flags.iter().enumerate() {
             if (9..42).contains(&i) && (i - 9) % 10 < 7 {
-                assert!(flags[i], "sticky false position must be rejected at {i}");
+                assert!(*flagged, "sticky false position must be rejected at {i}");
             } else {
-                assert!(!flags[i], "real observation must survive at {i}");
+                assert!(!*flagged, "real observation must survive at {i}");
             }
         }
     }

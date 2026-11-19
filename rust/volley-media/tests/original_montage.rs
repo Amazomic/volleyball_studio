@@ -417,8 +417,15 @@ fn verified_moving_ball_camera_crops_landscape_to_portrait() {
         },
     ];
     let output = root.join("follow-9x16.mp4");
-    let args =
-        compose_follow_args(&[segment], &[fmt.clone()], &[track], 1.5, &output, false).unwrap();
+    let args = compose_follow_args(
+        &[segment],
+        std::slice::from_ref(&fmt),
+        &[track],
+        1.5,
+        &output,
+        false,
+    )
+    .unwrap();
     command("ffmpeg", &args);
     let dims = probe(&output).unwrap();
     assert_eq!((dims.width, dims.height), (202, 360));
@@ -468,8 +475,8 @@ fn gpu_export_preserves_dimensions_fps_and_originals() {
     command(
         "ffmpeg",
         &compose_args_for_layout(
-            &[target.clone()],
-            &[format.clone()],
+            std::slice::from_ref(&target),
+            std::slice::from_ref(&format),
             &vertical,
             None,
             true,

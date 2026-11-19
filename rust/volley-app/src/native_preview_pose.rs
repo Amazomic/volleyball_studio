@@ -994,12 +994,18 @@ mod tests {
         let a = person([0.1, 0.1, 0.3, 0.7], 0.9);
         let duplicate = person([0.1, 0.1, 0.3, 0.7], 0.8);
         let distant = person([0.7, 0.1, 0.9, 0.7], 0.9);
-        assert!(interpolate_raw_players(&[a.clone()], &[distant], 0.5).is_empty());
+        assert!(interpolate_raw_players(std::slice::from_ref(&a), &[distant], 0.5).is_empty());
+        assert!(interpolate_raw_players(
+            &[a.clone(), duplicate.clone()],
+            std::slice::from_ref(&a),
+            0.5
+        )
+        .is_empty());
         assert!(
-            interpolate_raw_players(&[a.clone(), duplicate.clone()], &[a.clone()], 0.5).is_empty()
+            interpolate_raw_players(std::slice::from_ref(&a), &[a.clone(), duplicate], 0.5)
+                .is_empty()
         );
-        assert!(interpolate_raw_players(&[a.clone()], &[a.clone(), duplicate], 0.5).is_empty());
-        assert!(interpolate_raw_players(&[a.clone()], &[], 0.5).is_empty());
+        assert!(interpolate_raw_players(std::slice::from_ref(&a), &[], 0.5).is_empty());
         let low_confidence = person([0.1, 0.1, 0.3, 0.7], 0.1);
         let preview = interpolate_raw_players(&[a], &[low_confidence], 0.5);
         assert_eq!(preview.len(), 1);

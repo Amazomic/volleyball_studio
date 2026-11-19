@@ -33,7 +33,7 @@ pub(crate) struct DetectionRequest {
 /// Median background across a short fixed-camera window removes moving
 /// players that otherwise obscure the same painted line on every frame.
 fn temporal_median_rgb(frames: &[u8], frame_bytes: usize, count: usize) -> Option<Vec<u8>> {
-    if count < 3 || count > 7 || frames.len() != frame_bytes.checked_mul(count)? {
+    if !(3..=7).contains(&count) || frames.len() != frame_bytes.checked_mul(count)? {
         return None;
     }
     let mut result = vec![0_u8; frame_bytes];

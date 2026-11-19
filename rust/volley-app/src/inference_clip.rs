@@ -223,7 +223,7 @@ pub async fn clip_preview(
             let mut engine =
                 PersonEngine::load(&root, cfg.device, cfg.cpu_threads, cfg.gpu_memory_limit_mb)?;
             let mut frames = Vec::new();
-            for (offset, rgb) in inputs.chunks_exact(640 * 360 * 3).enumerate() {
+            for (offset, rgb) in inputs.as_chunks::<{ 640 * 360 * 3 }>().0.iter().enumerate() {
                 let players = engine.detect(rgb)?;
                 frames.push(json!({
                     "frame": request.first_frame + offset as u64,

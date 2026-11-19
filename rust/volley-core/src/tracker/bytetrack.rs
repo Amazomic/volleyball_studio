@@ -84,17 +84,17 @@ impl Kalman {
             self.mean[i] += delta * self.mean[i + 4];
         }
         let mut f = [[0.0; 8]; 8];
-        for i in 0..8 {
-            f[i][i] = 1.0;
+        for (i, row) in f.iter_mut().enumerate() {
+            row[i] = 1.0;
         }
         for i in 0..4 {
             f[i][i + 4] = delta;
         }
         let mut multiplied = [[0.0; 8]; 8];
-        for i in 0..8 {
-            for j in 0..8 {
-                for k in 0..8 {
-                    multiplied[i][j] += f[i][k] * self.cov[k][j];
+        for (i, row) in multiplied.iter_mut().enumerate() {
+            for (j, value) in row.iter_mut().enumerate() {
+                for (k, transform) in f[i].iter().enumerate() {
+                    *value += transform * self.cov[k][j];
                 }
             }
         }
@@ -120,11 +120,9 @@ impl Kalman {
         let h = self.mean[3].abs().max(0.01);
         let std = [h / 20.0, h / 20.0, 0.1, h / 20.0];
         let mut innovation_cov = [[0.0; 4]; 4];
-        for i in 0..4 {
-            for j in 0..4 {
-                innovation_cov[i][j] = self.cov[i][j];
-            }
-            innovation_cov[i][i] += std[i] * std[i];
+        for (i, row) in innovation_cov.iter_mut().enumerate() {
+            row.copy_from_slice(&self.cov[i][..4]);
+            row[i] += std[i] * std[i];
         }
         let Some(inv) = invert4(innovation_cov) else {
             *self = Self::new(bbox);
@@ -132,26 +130,26 @@ impl Kalman {
         };
         let prior = self.cov;
         let mut gain = [[0.0; 4]; 8];
-        for i in 0..8 {
-            for j in 0..4 {
+        for (i, row) in gain.iter_mut().enumerate() {
+            for (j, value) in row.iter_mut().enumerate() {
                 for (k, inverse) in inv.iter().enumerate() {
-                    gain[i][j] += prior[i][k] * inverse[j];
+                    *value += prior[i][k] * inverse[j];
                 }
             }
         }
         let difference = std::array::from_fn::<_, 4, _>(|j| observation[j] - self.mean[j]);
-        for i in 0..8 {
-            for (j, value) in difference.iter().enumerate() {
-                self.mean[i] += gain[i][j] * value;
+        for (mean, gains) in self.mean.iter_mut().zip(&gain) {
+            for (gain, value) in gains.iter().zip(&difference) {
+                *mean += gain * value;
             }
         }
-        for i in 0..8 {
-            for j in 0..8 {
-                for k in 0..4 {
-                    self.cov[i][j] -= gain[i][k] * prior[k][j];
+        for (i, (row, gains)) in self.cov.iter_mut().zip(&gain).enumerate() {
+            for (j, value) in row.iter_mut().enumerate() {
+                for (gain, prior_row) in gains.iter().zip(&prior[..4]) {
+                    *value -= gain * prior_row[j];
                 }
             }
-            self.cov[i][i] = self.cov[i][i].max(1e-12);
+            row[i] = row[i].max(1e-12);
         }
     }
     fn bbox(&self) -> [f64; 4] {
@@ -214,6 +212,8 @@ struct Observation {
     box_: Candidate,
     pose: Option<PoseEvidence>,
 }
+
+type AssociationOutcome = (Vec<(usize, usize)>, Vec<usize>, Vec<usize>, u64, Vec<usize>);
 
 pub struct ByteTracker {
     config: TrackingOptions,
@@ -406,7 +406,7 @@ impl ByteTracker {
         observations: &[Observation],
         indices: &[usize],
         min_iou: f64,
-    ) -> (Vec<(usize, usize)>, Vec<usize>, Vec<usize>, u64, Vec<usize>) {
+    ) -> AssociationOutcome {
         let mut matrix = Vec::with_capacity(observations.len());
         let mut ambiguous = 0;
         let mut blocked = Vec::new();
@@ -626,8 +626,10 @@ mod tests {
     #[test]
     fn assignment_strictness_changes_track_continuity() {
         let run = |strict: f64| {
-            let mut options = TrackingOptions::default();
-            options.min_assignment_score = strict;
+            let options = TrackingOptions {
+                min_assignment_score: strict,
+                ..TrackingOptions::default()
+            };
             let mut tr = ByteTracker::new(options).unwrap();
             let id = tr
                 .process_frame_with_poses(0, &[person(0, 0, 0.20, 0.99)], &[])
@@ -654,8 +656,10 @@ mod tests {
     #[test]
     fn ambiguity_margin_blocks_unsafe_assignment_and_duplicate_new_id() {
         let run = |margin: f64| {
-            let mut options = TrackingOptions::default();
-            options.ambiguity_margin = margin;
+            let options = TrackingOptions {
+                ambiguity_margin: margin,
+                ..TrackingOptions::default()
+            };
             let mut tr = ByteTracker::new(options).unwrap();
             tr.process_frame_with_poses(
                 0,

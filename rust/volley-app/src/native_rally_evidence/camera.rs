@@ -144,7 +144,7 @@ fn clean_camera_track(
         });
     }
     if smooth.len() > 100 {
-        let stride = (smooth.len() + 99) / 100;
+        let stride = smooth.len().div_ceil(100);
         let last = smooth.last().cloned();
         smooth = smooth.into_iter().step_by(stride).collect();
         if let Some(last) = last {

@@ -180,7 +180,7 @@ pub fn interpolate_player_rebound_gaps(
             continue;
         }
         let mut best: Option<(f64, usize, [f64; 2])> = None;
-        for impact in left + 1..right {
+        for (impact, nearby_players) in players.iter().enumerate().take(right).skip(left + 1) {
             let da = (impact - left) as f64;
             let db = (impact as i64 - right as i64) as f64;
             let from_left = [a[0] + da * incoming[0], a[1] + da * incoming[1]];
@@ -196,7 +196,7 @@ pub fn interpolate_player_rebound_gaps(
             if !valid_point([joint[0] / w, joint[1] / h]) {
                 continue;
             }
-            let near_athlete = players[impact].iter().any(|rect| {
+            let near_athlete = nearby_players.iter().any(|rect| {
                 let [x1, y1, x2, y2] = *rect;
                 if ![x1, y1, x2, y2].iter().all(|v| v.is_finite()) || x2 <= x1 || y2 <= y1 {
                     return false;

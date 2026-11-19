@@ -140,8 +140,7 @@ fn replay_frames_with_pose_options(
     let tentative = output.with_extension("unconfirmed");
     let result = replay_frames_verified(
         source,
-        &tentative,
-        output,
+        (&tentative, output),
         count,
         config,
         expected_sha,
@@ -323,14 +322,14 @@ fn fill_confirmed_track_gaps(
 
 fn replay_frames_verified(
     source: &Path,
-    tentative: &Path,
-    output: &Path,
+    outputs: (&Path, &Path),
     count: u64,
     config: TrackingOptions,
     expected_sha: &str,
     pose: Option<&pose_source::Snapshot>,
     interpolate_players: bool,
 ) -> Result<(String, ReplayTotals, u64), String> {
+    let (tentative, output) = outputs;
     let mut reader = BoundedReader::open(source)?;
     let mut pose_rows = pose.map(pose_source::PoseRows::open).transpose()?;
     let file = OpenOptions::new()

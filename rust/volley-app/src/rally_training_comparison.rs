@@ -114,10 +114,9 @@ fn overlap(a: Interval, b: Interval) -> f64 {
     intersection as f64 / union as f64
 }
 
-fn match_intervals(
-    baseline: &[Interval],
-    proposed: &[Interval],
-) -> (Value, Vec<Option<(usize, f64)>>, Vec<bool>) {
+type IntervalMatching = (Value, Vec<Option<(usize, f64)>>, Vec<bool>);
+
+fn match_intervals(baseline: &[Interval], proposed: &[Interval]) -> IntervalMatching {
     let mut pairs = vec![None; baseline.len()];
     let mut used = vec![false; proposed.len()];
     let mut boundary_sum = 0u64;
@@ -223,11 +222,13 @@ fn differences(
     result
 }
 
+type SavedImpacts = (Vec<u64>, RallySettings, &'static str);
+
 fn saved_impacts(
     state: &AppState,
     run: &ValidatedRun,
     simulate: bool,
-) -> Result<Option<(Vec<u64>, RallySettings, &'static str)>, ApiError> {
+) -> Result<Option<SavedImpacts>, ApiError> {
     let root = projects::project_root(state)
         .join(&run.project_id)
         .join("native_cpu_touch_runs")
@@ -286,8 +287,7 @@ fn saved_impacts(
             &replay,
             &run.replay_sha,
             run.frames,
-            run.width,
-            run.height,
+            (run.width, run.height),
             settings.min_ball_score,
             &mask.accepted,
             settings,

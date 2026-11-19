@@ -862,8 +862,8 @@ fn gpu_lineage_valid(
         {
             return false;
         }
-        if saved["gpu_model_stack"] == requested_gpu_model_stack() {
-            if !matches!(
+        if saved["gpu_model_stack"] == requested_gpu_model_stack()
+            && (!matches!(
                 pose["box_source_version"].as_str(),
                 Some(
                     "detector_observed_sampling_v1"
@@ -874,10 +874,9 @@ fn gpu_lineage_valid(
                 || pose["stride"] != request.gpu.pose_stride
                 || !pose["crop_plan_file"].is_null()
                 || pose["pixel_source_version"] != "original_full_resolution_rgb24_v1"
-                || pose["coordinate_system"] != "normalized_original_display_v1"
-            {
-                return false;
-            }
+                || pose["coordinate_system"] != "normalized_original_display_v1")
+        {
+            return false;
         }
     }
     true

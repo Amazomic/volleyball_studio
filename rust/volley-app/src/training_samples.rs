@@ -51,7 +51,7 @@ pub(crate) enum Example {
         frame_index: u64,
         track_id: u64,
         label: ActionKind,
-        keypoints: [[f64; 3]; 17],
+        keypoints: Box<[[f64; 3]; 17]>,
         bbox: [f64; 4],
         ball: [f64; 2],
         width: u32,
@@ -399,7 +399,7 @@ async fn capture_touch(
         frame_index: frame,
         track_id: track,
         label,
-        keypoints: main.keypoints,
+        keypoints: Box::new(main.keypoints),
         bbox: main.bbox,
         ball,
         width,
@@ -864,7 +864,7 @@ pub(crate) fn predict(
                 return None;
             };
             let saved = PoseEvidence {
-                keypoints: *keypoints,
+                keypoints: **keypoints,
                 player_bbox_norm: *bbox,
                 ball_x_norm: ball[0],
                 ball_y_norm: ball[1],
@@ -1026,7 +1026,7 @@ mod tests {
             frame_index: 30,
             track_id: 3,
             label: ActionKind::Attack,
-            keypoints: joints,
+            keypoints: Box::new(joints),
             bbox,
             ball: [0.46, 0.31],
             width: 1920,
@@ -1050,7 +1050,7 @@ mod tests {
             depth_ratio: 0.2,
             posture_ratio: 0.5,
         };
-        let result = predict(&evidence, &geometry, &[sample.clone()], &motion).unwrap();
+        let result = predict(&evidence, &geometry, std::slice::from_ref(&sample), &motion).unwrap();
         assert_eq!(result.kind, ActionKind::Attack);
         assert_eq!(result.method, PredictionMethod::LearnedPoseV1);
         let mut competitor = sample.clone();
@@ -1073,7 +1073,7 @@ mod tests {
             frame_index: 30,
             track_id: 4,
             label: ActionKind::Attack,
-            keypoints: joints,
+            keypoints: Box::new(joints),
             bbox,
             ball: [0.5, 0.5],
             width: 1920,

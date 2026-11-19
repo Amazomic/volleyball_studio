@@ -202,10 +202,10 @@ fn write_proposal(
     proposal: RallyProposal,
     history: &CourtHistory,
     surface_events: &std::collections::VecDeque<SurfaceEventProposal>,
-    replay_id: &str,
-    touch_id: &str,
+    source_ids: (&str, &str),
     counters: &mut OutputCounters,
 ) -> Result<(), String> {
+    let (replay_id, touch_id) = source_ids;
     let mut value =
         serde_json::to_value(&proposal).map_err(|e| format!("Serialize rally candidate: {e}"))?;
     // Physical surface candidates have no athlete Track ID and must remain
@@ -507,8 +507,7 @@ fn rebuild_from_snapshots_with_scope(
                 proposal,
                 &history,
                 &surface_events,
-                replay_id,
-                touch_id,
+                (replay_id, touch_id),
                 &mut totals,
             )?;
         }
@@ -562,8 +561,7 @@ fn rebuild_from_snapshots_with_scope(
                             proposal,
                             &history,
                             &surface_events,
-                            replay_id,
-                            touch_id,
+                            (replay_id, touch_id),
                             &mut totals,
                         )?;
                     }
@@ -613,8 +611,7 @@ fn rebuild_from_snapshots_with_scope(
             proposal,
             &history,
             &surface_events,
-            replay_id,
-            touch_id,
+            (replay_id, touch_id),
             &mut totals,
         )?;
     }

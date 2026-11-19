@@ -817,8 +817,10 @@ mod tests {
     }
     #[test]
     fn four_seconds_without_any_touch_ends_rally_even_if_ball_visible() {
-        let mut config = RallySettings::default();
-        config.max_without_touch_frames = 900; // old saved profile cannot extend beyond 4s
+        let config = RallySettings {
+            max_without_touch_frames: 900,
+            ..RallySettings::default()
+        };
         let mut segment = RallySegmenter::new(config, 640, 360).unwrap();
         let mut results = Vec::new();
         for frame in 0..270 {

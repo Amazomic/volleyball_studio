@@ -55,20 +55,25 @@ pub fn reconstruct(frames: &[TouchFrame]) -> Vec<TouchFrame> {
             if distance > (0.035 + (missing as f64) * 0.003).min(0.15) {
                 continue;
             }
-            for at in left_frame + 1..right_frame {
+            for (at, frame) in output
+                .iter_mut()
+                .enumerate()
+                .take(right_frame)
+                .skip(left_frame + 1)
+            {
                 let ratio = (at - left_frame) as f64 / (right_frame - left_frame) as f64;
                 let bbox = std::array::from_fn(|i| {
                     a.bbox_xyxy_norm[i] * (1.0 - ratio) + b.bbox_xyxy_norm[i] * ratio
                 });
                 // Prefer actual observed joints/boxes if two players overlap.
-                if output[at]
+                if frame
                     .players
                     .iter()
                     .any(|real| overlap(real.bbox_xyxy_norm, bbox) > 0.65)
                 {
                     continue;
                 }
-                output[at].players.push(TouchPlayer {
+                frame.players.push(TouchPlayer {
                     track_id,
                     score: a.score.min(b.score) * 0.90,
                     bbox_xyxy_norm: bbox,

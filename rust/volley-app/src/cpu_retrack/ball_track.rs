@@ -41,12 +41,12 @@ pub(crate) fn preliminary_rally_scope(
     source: &Path,
     expected_sha: &str,
     frames: u64,
-    width: u32,
-    height: u32,
+    dimensions: (u32, u32),
     min_score: f64,
     accepted: &[bool],
     settings: volley_core::rally_reconstruction::RallySettings,
 ) -> Result<PreliminaryRallyScope, String> {
+    let (width, height) = dimensions;
     use volley_core::motion::{downward_to_upward_breaks, BallObservation};
 
     if settings.validate().is_err()
@@ -148,7 +148,8 @@ struct CacheKey {
     change: Option<(u64, u64, i64, i64)>,
 }
 
-static CACHE: OnceLock<Mutex<Vec<(CacheKey, Arc<BallTrackMask>)>>> = OnceLock::new();
+type BallTrackCache = Vec<(CacheKey, Arc<BallTrackMask>)>;
+static CACHE: OnceLock<Mutex<BallTrackCache>> = OnceLock::new();
 
 #[derive(Deserialize)]
 struct BallOnlyFrame {
@@ -391,8 +392,7 @@ mod tests {
             &path,
             &sha,
             210,
-            1280,
-            720,
+            (1280, 720),
             0.35,
             &vec![true; 210],
             volley_core::rally_reconstruction::RallySettings::default(),
@@ -406,8 +406,7 @@ mod tests {
             &path,
             &sha,
             210,
-            1280,
-            720,
+            (1280, 720),
             0.35,
             &(0..210).map(|i| i < 90).collect::<Vec<_>>(),
             volley_core::rally_reconstruction::RallySettings::default(),
@@ -418,8 +417,7 @@ mod tests {
             &path,
             &"0".repeat(64),
             210,
-            1280,
-            720,
+            (1280, 720),
             0.35,
             &vec![true; 210],
             volley_core::rally_reconstruction::RallySettings::default(),

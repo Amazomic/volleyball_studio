@@ -462,7 +462,7 @@ pub fn decode_original_frames(
     cancelled: &AtomicBool,
     mut consume: impl FnMut(u64, &[u8], usize, usize) -> Result<(), String>,
 ) -> Result<(), String> {
-    if expected_frames == 0 || expected_frames > MAX_FRAMES as u64 {
+    if expected_frames == 0 || expected_frames > MAX_FRAMES {
         return Err("Invalid original RGB frame count".into());
     }
     if cancelled.load(Ordering::Acquire) {

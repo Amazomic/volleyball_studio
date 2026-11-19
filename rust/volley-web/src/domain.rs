@@ -177,54 +177,6 @@ fn chain(input: &Value) -> Value {
     json!({"choices":choices,"byAnalysis":by,"runToAnalysis":run_to})
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn analysis_choice_has_stable_two_word_display_name_and_keeps_full_id() {
-        let input = json!({"videos":["match.mp4"],"overviews":{"match.mp4":{"stages":[
-            {"key":"fusion","items":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":1700000000}]}
-        ]}},"runs":[]});
-        let result = chain(&input);
-        let choice = &result["choices"][0];
-        let name = choice["display_name"].as_str().unwrap();
-        assert_eq!(name.split_whitespace().count(), 2);
-        assert_eq!(choice["id"], "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        assert_eq!(
-            choice["value"],
-            "[\"match.mp4\",\"fusion\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"]"
-        );
-        assert_eq!(
-            choice["display_name"],
-            chain(&input)["choices"][0]["display_name"]
-        );
-    }
-
-    #[test]
-    fn fused_person_and_ball_jobs_do_not_appear_as_separate_analyses() {
-        let ball = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let person = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let fusion = "cccccccccccccccccccccccccccccccc";
-        let orphan = "dddddddddddddddddddddddddddddddd";
-        // Match the metadata returned by studio_analysis::stage_summary.
-        let input = json!({"videos":["match.mp4"],"overviews":{"match.mp4":{"stages":[
-            {"key":"fusion","items":[{"id":fusion,"person_job_id":person,"vball_job_id":ball}]},
-            {"key":"gpu","items":[{"id":ball},{"id":person},{"id":orphan}]}
-        ]}},"runs":[]});
-        let result = chain(&input);
-        let choices = result["choices"].as_array().unwrap();
-        assert_eq!(
-            choices.len(),
-            2,
-            "fused model jobs must not be separate GPU analyses"
-        );
-        assert_eq!(choices[0]["id"], fusion);
-        assert_eq!(choices[0]["kind"], "fusion");
-        assert_eq!(choices[1]["id"], orphan);
-        assert_eq!(choices[1]["kind"], "gpu");
-    }
-}
 fn montage(input: &Value) -> Value {
     let mut rows: Vec<_> = input.as_array().into_iter().flatten().collect();
     rows.sort_by(|a, b| {
@@ -304,5 +256,54 @@ pub extern "C" fn volley_evidence_fps(metadata: f64) -> f64 {
         metadata
     } else {
         30.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn analysis_choice_has_stable_two_word_display_name_and_keeps_full_id() {
+        let input = json!({"videos":["match.mp4"],"overviews":{"match.mp4":{"stages":[
+            {"key":"fusion","items":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":1700000000}]}
+        ]}},"runs":[]});
+        let result = chain(&input);
+        let choice = &result["choices"][0];
+        let name = choice["display_name"].as_str().unwrap();
+        assert_eq!(name.split_whitespace().count(), 2);
+        assert_eq!(choice["id"], "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(
+            choice["value"],
+            "[\"match.mp4\",\"fusion\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"]"
+        );
+        assert_eq!(
+            choice["display_name"],
+            chain(&input)["choices"][0]["display_name"]
+        );
+    }
+
+    #[test]
+    fn fused_person_and_ball_jobs_do_not_appear_as_separate_analyses() {
+        let ball = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let person = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let fusion = "cccccccccccccccccccccccccccccccc";
+        let orphan = "dddddddddddddddddddddddddddddddd";
+        // Match the metadata returned by studio_analysis::stage_summary.
+        let input = json!({"videos":["match.mp4"],"overviews":{"match.mp4":{"stages":[
+            {"key":"fusion","items":[{"id":fusion,"person_job_id":person,"vball_job_id":ball}]},
+            {"key":"gpu","items":[{"id":ball},{"id":person},{"id":orphan}]}
+        ]}},"runs":[]});
+        let result = chain(&input);
+        let choices = result["choices"].as_array().unwrap();
+        assert_eq!(
+            choices.len(),
+            2,
+            "fused model jobs must not be separate GPU analyses"
+        );
+        assert_eq!(choices[0]["id"], fusion);
+        assert_eq!(choices[0]["kind"], "fusion");
+        assert_eq!(choices[1]["id"], orphan);
+        assert_eq!(choices[1]["kind"], "gpu");
     }
 }

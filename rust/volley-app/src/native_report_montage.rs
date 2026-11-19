@@ -305,27 +305,6 @@ fn report_plan(state: &AppState, req: &ReportRequest) -> Result<ReportPlan, ApiE
         camera_tracks,
     })
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn report_statistics_require_explicit_opt_in() {
-        let base = json!({
-            "project_id": "1234abcdef01",
-            "rally_run_ids": ["a".repeat(32)]
-        });
-        let absent: ReportRequest = serde_json::from_value(base.clone()).unwrap();
-        assert!(!absent.include_statistics);
-        assert_eq!(statistics_outro_seconds(absent.include_statistics), 0.0);
-
-        let mut opted_in = base;
-        opted_in["include_statistics"] = json!(true);
-        let enabled: ReportRequest = serde_json::from_value(opted_in).unwrap();
-        assert!(enabled.include_statistics);
-        assert_eq!(statistics_outro_seconds(enabled.include_statistics), 5.0);
-    }
-}
 pub async fn report(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -386,4 +365,26 @@ pub async fn report(
     response["status"] = job["status"].clone();
     response["job_id"] = job["job_id"].clone();
     Ok(Json(response))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_statistics_require_explicit_opt_in() {
+        let base = json!({
+            "project_id": "1234abcdef01",
+            "rally_run_ids": ["a".repeat(32)]
+        });
+        let absent: ReportRequest = serde_json::from_value(base.clone()).unwrap();
+        assert!(!absent.include_statistics);
+        assert_eq!(statistics_outro_seconds(absent.include_statistics), 0.0);
+
+        let mut opted_in = base;
+        opted_in["include_statistics"] = json!(true);
+        let enabled: ReportRequest = serde_json::from_value(opted_in).unwrap();
+        assert!(enabled.include_statistics);
+        assert_eq!(statistics_outro_seconds(enabled.include_statistics), 5.0);
+    }
 }

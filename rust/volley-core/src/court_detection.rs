@@ -232,10 +232,10 @@ pub fn detect_frame(rgb: &[u8], width: usize, height: usize) -> Option<CourtDete
             if min < 120 || max - min > 68 {
                 continue;
             }
-            let left = ((y * width + x - 6) * 3) as usize;
-            let right = ((y * width + x + 6) * 3) as usize;
-            let above = (((y - 6) * width + x) * 3) as usize;
-            let below = (((y + 6) * width + x) * 3) as usize;
+            let left = (y * width + x - 6) * 3;
+            let right = (y * width + x + 6) * 3;
+            let above = ((y - 6) * width + x) * 3;
+            let below = ((y + 6) * width + x) * 3;
             let luma = |offset: usize| {
                 (rgb[offset] as u16 + rgb[offset + 1] as u16 + rgb[offset + 2] as u16) / 3
             };
