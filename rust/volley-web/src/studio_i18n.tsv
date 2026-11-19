@@ -518,3 +518,12 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Созданное видео	Created video
 Подобрать по эталону	Fit from reviewed labels
 Подбирает параметры только по подтверждённой разметке этого видео. Не изменяет CPU-анализ и не оценивает качество на других видео.	Tunes parameters using reviewed annotations from this video only. Does not change CPU analysis or validate accuracy on other videos.
+Рассчитать касания по мячу	Calculate ball-trajectory touches
+Метод касаний	Touch detection method
+Траектория VBallNet	VBallNet trajectory
+Точки RTMPose	RTMPose keypoints
+Скрыть неактуальные слои	Hide unrelated overlays
+Изменения остаются в черновике до сохранения. После сохранения повторите расчёт касаний — параметры обучатся на размеченных видео.	Edits stay in a local draft until saved. Recalculate touches after saving to fit detector parameters to labeled videos.
+Взять расчёт для правок	Use predictions for editing
+Сохранить данные касаний	Save touch annotations
+Взять CPU-метки за основу	Use CPU annotations as starting point

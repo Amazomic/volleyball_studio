@@ -184,7 +184,7 @@
         <section class="workspace">
           <div class="viewer-layout">
             <section class="viewer-panel" aria-label="Плеер розыгрышей">
-              <div class="viewer-head"><strong><span class="studio-preview-caption">Просмотр видео</span><span class="studio-training-caption">Дообучение</span></strong><div class="studio-training-video-actions"><button type="button" class="primary" id="studio-comparison-recalculate">Смоделировать розыгрыши и касания</button><small id="studio-simulation-summary" role="status" aria-live="polite"></small></div><span id="studio-video-time">—</span></div>
+              <div class="viewer-head"><strong><span class="studio-preview-caption">Просмотр видео</span><span class="studio-training-caption">Дообучение</span></strong><div class="studio-training-video-actions"><button type="button" class="primary" id="studio-comparison-recalculate">Смоделировать розыгрыши и касания</button><button type="button" class="primary" id="studio-annotation-calculate" disabled>Рассчитать касания по мячу</button><small id="studio-simulation-summary" role="status" aria-live="polite"></small></div><span id="studio-video-time">—</span></div>
               <div class="video-wrap">
                 <video id="studio-video" tabindex="0" preload="metadata" playsinline aria-label="Просмотр исходного видео. Пробел — воспроизведение или пауза"></video>
                 <canvas id="studio-video-overlay" class="video-overlay" aria-hidden="true"></canvas>
@@ -255,11 +255,19 @@
               <section id="studio-training-panel" class="studio-training-panel hidden" aria-label="Дообучение на подтверждённых касаниях">
                 <div class="studio-annotation-save-bar" role="group" aria-label="Сохранение разметки видео">
                   <div class="studio-annotation-save-info">
+                    <label class="studio-training-method-picker">Метод касаний
+                      <select id="studio-training-method"><option value="trajectory" selected>Траектория VBallNet</option><option value="pose">Точки RTMPose</option></select>
+                    </label>
+                    <label class="studio-training-focus-toggle"><input type="checkbox" id="studio-annotation-hide-extra" checked> Скрыть неактуальные слои</label>
                     <strong>Разметка видео</strong>
-                    <small>Изменения сохраняются сразу. Подтвердите разметку для проверки точности.</small>
+                    <small>Изменения остаются в черновике до сохранения. После сохранения повторите расчёт касаний — параметры обучатся на размеченных видео.</small>
                     <span id="studio-annotation-save-state" role="status" aria-live="polite">Выберите CPU-анализ для сохранения.</span>
                   </div>
-                  <button type="button" class="primary" id="studio-annotation-review" disabled>Сохранить разметку видео</button>
+                  <div class="studio-annotation-save-actions">
+                    <button type="button" class="secondary" id="studio-annotation-seed-trajectory" disabled>Взять расчёт для правок</button>
+                    <button type="button" class="primary" id="studio-annotation-save" disabled>Сохранить данные касаний</button>
+                    <button type="button" class="secondary" id="studio-annotation-review" disabled>Завершить проверку видео</button>
+                  </div>
                 </div>
                 <section class="studio-training-comparison" aria-label="Сравнение двух алгоритмов разметки розыгрышей">
                   <div class="studio-training-compare-title">
@@ -321,7 +329,7 @@
                   <details class="studio-training-advanced studio-training-legacy-tools">
                     <summary>Дополнительные кнопки разметки</summary>
                     <div class="studio-annotation-tools">
-                    <button type="button" class="secondary" id="studio-annotation-seed">Взять автоматические метки за основу</button>
+                    <button type="button" class="secondary" id="studio-annotation-seed">Взять CPU-метки за основу</button>
                     <button type="button" class="secondary" id="studio-annotation-add-touch">+ Касание</button>
                     <button type="button" class="secondary" id="studio-annotation-move-touch" disabled>Перенести касание сюда</button>
                     <button type="button" class="secondary" id="studio-annotation-delete-touch" disabled>Удалить касание</button>

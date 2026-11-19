@@ -59,6 +59,10 @@ struct VideoLabels {
     baseline_touch_sha: String,
     #[serde(default)]
     baseline_rally_sha: String,
+    #[serde(default)]
+    trajectory_replay_sha: String,
+    #[serde(default)]
+    trajectory_candidates: Vec<trajectory::TrajectoryCandidate>,
     touches: Vec<Mark>,
     rallies: Vec<RallyMark>,
 }
@@ -90,6 +94,10 @@ fn valid(v: &VideoLabels) -> bool {
         && v.total_frames <= 48 * 3600 * 120
         && v.touches.len() <= MAX_TOUCHES
         && v.rallies.len() <= MAX_RALLIES
+        && v.trajectory_candidates.len() <= 32768
+        && v.trajectory_candidates.iter().all(|c| {
+            c.frame < v.total_frames && c.score.is_finite() && (0.0..=10000.0).contains(&c.score)
+        })
         && v.touches
             .iter()
             .all(|t| Uuid::parse_str(&t.id).is_ok() && t.frame < v.total_frames)
@@ -321,7 +329,13 @@ pub struct EditLabels {
     start: Option<u64>,
     #[serde(default)]
     end: Option<u64>,
+    #[serde(default)]
+    touches: Option<Vec<Mark>>,
+    #[serde(default)]
+    rallies: Option<Vec<RallyMark>>,
 }
+pub(crate) mod trajectory;
+use trajectory::{scan_trajectory, trajectory_profile};
 fn aggregate(lib: &Library) -> Value {
     // Only explicitly reviewed videos contribute to the global benchmark.
     // Metrics are snapshots against each video's saved comparison CPU run.
@@ -393,7 +407,9 @@ fn response(state: &AppState, run: &ValidatedRun, source: &str) -> Result<Value,
             "annotated_videos":lib.videos.len(),"reviewed_videos":reviewed_videos,
             "overall":aggregate(&lib),
             "touches":labels.as_ref().map(|v|&v.touches),"rallies":labels.as_ref().map(|v|&v.rallies),
-            "metrics":metrics,"model_retrained":false}),
+            "metrics":metrics,"trajectory_profile":trajectory_profile(&lib),
+            "trajectory_cached":labels.as_ref().is_some_and(|v|v.trajectory_replay_sha==run.replay_sha),
+            "model_retrained":false}),
         )
     })
 }
@@ -472,7 +488,27 @@ pub async fn edit(
                         || v.baseline_rally_sha != run.rally_sha
                 }))
         })?;
-        let predictions = if req.action == "seed" || stale_baseline {
+        let scanned = if req.action == "save" {
+            let cached = lock(|| {
+                let lib = read(&state)?;
+                Ok(lib
+                    .videos
+                    .iter()
+                    .find(|v| {
+                        v.project_id == run.project_id
+                            && v.video == run.video
+                            && v.trajectory_replay_sha == run.replay_sha
+                    })
+                    .map(|v| v.trajectory_candidates.clone()))
+            })?;
+            Some(match cached {
+                Some(events) => events,
+                None => scan_trajectory(&run)?,
+            })
+        } else {
+            None
+        };
+        let predictions = if req.action == "seed" || req.action == "save" || stale_baseline {
             Some(auto(&run)?)
         } else {
             None
@@ -496,7 +532,7 @@ pub async fn edit(
                 return Err(storage::conflict("Annotations revision mismatch"));
             }
             if position.is_none() {
-                if req.action != "seed" {
+                if req.action != "seed" && req.action != "save" {
                     return Err(storage::bad_request(
                         "Start annotation from current CPU marks",
                     ));
@@ -517,6 +553,8 @@ pub async fn edit(
                     baseline_rallies: vec![],
                     baseline_touch_sha: String::new(),
                     baseline_rally_sha: String::new(),
+                    trajectory_replay_sha: String::new(),
+                    trajectory_candidates: Vec::new(),
                     touches: vec![],
                     rallies: vec![],
                 });
@@ -538,6 +576,54 @@ pub async fn edit(
                     .ok_or_else(|| storage::bad_request("Frame outside source video"))
             };
             match req.action.as_str() {
+                "save" => {
+                    let touches = req
+                        .touches
+                        .as_ref()
+                        .ok_or_else(|| storage::bad_request("Missing Touch labels"))?;
+                    let rallies = req
+                        .rallies
+                        .as_ref()
+                        .ok_or_else(|| storage::bad_request("Missing Rally labels"))?;
+                    if touches.len() > MAX_TOUCHES
+                        || rallies.len() > MAX_RALLIES
+                        || touches
+                            .iter()
+                            .any(|t| t.frame >= run.frames || Uuid::parse_str(&t.id).is_err())
+                        || rallies.iter().any(|r| {
+                            r.start >= r.end
+                                || r.end >= run.frames
+                                || Uuid::parse_str(&r.id).is_err()
+                        })
+                    {
+                        return Err(storage::bad_request("Invalid saved Touch/Rally labels"));
+                    }
+                    let touch_frames = touches
+                        .iter()
+                        .map(|t| t.frame)
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let touch_ids = touches
+                        .iter()
+                        .map(|t| &t.id)
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let rally_ids = rallies
+                        .iter()
+                        .map(|r| &r.id)
+                        .collect::<std::collections::BTreeSet<_>>();
+                    if touch_frames.len() != touches.len()
+                        || touch_ids.len() != touches.len()
+                        || rally_ids.len() != rallies.len()
+                    {
+                        return Err(storage::bad_request("Duplicate saved Touch/Rally labels"));
+                    }
+                    v.touches = touches.clone();
+                    v.rallies = rallies.clone();
+                    v.trajectory_candidates = scanned
+                        .as_ref()
+                        .ok_or_else(|| storage::internal("Missing measured trajectory"))?
+                        .clone();
+                    v.trajectory_replay_sha = run.replay_sha.clone();
+                }
                 "seed" => {
                     let (touches, rallies) = predictions.as_ref().expect("seed predictions");
                     v.touches = touches
@@ -672,6 +758,23 @@ pub async fn edit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn existing_saved_annotations_accept_optional_trajectory_evidence() {
+        let old = json!({
+            "project_id":"test","video":"match.mp4",
+            "source_sha256":"a".repeat(64),"rally_run_id":"b".repeat(24),
+            "total_frames":300,"revision":1,"reviewed":false,
+            "touches":[],"rallies":[]
+        });
+        let parsed: VideoLabels = serde_json::from_value(old).unwrap();
+        assert!(valid(&parsed));
+        assert!(parsed.trajectory_candidates.is_empty());
+        assert!(parsed.trajectory_replay_sha.is_empty());
+        let roundtrip: VideoLabels =
+            serde_json::from_value(serde_json::to_value(&parsed).unwrap()).unwrap();
+        assert!(valid(&roundtrip));
+    }
+
     #[test]
     fn duplicate_candidates_cannot_both_match_one_touch() {
         let result = accuracy(&[100], &[99, 100, 102], 3, 30.0);

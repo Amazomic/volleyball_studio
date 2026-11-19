@@ -14,10 +14,11 @@ assert.equal([...html.matchAll(/id="studio-timeline-track"/g)].length,1,"One sha
 assert.ok(html.indexOf('id="studio-timeline"')>html.indexOf('id="studio-video"'));
 assert.ok(js.includes('lane:$("studio-timeline-track")'),"Annotation ticks use the shared timeline");
 assert.ok(js.includes('if(active)training.panel.before(element)'),"Training ruler is placed under video");
-assert.match(js,/training\.panel\.classList\.add\("hidden"\);\s*annotation\.lane\.querySelectorAll/,
+assert.match(js,/training\.panel\.classList\.add\("hidden"\);\s*if\(annotation\.priorFlags\)/,
   "Leaving training clears its interactive ticks");
 
-assert.ok(js.includes('querySelectorAll(".studio-annotation-tick")'),"Do not erase canvas/playhead");
+assert.ok(js.includes('querySelectorAll(".studio-annotation-tick,.studio-trajectory-proposal")'),
+  "Only temporary overlay markers should be cleared; canvas and playhead remain");
 assert.ok(!css.includes('.studio-annotation-touch-lane{'),"Second ruler CSS is removed");
 assert.ok(js.includes('action:"relabel"'),"Training examples support correction");
 assert.ok(js.includes('action:editing?"replace_touch":"touch"'),"Captured examples support recapture at a new frame");
@@ -36,7 +37,7 @@ class Node {
   replaceChildren(...children){this.children=children;}
   remove(){this.removed=true;}
   querySelectorAll(selector){
-    return selector===".studio-annotation-tick"?
+    return selector.includes(".studio-annotation-tick")?
       this.children.filter(row=>row.className.startsWith("studio-annotation-tick")&&!row.removed):[];
   }
   getBoundingClientRect(){return {left:10,width:300};}
@@ -49,13 +50,16 @@ lane.append(canvas,playhead);
 const source={touches:[{id:"touch-1",frame:60}],rallies:[],total_frames:300,reviewed:false};
 const edits=[],seeks=[];
 const annotation={
-  data:source,busy:false,touchId:null,rallyId:null,pendingStart:null,
+  data:source,busy:false,dirty:false,source:["p","cpu","v.mp4"].join("\u0000"),
+  touchId:null,rallyId:null,pendingStart:null,prediction:null,
   lane,touchList:new Node(),rallies:new Node(),metrics:new Node(),saveState:new Node(),pending:new Node(),
-  seed:new Node(),add:new Node(),move:new Node(),remove:new Node(),next:new Node(),
+  seed:new Node(),calculate:new Node(),adopt:new Node(),save:new Node(),
+  add:new Node(),move:new Node(),remove:new Node(),next:new Node(),
   begin:new Node(),finish:new Node(),review:new Node(),current:new Node()
 };
 const context={
-  annotation,training:{active:true},ui:{video:{currentTime:2}},s:{seekAt:0,run:"cpu"},
+  annotation,training:{active:true},ui:{video:{currentTime:2}},
+  s:{seekAt:0,project:"p",run:"cpu",video:"v.mp4"},timeline:{data:{rallies:[]}},
   document:{createElement:name=>new Node(name)},fps:()=>30,timelineDuration:()=>10,
   annotationFrame:()=>60,
   editAnnotation:(action,fields)=>edits.push({action,fields}),
@@ -63,7 +67,7 @@ const context={
   annotationClock:frame=>(frame/30).toFixed(2)+" с"
 };
 const slice=js.slice(js.indexOf("  const annotationReady="),js.indexOf("  const refreshAnnotation="));
-assert.ok(slice.includes('querySelectorAll(".studio-annotation-tick")'));
+assert.ok(slice.includes('querySelectorAll(".studio-annotation-tick,.studio-trajectory-proposal")'));
 const draw=runInNewContext(slice+"\n({drawAnnotation})",context).drawAnnotation;
 draw();
 assert.equal(lane.children.includes(canvas),true,"Timeline canvas is never removed");

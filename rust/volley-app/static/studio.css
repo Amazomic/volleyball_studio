@@ -1859,3 +1859,12 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 .studio-video-player-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 0 12px}
 #studio-video-player-media{display:block;width:100%;max-height:75dvh;background:#000}
 @media(max-width:650px){.studio-sidebar-actions{grid-column:1/-1;padding:0}.studio-video-library{top:0;border-radius:0;width:min(420px,100vw)}}
+
+#studio-preview-view .video-timeline-track .studio-trajectory-proposal{position:absolute;top:3px;bottom:3px;width:4px;min-width:4px;padding:0;border:0;border-radius:3px;background:#ffbe57;transform:translateX(-50%);cursor:pointer;z-index:1}
+#studio-preview-view .video-timeline-track .studio-trajectory-proposal:hover,
+#studio-preview-view .video-timeline-track .studio-trajectory-proposal:focus-visible{width:7px;box-shadow:0 0 0 2px #ffe1a0;z-index:3}
+.studio-annotation-save-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.studio-training-method-picker{display:inline-flex;gap:8px;align-items:center;font-size:12px;color:#b1cade}
+.studio-training-method-picker select{min-width:140px}
+.studio-training-focus-toggle{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:#b1cade;cursor:pointer}
+#studio-annotation-save:disabled,#studio-annotation-seed-trajectory:disabled,#studio-annotation-calculate:disabled{opacity:.5;cursor:not-allowed}
