@@ -2452,3 +2452,13 @@ Studio показывает кнопку перехода между debug и re
 - UI `studio.{html,js,css}`: одна шкала под видео, метрики CPU/траектории/ручного эталона, редактируемые пороги, фильтр эпизодов; RTMPose и библиотека примеров сохранены в сворачиваемых разделах.
 - Добавлены `scripts/ci/test_training_rally_comparison.mjs`, Rust unit-тесты и записи в `docs/RUST_CANONICAL_OWNERS.json`. Контракт UI обновлён до 2; двуязычный каталог дополнен.
 - Проверки: 4 Rust-теста сравнения, тесты UI дообучения, уникальности DOM, владельцев маршрутов и WASM i18n — успешно. Общий `scripts/check-all.ps1` по-прежнему содержит ранее существовавшие несвязанные падения `test_studio_pose_modes`, `test_studio_preview_source`, `test_studio_raw_detector`, `test_studio_raw_gpu_preview` (подтверждены на чистом исходном worktree).
+
+
+## 2026-11-19 — Отзывчивая автопривязка Track ID
+
+- База 4d77b71 (origin/rust); ветка codex/20261119-auto-link-responsive. Владелец: rust/volley-app/src/native_player_tracks/assignments.rs, reid_handlers.rs, static/studio_tracks.js, static/studio.css; тест scripts/ci/test_studio_auto_assign_responsive.mjs.
+- Причина: команда «Автопривязать» снова запускала декодирование фото и ReID-инференцию, даже когда совпадения были сохранены. На время ожидания фронтенд выставлял общий busy=true и блокировал действия на вкладке.
+- Исправление: переиспользовать сохранённые фото-совпадения только при идентичных SHA исходного CPU-replay, ревизиях и SHA опорных фото, fingerprint модели, rally-run и составе ручных привязок/исключений. При расхождении запускается существующий полный расчёт и проверяется revision при записи. Интерфейс блокирует только повторный запуск автопривязки, не остальные инструменты; progress без вымышленного процента отображается в левой боковой панели, а уже запущенный пересчёт сходства не дублируется. Карточки обновляются с анимацией после подтверждённой сервером записи.
+- PASS: cargo fmt; Rust cached_auto_match_tests, automatic_photo; Node test_studio_auto_assign_responsive, test_studio_sidebar_tasks, test_studio_group_gallery, test_studio_track_assignment, test_studio_identity_sync, test_studio_wasm_ui, test_studio_dom_ids; check_rust_ownership; git diff --check.
+- Общий scripts/check-all.ps1: FAIL по существующим предупреждениям Clippy в volley-core/volley-inference, известному storage-тесту и другим сторонним UI/packaging harness-тестам. Новый UI-тест автопривязки в общем прогоне PASS. Реальная задержка на пользовательском видео и новый GPU/OpenVINO-инференс не измерялись.
+- Применение к Studio: только после проверки shutdown_safe и отсутствия active_jobs. Нельзя затирать несохранённые изменения другой рабочей копии.

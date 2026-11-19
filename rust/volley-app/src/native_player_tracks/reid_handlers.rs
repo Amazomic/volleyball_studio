@@ -748,6 +748,16 @@ pub async fn reid_review(
 ) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
     if req.action == "auto_assign" {
+        let cached_state = state.clone();
+        let cached_req = req.clone();
+        if let Some(saved) = tokio::task::spawn_blocking(move || {
+            save_cached_automatic_photo_links(&cached_state, &cached_req)
+        })
+        .await
+        .map_err(|e| storage::internal(format!("Cached automatic identity worker: {e}")))??
+        {
+            return Ok(Json(saved));
+        }
         let comparison =
             super::photo_comparison::compare(state.clone(), headers, req.clone()).await?;
         let result = tokio::task::spawn_blocking(move || {

@@ -1805,3 +1805,10 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 .studio-training-compare-title>small{font-size:11px;color:#a6c2d4;line-height:1.4}
 .studio-training-legacy-tools>summary{font-size:11px;font-weight:500}
 @media(max-width:690px){#studio-preview-view.training-workspace .viewer-head{align-items:flex-start}#studio-preview-view.training-workspace .studio-training-video-actions{width:100%}}
+
+
+.track-auto-assign.is-working{position:relative;animation:track-auto-pulse 1.7s ease-in-out infinite}
+.track-auto-assign.is-working::after{content:"";display:inline-block;width:11px;height:11px;margin-left:8px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;vertical-align:-1px;animation:track-auto-spin .75s linear infinite}
+@keyframes track-auto-pulse{50%{filter:brightness(1.22)}}
+@keyframes track-auto-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.track-auto-assign.is-working,.track-auto-assign.is-working::after{animation:none}}

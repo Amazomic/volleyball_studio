@@ -23,7 +23,7 @@
     playerMatches:{},libraryPlayers:[],projectPlayerIds:new Set(),
     rosterEpoch:0,rosterBusy:false,rosterLoaded:false,tracksLoaded:false,loadingKey:null,grouping:false,
     photoIndices:new Map(),groupNavigation:new Map(),viewPlayer:"",viewConflicts:false,filteredTotal:0,unassignedIds:new Set(),identityConflictIds:new Set(),comparisonIds:new Set(),
-    photoScoreAttempts:new Set(),photoScoreLoading:false,forcePhotoScores:false
+    photoScoreAttempts:new Set(),photoScoreLoading:false,photoScoresPromise:null,forcePhotoScores:false
   };
   const node=(tag,klass,text)=>{
     const n=document.createElement(tag);if(klass)n.className=klass;
@@ -427,7 +427,13 @@
          !state.photoScoreLoading&&!state.photoScoreAttempts.has(scoreKey)){
         state.photoScoreAttempts.add(scoreKey);
         state.forcePhotoScores=false;
-        void loadPhotoScoresOnFirstView(reviewScope(),scoreKey,token);
+        const scoreTask=loadPhotoScoresOnFirstView(reviewScope(),scoreKey,token);
+        state.photoScoresPromise=scoreTask;
+        void scoreTask.then(()=>{
+          if(state.photoScoresPromise===scoreTask)state.photoScoresPromise=null;
+        },()=>{
+          if(state.photoScoresPromise===scoreTask)state.photoScoresPromise=null;
+        });
       }
       note(state.roster.length?
         "Track ID получены. Выберите ID и вручную назначьте игрока из состава проекта.":
@@ -900,7 +906,7 @@
   const galleryRepeat=node("button","secondary","Повторить анализ");
   galleryRepeat.type="button";galleryRepeat.disabled=true;
   galleryRepeat.addEventListener("click",()=>repeatPhotoAnalysis());
-  const galleryAuto=node("button","primary","Автопривязать похожие ID");
+  const galleryAuto=node("button","primary track-auto-assign","Автопривязать похожие ID");
   galleryAuto.type="button";galleryAuto.disabled=true;
   galleryAuto.addEventListener("click",()=>autoAssignSimilar());
   const galleryMore=node("button","secondary track-group-more","Показать ещё группы");
@@ -1156,6 +1162,7 @@
     reviewStatus.textContent=message;
     reviewStatus.classList.toggle("track-error",error);
   };
+  let autoAssignInFlight=false;
   const reidUnlock=()=>{
     const ready=reviewReady()&&!state.busy;
     reviewThreshold.disabled=state.busy;
@@ -1164,33 +1171,58 @@
     reviewExtract.disabled=!ready||state.selected.size<1||state.selected.size>8;
     galleryExtract.disabled=reviewExtract.disabled;
     galleryRepeat.disabled=!ready||!state.comparisonIds.size||state.photoScoreLoading;
-    galleryAuto.disabled=!ready||!state.writable||!state.comparisonIds.size||!state.roster.length||state.photoScoreLoading;
+    galleryAuto.disabled=!ready||!state.writable||!state.comparisonIds.size||!state.roster.length||autoAssignInFlight;
     singlesExtract.disabled=reviewExtract.disabled;
     reviewMerge.disabled=!ready||!state.writable||!state.groupRevision||state.selected.size<2;
     reviewSplit.disabled=!ready||!state.writable||!state.groupRevision||state.selected.size<1;
   };
   const autoAssignSimilar=async()=>{
-    if(!reviewReady()||state.busy||!state.writable||!state.comparisonIds.size)return;
+    if(!reviewReady()||state.busy||autoAssignInFlight||
+       !state.writable||!state.comparisonIds.size)return;
     const scope=reviewScope(),token=state.token;
-    state.busy=true;unlock();reidUnlock();
-    galleryStatus.textContent="Сопоставляем похожие ID с фотографиями игроков…";
+    autoAssignInFlight=true;
+    galleryAuto.classList.add("is-working");
+    galleryAuto.setAttribute("aria-busy","true");
+    reidUnlock();
+    galleryStatus.textContent="Автопривязка запущена. Можно продолжать работу с игроками.";
+    window.VolleyballTasks?.set("auto-reid",{
+      label:"Автопривязка ID",stage:"Проверка сохранённых совпадений",progress:null
+    });
     try{
+      if(state.photoScoreLoading&&state.photoScoresPromise){
+        window.VolleyballTasks?.set("auto-reid",{
+          label:"Автопривязка ID",stage:"Ожидаем уже запущенный расчёт совпадений",progress:null
+        });
+        await state.photoScoresPromise;
+        if(token!==state.token||scope.replay_id!==state.replay)return;
+      }
       const result=await post("/api/players/native/reid-review",{...scope,action:"auto_assign"});
       if(token!==state.token||scope.replay_id!==state.replay)return;
       if(!Number.isSafeInteger(result.automatic_count)||result.automatic_count<0 ||
          !result.automatic_assignments||typeof result.automatic_assignments!=="object")
         throw Error("Сервер вернул некорректные автоматические привязки");
-      // Keep suggestions until the refreshed track page supplies saved scores.
+      window.VolleyballTasks?.set("auto-reid",{
+        label:"Автопривязка ID",stage:"Сохранено · обновляем список игроков",progress:null
+      });
       window.dispatchEvent(new CustomEvent("volley:track-assignments-updated",{detail:{
         project_id:scope.project_id,video:scope.video,replay_id:scope.replay_id
       }}));
-      await loadPage();
+      await loadPage({preserveCards:true});
       galleryStatus.textContent="Автоматически привязано ID: "+result.automatic_count;
       reviewNote("Автопривязка выполнена: "+result.automatic_count+
         ". Ручные назначения сохранены; одновременные ID одного игрока не объединяются.");
-    }catch(error){galleryStatus.textContent="Ошибка автопривязки: "+String(error.message||error);
-      reviewNote(String(error.message||error),true);}
-    finally{state.busy=false;unlock();reidUnlock();}
+    }catch(error){
+      if(token===state.token){
+        galleryStatus.textContent="Ошибка автопривязки: "+String(error.message||error);
+        reviewNote(String(error.message||error),true);
+      }
+    }finally{
+      autoAssignInFlight=false;
+      galleryAuto.classList.remove("is-working");
+      galleryAuto.removeAttribute("aria-busy");
+      window.VolleyballTasks?.clear("auto-reid");
+      unlock();reidUnlock();
+    }
   };
   const refreshPhotoMatches=async(scope,token)=>{
     const ids=[...state.comparisonIds];

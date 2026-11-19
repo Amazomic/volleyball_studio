@@ -1010,6 +1010,173 @@ pub(super) fn refresh_automatic_photo_links(
     Ok((updated, chosen))
 }
 
+fn reviewed_scope_sha256(doc: &Value) -> String {
+    let scope = json!({
+        "assignments":doc["assignments"],
+        "excluded_ids":doc["excluded_ids"],
+    });
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&scope).unwrap_or_default())
+    )
+}
+
+fn cached_photo_comparison(
+    doc: &Value,
+    identity_revision: &str,
+    albums: &[(String, String)],
+    hashes: &BTreeMap<String, BTreeSet<String>>,
+    model: &str,
+    rally_run_id: Option<&str>,
+) -> Option<Value> {
+    let evidence = doc.get("automatic_identity_evidence")?;
+    evidence["matches"].as_object()?;
+    if evidence["rally_run_id"] != json!(rally_run_id)
+        || evidence["album_revisions"] != json!(albums)
+        || evidence["reference_photo_sha256"] != json!(hashes)
+        || evidence["model_fingerprint"] != model
+        || evidence["reviewed_scope_sha256"] != reviewed_scope_sha256(doc)
+    {
+        return None;
+    }
+    Some(json!({
+        "identity_revision":identity_revision,
+        "album_revisions":albums,
+        "model_fingerprint":model,
+        "player_matches":evidence["matches"]
+    }))
+}
+
+pub(super) fn save_cached_automatic_photo_links(
+    state: &AppState,
+    req: &ReidReviewRequest,
+) -> Result<Option<Value>, ApiError> {
+    let ctx = source_for_rallies(
+        state,
+        &req.project_id,
+        &req.video,
+        &req.replay_id,
+        req.rally_run_id.as_deref(),
+    )?;
+    if ctx.source_sha != req.expected_source_sha256 {
+        return Err(storage::conflict("Source replay changed"));
+    }
+    let before = existing(&ctx.sidecar).map_err(storage::bad_request)?;
+    let doc = validated(before.as_deref(), &ctx).map_err(storage::bad_request)?;
+    if doc["automatic_identity_evidence"]["matches"]
+        .as_object()
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let model = volley_inference::reid_openvino::fingerprint(&state.repository_root)
+        .map_err(storage::bad_request)?;
+    let (albums, hashes) = reference_album_snapshot(state, &ctx)
+        .ok_or_else(|| storage::conflict("Saved player reference photos changed"))?;
+    let Some(comparison) = cached_photo_comparison(
+        &doc,
+        &revision(before.as_deref()),
+        &albums,
+        &hashes,
+        &model,
+        req.rally_run_id.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    save_automatic_photo_links(state, req, &comparison).map(Some)
+}
+
+#[cfg(test)]
+mod cached_auto_match_tests {
+    use super::*;
+
+    #[test]
+    fn cached_photo_scores_require_exact_reference_provenance() {
+        let albums = vec![("player".to_owned(), "album-revision".to_owned())];
+        let hashes = BTreeMap::from([("player".to_owned(), BTreeSet::from(["a".repeat(64)]))]);
+        let mut doc = json!({
+            "assignments":{}, "excluded_ids":[],
+            "automatic_identity_evidence":{
+                "matches":{"7":[{"player_id":"player","similarity":0.91}]},
+                "rally_run_id":"rally",
+                "album_revisions":albums,
+                "reference_photo_sha256":hashes,
+                "model_fingerprint":"model-v1"
+            }
+        });
+        doc["automatic_identity_evidence"]["reviewed_scope_sha256"] =
+            json!(reviewed_scope_sha256(&doc));
+        assert!(cached_photo_comparison(
+            &doc,
+            "identity-v1",
+            &albums,
+            &hashes,
+            "model-v1",
+            Some("rally")
+        )
+        .is_some());
+        assert!(cached_photo_comparison(
+            &doc,
+            "identity-v1",
+            &albums,
+            &hashes,
+            "model-v2",
+            Some("rally")
+        )
+        .is_none());
+        assert!(cached_photo_comparison(
+            &doc,
+            "identity-v1",
+            &albums,
+            &hashes,
+            "model-v1",
+            Some("other")
+        )
+        .is_none());
+        let mut changed_review = doc.clone();
+        changed_review["assignments"] = json!({"9":"another-player"});
+        assert!(cached_photo_comparison(
+            &changed_review,
+            "identity-v1",
+            &albums,
+            &hashes,
+            "model-v1",
+            Some("rally")
+        )
+        .is_none());
+        let changed_albums = vec![("player".to_owned(), "new-revision".to_owned())];
+        assert!(cached_photo_comparison(
+            &doc,
+            "identity-v1",
+            &changed_albums,
+            &hashes,
+            "model-v1",
+            Some("rally")
+        )
+        .is_none());
+        let changed_hashes =
+            BTreeMap::from([("player".to_owned(), BTreeSet::from(["b".repeat(64)]))]);
+        assert!(cached_photo_comparison(
+            &doc,
+            "identity-v1",
+            &albums,
+            &changed_hashes,
+            "model-v1",
+            Some("rally")
+        )
+        .is_none());
+        assert!(cached_photo_comparison(
+            &json!({}),
+            "identity-v1",
+            &albums,
+            &hashes,
+            "model-v1",
+            Some("rally")
+        )
+        .is_none());
+    }
+}
+
 pub(super) fn save_automatic_photo_links(
     state: &AppState,
     req: &ReidReviewRequest,
@@ -1092,7 +1259,8 @@ fn persist_photo_comparison(
         "rally_run_id":req.rally_run_id,
         "album_revisions":comparison["album_revisions"],
         "reference_photo_sha256":reference_hashes,
-        "model_fingerprint":comparison["model_fingerprint"]
+        "model_fingerprint":comparison["model_fingerprint"],
+        "reviewed_scope_sha256":reviewed_scope_sha256(&doc)
     });
     let unassigned: Vec<_> = scoped
         .tracks
