@@ -6,7 +6,7 @@
 
 Documentation: [Index](docs/README.md).
 
-**Beta:** [v0.1.0-beta.1](docs/releases/v0.1.0-beta.1.md) — experimental, localhost-only; no production acceptance. Binaries are available in GitHub Releases.
+**Branches:** `develop` is the main development branch and the target for day-to-day changes and PRs. `master` is reserved for tested version releases only. See the [development and release workflow](docs/DEVELOPMENT_WORKFLOW.md). [Beta v0.1.0-beta.1](https://github.com/Amazomic/volleyball_studio/releases/tag/v0.1.0-beta.1).
 
 План разработки: 84/85; следующий 85/85
 
@@ -40,9 +40,15 @@ Automated player identification and touch classification are **not guaranteed to
 
 The active application is developed in **Rust**. The original Python implementation remains available in Git history as the migration baseline. ONNX Runtime, OpenVINO, CUDA, and FFmpeg are external dependencies.
 
-## Run locally on Windows / WSL
+## Download beta v0.1.0-beta.1 (pre-release)
 
-Requirements include Windows with WSL (`Ubuntu-25.04` by default), a Rust toolchain inside WSL, FFmpeg/FFprobe, and compatible Linux libraries for the selected models. GPU inference requires a compatible NVIDIA/CUDA setup and ONNX Runtime; OpenVINO ReID requires its native runtime.
+Download the tested [Windows x64 ZIP or Linux x86-64 tar.gz](https://github.com/Amazomic/volleyball_studio/releases/tag/v0.1.0-beta.1). Extract it, then run `run-studio.cmd` on Windows or `bash run-studio.sh` on Linux. Open [http://127.0.0.1:8875/studio](http://127.0.0.1:8875/studio). **The Windows archive runs natively; it does not require WSL or a Rust compiler.** The Linux binary was built on Ubuntu 25.04 (glibc 2.41), so older distributions may be incompatible.
+
+These portable archives include the Rust server and embedded WASM UI, **not** model weights, original footage, FFmpeg/FFprobe, ONNX Runtime/CUDA/cuDNN or OpenVINO. AI analysis needs compatible external dependencies and model files. The launchers use a separate data directory (`%LOCALAPPDATA%\VolleyballStudioBeta\data` on Windows; `${XDG_DATA_HOME:-$HOME/.local/share}/volleyball-studio-beta` on Linux). Do not point the beta at the only copy of a project; never expose its unauthenticated localhost API to the Internet. See [beta release notes](docs/releases/v0.1.0-beta.1.md) and [deployment instructions](docs/RUST_DEPLOYMENT.md).
+
+## Run from source on Windows / WSL
+
+For source builds (not for the Windows beta ZIP), requirements include Windows with WSL (`Ubuntu-25.04` by default), a Rust toolchain inside WSL, FFmpeg/FFprobe, and compatible Linux libraries for the selected models. GPU inference requires a compatible NVIDIA/CUDA setup and ONNX Runtime; OpenVINO ReID requires its native runtime.
 
 From the repository root:
 
@@ -74,10 +80,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-volley-rust-de
 
 Studio UI: **http://127.0.0.1:8875/studio**. This is a localhost application; do not expose its API directly to the public internet.
 
-Run Rust tests from `rust/` with `cargo test --workspace --offline`; run the UI check from the repository root with `node scripts/ci/test_studio_wasm_ui.mjs`. See the [deployment guide](docs/RUST_DEPLOYMENT.md) for setup and diagnostics.
+Run the complete local gate from the repository root with `powershell -ExecutionPolicy Bypass -File scripts/check-all.ps1`. See the [deployment guide](docs/RUST_DEPLOYMENT.md) for setup and diagnostics.
 
 ## Project status
 
-**Active development / experimental release.** A visible feature is not proof of accuracy on real matches. End-to-end acceptance, comparison with the historical Python implementation, and comprehensive quality measurements are still pending. Original footage and historical results are not intended to be silently overwritten.
+**Public beta v0.1.0-beta.1 from `master`; ongoing development in `develop`.** Both remain experimental and not production-ready. A visible feature is not proof of accuracy on real matches. End-to-end acceptance, comparison with the historical Python implementation, and comprehensive quality measurements are still pending. Original footage and historical results are not intended to be silently overwritten.
 
 **Documentation:** [Architecture](docs/RUST_ARCHITECTURE.md) · [Roadmap](docs/RUST_ROADMAP.md) · [Migration log](docs/RUST_MIGRATION.md) · [Deployment](docs/RUST_DEPLOYMENT.md) · [Developer guide](rust/README.md).

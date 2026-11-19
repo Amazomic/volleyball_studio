@@ -1,4 +1,6 @@
-> Runtime decision (2026-11-09): active branch is Rust-only; Python sources below identify historical checkpoint modules only. The migration is not feature complete.
+> Historical migration inventory begun 2026-11-09. The Python paths below describe an immutable reference, not the currently running application. **The feature-status rows are historical snapshots**; do not treat their older "pending" statements as an up-to-date feature list.
+
+**Current branch and release (2026-11-19):** `develop` is the development branch; `master` is reserved for tested release snapshots. The first public pre-release is [v0.1.0-beta.1](releases/v0.1.0-beta.1.md), from Rust commit `437b446` (release commit `ddb2a82`). The published tag must not move. The application remains **not production-ready** and the formal stage-85 parity/acceptance gate remains open. Later `develop` commits are not part of this beta; consult current Rust code and `docs/RUST_MIGRATION.md` for their actual scope.
 
 # Volleyball Studio — complete Rust rewrite coverage
 
@@ -8,11 +10,13 @@ Status: **IMPLEMENTATION IN PROGRESS — NOT COMPLETE**. Current numbered roadma
 
 A new Rust executable and Rust/WebAssembly frontend operate all existing volleyball-studio flows with no Python server, Python CPU business logic, Python inference orchestration, or Python montage scripts. The application reads the same existing projects and preserved caches, produces equivalent persisted analysis/run records, drives GPU models and FFmpeg through native interfaces, and exposes every used browser API. External native model/codec libraries remain legitimate dependencies. Existing Python/JS sources are historical reference until the final comparison, not fallback services in the finished implementation.
 
-Never replace original `master`, original checkpoints, user media, `project/`, `results/`, saved photos, inference artifacts or previously prepared videos during development. Keep Rust dev services separate from the running `127.0.0.1:8765` Python/hybrid service until final cutover.
+Never overwrite the published `master` release branch during ordinary development, force-move release tags, or alter the immutable Python checkpoint, user media, `project/`, `results/`, photos, inference evidence or previous exports. All implementation changes are integrated through `develop`; only a tested, explicitly selected release snapshot goes to `master`. Source-built Rust Studio uses loopback `127.0.0.1:8875` and must not stop an unrelated service on the historical `8765` port.
 
-## Source-to-target inventory
+## Source-to-target inventory (historical implementation snapshot)
 
-| Domain | Existing implementation to account for | Rust destination | Actual state |
+This section was captured during early Rust migration; its "pending" and "not implemented" entries have **not** been rewritten to imply a new audit. For current behavior verify `rust/volley-app/src/main.rs`, the UI and source-specific schemas; for a frozen build use the [beta release notes](releases/v0.1.0-beta.1.md), and for later changes use `docs/RUST_MIGRATION.md`. A working beta UI does not make the stage-85 production/parity criteria complete.
+
+| Domain | Historical Python implementation | Rust destination | Historical migration state (NOT current acceptance) |
 |---|---|---|---|
 | HTTP service, routing, serialization, streaming/ranges, security | `scripts/volleyball_ui/server.py`, `data.py`, `preview.py`, `playback.py` | `rust/volley-app/` | PARTIAL: native JSON API, origin checks, MP4 byte-range streaming, preview JPEG; many routes pending |
 | Jobs, progress, cancellation, restarts, resources | `server.py`, `analysis_runs.py`, `project_lifecycle.py`, `quick_reel_jobs.py` | `rust/volley-app/` | PARTIAL: Rust preparation and manual montage jobs, progress, cancellation; single-model full-video native GPU job manager (progress/cancellation) implemented; combined GPU/CPU analysis and Quick Reel GPU job managers pending |

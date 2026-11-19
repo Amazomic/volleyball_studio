@@ -6,7 +6,7 @@
 
 Документация: [указатель](docs/README.md).
 
-**Бета-релиз:** [v0.1.0-beta.1](docs/releases/v0.1.0-beta.1.md) — экспериментальная локальная версия, не production-ready. Архивы — в GitHub Releases.
+**Ветки:** вся текущая разработка и обычные PR ведутся в `develop`; в `master` изменения отправляются только при выпуске проверенной версии. Подробности — в [регламенте разработки и релизов](docs/DEVELOPMENT_WORKFLOW.md). [Бета v0.1.0-beta.1](https://github.com/Amazomic/volleyball_studio/releases/tag/v0.1.0-beta.1).
 
 ---
 
@@ -40,9 +40,15 @@
 
 Основное приложение разрабатывается **на Rust**; Python-версия сохранена в истории Git как исходная точка миграции. ONNX Runtime, OpenVINO, CUDA и FFmpeg остаются внешними зависимостями.
 
-## Локальный запуск на Windows / WSL
+## Скачать бету v0.1.0-beta.1
 
-Нужны Windows с WSL (по умолчанию `Ubuntu-25.04`), Rust toolchain в WSL, FFmpeg/FFprobe и совместимые Linux-библиотеки для используемых моделей. Для GPU-инференса необходимы совместимые NVIDIA/CUDA и ONNX Runtime; ReID на OpenVINO требует соответствующего нативного runtime.
+Скачайте [архив Windows x64 или Linux x86-64](https://github.com/Amazomic/volleyball_studio/releases/tag/v0.1.0-beta.1), распакуйте и запустите `run-studio.cmd` (Windows) либо `bash run-studio.sh` (Linux). Откройте [http://127.0.0.1:8875/studio](http://127.0.0.1:8875/studio). **Готовый Windows EXE работает без WSL и Rust toolchain.** Linux-сборка создана для Ubuntu 25.04 (glibc 2.41), совместимость с более старыми системами не гарантируется.
+
+Архив содержит Rust-сервер и встроенный WASM-интерфейс, **но не** веса моделей, исходные видео, FFmpeg/FFprobe, ONNX Runtime/CUDA/cuDNN или OpenVINO. Для нейросетевого анализа установите совместимые библиотеки и модели отдельно. Данные по умолчанию сохраняются отдельно от архива: `%LOCALAPPDATA%\VolleyballStudioBeta\data` (Windows) или `${XDG_DATA_HOME:-$HOME/.local/share}/volleyball-studio-beta` (Linux). Не используйте бету с единственной копией проекта и не открывайте локальный API в Интернет. См. [заметки релиза](docs/releases/v0.1.0-beta.1.md) и [инструкцию запуска](docs/RUST_DEPLOYMENT.md).
+
+## Сборка из исходников на Windows / WSL
+
+Для сборки из исходников (не для готового EXE) нужны Windows с WSL (по умолчанию `Ubuntu-25.04`), Rust toolchain в WSL, FFmpeg/FFprobe и совместимые Linux-библиотеки для используемых моделей. Для GPU-инференса необходимы совместимые NVIDIA/CUDA и ONNX Runtime; ReID на OpenVINO требует соответствующего нативного runtime.
 
 Из корня репозитория:
 
@@ -72,10 +78,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-volley-rust-de
 
 Интерфейс: **http://127.0.0.1:8875/studio**. Приложение предназначено для локального использования; не публикуйте API напрямую в интернет.
 
-Проверка Rust-кода из каталога `rust/`: `cargo test --workspace --offline`. Проверки UI из корня: `node scripts/ci/test_studio_wasm_ui.mjs`. Подробности установки и диагностики — в [руководстве по развёртыванию](docs/RUST_DEPLOYMENT.md).
+Полный локальный набор проверок из корня: `powershell -ExecutionPolicy Bypass -File scripts/check-all.ps1`. Подробности установки и диагностики — в [руководстве по развёртыванию](docs/RUST_DEPLOYMENT.md).
 
 ## Статус
 
-**Активная разработка / экспериментальная версия.** Наличие функции в интерфейсе не означает подтверждённой точности на реальных матчах. Полная приёмка, сопоставление с исторической Python-реализацией и измерения качества ещё не завершены. Исходные видеозаписи и исторические результаты не должны автоматически изменяться при анализе.
+**Опубликованная бета v0.1.0-beta.1 из `master`; дальнейшая разработка в `develop`.** Обе версии экспериментальные и не предназначены для production. Наличие функции в интерфейсе не означает подтверждённой точности на реальных матчах. Полная приёмка, сопоставление с исторической Python-реализацией и измерения качества ещё не завершены. Исходные видеозаписи и исторические результаты не должны автоматически изменяться при анализе.
 
 **Документация:** [Архитектура](docs/RUST_ARCHITECTURE.md) · [Карта разработки](docs/RUST_ROADMAP.md) · [Журнал миграции](docs/RUST_MIGRATION.md) · [Развёртывание](docs/RUST_DEPLOYMENT.md) · [Руководство разработчика](rust/README.md) · [Чеклист улучшений для агентов](docs/AGENT_IMPROVEMENT_CHECKLIST.md) · [Параллельная работа агентов](docs/AGENT_PARALLEL_WORKFLOW.md).
