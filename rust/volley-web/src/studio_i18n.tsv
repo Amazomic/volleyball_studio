@@ -516,3 +516,5 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Готовые ролики из всех проектов	Finished videos from all projects
 Поиск готовых видео	Search created videos
 Созданное видео	Created video
+Подобрать по эталону	Fit from reviewed labels
+Подбирает параметры только по подтверждённой разметке этого видео. Не изменяет CPU-анализ и не оценивает качество на других видео.	Tunes parameters using reviewed annotations from this video only. Does not change CPU analysis or validate accuracy on other videos.

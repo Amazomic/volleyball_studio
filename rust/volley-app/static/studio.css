@@ -1765,6 +1765,7 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 .studio-training-compare-controls{display:flex;gap:10px;flex-wrap:wrap;align-items:end}
 .studio-training-compare-controls label{font-size:11px;color:#a7bfd9;display:grid;gap:5px;min-width:145px;flex:1}
 .studio-training-compare-controls input{width:100%;padding:9px 10px;background:#1b3149;color:#edf5ff;border:1px solid #48617e;border-radius:8px}
+#studio-comparison-calibrate{font-size:11px;padding:10px 12px;white-space:normal;align-self:end}
 #studio-comparison-status{font-size:11px;color:#a0c3e6;line-height:1.5}
 .studio-training-compare-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:7px}
 .studio-training-compare-metric{display:grid;gap:5px;padding:10px 11px;border-radius:9px;background:#1d344b;border:1px solid #35516a;min-width:0}

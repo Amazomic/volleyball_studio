@@ -12,7 +12,8 @@ const main=read("rust/volley-app/src/main.rs");
 for(const id of ["studio-comparison-recalculate","studio-comparison-status",
   "studio-comparison-metrics","studio-comparison-differences",
   "studio-comparison-min-impacts","studio-comparison-context",
-  "studio-comparison-duration","studio-comparison-gap","studio-comparison-filter"]){
+  "studio-comparison-duration","studio-comparison-gap","studio-comparison-filter",
+  "studio-comparison-calibrate"]){
   assert.ok(html.includes('id="'+id+'"'),"Missing comparison control: "+id);
 }
 assert.equal((html.match(/id="studio-timeline-track"/g)||[]).length,1);
@@ -21,6 +22,8 @@ assert.ok(js.includes('training.poseAdvanced.open'));
 assert.ok(js.includes('request(url("/api/training/rally-comparison",options))'));
 assert.ok(js.includes('void refreshComparison();'));
 assert.ok(js.includes('void refreshComparison(true);'));
+assert.ok(js.includes('void refreshComparison(true,true)'));
+assert.ok(rust.includes('fn fit_trajectory_settings('));
 assert.ok(js.includes('comparison.epoch++;comparison.data=null;comparison.sourceKey=""'));
 assert.ok(js.includes('comparison.data.trajectory_rallies'));
 assert.match(main,/\/api\/training\/rally-comparison"[\s\S]{0,90}get\(rally_training_comparison::get\)/);
@@ -47,9 +50,15 @@ const start=js.indexOf("  const comparison={");
 const end=js.indexOf("  const refreshComparison=async",start);
 assert.ok(start>0&&end>start);
 let seeked=null,paused=false;
+const sidebar=[];
+
 const s={project:"p",run:"r",video:"source.mp4"};
 const context={
   $,s,document:{createElement:()=>new Node()},
+  window:{VolleyballTasks:{
+    set:(key,details)=>sidebar.push({type:"set",key,details}),
+    clear:key=>sidebar.push({type:"clear",key})
+  }},
   ui:{video:{pause:()=>{paused=true;}}},
   fps:()=>30,
   seekTimeline:seconds=>{seeked=seconds;},
@@ -121,8 +130,31 @@ await refreshComparison(true);
 assert.equal(queries.at(-1).simulate,true);
 assert.equal(comparison.simulated,true);
 assert.equal(elements.get("studio-comparison-touches").children.length,2);
+assert.equal(comparison.calibrate.disabled,true,"Unreviewed labels cannot calibrate");
 assert.match(elements.get("studio-simulation-summary").textContent,/возможных касаний/);
 await refreshComparison();
 assert.equal(queries.at(-1).simulate,true,
   "Manual edits must preserve the current simulation and its parameters");
+const beforeCalibration=queries.length;
+context.request=async requestValue=>{
+  queries.push(requestValue.query);
+  return {...saved,reference_reviewed:true,reference_rallies:[{start:10,end:30}],
+    trajectory_status:"ready",simulated_touch_candidates:[12],
+    calibration:{in_sample_only:true,training_videos:1,baseline:{f1:0.4},fitted:{f1:0.8}},
+    parameters:{min_impacts:1,context_frames:0,min_duration_frames:30,max_touch_gap_frames:105}};
+};
+await refreshComparison(true,true);
+assert.equal(queries.length,beforeCalibration+1);
+assert.equal(queries.at(-1).simulate,true);
+assert.equal(queries.at(-1).calibrate,true);
+assert.ok(sidebar.some(item=>item.type==="set"&&item.key==="training-simulation"&&
+  item.details.stage.includes("Подбор параметров")));
+assert.equal(sidebar.at(-1).type,"clear");
+assert.equal(comparison.calibrate.disabled,false);
+assert.equal(comparison.minImpacts.value,1);
+assert.equal(comparison.context.value,0);
+assert.equal(comparison.gap.value,105);
+assert.ok(elements.get("studio-comparison-metrics").children.some(
+  row=>row.children[0]?.textContent.includes("Подбор по этому видео")),
+  "Calibration must be marked in-sample rather than general validation");
 console.log("Training comparison: source guard, editable params, separate timeline overlays and discrepancy navigation: OK");

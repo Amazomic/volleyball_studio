@@ -28,6 +28,7 @@ pub struct CompareQuery {
     min_duration_frames: Option<u64>,
     max_touch_gap_frames: Option<u64>,
     simulate: Option<bool>,
+    calibrate: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -363,6 +364,74 @@ fn impacts_within_rallies(impacts: &[u64], rallies: &[Interval]) -> Vec<u64> {
         .collect()
 }
 
+fn fit_trajectory_settings(
+    impacts: &[u64],
+    frames: u64,
+    settings: RallySettings,
+    reviewed: &[Interval],
+) -> Option<(RallySettings, Value, Value)> {
+    if reviewed.is_empty()
+        || impacts.is_empty()
+        || reviewed.len() > 256
+        || impacts.len() > 8192
+        || reviewed.len().saturating_mul(impacts.len()) > 250_000
+        || frames < 2
+    {
+        return None;
+    }
+    let evaluate = |candidate: RallySettings| {
+        let predicted = preliminary_rally_intervals(impacts, frames, candidate)
+            .into_iter()
+            .map(|(start, end)| Interval { start, end })
+            .collect::<Vec<_>>();
+        match_intervals(reviewed, &predicted).0
+    };
+    let baseline = evaluate(settings);
+    let mut best = settings;
+    let mut best_metrics = baseline.clone();
+    let error_count = |metric: &Value| {
+        metric["extra"]
+            .as_u64()
+            .unwrap_or(u64::MAX)
+            .saturating_add(metric["missed"].as_u64().unwrap_or(u64::MAX))
+    };
+    let boundary_error = |metric: &Value| {
+        metric["mean_boundary_error_ms"]
+            .as_f64()
+            .unwrap_or(f64::INFINITY)
+    };
+    for min_impacts in [1, 2, 3, 4, 5] {
+        for context in [0, 15, 30, 45, 60, 90] {
+            for duration in [15, 30, 45, 60, 90, 120] {
+                for gap in [90, 105, 120] {
+                    let candidate = RallySettings {
+                        min_touch_candidates: min_impacts,
+                        suggested_context_frames: context,
+                        min_rally_frames: duration,
+                        max_without_touch_frames: gap,
+                        ..settings
+                    };
+                    let score = evaluate(candidate);
+                    let f1 = score["f1"].as_f64().unwrap_or(0.0);
+                    let current_f1 = best_metrics["f1"].as_f64().unwrap_or(0.0);
+                    let tie = (f1 - current_f1).abs() < 1e-9;
+                    if f1 > current_f1 + 1e-9
+                        || (tie
+                            && (error_count(&score) < error_count(&best_metrics)
+                                || (error_count(&score) == error_count(&best_metrics)
+                                    && boundary_error(&score) + 1e-6
+                                        < boundary_error(&best_metrics))))
+                    {
+                        best = candidate;
+                        best_metrics = score;
+                    }
+                }
+            }
+        }
+    }
+    Some((best, baseline, best_metrics))
+}
+
 fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result<Value, ApiError> {
     let (cpu, cpu_touches) = cpu_intervals(run)?;
     let truth = touch_annotation::comparison_truth(state, run)?;
@@ -378,45 +447,82 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         })
         .transpose()?;
     let reviewed = truth.as_ref().is_some_and(|(_, _, reviewed)| *reviewed);
-    let saved = saved_impacts(state, run, query.simulate.unwrap_or(false))?;
-    let (trajectory, impacts, parameters, status, source) =
-        if let Some((impacts, mut settings, source)) = saved {
-            if let Some(n) = query.min_impacts {
-                settings.min_touch_candidates = n;
+    let calibration_requested = query.calibrate.unwrap_or(false);
+    let saved = saved_impacts(
+        state,
+        run,
+        query.simulate.unwrap_or(false) || calibration_requested,
+    )?;
+    let (trajectory, impacts, parameters, status, source, calibration) = if let Some((
+        impacts,
+        mut settings,
+        source,
+    )) = saved
+    {
+        if let Some(n) = query.min_impacts {
+            settings.min_touch_candidates = n;
+        }
+        if let Some(n) = query.context_frames {
+            settings.suggested_context_frames = n;
+        }
+        if let Some(n) = query.min_duration_frames {
+            settings.min_rally_frames = n;
+        }
+        if let Some(n) = query.max_touch_gap_frames {
+            settings.max_without_touch_frames = n;
+        }
+        settings.validate().map_err(storage::bad_request)?;
+        let calibration = if calibration_requested {
+            if !reviewed {
+                return Err(storage::bad_request(
+                    "Confirm the rally annotations before calibrating trajectory parameters",
+                ));
             }
-            if let Some(n) = query.context_frames {
-                settings.suggested_context_frames = n;
-            }
-            if let Some(n) = query.min_duration_frames {
-                settings.min_rally_frames = n;
-            }
-            if let Some(n) = query.max_touch_gap_frames {
-                settings.max_without_touch_frames = n;
-            }
-            settings.validate().map_err(storage::bad_request)?;
-            let intervals = preliminary_rally_intervals(&impacts, run.frames, settings)
-                .into_iter()
-                .map(|(start, end)| Interval::new(start, end, run.frames))
-                .collect::<Result<Vec<_>, _>>()?;
-            (
-                intervals,
-                impacts,
-                json!({"min_impacts":settings.min_touch_candidates,
+            let reviewed_intervals = reference.as_deref().unwrap_or(&[]);
+            let (fitted, baseline, optimized) =
+                    fit_trajectory_settings(&impacts, run.frames, settings, reviewed_intervals)
+                        .ok_or_else(|| storage::bad_request(
+                            "Calibration requires approved rallies and a bounded number of saved trajectory impacts",
+                        ))?;
+            settings = fitted;
+            Some(json!({"method":"bounded_rally_parameter_sweep_v1",
+                    "training_videos":1,"in_sample_only":true,
+                    "baseline":baseline,"fitted":optimized,
+                    "source_replay_sha256":run.replay_sha,
+                    "published_cpu_unchanged":true}))
+        } else {
+            None
+        };
+        let intervals = preliminary_rally_intervals(&impacts, run.frames, settings)
+            .into_iter()
+            .map(|(start, end)| Interval::new(start, end, run.frames))
+            .collect::<Result<Vec<_>, _>>()?;
+        (
+            intervals,
+            impacts,
+            json!({"min_impacts":settings.min_touch_candidates,
                 "context_frames":settings.suggested_context_frames,
                 "min_duration_frames":settings.min_rally_frames,
                 "max_touch_gap_frames":settings.max_without_touch_frames.min(120)}),
-                "ready",
-                source,
-            )
-        } else {
-            (
-                Vec::new(),
-                Vec::new(),
-                Value::Null,
-                "unavailable",
-                "missing_saved_trajectory",
-            )
-        };
+            "ready",
+            source,
+            calibration,
+        )
+    } else {
+        if calibration_requested {
+            return Err(storage::bad_request(
+                "No saved ball trajectory is available for rally calibration",
+            ));
+        }
+        (
+            Vec::new(),
+            Vec::new(),
+            Value::Null,
+            "unavailable",
+            "missing_saved_trajectory",
+            None,
+        )
+    };
     let simulated_touches = impacts_within_rallies(&impacts, &trajectory);
     let cpu_vs_simulated_touches = (status == "ready")
         .then(|| touch_annotation::compare_touch_frames(&cpu_touches, &simulated_touches));
@@ -457,6 +563,7 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         "cpu_touch_candidates":cpu_touches,
         "touch_metrics":{"cpu_trajectory":cpu_vs_simulated_touches,
                          "reference":touch_reference},
+        "calibration":calibration,
         "simulation_touch_status":"unverified_ball_direction_change",
         "cpu_rallies":cpu,"trajectory_rallies":trajectory,
         "reference_rallies":reference,"reference_reviewed":reviewed,
@@ -565,6 +672,58 @@ mod tests {
             vec![10, 20, 30, 110]
         );
         assert!(impacts_within_rallies(&impacts, &[]).is_empty());
+    }
+
+    #[test]
+    fn calibration_improves_reviewed_rally_boundaries_without_changing_impacts() {
+        let impacts = [100, 120, 200, 220, 500, 520, 600, 620];
+        let reviewed = [
+            Interval {
+                start: 100,
+                end: 220,
+            },
+            Interval {
+                start: 500,
+                end: 620,
+            },
+        ];
+        let defaults = RallySettings::default();
+        let original = impacts;
+        let (recommended, baseline, calibrated) =
+            fit_trajectory_settings(&impacts, 900, defaults, &reviewed).unwrap();
+        assert_eq!(impacts, original);
+        assert_eq!(recommended.suggested_context_frames, 0);
+        assert_eq!(calibrated["matched"], 2);
+        assert_eq!(calibrated["missed"], 0);
+        assert_eq!(calibrated["extra"], 0);
+        assert!(calibrated["f1"].as_f64().unwrap() >= baseline["f1"].as_f64().unwrap());
+        assert!(
+            calibrated["mean_boundary_error_ms"].as_f64().unwrap()
+                < baseline["mean_boundary_error_ms"].as_f64().unwrap()
+        );
+    }
+
+    #[test]
+    fn calibration_requires_approved_nonempty_bounded_reference() {
+        let impacts = [100, 120, 200, 220];
+        let defaults = RallySettings::default();
+        assert!(fit_trajectory_settings(&impacts, 500, defaults, &[]).is_none());
+        let too_many = vec![
+            Interval {
+                start: 100,
+                end: 200
+            };
+            257
+        ];
+        assert!(fit_trajectory_settings(&impacts, 500, defaults, &too_many).is_none());
+        let good = [Interval {
+            start: 100,
+            end: 220,
+        }];
+        assert!(fit_trajectory_settings(&vec![10; 8193], 500, defaults, &good).is_none());
+        assert!(fit_trajectory_settings(&[], 500, defaults, &good).is_none());
+        let expensive = vec![Interval { start: 10, end: 40 }; 256];
+        assert!(fit_trajectory_settings(&vec![10; 1000], 2000, defaults, &expensive).is_none());
     }
 
     #[test]

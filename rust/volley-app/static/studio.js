@@ -1466,6 +1466,7 @@
     differences:$("studio-comparison-differences"),
     filter:$("studio-comparison-filter"),
     recalculate:$("studio-comparison-recalculate"),
+    calibrate:$("studio-comparison-calibrate"),
     minImpacts:$("studio-comparison-min-impacts"),
     context:$("studio-comparison-context"),
     duration:$("studio-comparison-duration"),
@@ -1486,6 +1487,7 @@
     for(const input of [comparison.minImpacts,comparison.context,comparison.duration,comparison.gap])
       input.disabled=!data;
     comparison.recalculate.disabled=!data;
+    comparison.calibrate.disabled=!data || !data.reference_reviewed;
     if(!data){
       comparison.summary.textContent="Результат моделирования ещё не рассчитан";
       comparison.metrics.textContent="Сравнение ещё не загружено.";
@@ -1516,6 +1518,11 @@
     addMetric("Совпали (IoU ≥ 0,5)",String(cpu.matched));
     addMetric("Только CPU / только мяч",cpu.missed+" / "+cpu.extra);
     addMetric("F1 между детекторами",(cpu.f1*100).toFixed(1)+"%");
+    if(data.calibration){
+      const before=data.calibration.baseline.f1*100;
+      const after=data.calibration.fitted.f1*100;
+      addMetric("Подбор по этому видео · F1",before.toFixed(1)+"% → "+after.toFixed(1)+"%");
+    }
     if(data.reference_reviewed&&data.metrics.cpu_reference&&data.metrics.trajectory_reference){
       addMetric("CPU против эталона · F1",(data.metrics.cpu_reference.f1*100).toFixed(1)+"%");
       addMetric("Мяч против эталона · F1",(data.metrics.trajectory_reference.f1*100).toFixed(1)+"%");
@@ -1580,19 +1587,21 @@
       comparison.differences.append(more);
     }
   };
-  const refreshComparison=async(useControls=false)=>{
+  const refreshComparison=async(useControls=false,calibrate=false)=>{
     const epoch=++comparison.epoch,project=s.project,run=s.run,video=s.video;
     if(!training.active||!project||!run||!video){
       comparison.data=null;comparison.sourceKey="";comparison.simulated=false;
+      window.VolleyballTasks?.clear("training-simulation");
       comparison.status.textContent="Выберите видео и CPU-постобработку.";
       renderComparison();return;
     }
     const key=project+":"+run+":"+video;
     const sameSource=comparison.sourceKey===key;
-    const simulate=useControls||(sameSource&&comparison.simulated);
+    const simulate=useControls||calibrate||(sameSource&&comparison.simulated);
     if(!sameSource)comparison.simulated=false;
     comparison.status.textContent="Сравниваем выбранную CPU-версию и сохранённую траекторию мяча…";
     comparison.recalculate.disabled=true;
+    comparison.calibrate.disabled=true;
     const options={project_id:project,rally_run_id:run};
     if(simulate){
       options.simulate=true;
@@ -1601,6 +1610,12 @@
       options.min_duration_frames=Number(comparison.duration.value);
       options.max_touch_gap_frames=Number(comparison.gap.value);
     }
+    if(calibrate)options.calibrate=true;
+    window.VolleyballTasks?.set("training-simulation",{
+      label:"Дообучение",
+      stage:calibrate?"Подбор параметров по эталону":simulate?"Моделирование розыгрышей и касаний":"Сравнение алгоритмов",
+      progress:null
+    });
     try{
       const data=await request(url("/api/training/rally-comparison",options));
       if(epoch!==comparison.epoch||project!==s.project||run!==s.run||
@@ -1617,7 +1632,9 @@
         comparison.duration.value=data.parameters.min_duration_frames;
         comparison.gap.value=data.parameters.max_touch_gap_frames;
       }
-      comparison.status.textContent=data.trajectory_status==="ready"?
+      comparison.status.textContent=data.calibration?
+        "Параметры подобраны по подтверждённой разметке текущего видео. Это обучение на примере, не независимая оценка точности.":
+        data.trajectory_status==="ready"?
         "Результат по сохранённой траектории VBallNet; возможные касания не подтверждены игроками и не классифицированы.":
         "Траекторных интервалов нет в этой CPU-версии.";
       renderComparison();
@@ -1628,9 +1645,12 @@
       comparison.simulated=false;
       comparison.status.textContent="Ошибка сравнения: "+error.message;
       renderComparison();drawTimeline();
+    }finally{
+      if(epoch===comparison.epoch)window.VolleyballTasks?.clear("training-simulation");
     }
   };
   comparison.recalculate.addEventListener("click",()=>void refreshComparison(true));
+  comparison.calibrate.addEventListener("click",()=>void refreshComparison(true,true));
   comparison.filter.addEventListener("change",()=>{comparison.shown=200;renderComparison();});
   const annotationContext={
     root:$("studio-annotation-context"),
