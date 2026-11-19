@@ -1584,6 +1584,12 @@ async fn pipeline(
                         },
                     )
                 })?;
+                crate::preparation::primary_preview::enqueue(
+                    app.clone(),
+                    request.project_id.clone(),
+                    request.video.clone(),
+                    result.source_provenance.clone(),
+                );
                 log_event(
                     path,
                     "Общий GPU",

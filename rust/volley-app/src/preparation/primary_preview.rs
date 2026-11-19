@@ -10,9 +10,82 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use serde_json::json;
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use serde_json::{json, Value};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
+};
 use volley_media::preparation::primary_preview::{scope_root, PrimaryPreviewPlan};
+
+static ENCODING: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+fn active_previews() -> &'static Mutex<HashSet<PathBuf>> {
+    ENCODING.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+pub(crate) fn has_active() -> bool {
+    active_previews()
+        .lock()
+        .map_or(true, |guard| !guard.is_empty())
+}
+
+struct ActivePreview(PathBuf);
+
+impl Drop for ActivePreview {
+    fn drop(&mut self) {
+        if let Ok(mut active) = active_previews().lock() {
+            active.remove(&self.0);
+        }
+    }
+}
+
+pub(crate) fn enqueue(
+    state: Arc<AppState>,
+    project: String,
+    video: String,
+    expected_source: Value,
+) {
+    if !state.writes_enabled {
+        return;
+    }
+    let key = scope_root(&state.data_root, &project, &video);
+    let Ok(mut running) = active_previews().lock() else {
+        eprintln!("Primary preview queue unavailable: lock poisoned");
+        return;
+    };
+    if !running.insert(key.clone()) {
+        return;
+    }
+    drop(running);
+    tokio::task::spawn_blocking(move || {
+        let _guard = ActivePreview(key);
+        let result = (|| -> Result<(), String> {
+            let saved = projects::existing_project(&state, &project)
+                .map_err(|error| format!("Preview project missing: {error:?}"))?;
+            if !saved["videos"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row.as_str() == Some(&video)))
+            {
+                return Err("Preview video no longer belongs to the project".into());
+            }
+            let source = projects::canonical_source(&state, &video)
+                .map_err(|error| format!("Preview source missing: {error:?}"))?;
+            let verified_source = volley_media::preparation::source_provenance(&source)?;
+            if verified_source != expected_source {
+                return Err("Preview source differs from completed GPU analysis".into());
+            }
+            let plan = PrimaryPreviewPlan::new(&source, &state.data_root, &project, &video)?;
+            volley_media::preparation::primary_preview::encode_separately(
+                &plan,
+                &AtomicBool::new(false),
+            )
+        })();
+        if let Err(error) = result {
+            eprintln!("Independent primary preview unavailable: {error}");
+        }
+    });
+}
 
 pub(crate) async fn ready(
     state: Arc<AppState>,

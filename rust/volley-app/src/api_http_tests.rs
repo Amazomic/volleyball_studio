@@ -658,6 +658,74 @@ async fn primary_preview_http_keeps_two_videos_separate_and_checks_version() {
     server.close().await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn detached_primary_preview_publishes_without_holding_gpu_or_http() {
+    let server = TestServer::spawn(true).await;
+    let project = "123456abcdef";
+    server.seed_project(project);
+    let folder = server.root.join("original/project");
+    fs::create_dir_all(&folder).unwrap();
+    let source = folder.join("match.mp4");
+    assert!(std::process::Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=60:duration=1.5",
+            "-c:v",
+            "libx264",
+            "-threads",
+            "1",
+            "-y",
+        ])
+        .arg(&source)
+        .status()
+        .unwrap()
+        .success());
+    let proof = volley_media::preparation::source_provenance(&source).unwrap();
+    preparation::primary_preview::enqueue(
+        server.state.clone(),
+        project.to_owned(),
+        "match.mp4".to_owned(),
+        proof,
+    );
+    assert!(preparation::primary_preview::has_active());
+    let (code, body) = server
+        .request("GET", "/internal/rewrite-status", None)
+        .await;
+    assert_eq!(code, 200, "{body}");
+    let busy: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(busy["shutdown_safe"], false);
+    assert!(busy["active_jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item == "primary_preview_encoding"));
+    let mut ready = false;
+    for _ in 0..100 {
+        let (code, body) = server
+            .request(
+                "GET",
+                "/api/video-primary-preview?project_id=123456abcdef&video=match.mp4",
+                None,
+            )
+            .await;
+        assert_eq!(code, 200, "{body}");
+        let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if response["state"] == "ready" {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(ready, "Independent preview must publish a playable cache");
+    assert!(!preparation::primary_preview::has_active());
+    server.close().await;
+}
+
 #[tokio::test]
 async fn montage_library_lists_all_projects_and_deletes_only_selected_output() {
     let server = TestServer::spawn(true).await;

@@ -4,7 +4,7 @@ use super::*;
 use crate::pose_inference::{PendingPose, PoseStream};
 use std::cell::RefCell;
 use volley_media::raw_decoder::{
-    decode_full_video_shared_with_preview, DecodeBackend, DecodePreference, PrimaryPreviewOutput,
+    decode_full_video_shared_with_backend_and_tail, DecodeBackend, DecodePreference,
 };
 
 #[derive(Debug)]
@@ -16,6 +16,7 @@ pub(crate) struct JointPair {
     pub windows: usize,
     pub decoded_frames: u64,
     pub pending_pose: Option<PendingPose>,
+    pub source_provenance: Value,
 }
 
 #[derive(Default)]
@@ -165,22 +166,6 @@ pub(crate) fn run_joint_pair(
     ball_config.verify()?;
     person_config.verify()?;
     report(0.0)?;
-    let preview_plan = volley_media::preparation::primary_preview::PrimaryPreviewPlan::new(
-        original,
-        &state.data_root,
-        project_id,
-        video,
-    )?;
-    let preview = if preview_plan.ready_path().is_some() {
-        None
-    } else {
-        Some(preview_plan.begin()?)
-    };
-    let preview_hardware = if preview.is_some() {
-        preview_nvenc_available(original, cancelled)?
-    } else {
-        false
-    };
     let mut ball_engine = Engine::load(&state.repository_root, &ball_config)?;
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
@@ -235,16 +220,12 @@ pub(crate) fn run_joint_pair(
     };
     let pose = RefCell::new(pose);
     let estimated = (duration * 30.0).max(9.0);
-    let summary = decode_full_video_shared_with_preview(
+    let summary = decode_full_video_shared_with_backend_and_tail(
         original,
         9,
         backend_preference()?,
         cpu_threads,
         cancelled,
-        preview.as_ref().map(|write| PrimaryPreviewOutput {
-            path: &write.path,
-            hardware: preview_hardware,
-        }),
         |batch| {
             if cancelled.load(Ordering::Acquire) {
                 return Err("cancelled".into());
@@ -316,17 +297,6 @@ pub(crate) fn run_joint_pair(
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
-    if let Some(preview) = preview {
-        if let Err(error) = preview.publish(cancelled) {
-            // Preview is an optional browser artifact. A bad MP4 must never
-            // discard expensive, already validated ball/player GPU evidence.
-            // Source integrity and cancellation remain fatal.
-            if error == "cancelled" || error == "Preview source changed during analysis" {
-                return Err(error);
-            }
-            eprintln!("Primary preview unavailable (GPU evidence retained): {error}");
-        }
-    }
     report(1.0)?;
     pending.committed = true;
     Ok(JointPair {
@@ -337,57 +307,8 @@ pub(crate) fn run_joint_pair(
         windows: summary.decode.windows,
         decoded_frames: summary.decode.decoded_frames,
         pending_pose,
+        source_provenance: original_provenance,
     })
-}
-
-fn preview_nvenc_available(source: &Path, cancelled: &AtomicBool) -> Result<bool, String> {
-    let info = volley_media::probe(source)?;
-    let scale = (1280.0 / info.width as f64)
-        .min(1280.0 / info.height as f64)
-        .min(1.0);
-    let width = ((info.width as f64 * scale) as u32 / 2 * 2).max(2);
-    let height = ((info.height as f64 * scale) as u32 / 2 * 2).max(2);
-    let input = format!("color=size={width}x{height}:rate=30");
-    let mut child = std::process::Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-f",
-            "lavfi",
-            "-i",
-            &input,
-            "-frames:v",
-            "1",
-            "-c:v",
-            "h264_nvenc",
-            "-f",
-            "null",
-            "-",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Preview encoder preflight: {e}"))?;
-    let start = std::time::Instant::now();
-    loop {
-        if cancelled.load(Ordering::Acquire) || start.elapsed() > std::time::Duration::from_secs(12)
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-            return if cancelled.load(Ordering::Acquire) {
-                Err("cancelled".into())
-            } else {
-                Ok(false)
-            };
-        }
-        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-            return Ok(status.success());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
 }
 
 #[cfg(test)]

@@ -212,6 +212,9 @@ pub(crate) async fn active_job_types(state: &AppState) -> Vec<&'static str> {
     if state.preparation.has_active().await {
         busy.push("video_preparation");
     }
+    if crate::preparation::primary_preview::has_active() {
+        busy.push("primary_preview_encoding");
+    }
     if state.inference_limit.available_permits() == 0 && !busy.contains(&"gpu_inference") {
         busy.push("gpu_inference");
     }

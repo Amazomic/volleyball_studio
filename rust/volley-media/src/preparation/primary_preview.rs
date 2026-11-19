@@ -6,8 +6,10 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 pub const PROFILE: &str = "h264-native-pts-fit1280-v1";
@@ -171,6 +173,85 @@ impl PrimaryPreviewWrite {
     }
 }
 
+pub fn encode_separately(plan: &PrimaryPreviewPlan, cancelled: &AtomicBool) -> Result<(), String> {
+    check_cancelled(cancelled)?;
+    if plan.ready_path().is_some() {
+        return Ok(());
+    }
+    let write = plan.begin()?;
+    let filter = "scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,format=yuv420p";
+    for hardware in [true, false] {
+        check_cancelled(cancelled)?;
+        let mut command = Command::new("ffmpeg");
+        command
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+            .arg(&plan.source)
+            .args([
+                "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-vf", filter, "-c:a", "aac",
+                "-b:a", "128k",
+            ]);
+        if hardware {
+            command.args([
+                "-c:v",
+                "h264_nvenc",
+                "-preset",
+                "p4",
+                "-rc",
+                "vbr",
+                "-cq",
+                "23",
+                "-b:v",
+                "0",
+            ]);
+        } else {
+            command.args([
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", "2",
+            ]);
+        }
+        command
+            .args([
+                "-fps_mode",
+                "passthrough",
+                "-force_key_frames",
+                "expr:gte(t,n_forced*1)",
+                "-map_metadata",
+                "-1",
+                "-metadata:s:v:0",
+                "rotate=0",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+                "-y",
+            ])
+            .arg(&write.path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("Launch independent preview encoding: {e}"))?;
+        let status = loop {
+            if cancelled.load(Ordering::Acquire) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("cancelled".into());
+            }
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| format!("Wait independent preview encoder: {e}"))?
+            {
+                break status;
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+        if status.success() {
+            return write.publish(cancelled);
+        }
+    }
+    Err("Independent preview encoding failed with NVENC and libx264".into())
+}
+
 impl Drop for PrimaryPreviewWrite {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
@@ -184,5 +265,136 @@ fn check_cancelled(cancelled: &AtomicBool) -> Result<(), String> {
         Err("cancelled".into())
     } else {
         Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::raw_decoder::{decode_full_video_shared_with_backend_and_tail, DecodePreference};
+
+    #[test]
+    fn independent_preview_preserves_rotated_native_frame_timing() {
+        let root = std::env::temp_dir().join(format!(
+            "volley-preview-rotation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let base = root.join("base.mp4");
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=60:duration=0.8",
+                "-c:v",
+                "libx264",
+                "-y",
+            ])
+            .arg(&base)
+            .status()
+            .unwrap()
+            .success());
+        let rotated = root.join("rotated.mp4");
+        assert!(Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(&base)
+            .args(["-c", "copy", "-metadata:s:v:0", "rotate=90", "-y"])
+            .arg(&rotated)
+            .status()
+            .unwrap()
+            .success());
+        let plan = PrimaryPreviewPlan::new(&rotated, &root, "p", "rotated.mp4").unwrap();
+        encode_separately(&plan, &AtomicBool::new(false)).unwrap();
+        let encoded = crate::probe(plan.ready_path().unwrap()).unwrap();
+        let original = crate::probe(&rotated).unwrap();
+        assert_eq!(encoded.rotation, 0);
+        assert_eq!(
+            (encoded.width, encoded.height),
+            (original.width, original.height)
+        );
+        assert!((encoded.fps.unwrap() - 60.0).abs() < 0.1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn primary_inference_finishes_without_encoding_and_preview_remains_available() {
+        let root = std::env::temp_dir().join(format!(
+            "volley-separate-preview-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.mp4");
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=25:duration=1.16",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1.16",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+                "-shortest",
+                "-y",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let plan = PrimaryPreviewPlan::new(&source, &root, "p", "source.mp4").unwrap();
+        let cancelled = AtomicBool::new(false);
+        let mut windows = 0;
+        decode_full_video_shared_with_backend_and_tail(
+            &source,
+            9,
+            DecodePreference::Software,
+            2,
+            &cancelled,
+            |_| {
+                windows += 1;
+                Ok(())
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert!(windows > 0);
+        assert!(plan.ready_path().is_none());
+        cancelled.store(true, Ordering::Release);
+        assert_eq!(
+            encode_separately(&plan, &cancelled).unwrap_err(),
+            "cancelled"
+        );
+        assert!(plan.ready_path().is_none());
+        cancelled.store(false, Ordering::Release);
+        encode_separately(&plan, &cancelled).unwrap();
+        assert_eq!(plan.ready_path(), Some(plan.output.as_path()));
+        let probe = crate::ffprobe(&plan.output).unwrap();
+        let info = crate::inspect_probe(&probe).unwrap();
+        assert!((info.fps.unwrap() - 25.0).abs() < 0.1);
+        assert_eq!((info.width, info.height), (320, 180));
+        assert!(probe["streams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stream| stream["codec_type"] == "audio"));
+        encode_separately(&plan, &cancelled).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 }
