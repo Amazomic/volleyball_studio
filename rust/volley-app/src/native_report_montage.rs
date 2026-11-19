@@ -23,6 +23,8 @@ const MAX_CLIPS: usize = 80;
 pub struct ReportRequest {
     project_id: String,
     rally_run_ids: Vec<String>,
+    #[serde(default)]
+    preferred_rally_run_id: Option<String>,
     #[serde(default = "default_operation")]
     operation: String,
     #[serde(default)]
@@ -340,6 +342,7 @@ pub async fn report(
     let include_statistics = req.include_statistics;
     let include_recognition_data = req.include_recognition_data;
     let camera_zoom = req.camera_zoom;
+    let preferred_rally_run_id = req.preferred_rally_run_id.clone();
     let worker = state.clone();
     let plan = tokio::task::spawn_blocking(move || {
         let _guard = project_guard::write_guard(&worker, &req.project_id)?;
@@ -363,6 +366,7 @@ pub async fn report(
         headers,
         Json(montage::MontageRequest {
             materials,
+            preferred_rally_run_id,
             project_id,
             clips: plan.clips,
             audio_file,

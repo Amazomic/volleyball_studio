@@ -32,6 +32,8 @@ pub struct Request {
     #[serde(default)]
     target_duration_sec: Option<f64>,
     rally_run_ids: Vec<String>,
+    #[serde(default)]
+    preferred_rally_run_id: Option<String>,
     #[serde(default = "preview")]
     operation: String,
     #[serde(default = "auto")]
@@ -534,6 +536,7 @@ pub async fn highlights(
     let target_duration_sec = request.target_duration_sec;
     let camera_zoom = request.camera_zoom;
     let include_recognition_data = request.include_recognition_data;
+    let preferred_rally_run_id = request.preferred_rally_run_id.clone();
     let state_copy = state.clone();
     let planned = tokio::task::spawn_blocking(move || {
         let _guard = project_guard::write_guard(&state_copy, &request.project_id)?;
@@ -579,6 +582,7 @@ pub async fn highlights(
         headers,
         Json(montage::MontageRequest {
             materials,
+            preferred_rally_run_id,
             project_id,
             clips: planned.clips,
             audio_file,

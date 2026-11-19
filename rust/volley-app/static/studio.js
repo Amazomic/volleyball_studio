@@ -3046,6 +3046,7 @@
         " · "+(Number.isFinite(percentage)?percentage.toFixed(0)+"%":"—");
       if(["complete","completed","done"].includes(result.state)){
         stopPoll();ui.cancel.classList.add("hidden");ui.render.disabled=false;
+        window.dispatchEvent(new Event("volley:montage-complete"));
         if(typeof result.media_url==="string"&&
           result.media_url.startsWith("/api/montage/native/media?")){
           ui.download.href=result.media_url;ui.download.classList.remove("hidden");
@@ -3358,6 +3359,24 @@
         throw Error("Новая CPU-постобработка не привязана к GPU-версии");
     }catch(e){failed(e);}
   });
+  window.VolleyballStudioApplyMontageAnalysis=async ({project_id,source_run_ids})=>{
+    if(!/^[a-f0-9]{12}$/.test(project_id||"")||
+        !Array.isArray(source_run_ids)||!source_run_ids.length)
+      throw Error("У ролика не сохранена исходная версия анализа");
+    await projects(project_id);
+    if(s.project!==project_id)throw Error("Не удалось выбрать исходный проект");
+    const source=new Set(source_run_ids.filter(id=>/^[a-f0-9]{32}$/.test(id)));
+    const matched=[...(s.chain?.byAnalysis||new Map())].flatMap(([analysis,runs])=>
+      runs.filter(row=>source.has(row.rally_run_id)).map(row=>({
+        analysis,run:row.rally_run_id
+      })));
+    if(!matched.length)throw Error("Исходная CPU-версия недоступна в проекте");
+    const selected=matched.find(row=>row.run===source_run_ids[0])||matched[0];
+    ui.analysis.value=selected.analysis;
+    await setAnalysis(selected.run);
+    if(s.run!==selected.run)throw Error("Выбранная версия анализа не восстановлена");
+    $("studio-nav-preview")?.click();
+  };
   window.addEventListener("volley:open-legacy-project",async event=>{
     const id=event.detail?.project_id;
     if(typeof id!=="string"||!/^[a-f0-9]{12}$/.test(id))return;

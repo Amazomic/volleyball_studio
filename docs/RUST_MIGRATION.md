@@ -2462,3 +2462,10 @@ Studio показывает кнопку перехода между debug и re
 - PASS: cargo fmt; Rust cached_auto_match_tests, automatic_photo; Node test_studio_auto_assign_responsive, test_studio_sidebar_tasks, test_studio_group_gallery, test_studio_track_assignment, test_studio_identity_sync, test_studio_wasm_ui, test_studio_dom_ids; check_rust_ownership; git diff --check.
 - Общий scripts/check-all.ps1: FAIL по существующим предупреждениям Clippy в volley-core/volley-inference, известному storage-тесту и другим сторонним UI/packaging harness-тестам. Новый UI-тест автопривязки в общем прогоне PASS. Реальная задержка на пользовательском видео и новый GPU/OpenVINO-инференс не измерялись.
 - Применение к Studio: только после проверки shutdown_safe и отсутствия active_jobs. Нельзя затирать несохранённые изменения другой рабочей копии.
+### 2026-11-19 — Общая библиотека готовых видео
+
+- База 33d38b7, изолированная ветка feature/studio-video-library-20261119. Rust-монтаж, HTTP, UI и переводы.
+- Две квадратные кнопки внизу: безопасный перезапуск и библиотека созданных роликов из всех проектов. Поиск, проект, дата, длительность, просмотр, скачивание, подтверждённое удаление и восстановление выбранной CPU-версии из сохранённых монтажных материалов. Для прежних роликов без подтверждённого источника действие отключено.
+- PASS: 16 in-process HTTP тестов, сборка Rust/WASM, cargo fmt --check, test_volley_web_wasm.mjs, test_studio_dom_ids.mjs, test_studio_viewport_layout.mjs, test_studio_montage_tab.mjs, check_rust_ownership.mjs --self-test, node --check, git diff --check.
+- Полный scripts/check-all.ps1: FAIL — сторонние Clippy-ошибки volley-core и volley-inference, один тест storage и часть устаревших UI-тестов (не менялись). Визуальный браузерный тест и реальное MP4: NOT TESTED.
+- Применение: в изолированной ветке, рабочая копия студии с незавершёнными изменениями пока не перезаписывается.

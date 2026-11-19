@@ -352,6 +352,10 @@
                                            "handler":  "montage::native_library"
                                        },
                                        {
+                                           "path":  "/api/montage/native/delete",
+                                           "handler":  "montage::native_delete"
+                                       },
+                                       {
                                            "path":  "/api/montage/native/audio",
                                            "handler":  "montage::native_upload_audio"
                                        },

@@ -21,6 +21,7 @@
   <script src="/studio/tracks.js" defer></script>
   <script src="/studio/stats.js" defer></script>
   <script src="/studio/montage-builder.js" defer></script>
+  <script src="/studio/video-library.js" defer></script>
   <script src="/studio/quick-reel.js" defer></script>
 </head>
 <body>
@@ -41,13 +42,31 @@
           <div class="studio-sidebar-tasks-heading"><span class="studio-sidebar-tasks-indicator" aria-hidden="true"></span>Выполняется</div>
           <div id="studio-sidebar-task-list" class="studio-sidebar-task-list"></div>
         </section>
-        <button id="studio-restart" class="studio-sidebar-restart" type="button" title="Безопасно перезапустить студию" aria-label="Перезапустить студию">
-          <span class="studio-sidebar-restart-icon" aria-hidden="true">↻</span>
-          <span>Перезапустить студию</span>
-        </button>
+        <div class="studio-sidebar-actions">
+          <button id="studio-restart" class="studio-sidebar-restart" type="button" title="Безопасно перезапустить студию" aria-label="Перезапустить студию">
+            <svg class="studio-sidebar-action-icon" viewBox="0 0 28 28" aria-hidden="true" fill="none"><rect x="3.5" y="3.5" width="21" height="21" rx="5" stroke="currentColor" opacity=".55"/><path d="M20 11a7 7 0 1 0 1 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M20 6v5h-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button id="studio-video-library-toggle" class="studio-sidebar-video-toggle" type="button" title="Все созданные видео" aria-label="Открыть библиотеку видео" aria-controls="studio-video-library" aria-expanded="false">
+            <svg class="studio-sidebar-action-icon" viewBox="0 0 40 40" aria-hidden="true" fill="none"><path d="M20 8v26M4 16h32M4 25h32M4 34h32" stroke="currentColor" opacity=".5" stroke-width="1.2"/><circle cx="23" cy="5" r="2.5" fill="currentColor"/><circle cx="11" cy="13" r="2.6" fill="currentColor"/><circle cx="31" cy="12" r="2.6" fill="currentColor"/><path d="m10 17-2 7-4 5m6-10 6-5 3-6m-9 11 5 6-1 8m17-17-5 6-3-8m8 7 4 5m-7-9-5-6-2-7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
         <small id="studio-restart-status" class="studio-sidebar-restart-status hidden" role="status" aria-live="polite"></small>
       </div>
     </aside>
+    <aside id="studio-video-library" class="studio-video-library hidden" aria-label="Видео в студии" aria-modal="false">
+      <div class="studio-video-library-head">
+        <div><h2>Видео в студии</h2><p>Готовые ролики из всех проектов</p></div>
+        <button id="studio-video-library-close" class="studio-video-icon-button" type="button" aria-label="Закрыть библиотеку">✕</button>
+      </div>
+      <label class="sr-only" for="studio-video-library-search">Поиск готовых видео</label>
+      <input id="studio-video-library-search" type="search" placeholder="Поиск по проекту или видео…">
+      <p id="studio-video-library-status" class="studio-video-library-status" role="status" aria-live="polite"></p>
+      <div id="studio-video-library-list" class="studio-video-library-list"></div>
+    </aside>
+    <dialog id="studio-video-library-player" class="studio-video-library-player" aria-label="Просмотр созданного видео">
+      <div class="studio-video-player-head"><strong id="studio-video-player-title">Созданное видео</strong><button id="studio-video-player-close" class="studio-video-icon-button" type="button" aria-label="Закрыть видео">✕</button></div>
+      <video id="studio-video-player-media" controls playsinline preload="metadata"></video>
+    </dialog>
     <main class="main">
       <header class="topbar studio-chain-topbar">
         <div class="studio-source-chain" role="group" aria-label="Связанные версии проекта, анализа и постобработки">

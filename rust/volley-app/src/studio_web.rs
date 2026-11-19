@@ -36,6 +36,7 @@ const TABS_SCRIPT: &str = include_str!("../static/studio_tabs.js");
 const TRACKS_SCRIPT: &str = include_str!("../static/studio_tracks.js");
 const STATS_SCRIPT: &str = include_str!("../static/studio_stats.js");
 const MONTAGE_BUILDER_SCRIPT: &str = include_str!("../static/studio_montage_builder.js");
+const VIDEO_LIBRARY_SCRIPT: &str = include_str!("../static/studio_video_library.js");
 const QUICK_REEL_SCRIPT: &str = include_str!("../static/studio_quick_reel.js");
 const SELECTION_WASM: &[u8] = include_bytes!("../static/volley_web.wasm");
 const HTML: &str = include_str!("../static/studio.html");
@@ -200,6 +201,13 @@ pub async fn montage_builder_js() -> Response {
         "text/javascript; charset=utf-8",
         "studio_montage_builder.js",
         MONTAGE_BUILDER_SCRIPT,
+    )
+}
+pub async fn video_library_js() -> Response {
+    studio_asset(
+        "text/javascript; charset=utf-8",
+        "studio_video_library.js",
+        VIDEO_LIBRARY_SCRIPT,
     )
 }
 pub async fn quick_reel_js() -> Response {

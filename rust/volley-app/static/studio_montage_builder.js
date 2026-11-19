@@ -133,6 +133,7 @@
   const payload=(operation)=>{
     const value={
       project_id:st.project,operation,rally_run_ids:selectedRuns(),
+      preferred_rally_run_id:selectedRuns().includes(ui.run.value)?ui.run.value:null,
       target_duration_sec:lengthSec(),
       layout:ui.layout.value==="vertical"&&ui.camera.value==="on"?
         "vertical_follow":ui.layout.value,
@@ -222,6 +223,8 @@
         Math.round(Number(status.overall_percent)||0)+"%";
       if(status.state==="complete"){
         stopPoll();ui.cancel.classList.add("hidden");
+        if(typeof window.dispatchEvent==="function")
+          window.dispatchEvent(new Event("volley:montage-complete"));
         if(typeof status.media_url==="string"&&
           status.media_url.startsWith("/api/montage/native/media?")){
           ui.download.href=status.media_url;ui.download.classList.remove("hidden");

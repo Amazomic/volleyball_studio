@@ -657,3 +657,117 @@ async fn primary_preview_http_keeps_two_videos_separate_and_checks_version() {
     assert_eq!(server.request("GET", &forged, None).await.0, 409);
     server.close().await;
 }
+
+#[tokio::test]
+async fn montage_library_lists_all_projects_and_deletes_only_selected_output() {
+    let server = TestServer::spawn(true).await;
+    let project_a = "123456abcdef";
+    let project_b = "abcdef123456";
+    let montage_a = format!("montage_{}", "a".repeat(32));
+    let montage_b = format!("montage_{}", "b".repeat(32));
+    let run = "c".repeat(32);
+    fs::create_dir_all(server.root.join("sandbox/projects").join(project_a)).unwrap();
+    fs::create_dir_all(server.root.join("sandbox/projects").join(project_b)).unwrap();
+    storage::write_json_atomic(
+        &server.root.join("sandbox/projects/projects.json"),
+        &serde_json::json!({"projects":[
+            {"id":project_a,"name":"Первый матч","videos":["match_a.mp4"]},
+            {"id":project_b,"name":"Второй матч","videos":["match_b.mp4"]}
+        ]}),
+    )
+    .unwrap();
+    for (project, montage) in [(project_a, &montage_a), (project_b, &montage_b)] {
+        let folder = server
+            .root
+            .join("sandbox/projects")
+            .join(project)
+            .join("montages")
+            .join(montage);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("montage.mp4"), vec![7_u8; 2048]).unwrap();
+        storage::write_json_atomic(
+            &folder.join("selection.json"),
+            &serde_json::json!({
+                "schema":"volley-rust-montage/1",
+                "id":montage,
+                "project_id":project,
+                "render_source":"original_recording",
+                "file":"montage.mp4",
+                "duration_sec":32.0,
+                "preferred_rally_run_id":run,
+                "montage_materials":[{"rally_run_id":run}]
+            }),
+        )
+        .unwrap();
+    }
+    let (code, body) = server
+        .request("GET", "/api/montage/native/library", None)
+        .await;
+    assert_eq!(code, 200, "{body}");
+    let found: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(found["videos"].as_array().unwrap().len(), 2);
+    assert!(found["videos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["project_id"] == project_a
+            && item["project_name"] == "Первый матч"
+            && item["source_run_ids"][0] == run
+            && item["preferred_rally_run_id"] == run));
+    let (code, body) = server
+        .request(
+            "GET",
+            &format!("/api/montage/native/library?project_id={project_b}"),
+            None,
+        )
+        .await;
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["videos"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let request = serde_json::json!({"project_id":project_a,"job_id":montage_a}).to_string();
+    let (code, body) = server
+        .request("POST", "/api/montage/native/delete", Some(&request))
+        .await;
+    assert_eq!(code, 200, "{body}");
+    assert!(!server
+        .root
+        .join("sandbox/projects")
+        .join(project_a)
+        .join("montages")
+        .join(&montage_a)
+        .exists());
+    assert!(server
+        .root
+        .join("sandbox/projects")
+        .join(project_b)
+        .join("montages")
+        .join(&montage_b)
+        .join("montage.mp4")
+        .exists());
+    let (code, body) = server
+        .request("GET", "/api/montage/native/library", None)
+        .await;
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["videos"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let (code, _) = server
+        .request("POST", "/api/montage/native/delete", Some(&request))
+        .await;
+    assert_eq!(code, 404);
+    let invalid = serde_json::json!({"project_id":project_b,"job_id":"../../evil"}).to_string();
+    let (code, _) = server
+        .request("POST", "/api/montage/native/delete", Some(&invalid))
+        .await;
+    assert!(code == 400 || code == 404);
+    server.close().await;
+}

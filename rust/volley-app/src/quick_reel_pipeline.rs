@@ -263,6 +263,7 @@ async fn quick_montage(
         HeaderMap::new(),
         Json(montage::MontageRequest {
             materials,
+            preferred_rally_run_id: None,
             project_id: work.project_id.clone(),
             clips,
             audio_file: Some(audio),

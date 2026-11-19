@@ -1812,3 +1812,35 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 @keyframes track-auto-pulse{50%{filter:brightness(1.22)}}
 @keyframes track-auto-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.track-auto-assign.is-working,.track-auto-assign.is-working::after{animation:none}}
+.studio-sidebar-actions{display:flex;gap:12px;align-items:center;padding:0 12px}
+.studio-sidebar-actions .studio-sidebar-restart,.studio-sidebar-video-toggle{display:grid;place-items:center;flex:0 0 49px;width:49px;height:49px;min-height:49px;padding:8px;border:1px solid #365376;border-radius:11px;background:linear-gradient(155deg,#223957,#101f35);color:#b7d8ff;box-shadow:0 5px 16px #0003}
+.studio-sidebar-actions .studio-sidebar-restart:hover:not(:disabled),.studio-sidebar-video-toggle:hover:not(:disabled),.studio-sidebar-video-toggle[aria-expanded="true"]{border-color:#70b3ff;color:#fff;background:#214773;box-shadow:0 0 13px #2e83e944}
+.studio-sidebar-action-icon{width:30px;height:30px;flex:none}
+.studio-sidebar-video-toggle .studio-sidebar-action-icon{width:34px;height:34px}
+.studio-video-library{position:fixed;z-index:110;right:0;top:86px;bottom:0;width:min(440px,calc(100vw - 56px));display:flex;flex-direction:column;gap:12px;min-height:0;background:#111d2f;border:1px solid #345078;border-right:0;border-radius:12px 0 0 0;box-shadow:-16px 0 36px #0008;padding:18px 16px 15px}
+.studio-video-library-head{display:flex;align-items:start;justify-content:space-between;gap:12px}
+.studio-video-library-head h2{margin:0;font-size:19px}
+.studio-video-library-head p{margin:5px 0 0;color:#9cb0cd;font-size:11px}
+.studio-video-icon-button{display:grid;place-items:center;flex:none;width:30px;height:30px;padding:0;background:#1c2c45;color:#dbe9fb;border:1px solid #324764;border-radius:8px}
+.studio-video-icon-button:hover{background:#28466a;border-color:#6195d3}
+#studio-video-library-search{width:100%;min-height:39px;border:1px solid #385171;border-radius:8px;background:#132238;color:#e9f4ff;padding:9px 11px}
+.studio-video-library-status{min-height:18px;margin:0;color:#98b1d3;font-size:11px}
+.studio-video-library-list{min-height:0;overflow-y:auto;scrollbar-gutter:stable;display:grid;gap:14px;align-content:start;padding-right:4px}
+.studio-video-group{display:grid;gap:6px}
+.studio-video-group h3{display:flex;align-items:center;gap:8px;margin:4px 0;font-size:13px;color:#d9e9ff}
+.studio-video-group h3 svg{width:16px;height:16px;flex:none;color:#79b9ff}
+.studio-video-entry{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;border:1px solid #2d4260;border-radius:10px;background:#19283f;padding:9px 8px 9px 11px}
+.studio-video-entry-details{min-width:0}
+.studio-video-entry-name{font-size:12px;color:#edf5ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.studio-video-entry-meta{color:#96b0d1;font-size:10px;margin-top:5px}
+.studio-video-entry-actions{display:flex;align-items:center;gap:5px}
+.studio-video-entry-actions button,.studio-video-entry-actions a{display:grid;place-items:center;width:29px;height:29px;padding:0;background:#243852;border:1px solid #334d6c;color:#cfe4ff;border-radius:7px;font-size:17px}
+.studio-video-entry-actions button:hover,.studio-video-entry-actions a:hover{background:#31547b;border-color:#6599d5}
+.studio-video-entry-actions button:disabled{opacity:.4}
+.studio-video-apply{margin-top:7px;background:#203b5e;border:1px solid #355d8c;border-radius:6px;color:#bbdcff;padding:5px 9px;font-size:11px}
+.studio-video-apply:hover:not(:disabled){background:#2c5a91}
+.studio-video-library-player{width:min(860px,calc(100vw - 28px));max-height:92dvh;padding:13px 14px 17px;background:#122139;border:1px solid #3b6590;border-radius:13px;color:#eef4fc}
+.studio-video-library-player::backdrop{background:#030811c9}
+.studio-video-player-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 0 12px}
+#studio-video-player-media{display:block;width:100%;max-height:75dvh;background:#000}
+@media(max-width:650px){.studio-sidebar-actions{grid-column:1/-1;padding:0}.studio-video-library{top:0;border-radius:0;width:min(420px,100vw)}}
