@@ -254,6 +254,47 @@ impl PersonEngine {
         Ok(Self { detector, pose })
     }
 
+    pub fn allocate_cuda_input(&self) -> Result<Tensor<f32>, String> {
+        crate::cuda_input::allocate(&self.detector, &[1, 3, 576, 576], 0)
+    }
+
+    pub fn detect_cuda_input(
+        &mut self,
+        input: &Tensor<f32>,
+    ) -> Result<Vec<PersonObservation>, String> {
+        if self.pose.is_some() {
+            return Err("CUDA detector-only input cannot substitute RTMPose source pixels".into());
+        }
+        let tensors = crate::cuda_input::run(
+            &mut self.detector,
+            input,
+            &[1, 3, 576, 576],
+            "input",
+            &["pred_boxes", "pred_logits"],
+            0,
+        )?;
+        let boxes = tensors
+            .iter()
+            .find(|tensor| tensor.name == "pred_boxes")
+            .ok_or("CUDA RF-DETR boxes missing")?;
+        let logits = tensors
+            .iter()
+            .find(|tensor| tensor.name == "pred_logits")
+            .ok_or("CUDA RF-DETR logits missing")?;
+        if boxes.dimensions.len() != 3
+            || boxes.dimensions[0] != 1
+            || boxes.dimensions[2] != 4
+            || logits.dimensions.len() != 3
+            || logits.dimensions[0] != 1
+            || logits.dimensions[1] != boxes.dimensions[1]
+            || logits.dimensions[2] != 91
+        {
+            return Err("CUDA RF-DETR output dimensions are incompatible".into());
+        }
+        let proposals = decode_rfdetr_medium(&boxes.data, &logits.data)?;
+        Ok(rfdetr_detector_observations(proposals))
+    }
+
     pub fn detect(&mut self, rgb: &[u8]) -> Result<Vec<PersonObservation>, String> {
         self.detect_rfdetr_medium(rgb)
     }

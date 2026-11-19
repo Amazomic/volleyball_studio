@@ -863,6 +863,7 @@ fn gpu_lineage_valid(
             return false;
         }
         if saved["gpu_model_stack"] == requested_gpu_model_stack()
+            && saved["zero_copy_request"].as_bool().unwrap_or(false) == zero_copy_requested()
             && (!matches!(
                 pose["box_source_version"].as_str(),
                 Some(
@@ -873,7 +874,12 @@ fn gpu_lineage_valid(
                 || pose["interpolate_players"] != false
                 || pose["stride"] != request.gpu.pose_stride
                 || !pose["crop_plan_file"].is_null()
-                || pose["pixel_source_version"] != "original_full_resolution_rgb24_v1"
+                || pose["pixel_source_version"]
+                    != if saved["zero_copy_active"] == true {
+                        "original_nv12_cuda_v1"
+                    } else {
+                        "original_full_resolution_rgb24_v1"
+                    }
                 || pose["coordinate_system"] != "normalized_original_display_v1")
         {
             return false;
@@ -995,6 +1001,13 @@ fn person_detector_label() -> &'static str {
         Ok(volley_inference::person::DetectorVariant::RfDetrMedium) => "RF-DETR Medium",
         Err(_) => "Детектор игроков + RTMPose",
     }
+}
+
+fn zero_copy_requested() -> bool {
+    matches!(
+        std::env::var("VOLLEY_ZERO_COPY_PRIMARY").ok().as_deref(),
+        None | Some("1") | Some("true")
+    )
 }
 
 fn requested_gpu_model_stack() -> &'static str {
@@ -1640,13 +1653,16 @@ async fn pipeline(
                     "Общий GPU",
                     "success",
                     &format!(
-                        "Один декодер: {:?}, окон={}, кадров={}, fallback={}",
+                        "Один декодер: {:?}, окон={}, кадров={}, zero_copy={}, fallback={}",
                         result.backend,
                         result.windows,
                         result.decoded_frames,
+                        result.zero_copy,
                         result.fallback_reason.as_deref().unwrap_or("none")
                     ),
                 )?;
+                status["zero_copy_active"] = json!(result.zero_copy);
+                save(path, status)?;
                 pending_shared_pose = result.pending_pose;
                 Some((result.ball_job_id, result.player_job_id))
             } else {
@@ -2285,6 +2301,7 @@ pub async fn start(
         "mode":request.mode,"source_analysis_id":request.source_analysis_id,
         "client_request_id":request.client_request_id,
         "gpu_model_stack":requested_gpu_model_stack(),
+        "zero_copy_request":zero_copy_requested(),"zero_copy_active":false,
         "gpu_jobs":{},"cpu_runs":{},"analysis_id":null,
         "postprocessing_id":null,"current_gpu_job_id":null,
         "source_identity":null,"gpu_reused":false,"result_reused":false,

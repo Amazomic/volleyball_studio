@@ -373,7 +373,11 @@ fn finalize_model_output(
     let mut manifest = json!({
         "schema":"volley-native-gpu-model-detections/1",
         "original_source":context.original_source,
-        "working_stream":"original_rgb_fps30_v1",
+        "working_stream":if backend == Some("nvdec_zero_copy") {
+            "original_nv12_cuda_fps30_v1"
+        } else {
+            "original_rgb_fps30_v1"
+        },
         "status":"model_raw_detections_complete",
         "job_id":context.id,
         "project_id":context.project_id,
@@ -402,7 +406,11 @@ fn finalize_model_output(
     });
     if let Some(backend) = backend {
         manifest["decode_backend"] = json!(backend);
-        manifest["decode_pipeline"] = json!("shared_primary_v1");
+        manifest["decode_pipeline"] = json!(if backend == "nvdec_zero_copy" {
+            "gpu_resident_nvdec_primary_v1"
+        } else {
+            "shared_primary_v1"
+        });
     }
     storage::write_json_atomic(&context.folder.join(MANIFEST_FILE), &manifest)
         .map_err(|e| format!("Write immutable model manifest: {e:?}"))?;

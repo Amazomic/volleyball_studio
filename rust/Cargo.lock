@@ -492,6 +492,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libloading"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1832accd5a4ca2795ace4d05d15c4039be15b62d3b950eff99746a990e3cc10"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -524,6 +534,30 @@ name = "mime"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5848f5a9e8117cf94f2f90faac24a87ff81600ff8628c1e3deaab572e76bfa1"
+
+[[package]]
+name = "mini-cuda"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdc2333a757c32ed4ac681587abf9a7cc979d6fabccc2d628337703ee743795b"
+dependencies = [
+ "libloading 0.9.1",
+ "log",
+ "smallvec 1.16.5",
+ "thiserror",
+]
+
+[[package]]
+name = "mini-nvcodec"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "358bc0f8e8e6f75a500e0f9eae3df6dd9a8230405eb4d69d44df7e1cd7e75c2d"
+dependencies = [
+ "libloading 0.9.1",
+ "log",
+ "mini-cuda",
+ "thiserror",
+]
 
 [[package]]
 name = "miniz_oxide"
@@ -623,7 +657,7 @@ version = "2.0.0-rc.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa7e49bd669d32d7bc2a15ec540a527e7764aec722a45467814005725bcd721"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
  "ndarray",
  "ort-sys",
  "smallvec 2.0.0-alpha.10",
@@ -888,6 +922,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
 
 [[package]]
+name = "thiserror"
+version = "2.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1054,7 +1108,8 @@ dependencies = [
 name = "volley-inference"
 version = "0.1.0"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
+ "mini-cuda",
  "ort",
  "serde",
  "serde_json",
@@ -1065,6 +1120,8 @@ dependencies = [
 name = "volley-media"
 version = "0.1.0"
 dependencies = [
+ "mini-cuda",
+ "mini-nvcodec",
  "serde",
  "serde_json",
  "sha2",

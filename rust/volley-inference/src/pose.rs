@@ -145,6 +145,62 @@ impl PoseEngine {
         self.infer_batch_original(rgb, IMAGE_WIDTH, IMAGE_HEIGHT, boxes)
     }
 
+    pub fn allocate_cuda_pose_input(&self, batch: usize) -> Result<Tensor<f32>, String> {
+        if !(1..=8).contains(&batch) {
+            return Err("RTMPose CUDA input batch must contain 1..8 players".into());
+        }
+        crate::cuda_input::allocate(&self.session, &[batch as i64, 3, 256, 192], 0)
+    }
+
+    pub fn infer_cuda_pose_input(
+        &mut self,
+        input: &Tensor<f32>,
+        width: usize,
+        height: usize,
+        boxes: &[[f64; 4]],
+    ) -> Result<Vec<[Keypoint; KPT_COUNT]>, String> {
+        if boxes.is_empty() || boxes.len() > 8 {
+            return Err("RTMPose CUDA inference expects 1..8 player boxes".into());
+        }
+        for &bbox in boxes {
+            crop_geometry_at(bbox, width, height)?;
+        }
+        let output = crate::cuda_input::run(
+            &mut self.session,
+            input,
+            &[boxes.len() as i64, 3, 256, 192],
+            "input",
+            &["simcc_x", "simcc_y"],
+            0,
+        )?;
+        let xs = output
+            .iter()
+            .find(|tensor| tensor.name == "simcc_x")
+            .ok_or("RTMPose CUDA SimCC X missing")?;
+        let ys = output
+            .iter()
+            .find(|tensor| tensor.name == "simcc_y")
+            .ok_or("RTMPose CUDA SimCC Y missing")?;
+        if xs.dimensions != [boxes.len() as i64, 17, 384]
+            || ys.dimensions != [boxes.len() as i64, 17, 512]
+        {
+            return Err("RTMPose CUDA output dimensions are incompatible".into());
+        }
+        boxes
+            .iter()
+            .enumerate()
+            .map(|(i, &bbox)| {
+                decode_simcc_at(
+                    &xs.data[i * 17 * 384..(i + 1) * 17 * 384],
+                    &ys.data[i * 17 * 512..(i + 1) * 17 * 512],
+                    bbox,
+                    width,
+                    height,
+                )
+            })
+            .collect()
+    }
+
     pub fn infer_batch_original(
         &mut self,
         rgb: &[u8],
@@ -226,6 +282,21 @@ fn crop_geometry_at(
     let cx = (left + right) * width as f64 * 0.5;
     let cy = (top + bottom) * height as f64 * 0.5;
     Ok((cx, cy, crop_w, crop_h))
+}
+
+pub fn cuda_crop_geometry(
+    boxes: &[[f64; 4]],
+    width: usize,
+    height: usize,
+) -> Result<Vec<[f32; 4]>, String> {
+    boxes
+        .iter()
+        .copied()
+        .map(|bbox| {
+            let (cx, cy, w, h) = crop_geometry_at(bbox, width, height)?;
+            Ok([cx as f32, cy as f32, w as f32, h as f32])
+        })
+        .collect()
 }
 
 fn pixel(rgb: &[u8], width: usize, height: usize, x: isize, y: isize, c: usize) -> f32 {

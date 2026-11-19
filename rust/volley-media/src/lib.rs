@@ -2,6 +2,7 @@
 //! FFmpeg/FFprobe are external native codecs, not Python application code.
 pub mod frame_windows;
 pub mod montage;
+pub mod nvdec;
 pub mod preparation;
 pub mod preview;
 pub mod raw_decoder;

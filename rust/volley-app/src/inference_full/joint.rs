@@ -1,17 +1,85 @@
 //! Experimental single-source GPU pair. The existing raw model manifests
 //! and fusion contracts remain unchanged; no tracking or touches are invented.
 use super::*;
+mod zero_copy;
 use crate::pose_inference::{PendingPose, PoseStream};
 use std::cell::RefCell;
+use volley_media::nvdec::NvdecCodec;
 use volley_media::raw_decoder::{
     decode_full_video_shared_with_native_and_tail, DecodeBackend, DecodePreference,
+    PrimaryDecodeSummary,
 };
+
+fn zero_copy_color_matrix(space: Option<&str>, range: Option<&str>) -> Option<bool> {
+    if !matches!(range, None | Some("unknown") | Some("tv")) {
+        return None;
+    }
+    match space {
+        Some("bt709") => Some(true),
+        None | Some("unknown" | "bt470bg" | "smpte170m") => Some(false),
+        _ => None,
+    }
+}
+
+fn source_color_matrix(source: &Path) -> Option<bool> {
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=color_space,color_range",
+            "-of",
+            "json",
+        ])
+        .arg(source)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let document: Value = serde_json::from_slice(&output.stdout).ok()?;
+    let video = document["streams"].as_array()?.first()?;
+    zero_copy_color_matrix(video["color_space"].as_str(), video["color_range"].as_str())
+}
+fn zero_copy_codec(original: &Path, cancelled: &AtomicBool) -> Option<(NvdecCodec, bool)> {
+    if !matches!(
+        std::env::var("VOLLEY_ZERO_COPY_PRIMARY").ok().as_deref(),
+        None | Some("1") | Some("true")
+    ) {
+        return None;
+    }
+    let info = volley_media::probe(original).ok()?;
+    if info.rotation != 0 || info.fps.is_none_or(|fps| (fps - 30.0).abs() > 0.0001) {
+        return None;
+    }
+    let backend = volley_media::raw_decoder::select_decode_backend(
+        original,
+        DecodePreference::Nvdec,
+        cancelled,
+    )
+    .ok()?;
+    if backend.backend != DecodeBackend::Nvdec {
+        return None;
+    }
+    let bt709 = source_color_matrix(original)?;
+    if volley_inference::gpu_preprocess::GpuPreprocessor::new().is_err() {
+        return None;
+    }
+    match info.codec.as_str() {
+        "h264" => Some((NvdecCodec::H264, bt709)),
+        "hevc" => Some((NvdecCodec::Hevc, bt709)),
+        _ => None,
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct JointPair {
     pub ball_job_id: String,
     pub player_job_id: String,
     pub backend: DecodeBackend,
+    pub zero_copy: bool,
     pub fallback_reason: Option<String>,
     pub windows: usize,
     pub decoded_frames: u64,
@@ -220,48 +288,78 @@ pub(crate) fn run_joint_pair(
     };
     let pose = RefCell::new(pose);
     let estimated = (duration * 30.0).max(9.0);
-    let summary = decode_full_video_shared_with_native_and_tail(
-        original,
-        9,
-        backend_preference()?,
-        cpu_threads,
-        cancelled,
-        pose_enabled,
-        |batch| {
-            if cancelled.load(Ordering::Acquire) {
-                return Err("cancelled".into());
-            }
-            let balls =
-                detect_ball_window(&mut ball_engine, &batch.gray, batch.first_frame, cancelled)?;
-            let persons = detect_player_window(
-                &mut person_engine,
-                &batch.rgb,
-                batch.first_frame,
-                person_stride as u64,
-                cancelled,
-            )?;
-            ball_writer.push(batch.first_frame, &balls)?;
-            person_writer.push(batch.first_frame, &persons)?;
-            if let Some(stage) = pose.borrow_mut().as_mut() {
-                stage.observe(&batch, &persons, cancelled)?;
-            }
-            if ball_writer.count % 10 == 0 {
-                let frames = batch.first_frame + 9;
-                update_progress(&ball.status, ball_writer.count, frames, estimated);
-                update_progress(&players.status, person_writer.count, frames, estimated);
-                persist(&ball.folder, &snapshot(&ball.status))?;
-                persist(&players.folder, &snapshot(&players.status))?;
-                report((frames as f64 / estimated).clamp(0.0, 0.99))?;
-            }
-            Ok(())
-        },
-        |tail, decoded| {
-            if let Some(stage) = pose.borrow_mut().as_mut() {
-                stage.tail(tail, decoded, cancelled)?;
-            }
-            Ok(())
-        },
-    )?;
+    let zero_copy_codec = zero_copy_codec(original, cancelled);
+    let zero_copy = zero_copy_codec.is_some();
+    let summary = if let Some((codec, bt709)) = zero_copy_codec {
+        let decode = zero_copy::run(
+            original,
+            codec,
+            bt709,
+            &mut ball_engine,
+            &mut person_engine,
+            &pose,
+            &mut ball_writer,
+            &mut person_writer,
+            &ball,
+            &players,
+            person_stride,
+            duration,
+            cancelled,
+            &mut report,
+        )?;
+        PrimaryDecodeSummary {
+            decode,
+            backend: DecodeBackend::Nvdec,
+            fallback_reason: None,
+        }
+    } else {
+        decode_full_video_shared_with_native_and_tail(
+            original,
+            9,
+            backend_preference()?,
+            cpu_threads,
+            cancelled,
+            pose_enabled,
+            |batch| {
+                if cancelled.load(Ordering::Acquire) {
+                    return Err("cancelled".into());
+                }
+                let balls = detect_ball_window(
+                    &mut ball_engine,
+                    &batch.gray,
+                    batch.first_frame,
+                    cancelled,
+                )?;
+                let persons = detect_player_window(
+                    &mut person_engine,
+                    &batch.rgb,
+                    batch.first_frame,
+                    person_stride as u64,
+                    cancelled,
+                )?;
+                ball_writer.push(batch.first_frame, &balls)?;
+                person_writer.push(batch.first_frame, &persons)?;
+                if let Some(stage) = pose.borrow_mut().as_mut() {
+                    stage.observe(&batch, &persons, cancelled)?;
+                }
+                if ball_writer.count % 10 == 0 {
+                    let frames = batch.first_frame + 9;
+                    update_progress(&ball.status, ball_writer.count, frames, estimated);
+                    update_progress(&players.status, person_writer.count, frames, estimated);
+                    persist(&ball.folder, &snapshot(&ball.status))?;
+                    persist(&players.folder, &snapshot(&players.status))?;
+                    report((frames as f64 / estimated).clamp(0.0, 0.99))?;
+                }
+                Ok(())
+            },
+            |tail, decoded| {
+                if let Some(stage) = pose.borrow_mut().as_mut() {
+                    stage.tail(tail, decoded, cancelled)?;
+                }
+                Ok(())
+            },
+        )?
+    };
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
@@ -269,6 +367,7 @@ pub(crate) fn run_joint_pair(
         return Err("Original video changed during shared GPU analysis".into());
     }
     let backend = match summary.backend {
+        DecodeBackend::Nvdec if zero_copy => "nvdec_zero_copy",
         DecodeBackend::Nvdec => "nvdec",
         DecodeBackend::Software => "software",
     };
@@ -304,6 +403,7 @@ pub(crate) fn run_joint_pair(
         ball_job_id: ball.id,
         player_job_id: players.id,
         backend: summary.backend,
+        zero_copy,
         fallback_reason: summary.fallback_reason,
         windows: summary.decode.windows,
         decoded_frames: summary.decode.decoded_frames,
@@ -316,6 +416,22 @@ pub(crate) fn run_joint_pair(
 mod tests {
     use super::*;
 
+    #[test]
+    fn zero_copy_source_color_contract_only_accepts_supported_limited_matrices() {
+        assert_eq!(
+            zero_copy_color_matrix(Some("bt709"), Some("tv")),
+            Some(true)
+        );
+        assert_eq!(
+            zero_copy_color_matrix(Some("bt470bg"), Some("tv")),
+            Some(false)
+        );
+        assert_eq!(zero_copy_color_matrix(Some("smpte170m"), None), Some(false));
+        assert_eq!(zero_copy_color_matrix(None, None), Some(false));
+        assert_eq!(zero_copy_color_matrix(Some("bt709"), Some("pc")), None);
+        assert_eq!(zero_copy_color_matrix(Some("bt2020nc"), Some("tv")), None);
+        assert_eq!(zero_copy_color_matrix(Some("smpte240m"), Some("tv")), None);
+    }
     #[test]
     fn pose_provenance_does_not_swap_original_content_and_file_stamp() {
         let original = json!({"sha256":"a".repeat(64),"size_bytes":262927597u64});

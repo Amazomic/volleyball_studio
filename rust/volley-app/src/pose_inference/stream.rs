@@ -3,15 +3,27 @@
 //! and frame/source identities are verified.
 use super::*;
 use std::{collections::VecDeque, io::BufWriter, path::PathBuf, sync::Arc};
+use volley_inference::gpu_preprocess::{GpuBuffer, GpuPreprocessor};
 use volley_media::raw_decoder::{PrimaryFrameBatch, MAX_NATIVE_RGB_FRAME_BYTES};
 
 const DETECTOR_RGB_FRAME_BYTES: usize = 640 * 360 * 3;
 
 #[derive(Debug)]
+enum FramePixels {
+    Host {
+        rgb: Arc<Vec<u8>>,
+        offset: usize,
+    },
+    Cuda {
+        frame: Arc<GpuBuffer>,
+        pitch: usize,
+        bt709: bool,
+    },
+}
+#[derive(Debug)]
 struct PendingFrame {
     index: u64,
-    rgb: Arc<Vec<u8>>,
-    offset: usize,
+    pixels: FramePixels,
     width: usize,
     height: usize,
     boxes: Vec<[f64; 4]>,
@@ -47,6 +59,8 @@ pub(crate) struct PoseStream {
     writer: Option<BufWriter<File>>,
     artifact: Option<PoseArtifact>,
     engine: PoseEngine,
+    cuda_processor: Option<GpuPreprocessor>,
+    cuda_pixels: bool,
     hash: Sha256,
     model_sha: String,
     sample_stride: usize,
@@ -81,6 +95,7 @@ pub(crate) struct PendingPose {
     people: u64,
     observed_crops: u64,
     interpolated_crops: u64,
+    cuda_pixels: bool,
     original_source: Value,
     source_identity: Value,
     project_id: String,
@@ -133,6 +148,8 @@ impl PoseStream {
             writer: Some(writer),
             artifact: Some(artifact),
             engine,
+            cuda_processor: None,
+            cuda_pixels: false,
             hash: Sha256::new(),
             model_sha,
             sample_stride,
@@ -191,8 +208,10 @@ impl PoseStream {
             let begin = offset * frame_bytes;
             self.pending.push_back(PendingFrame {
                 index,
-                rgb: native.rgb.clone(),
-                offset: begin,
+                pixels: FramePixels::Host {
+                    rgb: native.rgb.clone(),
+                    offset: begin,
+                },
                 width: native.width,
                 height: native.height,
                 boxes: boxes_from_raw_detections(detected, index)?,
@@ -203,6 +222,76 @@ impl PoseStream {
             return Err("Pose lookahead queue exceeded its bounded capacity".into());
         }
         self.flush_ready(batch.first_frame + 8, cancelled)
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) fn observe_cuda(
+        &mut self,
+        first_frame: u64,
+        frames: Vec<Option<Arc<GpuBuffer>>>,
+        pitch: usize,
+        bt709: bool,
+        width: usize,
+        height: usize,
+        detected: &[RawDetection],
+        cancelled: &AtomicBool,
+    ) -> Result<(), String> {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        if first_frame != self.next_frame || frames.len() != 9 {
+            return Err("CUDA RTMPose frames must be a contiguous nine-frame window".into());
+        }
+        if self.native_width == 0 {
+            (self.native_width, self.native_height) = (width, height);
+        } else if (self.native_width, self.native_height) != (width, height) {
+            return Err("CUDA RTMPose original dimensions changed during decoding".into());
+        }
+        if self.cuda_processor.is_none() {
+            self.cuda_processor = Some(GpuPreprocessor::new()?);
+        }
+        self.cuda_pixels = true;
+        for (offset, frame) in frames.into_iter().enumerate() {
+            let index = first_frame + offset as u64;
+            if !index.is_multiple_of(self.sample_stride as u64) {
+                if frame.is_some() {
+                    return Err("CUDA RTMPose received unexpected nonsampled source".into());
+                }
+                continue;
+            }
+            let frame = frame.ok_or("Missing sampled CUDA RTMPose original frame")?;
+            self.pending.push_back(PendingFrame {
+                index,
+                pixels: FramePixels::Cuda {
+                    frame,
+                    pitch,
+                    bt709,
+                },
+                width,
+                height,
+                boxes: boxes_from_raw_detections(detected, index)?,
+            });
+        }
+        self.next_frame += 9;
+        if self.pending.len() > 40 {
+            return Err("CUDA pose lookahead queue exceeded its bounded capacity".into());
+        }
+        self.flush_ready(first_frame + 8, cancelled)
+    }
+
+    pub(crate) fn tail_cuda(
+        &mut self,
+        decoded_frames: u64,
+        cancelled: &AtomicBool,
+    ) -> Result<(), String> {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        decoded_frames
+            .checked_sub(self.next_frame)
+            .filter(|count| *count < 9)
+            .ok_or("CUDA pose tail frame indices exceed the original stream")?;
+        self.flush_ready(decoded_frames.saturating_sub(1), cancelled)
     }
 
     pub(crate) fn tail(
@@ -248,13 +337,35 @@ impl PoseStream {
                     return Err("cancelled".into());
                 }
                 let boxes: Vec<_> = group.iter().map(|(bb, _)| *bb).collect();
-                let frame_bytes = frame.width * frame.height * 3;
-                let points = self.engine.infer_batch_original(
-                    &frame.rgb[frame.offset..frame.offset + frame_bytes],
-                    frame.width,
-                    frame.height,
-                    &boxes,
-                )?;
+                let points = match &frame.pixels {
+                    FramePixels::Host { rgb, offset } => {
+                        let frame_bytes = frame.width * frame.height * 3;
+                        self.engine.infer_batch_original(
+                            &rgb[*offset..*offset + frame_bytes],
+                            frame.width,
+                            frame.height,
+                            &boxes,
+                        )?
+                    }
+                    FramePixels::Cuda {
+                        frame: nv12,
+                        pitch,
+                        bt709,
+                    } => {
+                        let view = nv12.view(*pitch, frame.width, frame.height)?;
+                        let input = self.engine.allocate_cuda_pose_input(boxes.len())?;
+                        self.cuda_processor
+                            .as_ref()
+                            .ok_or("CUDA pose preprocessor was not initialized")?
+                            .pose_input(view, &input, &boxes, *bt709)?;
+                        self.engine.infer_cuda_pose_input(
+                            &input,
+                            frame.width,
+                            frame.height,
+                            &boxes,
+                        )?
+                    }
+                };
                 for ((bb, origin), keypoints) in group.iter().zip(points) {
                     if *origin == "interpolated_box" {
                         self.interpolated_crops += 1;
@@ -352,6 +463,7 @@ impl PoseStream {
             people: self.people,
             observed_crops: self.observed_crops,
             interpolated_crops: self.interpolated_crops,
+            cuda_pixels: self.cuda_pixels,
             original_source: self.original_source,
             source_identity: self.source_identity,
             project_id: self.project_id,
@@ -407,8 +519,8 @@ impl PendingPose {
             "model":"RTMPose-M-Body7",
             "model_sha256":self.model_sha,
             "original_source":self.original_source,
-            "working_stream":"original_rgb_fps30_v1",
-            "pixel_source_version":"original_full_resolution_rgb24_v1",
+            "working_stream":if self.cuda_pixels { "original_nv12_cuda_fps30_v1" } else { "original_rgb_fps30_v1" },
+            "pixel_source_version":if self.cuda_pixels { "original_nv12_cuda_v1" } else { "original_full_resolution_rgb24_v1" },
             "pixel_dimensions":[self.native_width,self.native_height],
             "coordinate_system":"normalized_original_display_v1",
             "source_fusion_sha256":fusion["sha256"],
@@ -418,7 +530,7 @@ impl PendingPose {
             "interpolate_players":false,
             "file":POSE_FILE,
             "sha256":self.checksum,
-            "decode_pipeline":"shared_primary_native_rgb_v2"
+            "decode_pipeline":if self.cuda_pixels { "gpu_resident_nvdec_primary_v1" } else { "shared_primary_native_rgb_v2" }
         });
         if cancelled.load(Ordering::Acquire) {
             return Err("cancelled".into());

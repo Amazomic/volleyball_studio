@@ -1,7 +1,9 @@
 //! Standalone ONNX Runtime engine. No Python process, model inference cache,
 //! browser hooks or silent CUDA -> CPU fallback. The 9-frame clip is fed from
 //! a future native video decoder; source preprocessing is a separate stage.
+pub mod cuda_input;
 pub mod decode;
+pub mod gpu_preprocess;
 pub mod person;
 pub mod pose;
 pub mod reid_openvino;
@@ -328,6 +330,28 @@ impl Engine {
     }
     pub fn spec(&self) -> &ModelSpec {
         &self.model
+    }
+
+    pub fn allocate_cuda_clip_input(&self) -> Result<Tensor<f32>, String> {
+        if self.model.kind != ModelKind::Ball {
+            return Err("CUDA clip input is only supported for VBallNet".into());
+        }
+        cuda_input::allocate(&self.session, &self.model.input_shape, 0)
+    }
+
+    pub fn infer_cuda_clip(&mut self, input: &Tensor<f32>) -> Result<Vec<Output>, String> {
+        if self.model.kind != ModelKind::Ball {
+            return Err("CUDA clip input is only supported for VBallNet".into());
+        }
+        let names: Vec<&str> = self.model.outputs.iter().map(String::as_str).collect();
+        cuda_input::run(
+            &mut self.session,
+            input,
+            &self.model.input_shape,
+            &self.model.input_name,
+            &names,
+            0,
+        )
     }
     /// Run exactly one 9-frame clip from the native decoder/preprocessor.
     /// Return all named model tensors, raw; CPU postprocessing owns their
