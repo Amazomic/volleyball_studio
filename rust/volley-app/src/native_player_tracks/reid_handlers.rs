@@ -239,6 +239,8 @@ pub struct ReidReviewRequest {
     pub(crate) expected_revision: Option<String>,
     #[serde(default = "default_reid_threshold")]
     pub(crate) threshold_percent: u8,
+    #[serde(default)]
+    pub(crate) auto_threshold_percent: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,7 +414,7 @@ pub(super) fn photo_match_candidates_with_samples(
     ctx: &Inputs,
     identity: &Value,
     vectors: &BTreeMap<u64, Vec<f32>>,
-    alternatives: &BTreeMap<u64, Vec<f32>>,
+    alternatives: &BTreeMap<u64, Vec<Vec<f32>>>,
     references: &[PhotoReference],
 ) -> Result<Value, String> {
     let assignments = identity["assignments"]
@@ -432,12 +434,13 @@ pub(super) fn photo_match_candidates_with_samples(
         let Some(track) = ctx.tracks.get(&id) else {
             continue;
         };
-        let alternative = alternatives
-            .get(&id)
-            .filter(|extra| extra.len() == vector.len());
-        // Each source crop ranks against the best saved image *independently*.
-        // Different poses need not select the very same library photograph.
-        let mut ranked = BTreeMap::<String, (f64, f64, u64)>::new();
+        let mut samples = vec![vector.as_slice()];
+        if let Some(others) = alternatives.get(&id).filter(|others| {
+            others.len() == 2 && others.iter().all(|other| other.len() == vector.len())
+        }) {
+            samples.extend(others.iter().map(Vec::as_slice));
+        }
+        let mut ranked = BTreeMap::<String, (Vec<f64>, u64)>::new();
         for reference in references {
             if !ctx.roster.contains_key(&reference.player_id)
                 || reference.vector.len() != vector.len()
@@ -460,49 +463,46 @@ pub(super) fn photo_match_candidates_with_samples(
                     }
                 }
             }
-            let score = vector
-                .iter()
-                .zip(&reference.vector)
-                .map(|(a, b)| f64::from(*a) * f64::from(*b))
-                .sum::<f64>();
-            if !score.is_finite() || score <= 0.0 {
-                continue;
-            }
-            let second_score = alternative.map_or(score, |extra| {
-                extra
+            let entry = ranked
+                .entry(reference.player_id.clone())
+                .or_insert_with(|| (vec![0.0; samples.len()], reference.track_id));
+            for (index, sample) in samples.iter().enumerate() {
+                let score = sample
                     .iter()
                     .zip(&reference.vector)
                     .map(|(a, b)| f64::from(*a) * f64::from(*b))
-                    .sum::<f64>()
-                    .max(0.0)
-            });
-            let entry = ranked.entry(reference.player_id.clone()).or_insert((
-                score,
-                second_score,
-                reference.track_id,
-            ));
-            if score > entry.0 {
-                entry.0 = score;
-                entry.2 = reference.track_id;
+                    .sum::<f64>();
+                if score.is_finite() && score > entry.0[index] {
+                    entry.0[index] = score.min(1.0);
+                    entry.1 = reference.track_id;
+                }
             }
-            entry.1 = entry.1.max(second_score);
         }
         let mut rows = ranked
             .into_iter()
-            .map(|(owner, (best, other, reference))| {
-                let combined = if alternative.is_some() {
-                    0.5 * (best + other)
-                } else {
-                    best
-                };
-                (owner, (combined, reference))
+            .filter(|(_, (scores, _))| scores.iter().any(|score| *score > 0.0))
+            .map(|(player, (scores, reference_track_id))| {
+                let score = scores.iter().sum::<f64>() / scores.len() as f64;
+                (player, score, scores, reference_track_id)
             })
             .collect::<Vec<_>>();
-        rows.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0).then_with(|| a.0.cmp(&b.0)));
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         if !rows.is_empty() {
-            matches.insert(id.to_string(), json!(rows.into_iter().take(ctx.roster.len()).map(|(player,(score,track_id))|
-                json!({"player_id":player,"name":ctx.roster[&player],"cosine_similarity":score.min(1.0),
-                    "reference_track_id":track_id,"reference_kind":"saved_photo"})).collect::<Vec<_>>()));
+            matches.insert(
+                id.to_string(),
+                json!(rows
+                    .into_iter()
+                    .take(ctx.roster.len())
+                    .map(|(player, score, scores, track_id)| json!({
+                        "player_id":player,"name":ctx.roster[&player],
+                        "cosine_similarity":score,
+                        "sample_similarities":scores,
+                        "samples_used":samples.len(),
+                        "reference_track_id":track_id,
+                        "reference_kind":"saved_photo"
+                    }))
+                    .collect::<Vec<_>>()),
+            );
         }
     }
     Ok(Value::Object(matches))
@@ -748,6 +748,14 @@ pub async fn reid_review(
 ) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
     if req.action == "auto_assign" {
+        if req
+            .auto_threshold_percent
+            .is_some_and(|value| !(1..=99).contains(&value))
+        {
+            return Err(storage::bad_request(
+                "Invalid automatic similarity threshold",
+            ));
+        }
         let cached_state = state.clone();
         let cached_req = req.clone();
         if let Some(saved) = tokio::task::spawn_blocking(move || {

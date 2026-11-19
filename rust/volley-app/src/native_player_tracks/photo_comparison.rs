@@ -248,12 +248,69 @@ pub(super) fn contested_photo_tracks(ctx: &Inputs, matches: &Value) -> BTreeSet<
 
 /// Choose an independently measured crop well away from the best photo.
 /// The index only stores measured (never interpolated) samples inside rallies.
-fn independent_photo_sample(track: &Aggregate) -> Option<&PhotoSample> {
-    track
-        .photo_samples
-        .iter()
-        .filter(|sample| sample.frame.abs_diff(track.best_frame) >= 60)
-        .max_by_key(|sample| sample.frame.abs_diff(track.best_frame))
+fn independent_photo_samples(track: &Aggregate) -> Vec<PhotoSample> {
+    let mut candidates = track.photo_samples.clone();
+    candidates.sort_by_key(|sample| sample.frame);
+    candidates.dedup_by_key(|sample| sample.frame);
+    let duration = track
+        .last
+        .saturating_sub(track.first)
+        .saturating_add(1)
+        .max(1);
+    let best_part = track
+        .best_frame
+        .saturating_sub(track.first)
+        .saturating_mul(3)
+        / duration;
+    let mut used = BTreeSet::from([track.best_frame]);
+    let mut selected = Vec::with_capacity(2);
+    for part in 0..3_u64 {
+        if part == best_part {
+            continue;
+        }
+        let target = track.first + duration.saturating_mul(part * 2 + 1) / 6;
+        if let Some(sample) = candidates
+            .iter()
+            .filter(|sample| {
+                sample.frame >= track.first
+                    && sample.frame <= track.last
+                    && !used.contains(&sample.frame)
+                    && sample.frame.saturating_sub(track.first).saturating_mul(3) / duration == part
+            })
+            .min_by_key(|sample| sample.frame.abs_diff(target))
+        {
+            selected.push(sample.clone());
+            used.insert(sample.frame);
+        }
+    }
+    while selected.len() < 2 {
+        let Some(sample) = candidates
+            .iter()
+            .filter(|sample| {
+                sample.frame >= track.first
+                    && sample.frame <= track.last
+                    && !used.contains(&sample.frame)
+            })
+            .max_by_key(|sample| {
+                used.iter()
+                    .map(|frame| sample.frame.abs_diff(*frame))
+                    .min()
+                    .unwrap_or(0)
+            })
+        else {
+            break;
+        };
+        selected.push(sample.clone());
+        used.insert(sample.frame);
+    }
+    selected
+}
+
+type IndependentCropCache = BTreeMap<String, Vec<f32>>;
+
+fn independent_features() -> &'static Mutex<IndependentCropCache> {
+    static CACHE: OnceLock<Mutex<IndependentCropCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 async fn decode_track_crop(
@@ -487,75 +544,195 @@ pub(super) async fn compare(
         .collect::<Vec<_>>();
     let first_pass = photo_match_candidates(&snap.ctx, &snap.identity, &snap.vectors, &refs)
         .map_err(storage::bad_request)?;
-    let contested = contested_photo_tracks(&snap.ctx, &first_pass);
-    let mut independently_verified = BTreeMap::<u64, Vec<f32>>::new();
-    if !contested.is_empty() {
+    let mut independently_verified = BTreeMap::<u64, BTreeMap<usize, Vec<f32>>>::new();
+    let mut cached_inputs = Vec::<(u64, usize, String, u64, [u32; 4])>::new();
+    let mut source_for_sampling = None;
+    if first_pass.as_object().is_some_and(|rows| !rows.is_empty()) {
         let plan = preparation::plan_for(&state, &req.project_id, &req.video)?;
         let source = plan
             .ready_path()
             .ok_or_else(|| storage::bad_request("Prepared Track ID video missing"))?;
+        let source_stamp = inference_stream::source_stamp(source).map_err(storage::bad_request)?;
         let video = volley_media::probe(source).map_err(storage::bad_request)?;
-        let mut crops = Vec::<(u64, Vec<f32>)>::new();
-        for id in contested.iter().take(128) {
-            let Some(track) = snap.ctx.tracks.get(id) else {
+        let cache_prefix = format!(
+            "{}:{:?}:{}:{}",
+            snap.model,
+            source_stamp,
+            snap.ctx.source_sha,
+            source.display()
+        );
+        let cache = independent_features()
+            .lock()
+            .map_err(|_| storage::internal("Independent ReID cache lock poisoned"))?;
+        for (&id, track) in &snap.ctx.tracks {
+            let high_enough = first_pass[id.to_string()].as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row["cosine_similarity"]
+                        .as_f64()
+                        .is_some_and(|score| score >= 0.40)
+                })
+            });
+            if !high_enough {
                 continue;
-            };
-            let Some(sample) = independent_photo_sample(track) else {
+            }
+            let samples = independent_photo_samples(track);
+            if samples.len() != 2 {
                 continue;
-            };
-            let Ok(crop) = crop_box(sample.bbox, video.width, video.height) else {
-                continue;
-            };
-            // Supplemental evidence is best effort: an inaccessible or too
-            // blurry late crop should not abort the entire CPU postprocessing.
-            if let Ok(input) = decode_track_crop(source, sample.frame, crop).await {
-                crops.push((*id, input));
+            }
+            for (index, sample) in samples.into_iter().enumerate() {
+                let Ok(crop) = crop_box(sample.bbox, video.width, video.height) else {
+                    continue;
+                };
+                let key = format!("{cache_prefix}:{id}:{}:{crop:?}", sample.frame);
+                if let Some(vector) = cache.get(&key) {
+                    independently_verified
+                        .entry(id)
+                        .or_default()
+                        .insert(index, vector.clone());
+                } else {
+                    cached_inputs.push((id, index, key, sample.frame, crop));
+                }
             }
         }
-        if !crops.is_empty() {
+        drop(cache);
+        source_for_sampling = Some(source.to_path_buf());
+    }
+    if let Some(source) = source_for_sampling {
+        let mut set = tokio::task::JoinSet::new();
+        let mut decoded = Vec::new();
+        for (id, index, key, frame, crop) in cached_inputs {
+            let path = source.clone();
+            set.spawn(async move {
+                (
+                    id,
+                    index,
+                    key,
+                    decode_track_crop(&path, frame, crop).await.ok(),
+                )
+            });
+            if set.len() >= 4 {
+                if let Some(Ok((id, index, key, Some(input)))) = set.join_next().await {
+                    decoded.push((id, index, key, input));
+                }
+            }
+        }
+        while let Some(result) = set.join_next().await {
+            if let Ok((id, index, key, Some(input))) = result {
+                decoded.push((id, index, key, input));
+            }
+        }
+        if !decoded.is_empty() {
             let repo = state.repository_root.clone();
             let library = std::env::var("VOLLEY_OPENVINO_C_LIB")
                 .map_err(|_| storage::bad_request("Native OpenVINO C runtime is not configured"))?;
-            independently_verified = tokio::task::spawn_blocking(
-                move || -> Result<BTreeMap<u64, Vec<f32>>, ApiError> {
+            let inferred = tokio::task::spawn_blocking(
+                move || -> Result<Vec<(u64, usize, String, Vec<f32>)>, ApiError> {
                     let mut encoder =
                         volley_inference::reid_openvino::Encoder::load(&repo, Path::new(&library))
                             .map_err(storage::bad_request)?;
-                    let mut compared = BTreeMap::new();
-                    for (id, input) in crops {
-                        compared.insert(id, encoder.infer(&input).map_err(storage::bad_request)?);
-                    }
-                    Ok(compared)
+                    decoded
+                        .into_iter()
+                        .map(|(id, index, key, input)| {
+                            Ok((
+                                id,
+                                index,
+                                key,
+                                encoder.infer(&input).map_err(storage::bad_request)?,
+                            ))
+                        })
+                        .collect()
                 },
             )
             .await
-            .map_err(|e| storage::internal(format!("Second ReID crop worker: {e}")))??;
+            .map_err(|e| storage::internal(format!("ReID independent crop worker: {e}")))??;
+            let mut cache = independent_features()
+                .lock()
+                .map_err(|_| storage::internal("Independent ReID cache lock poisoned"))?;
+            if cache.len().saturating_add(inferred.len()) > 8192 {
+                cache.clear();
+            }
+            for (id, index, key, vector) in inferred {
+                cache.insert(key, vector.clone());
+                independently_verified
+                    .entry(id)
+                    .or_default()
+                    .insert(index, vector);
+            }
         }
     }
-    let matches = if independently_verified.is_empty() {
-        first_pass
-    } else {
-        photo_match_candidates_with_samples(
-            &snap.ctx,
-            &snap.identity,
-            &snap.vectors,
-            &independently_verified,
-            &refs,
-        )
-        .map_err(storage::bad_request)?
-    };
-    Ok(
-        json!({"schema":"volley-native-player-photo-comparison/1", "project_id":snap.ctx.project_id,
-        "replay_id":snap.ctx.replay_id,"source_replay_sha256":snap.ctx.source_sha,
-        "player_matches":matches,"photo_count":refs.len(),
-        "independent_photo_checks":independently_verified.len(),
-        "identity_revision":snap.identity_revision,"album_revisions":snap.albums,"model_fingerprint":snap.model,"auto_assign_enabled":false,"confirmed":false}),
+    let multi_samples = independently_verified
+        .into_iter()
+        .filter_map(|(id, samples)| {
+            if samples.len() == 2 {
+                Some((id, samples.into_values().collect::<Vec<_>>()))
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeMap<_, _>>();
+    let matches = photo_match_candidates_with_samples(
+        &snap.ctx,
+        &snap.identity,
+        &snap.vectors,
+        &multi_samples,
+        &refs,
     )
+    .map_err(storage::bad_request)?;
+    Ok(json!({
+        "schema":"volley-native-player-photo-comparison/1",
+        "project_id":snap.ctx.project_id,
+        "replay_id":snap.ctx.replay_id,
+        "source_replay_sha256":snap.ctx.source_sha,
+        "player_matches":matches,
+        "photo_count":refs.len(),
+        "independent_photo_checks":multi_samples.len() * 2,
+        "multiframe_track_count":multi_samples.len(),
+        "photo_sample_policy":"three_observations_v1",
+        "identity_revision":snap.identity_revision,
+        "album_revisions":snap.albums,
+        "model_fingerprint":snap.model,
+        "auto_assign_enabled":false,
+        "confirmed":false
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn three_real_observations_are_distributed_over_track_duration() {
+        let track = Aggregate {
+            first: 0,
+            last: 95,
+            best_frame: 49,
+            best_box: [0.1, 0.2, 0.6, 0.8],
+            photo_samples: [0, 16, 33, 49, 71, 86, 95]
+                .into_iter()
+                .map(|frame| PhotoSample {
+                    frame,
+                    bbox: [0.1, 0.2, 0.6, 0.8],
+                })
+                .collect(),
+            ..Aggregate::default()
+        };
+        let samples = independent_photo_samples(&track);
+        assert_eq!(
+            samples
+                .iter()
+                .map(|sample| sample.frame)
+                .collect::<Vec<_>>(),
+            vec![16, 86]
+        );
+        let short = Aggregate {
+            photo_samples: vec![PhotoSample {
+                frame: 49,
+                bbox: [0.1, 0.2, 0.6, 0.8],
+            }],
+            ..track
+        };
+        assert!(independent_photo_samples(&short).is_empty());
+    }
 
     #[test]
     fn full_multi_athlete_photo_albums_fit_in_one_comparison() {

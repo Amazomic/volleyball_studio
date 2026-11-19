@@ -1930,6 +1930,7 @@ async fn pipeline(
             track_ids: Vec::new(),
             expected_revision: None,
             threshold_percent: 30,
+            auto_threshold_percent: None,
         }),
     )
     .await;

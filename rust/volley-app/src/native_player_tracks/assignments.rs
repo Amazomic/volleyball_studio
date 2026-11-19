@@ -1,5 +1,17 @@
 use super::*;
 
+const AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD: f64 = 0.80;
+
+pub(super) fn saved_automatic_photo_threshold(doc: &Value) -> f64 {
+    if doc["automatic_identity_evidence"]["photo_sample_policy"] != "three_observations_v1" {
+        return AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD;
+    }
+    doc["automatic_identity_evidence"]["threshold"]
+        .as_f64()
+        .filter(|value| value.is_finite() && (0.01..=0.99).contains(value))
+        .unwrap_or(AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD)
+}
+
 pub(crate) fn conflicting_frame_tracks(
     owners: &BTreeMap<u64, String>,
     tracks: impl IntoIterator<Item = u64>,
@@ -133,6 +145,23 @@ pub(super) fn choose_automatic_photo_links(
     doc: &Value,
     matches: &Value,
 ) -> Result<BTreeMap<u64, String>, String> {
+    choose_automatic_photo_links_at_threshold(
+        ctx,
+        doc,
+        matches,
+        AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD,
+    )
+}
+
+pub(super) fn choose_automatic_photo_links_at_threshold(
+    ctx: &Inputs,
+    doc: &Value,
+    matches: &Value,
+    threshold: f64,
+) -> Result<BTreeMap<u64, String>, String> {
+    if !threshold.is_finite() || !(0.01..=0.99).contains(&threshold) {
+        return Err("Invalid automatic similarity threshold".into());
+    }
     let assigned = doc["assignments"]
         .as_object()
         .ok_or("Invalid assignments")?;
@@ -161,6 +190,9 @@ pub(super) fn choose_automatic_photo_links(
             continue;
         }
         for row in rows.as_array().ok_or("Invalid candidate list")? {
+            if row["samples_used"].as_u64().is_some_and(|count| count != 3) {
+                continue;
+            }
             let Some(owner) = row["player_id"]
                 .as_str()
                 .filter(|owner| ctx.roster.contains_key(*owner))
@@ -169,7 +201,7 @@ pub(super) fn choose_automatic_photo_links(
             };
             let Some(score) = row["cosine_similarity"]
                 .as_f64()
-                .filter(|score| score.is_finite() && *score > 0.30 && *score <= 1.0)
+                .filter(|score| score.is_finite() && *score >= threshold && *score <= 1.0)
             else {
                 continue;
             };
@@ -208,13 +240,9 @@ pub(super) fn choose_automatic_photo_links(
         };
         let mut ranked = candidates.iter().filter(|v| v.1 == id).collect::<Vec<_>>();
         ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
-        let Some((score, _, owner)) = ranked.first() else {
+        let Some((_, _, owner)) = ranked.first() else {
             continue;
         };
-        // A near-equal photo match is ambiguous only when that other athlete
-        // could actually be the current body. If the alternative has already
-        // been identified in an independently observed, co-visible track,
-        // it is not a valid contender for this same video frame.
         let occupied_in_frame = |possible_owner: &str| {
             assigned.iter().any(|(other_id, other_owner)| {
                 other_owner.as_str() == Some(possible_owner)
@@ -223,13 +251,6 @@ pub(super) fn choose_automatic_photo_links(
                 .iter()
                 .any(|(other_id, other_owner)| other_owner == possible_owner && overlaps(*other_id))
         };
-        if ranked
-            .iter()
-            .skip(1)
-            .any(|second| *score - second.0 < 0.04 && !occupied_in_frame(&second.2))
-        {
-            continue;
-        }
         // Reject only *measured co-visible* tracks owned by the same athlete.
         // Sequential reacquisitions remain eligible for that athlete.
         if !occupied_in_frame(owner) {
@@ -250,6 +271,10 @@ pub(super) fn reconcile_automatic_photo_links(ctx: &Inputs, doc: &mut Value) -> 
     }
     // Without the original per-athlete similarities these automatic identity
     // claims cannot be checked, so they are not safe to display as names.
+    if doc["automatic_identity_evidence"]["photo_sample_policy"] != "three_observations_v1" {
+        doc["automatic_assignments"] = json!({});
+        return Ok(());
+    }
     let Some(matches) = doc["automatic_identity_evidence"]["matches"].as_object() else {
         doc["automatic_assignments"] = json!({});
         return Ok(());
@@ -259,7 +284,12 @@ pub(super) fn reconcile_automatic_photo_links(ctx: &Inputs, doc: &mut Value) -> 
         .filter(|(id, _)| saved.contains_key(*id))
         .map(|(id, rows)| (id.clone(), rows.clone()))
         .collect();
-    let expected = choose_automatic_photo_links(ctx, doc, &Value::Object(preserved_matches))?;
+    let expected = choose_automatic_photo_links_at_threshold(
+        ctx,
+        doc,
+        &Value::Object(preserved_matches),
+        saved_automatic_photo_threshold(doc),
+    )?;
     let safe = saved
         .iter()
         .filter_map(|(id, owner)| {
@@ -569,6 +599,7 @@ pub(super) fn filtered_page(
         "identity_conflict_track_ids":actual_conflicts,
         "roster":roster,"tracks":rows,
         "automatic_identity_matches":doc["automatic_identity_evidence"]["matches"],
+        "automatic_assignment_threshold_percent":(saved_automatic_photo_threshold(doc) * 100.0).round() as u8,
         "athlete_links_require_manual_confirmation":true,
         "automatic_reid_binding":doc["automatic_assignments"].as_object().is_some_and(|map| !map.is_empty()),"photos_auto_registered":false,
     }))
@@ -895,25 +926,16 @@ pub(super) fn change(state: &AppState, req: &TrackEdit) -> Result<Value, ApiErro
     let saved_scope = automatic_assignment_scope(state, &whole_source, &doc)?;
     let conflict_tracks = saved_scope.as_ref().unwrap_or(&ctx);
     let previous_automatic = doc["automatic_assignments"].clone();
-    if req.action == "assign" {
-        if let Some((id, other, frame)) = new_manual_owner_conflict(
+    let manual_overlap = if req.action == "assign" {
+        new_manual_owner_conflict(
             conflict_tracks,
             &review.assignments,
             &previous_automatic,
             &req.track_ids,
-        ) {
-            let message = if req.track_ids.contains(&other) {
-                format!(
-                    "В выбранных Track ID {id} и {other} обнаружены разные люди в кадре {frame}. Нельзя привязать их к одному игроку: исключите ошибочный ID из группы или снимите его выбор."
-                )
-            } else {
-                format!(
-                    "ID {id} конфликтует с ранее подтверждённым ID {other}: разные люди в кадре {frame}. Проверьте кадр и при ошибке сначала снимите прежнюю привязку ID {other}."
-                )
-            };
-            return Err(storage::conflict(message));
-        }
-    }
+        )
+    } else {
+        None
+    };
     let displaced_automatic = if req.action == "assign" {
         conflicting_automatic_links(conflict_tracks, &review.assignments, &previous_automatic)
     } else {
@@ -992,6 +1014,8 @@ pub(super) fn change(state: &AppState, req: &TrackEdit) -> Result<Value, ApiErro
     )
     .map_err(storage::bad_request)?;
     result["displaced_automatic_track_ids"] = json!(displaced_automatic);
+    result["manual_overlap"] = json!(manual_overlap
+        .map(|(id, other, frame)| { json!({"track_id":id,"other_track_id":other,"frame":frame}) }));
     Ok(result)
 }
 
@@ -999,10 +1023,11 @@ pub(super) fn refresh_automatic_photo_links(
     ctx: &Inputs,
     doc: &Value,
     matches: &Value,
+    threshold: f64,
 ) -> Result<(Value, BTreeMap<u64, String>), String> {
     let mut updated = doc.clone();
     updated["automatic_assignments"] = json!({});
-    let chosen = choose_automatic_photo_links(ctx, &updated, matches)?;
+    let chosen = choose_automatic_photo_links_at_threshold(ctx, &updated, matches, threshold)?;
     updated["automatic_assignments"] = json!(chosen
         .iter()
         .map(|(id, player)| (id.to_string(), player.clone()))
@@ -1031,6 +1056,9 @@ fn cached_photo_comparison(
 ) -> Option<Value> {
     let evidence = doc.get("automatic_identity_evidence")?;
     evidence["matches"].as_object()?;
+    if evidence["photo_sample_policy"] != "three_observations_v1" {
+        return None;
+    }
     if evidence["rally_run_id"] != json!(rally_run_id)
         || evidence["album_revisions"] != json!(albums)
         || evidence["reference_photo_sha256"] != json!(hashes)
@@ -1043,6 +1071,7 @@ fn cached_photo_comparison(
         "identity_revision":identity_revision,
         "album_revisions":albums,
         "model_fingerprint":model,
+        "photo_sample_policy":evidence["photo_sample_policy"],
         "player_matches":evidence["matches"]
     }))
 }
@@ -1097,7 +1126,8 @@ mod cached_auto_match_tests {
         let mut doc = json!({
             "assignments":{}, "excluded_ids":[],
             "automatic_identity_evidence":{
-                "matches":{"7":[{"player_id":"player","similarity":0.91}]},
+                "matches":{"7":[{"player_id":"player","cosine_similarity":0.91,"samples_used":3}]},
+                "photo_sample_policy":"three_observations_v1",
                 "rally_run_id":"rally",
                 "album_revisions":albums,
                 "reference_photo_sha256":hashes,
@@ -1106,6 +1136,17 @@ mod cached_auto_match_tests {
         });
         doc["automatic_identity_evidence"]["reviewed_scope_sha256"] =
             json!(reviewed_scope_sha256(&doc));
+        let mut legacy = doc.clone();
+        legacy["automatic_identity_evidence"]["photo_sample_policy"] = Value::Null;
+        assert!(cached_photo_comparison(
+            &legacy,
+            "identity-v1",
+            &albums,
+            &hashes,
+            "model-v1",
+            Some("rally")
+        )
+        .is_none());
         assert!(cached_photo_comparison(
             &doc,
             "identity-v1",
@@ -1182,17 +1223,15 @@ pub(super) fn save_automatic_photo_links(
     req: &ReidReviewRequest,
     comparison: &Value,
 ) -> Result<Value, ApiError> {
-    persist_photo_comparison(state, req, comparison, true)
+    persist_photo_comparison(state, req, comparison, true, true)
 }
 
-/// Save the ranked candidates without changing manual or automatic owners.
-/// This is used by the gallery's explicit refresh and survives page reloads.
 pub(super) fn save_photo_match_suggestions(
     state: &AppState,
     req: &ReidReviewRequest,
     comparison: &Value,
 ) -> Result<Value, ApiError> {
-    persist_photo_comparison(state, req, comparison, false)
+    persist_photo_comparison(state, req, comparison, true, false)
 }
 
 fn persist_photo_comparison(
@@ -1200,13 +1239,14 @@ fn persist_photo_comparison(
     req: &ReidReviewRequest,
     comparison: &Value,
     auto_assign: bool,
+    return_automatic_result: bool,
 ) -> Result<Value, ApiError> {
     if !state.writes_enabled {
         return Err(storage::conflict(
             "Automatic links require isolated writable storage",
         ));
     }
-    let _guard = if auto_assign {
+    let _guard = if return_automatic_result {
         project_guard::write_guard_for_postprocessing(state, &req.project_id)?
     } else {
         project_guard::write_guard(state, &req.project_id)?
@@ -1239,9 +1279,16 @@ fn persist_photo_comparison(
         req.rally_run_id.as_deref(),
     )?;
     let matches = &comparison["player_matches"];
+    let threshold = if return_automatic_result {
+        req.auto_threshold_percent
+            .map(|percent| percent as f64 / 100.0)
+            .unwrap_or_else(|| saved_automatic_photo_threshold(&doc))
+    } else {
+        saved_automatic_photo_threshold(&doc)
+    };
     let chosen = if auto_assign {
-        let (updated, chosen) =
-            refresh_automatic_photo_links(&scoped, &doc, matches).map_err(storage::bad_request)?;
+        let (updated, chosen) = refresh_automatic_photo_links(&scoped, &doc, matches, threshold)
+            .map_err(storage::bad_request)?;
         doc = updated;
         chosen
     } else {
@@ -1255,7 +1302,8 @@ fn persist_photo_comparison(
         ));
     }
     doc["automatic_identity_evidence"] = json!({
-        "threshold":0.30, "matches":matches,
+        "threshold":threshold, "matches":matches,
+        "photo_sample_policy":comparison["photo_sample_policy"],
         "rally_run_id":req.rally_run_id,
         "album_revisions":comparison["album_revisions"],
         "reference_photo_sha256":reference_hashes,
@@ -1283,11 +1331,12 @@ fn persist_photo_comparison(
     versioned_store::write_json_checked(parent, &ctx.sidecar, &doc, MAX_LINKS)
         .map_err(storage::bad_request)?;
     let saved = existing(&ctx.sidecar).map_err(storage::bad_request)?;
-    if auto_assign {
+    if return_automatic_result {
         Ok(
             json!({"automatic_count":chosen.len(),"automatic_assignments":chosen,
             "unassigned_track_ids":unassigned,
-            "identity_revision":revision(saved.as_deref()),"confirmed":false}),
+            "identity_revision":revision(saved.as_deref()),"confirmed":false,
+            "threshold_percent":(threshold * 100.0).round() as u8}),
         )
     } else {
         let mut response = comparison.clone();
