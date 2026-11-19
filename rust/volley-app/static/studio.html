@@ -326,22 +326,24 @@
             <header class="montage-builder-header">
               <div><p class="eyebrow">ОДИН КОНСТРУКТОР — РАЗНЫЕ ВАРИАНТЫ</p><h2>Выберите профиль и настройте ролик</h2>
               <p class="panel-note">Весь монтаж — из исходного видео. Анализ повторно не запускается.</p></div>
-              <div class="montage-presets" id="studio-montage-presets" aria-label="Готовые профили">
-                <button class="secondary" type="button" data-profile="favorites">Избранное</button>
-                <button class="secondary" type="button" data-profile="player">Рилс игрока</button>
-                <button class="secondary" type="button" data-profile="attacks">Лучшие атаки</button>
+              <div class="montage-type-picker">
+                <label class="field-label" for="studio-montage-profile">Тип монтажа</label>
+                <select id="studio-montage-profile" aria-label="Тип монтажа">
+                  <option value="favorites">Избранные розыгрыши</option>
+                  <option value="player">Рилс игрока</option>
+                  <option value="attacks">Лучшие атаки</option>
+                  <option value="report">Лучшие и длинные розыгрыши</option>
+                </select>
               </div>
             </header>
             <div class="montage-builder-grid">
               <div class="montage-builder-main">
+                <div class="montage-builder-settings-head">
+                  <h3 id="studio-montage-settings-label">Избранные розыгрыши</h3>
+                  <p id="studio-montage-settings-hint" class="panel-note">Добавьте розыгрыши в избранное во вкладке предпросмотра.</p>
+                </div>
                 <div class="montage-builder-fields">
-                  <div><label class="field-label" for="studio-montage-mode">Тип монтажа</label>
-                    <select id="studio-montage-mode">
-                      <option value="favorites">Избранные розыгрыши</option>
-                      <option value="player">Касания выбранного игрока</option>
-                      <option value="report">Лучшие и длинные розыгрыши</option>
-                    </select>
-                    <label id="studio-montage-statistics-field" class="montage-builder-check hidden"><input id="studio-montage-statistics" type="checkbox"> Включить статистику</label></div>
+                  <div id="studio-montage-statistics-field" class="montage-builder-statistics hidden"><label class="montage-builder-check"><input id="studio-montage-statistics" type="checkbox"> Включить статистику</label></div>
                   <div id="studio-montage-player-field"><label class="field-label" for="studio-montage-player">Игрок</label><select id="studio-montage-player"><option value="">Выберите игрока</option></select></div>
                   <div id="studio-montage-action-field"><label class="field-label" for="studio-montage-action">Тип касаний</label>
                     <select id="studio-montage-action">

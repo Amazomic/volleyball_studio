@@ -3,8 +3,9 @@
 (() => {
   const $=id=>document.getElementById(id);
   const ui={
-    project:$("studio-project"),presets:$("studio-montage-presets"),
-    mode:$("studio-montage-mode"),player:$("studio-montage-player"),action:$("studio-montage-action"),
+    project:$("studio-project"),profile:$("studio-montage-profile"),
+    settingsLabel:$("studio-montage-settings-label"),settingsHint:$("studio-montage-settings-hint"),
+    player:$("studio-montage-player"),action:$("studio-montage-action"),
     run:$("studio-run"),statistics:$("studio-montage-statistics"),
     statisticsField:$("studio-montage-statistics-field"),
     context:$("studio-montage-context"),duration:$("studio-montage-duration"),
@@ -21,9 +22,9 @@
     start:$("studio-montage-start"),legacyStart:$("studio-render"),job:$("studio-job"),
     cancel:$("studio-cancel"),download:$("studio-download"),help:$("studio-montage-help")
   };
-  if(!ui.mode)return;
+  if(!ui.profile)return;
   const st={project:"",token:0,busy:false,runs:new Map(),available:new Map(),fingerprint:"",key:"",
-    jobId:"",timer:null,audioSeconds:null,audioURL:"",profile:"favorites"};
+    jobId:"",timer:null,audioSeconds:null,audioURL:""};
   const option=(label,value)=>{const node=document.createElement("option");
     node.textContent=String(label);node.value=String(value);return node;};
   const validRun=value=>typeof value==="string"&&/^[a-f0-9]{32}$/.test(value);
@@ -43,44 +44,53 @@
   const invalidate=()=>{st.fingerprint="";st.key="";ui.previewList.replaceChildren();
     ui.download.classList.add("hidden");ui.archiveDownload.classList.add("hidden");};
   const snapshot=()=>JSON.stringify({
-    project:st.project,mode:ui.mode.value,player:ui.player.value,action:ui.action.value,
+    project:st.project,profile:ui.profile.value,mode:mode(),player:ui.player.value,action:ui.action.value,
     context:ui.context.value,duration:lengthSec(),runs:selectedRuns(),layout:ui.layout.value,
     camera:ui.camera.value,zoom:ui.zoom.value,encoder:ui.encoder.value,
-    include_statistics:ui.mode.value==="report"&&ui.statistics.checked,
+    include_statistics:mode()==="report"&&ui.statistics.checked,
     include_recognition_data:ui.recognition.checked,
     music:ui.music.files?.[0]?.name||"",volume:ui.volume.value
   });
+  const profiles={
+    favorites:{mode:"favorites",label:"Избранные розыгрыши",
+      hint:"Отмеченные в предпросмотре розыгрыши.",
+      duration:60,layout:"original",action:"all",context:"1"},
+    player:{mode:"player",label:"Рилс игрока",
+      hint:"Выберите игрока и нужные типы касаний.",
+      duration:30,layout:"vertical",action:"all",context:"1"},
+    attacks:{mode:"player",label:"Лучшие атаки",
+      hint:"Атаки выбранного игрока с контекстом до и после.",
+      duration:30,layout:"vertical",action:"attack",context:"0.5"},
+    report:{mode:"report",label:"Лучшие и длинные розыгрыши",
+      hint:"Автоматическая подборка из подтверждённых розыгрышей.",
+      duration:30,layout:"original",action:"all",context:"1"}
+  };
+  const mode=()=>profiles[ui.profile.value]?.mode||"favorites";
   const sync=()=>{
-    const person=ui.mode.value==="player",favorite=ui.mode.value==="favorites";
+    const person=mode()==="player",favorite=mode()==="favorites";
+    const selected=profiles[ui.profile.value]||profiles.favorites;
+    ui.settingsLabel.textContent=selected.label;
+    ui.settingsHint.textContent=selected.hint;
     ui.playerField.classList.toggle("hidden",!person);
-    ui.actionField.classList.toggle("hidden",!person);
+    ui.actionField.classList.toggle("hidden",!person||ui.profile.value==="attacks");
     ui.contextField.classList.toggle("hidden",!person);
     ui.sources.classList.toggle("hidden",favorite);
-    ui.statisticsField.classList.toggle("hidden",ui.mode.value!=="report");
+    ui.statisticsField.classList.toggle("hidden",mode()!=="report");
     ui.favorites.classList.toggle("hidden",!favorite);
     ui.cameraField.classList.toggle("hidden",ui.layout.value==="original");
     ui.zoomField.classList.toggle("hidden",ui.layout.value==="original"||ui.camera.value!=="on");
     ui.start.disabled=st.busy;ui.preview.disabled=st.busy;ui.refresh.disabled=st.busy;
-    ui.presets.querySelectorAll("[data-profile]").forEach(btn=>{
-      btn.classList.toggle("active",btn.dataset.profile===st.profile);
-      btn.setAttribute("aria-pressed",String(btn.dataset.profile===st.profile));
-    });
     ui.help.textContent=favorite?
       "Избранные розыгрыши собираются из оригинального видео.":
       person?"В рилс входят только фрагменты вокруг проверенных касаний выбранного игрока.":
       "Лучшие и длинные розыгрыши."+
         (ui.statistics.checked?" В конце — подтверждённая статистика по игрокам.":"");
   };
-  const profiles={
-    favorites:{mode:"favorites",duration:60,layout:"original",action:"all",context:"1"},
-    player:{mode:"player",duration:30,layout:"vertical",action:"all",context:"1"},
-    attacks:{mode:"player",duration:30,layout:"vertical",action:"attack",context:"0.5"}
-  };
   const chooseProfile=profile=>{
     if(!profiles[profile])return;
-    st.profile=profile;
+    ui.profile.value=profile;
     const p=profiles[profile];
-    ui.mode.value=p.mode;ui.duration.value=String(p.duration);
+    ui.duration.value=String(p.duration);
     ui.layout.value=p.layout;ui.action.value=p.action;ui.context.value=p.context;
     ui.camera.value="off";
     if(ui.audioFit.checked&&st.audioSeconds)ui.duration.value=String(
@@ -140,19 +150,19 @@
       encoder:ui.encoder.value,audio_volume:Number(ui.volume.value),
       include_recognition_data:ui.recognition.checked
     };
-    if(ui.mode.value==="report")value.include_statistics=ui.statistics.checked;
-    if(ui.mode.value==="player")Object.assign(value,{
+    if(mode()==="report")value.include_statistics=ui.statistics.checked;
+    if(mode()==="player")Object.assign(value,{
       player_id:ui.player.value,action_kind:ui.action.value,
       clip_context_sec:Number(ui.context.value),selection_mode:"auto",max_clips:80
     });
     if(operation==="start")value.expected_source_fingerprint=st.fingerprint;
     return value;
   };
-  const endpoint=()=>ui.mode.value==="player"?
+  const endpoint=()=>mode()==="player"?
     "/api/montage/native/player-highlights":"/api/montage/native/game-report";
   const drawPlan=result=>{
     ui.previewList.replaceChildren();
-    const person=ui.mode.value==="player";
+    const person=mode()==="player";
     const clips=Number(person?result.selected_clips:result.selected_rallies);
     if(!Number.isInteger(clips)||clips<0)throw Error("Подборка недостоверна");
     const head=document.createElement("strong");
@@ -179,13 +189,13 @@
     return clips>0;
   };
   const preview=async()=>{
-    if(ui.mode.value==="favorites"){
+    if(mode()==="favorites"){
       const count=Number($("studio-selected-count")?.textContent)||0;
       show(count?"Избранных розыгрышей: "+count:"Нет избранных розыгрышей.");
       return count>0;
     }
     if(!selectedRuns().length)throw Error("Нет выбранных CPU-версий");
-    if(ui.mode.value==="player"&&!ui.player.value)throw Error("Выберите игрока");
+    if(mode()==="player"&&!ui.player.value)throw Error("Выберите игрока");
     const token=st.token,key=snapshot();
     st.busy=true;sync();show("Проверяем SHA, касания и привязки...");
     try{
@@ -240,7 +250,7 @@
   };
   const start=async()=>{
     if(st.busy)return;
-    if(ui.mode.value==="favorites"){
+    if(mode()==="favorites"){
       if(ui.legacyStart.disabled){show("Отметьте розыгрыши в предпросмотре.",true);return;}
       ui.legacyStart.click();return;
     }
@@ -293,14 +303,7 @@
     };
     audio.onerror=()=>{ui.audioLength.textContent="Не удалось прочитать длительность музыки.";};
   };
-  ui.presets.addEventListener("click",e=>{
-    const button=e.target.closest("[data-profile]");
-    if(button)chooseProfile(button.dataset.profile);
-  });
-  ui.mode.addEventListener("change",()=>{
-    st.profile=ui.mode.value==="favorites"?"favorites":ui.mode.value==="report"?"report":"player";
-    invalidate();sync();
-  });
+  ui.profile.addEventListener("change",()=>chooseProfile(ui.profile.value));
   for(const input of [ui.player,ui.action,ui.context,ui.duration,ui.layout,ui.encoder,
     ui.volume,ui.camera,ui.zoom,ui.statistics,ui.recognition])input.addEventListener("change",()=>{invalidate();sync();});
   ui.music.addEventListener("change",audioChanged);

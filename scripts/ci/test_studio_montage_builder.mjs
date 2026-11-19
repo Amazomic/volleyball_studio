@@ -85,16 +85,22 @@ vm.runInNewContext(text("rust/volley-app/static/studio_overview.js"),context);
 vm.runInNewContext(source,context);await tick();
 assert.equal(montage("player").value,"athlete1");
 assert.equal(montage("player").children.length,2);
-assert.ok(!html.includes('data-profile="report"'));
+assert.ok(!html.includes('id="studio-montage-mode"'));
+assert.ok(!html.includes('id="studio-montage-presets"'));
 assert.equal(montage("statistics").checked,false);
 assert.equal(montage("recognition").checked,false);
 assert.equal(montage("source-list").children.length,1);
 assert.ok(montage("source-list").children[0].children.every(child=>child.tagName!=="select"));
-const choose=async profile=>montage("presets").fire("click",{
-  target:{closest:()=>({dataset:{profile}})}
-});
+const choose=async profile=>{
+  montage("profile").value=profile;
+  await montage("profile").fire("change");
+};
 const starts=()=>requests.filter(r=>r.body?.operation==="start");
 await choose("attacks");
+assert.equal(montage("settings-label").textContent,"Лучшие атаки");
+assert.equal(montage("action").value,"attack");
+assert.equal(montage("action-field").classList.contains("hidden"),true);
+assert.equal(montage("player-field").classList.contains("hidden"),false);
 get("studio-run").value=otherRun;expectedRun=otherRun;
 windowListeners.get("volley:postprocessing-change")({
   detail:{project_id:"1234abcdef01",rally_run_id:otherRun}
@@ -133,7 +139,10 @@ for(const failure of ["empty","fingerprint","project","server"]) {
   await montage("start").fire("click");assert.equal(starts().length,before,failure+" must prevent launch");
 }
 clips=2;invalidFingerprint=false;wrongProject=false;failPreview=false;
-montage("mode").value="report";await montage("mode").fire("change");
+await choose("report");
+assert.equal(montage("settings-label").textContent,"Лучшие и длинные розыгрыши");
+assert.equal(montage("statistics-field").classList.contains("hidden"),false);
+assert.equal(montage("player-field").classList.contains("hidden"),true);
 await montage("start").fire("click");
 assert.equal(starts().at(-1).url,"/api/montage/native/game-report");
 assert.equal(starts().at(-1).body.player_id,undefined);
@@ -152,6 +161,9 @@ jobState="complete";await pollTimer();
 assert.equal(get("studio-download").classList.contains("hidden"),false);
 assert.equal(get("studio-download-archive").classList.contains("hidden"),false);
 assert.ok(get("studio-download-archive").href.endsWith("&archive=1"));
-await choose("favorites");await montage("start").fire("click");
+await choose("favorites");
+assert.equal(montage("favorites").classList.contains("hidden"),false);
+assert.equal(montage("sources").classList.contains("hidden"),true);
+await montage("start").fire("click");
 assert.equal(get("studio-render").clicks,1);
 console.log("Live montage builder: roster, attack/report/favorite profiles, source fingerprint, audio, start, cancel and invalid-preview veto passed");

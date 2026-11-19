@@ -1571,9 +1571,15 @@ body[data-ui-theme="light"] .analysis-history-eta{color:#285e9a!important}
 /* Unified native montage builder. The old independent highlights form is obsolete. */
 #studio-montage.montage-builder{display:block;margin-top:9px;padding:24px}
 .montage-builder-header{display:flex;justify-content:space-between;align-items:flex-start;gap:22px;border-bottom:1px solid #2c3c54;padding-bottom:22px}
-.montage-presets{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
-.montage-presets button{font-size:12px;white-space:nowrap}
-.montage-presets button.active{border-color:#5c9bff;background:#234574;color:#fff}
+.montage-type-picker{display:grid;gap:7px;flex:0 0 clamp(220px,30%,340px);min-width:0}
+.montage-type-picker .field-label{margin:0}
+.montage-type-picker select{width:100%;border:1px solid #5c9bff;background:#1b3556;color:#fff;border-radius:9px;padding:11px 13px;font-weight:600}
+.montage-type-picker select:focus-visible{outline:2px solid #8bbaff;outline-offset:2px}
+.montage-builder-settings-head{margin-bottom:15px}
+.montage-builder-settings-head h3{margin:0 0 6px;font-size:17px}
+.montage-builder-settings-head .panel-note{margin:0}
+.montage-builder-statistics{grid-column:1/-1}
+.montage-builder-statistics .montage-builder-check{margin:0 0 4px}
 .montage-builder-grid{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:25px;margin-top:22px}
 .montage-builder-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 18px}
 .montage-builder-fields input[type=number]{width:100%;padding:11px;background:#172235;border:1px solid #31415a;border-radius:9px;color:#fff}
@@ -1588,7 +1594,7 @@ body[data-ui-theme="light"] .analysis-history-eta{color:#285e9a!important}
 .montage-builder-side{border-left:1px solid #2c3c54;padding-left:24px}
 .montage-builder-side .primary{justify-content:center;gap:16px}
 @media(max-width:1050px){.montage-builder-grid{grid-template-columns:1fr}.montage-builder-side{border-left:0;border-top:1px solid #2c3c54;padding:17px 0 0}}
-@media(max-width:690px){.montage-builder-header{display:block}.montage-presets{margin-top:14px;justify-content:flex-start}.montage-builder-fields{grid-template-columns:1fr}}
+@media(max-width:690px){.montage-builder-header{display:grid;gap:14px}.montage-type-picker{width:100%}.montage-builder-fields{grid-template-columns:1fr}}
 
 /* Human-verified examples: only the paused overlay canvas receives selection clicks. */
 .video-wrap.training-select #studio-video-overlay{pointer-events:auto;cursor:crosshair}
