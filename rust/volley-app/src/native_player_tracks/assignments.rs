@@ -599,6 +599,13 @@ pub(super) fn filtered_page(
         "identity_conflict_track_ids":actual_conflicts,
         "roster":roster,"tracks":rows,
         "automatic_identity_matches":doc["automatic_identity_evidence"]["matches"],
+        "similarity_status":if doc["automatic_identity_evidence"]["matches"].as_object().is_none() {
+            "not_calculated"
+        } else if doc["automatic_identity_evidence"]["photo_count"] == 0 {
+            "no_reference_photos"
+        } else {
+            "calculated"
+        },
         "automatic_assignment_threshold_percent":(saved_automatic_photo_threshold(doc) * 100.0).round() as u8,
         "athlete_links_require_manual_confirmation":true,
         "automatic_reid_binding":doc["automatic_assignments"].as_object().is_some_and(|map| !map.is_empty()),"photos_auto_registered":false,
@@ -1074,6 +1081,7 @@ fn cached_photo_comparison(
         "album_revisions":albums,
         "model_fingerprint":model,
         "photo_sample_policy":evidence["photo_sample_policy"],
+        "photo_count":evidence["photo_count"],
         "player_matches":evidence["matches"]
     }))
 }
@@ -1186,6 +1194,7 @@ fn persist_photo_comparison(
     }
     doc["automatic_identity_evidence"] = json!({
         "threshold":threshold, "matches":matches,
+        "photo_count":comparison["photo_count"],
         "photo_sample_policy":comparison["photo_sample_policy"],
         "rally_run_id":req.rally_run_id,
         "album_revisions":comparison["album_revisions"],
@@ -1268,7 +1277,7 @@ pub(super) fn save_photo_match_suggestions(
     req: &ReidReviewRequest,
     comparison: &Value,
 ) -> Result<Value, ApiError> {
-    persist_photo_comparison(state, req, comparison, true, false)
+    persist_photo_comparison(state, req, comparison, false, false)
 }
 
 #[cfg(test)]

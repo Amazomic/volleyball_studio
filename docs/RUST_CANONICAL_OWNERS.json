@@ -132,6 +132,10 @@
                                        },
                                        {
                                            "source":  "native",
+                                           "path":  "players/native_reference_photos/\u003cplayer_id\u003e/reid-features.json"
+                                       },
+                                       {
+                                           "source":  "native",
                                            "path":  "projects/\u003cid\u003e/native_reid_reviews/\u003creplay_id\u003e.json"
                                        }
                                    ]

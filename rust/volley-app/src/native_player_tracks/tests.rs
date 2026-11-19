@@ -2038,6 +2038,12 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
             let result = reid_review(State(shared.clone()), HeaderMap::new(), Json(compare_req)).await.unwrap().0;
             assert_eq!(result["schema"], "volley-native-player-photo-comparison/1");
             assert_eq!(result["photo_count"], 1);
+            let feature_file = album_path.join("reid-features.json");
+            let features: Value = serde_json::from_slice(&fs::read(&feature_file).unwrap()).unwrap();
+            assert_eq!(features["schema"], "volley-native-player-reid-features/1");
+            assert_eq!(features["player_id"], "abcdef012345");
+            let saved_sha = album["photos"][0]["image_sha256"].as_str().unwrap();
+            assert_eq!(features["features"][saved_sha].as_array().map(Vec::len), Some(256));
             assert_eq!(result["auto_assign_enabled"], false);
             assert_eq!(result["player_matches"]["7"][0]["player_id"], "abcdef012345");
             let score = result["player_matches"]["7"][0]["cosine_similarity"].as_f64().unwrap();

@@ -1925,7 +1925,7 @@ async fn pipeline(
             expected_source_sha256: replay_sha.to_owned(),
             // Only assign athletes actually observed in this CPU rally version.
             rally_run_id: Some(rally_id.clone()),
-            action: "auto_assign".into(),
+            action: "postprocess_auto_assign".into(),
             track_ids: Vec::new(),
             expected_revision: None,
             threshold_percent: 30,

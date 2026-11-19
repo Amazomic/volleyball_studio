@@ -24,7 +24,7 @@ pub struct ReferenceRequest {
 }
 pub(super) const MAX_REFERENCE_INDEX: u64 = 256 * 1024;
 pub(super) const MAX_PHOTO_BYTES: usize = 3_000_000;
-pub(super) const MAX_PLAYER_PHOTOS: usize = 64;
+pub(super) const MAX_PLAYER_PHOTOS: usize = 200;
 
 pub(super) fn checked_reference_folder(
     state: &AppState,

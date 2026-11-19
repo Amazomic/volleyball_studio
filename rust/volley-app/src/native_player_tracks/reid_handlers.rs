@@ -747,7 +747,10 @@ pub async fn reid_review(
     Json(req): Json<ReidReviewRequest>,
 ) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
-    if req.action == "auto_assign" {
+    if matches!(
+        req.action.as_str(),
+        "auto_assign" | "postprocess_auto_assign"
+    ) {
         if req
             .auto_threshold_percent
             .is_some_and(|value| !(1..=99).contains(&value))
@@ -765,6 +768,11 @@ pub async fn reid_review(
         .map_err(|e| storage::internal(format!("Cached automatic identity worker: {e}")))??
         {
             return Ok(Json(saved));
+        }
+        if req.action == "auto_assign" {
+            return Err(storage::conflict(
+                "Сохранённые совпадения отсутствуют или устарели. Нажмите «Обновить признаки и совпадения», затем повторите автопривязку.",
+            ));
         }
         let comparison =
             super::photo_comparison::compare(state.clone(), headers, req.clone()).await?;

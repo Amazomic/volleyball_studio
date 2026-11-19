@@ -1,3 +1,11 @@
+> 2026-11-19: Global athlete photos and model-specific 256-dimensional OpenVINO
+> reference descriptors persist under `players/native_reference_photos/<player_id>/`
+> (`index.json`, `ref-*.jpg`, `reid-features.json`) independent of projects.
+> Photo SHA-256 + model fingerprint invalidate stale descriptors. Native CPU
+> postprocessing calculates project Track ID comparisons, saves suggestions and
+> may apply thresholded automatic matches; the Players tab does not trigger
+> inference on opening. New photos are considered only after the explicit
+> refresh action; manual refresh does not create athlete assignments.
 > Stage 61: the global athlete album uses only isolated Rust writes in
 > players/native_reference_photos/<player_id>/index.json with bounded JPEG
 > blobs, manually reviewed source replay metadata, CAS revision, per-athlete

@@ -20,10 +20,10 @@
     selected:new Set(),rallyIds:new Set(),revision:"absent",rows:[],total:0,
     roster:[],writable:false,busy:false,sourceSha:"",groupRevision:null,
     groups:[],grouped:new Set(),groupLoaded:false,groupShown:24,singleCount:0,
-    playerMatches:{},libraryPlayers:[],projectPlayerIds:new Set(),
+    playerMatches:{},similarityStatus:"not_calculated",libraryPlayers:[],projectPlayerIds:new Set(),
     rosterEpoch:0,rosterBusy:false,rosterLoaded:false,tracksLoaded:false,loadingKey:null,grouping:false,
     photoIndices:new Map(),groupNavigation:new Map(),viewPlayer:"",viewConflicts:false,filteredTotal:0,unassignedIds:new Set(),identityConflictIds:new Set(),comparisonIds:new Set(),
-    photoScoreAttempts:new Set(),photoScoreLoading:false,photoScoresPromise:null,forcePhotoScores:false,autoThresholdScope:"",autoAssignPending:null
+    photoScoreLoading:false,autoThresholdScope:"",autoAssignPending:null
   };
   const node=(tag,klass,text)=>{
     const n=document.createElement(tag);if(klass)n.className=klass;
@@ -230,7 +230,7 @@
     state.photoIndices.clear();state.groupNavigation.clear();
     state.sourceSha="";state.groupRevision=null;state.rallyRun="";state.fallback=false;
     state.groups=[];state.grouped.clear();state.groupLoaded=false;
-    state.groupShown=24;state.singleCount=0;state.playerMatches={};
+    state.groupShown=24;state.singleCount=0;state.playerMatches={};state.similarityStatus="not_calculated";
     state.viewPlayer="";state.viewConflicts=false;state.filteredTotal=0;state.unassignedIds.clear();state.identityConflictIds.clear();
     state.comparisonIds.clear();state.autoAssignPending=null;
     updateUnassignedLabel();viewBack.hidden=true;groupsMode.hidden=false;playerMode.hidden=true;setMode("singles");
@@ -397,6 +397,8 @@
       const savedMatches=result.automatic_identity_matches;
       state.playerMatches=savedMatches&&typeof savedMatches==="object"&&!Array.isArray(savedMatches)?
         savedMatches:{};
+      state.similarityStatus=["calculated","no_reference_photos"].includes(result.similarity_status)?
+        result.similarity_status:"not_calculated";
       const previousRevision=state.revision;
       state.revision=String(result.revision||"absent");
       if(previousRevision!=="absent"&&previousRevision!==state.revision){
@@ -422,29 +424,6 @@
       // ReID group calculation is a secondary read, not part of the gallery
       // response. Never block card interaction while it is being refreshed.
       if(reviewReady()&&(preserveCards||!state.groupLoaded))void reviewLoad();
-      // Compute scores once for this replay on first opening the player
-      // gallery. The request runs independently of card interactions and
-      // persists photo comparisons for following page loads.
-      const unscored=[...state.comparisonIds].some(id=>
-        !Array.isArray(state.playerMatches[String(id)])||
-        !state.playerMatches[String(id)].length);
-      const savedHighMatches=[...state.unassignedIds].some(id=>
-        Array.isArray(savedMatches?.[String(id)])&&
-        savedMatches[String(id)].some(match=>Number(match.cosine_similarity)>0.80));
-      const scoreKey=[project,video,replay,state.sourceSha].join("|");
-      if(state.writable&&state.roster.length&&state.comparisonIds.size&&
-         (unscored||savedHighMatches||state.forcePhotoScores)&&
-         !state.photoScoreLoading&&!state.photoScoreAttempts.has(scoreKey)){
-        state.photoScoreAttempts.add(scoreKey);
-        state.forcePhotoScores=false;
-        const scoreTask=loadPhotoScoresOnFirstView(reviewScope(),scoreKey,token);
-        state.photoScoresPromise=scoreTask;
-        void scoreTask.then(()=>{
-          if(state.photoScoresPromise===scoreTask)state.photoScoresPromise=null;
-        },()=>{
-          if(state.photoScoresPromise===scoreTask)state.photoScoresPromise=null;
-        });
-      }
       note(state.roster.length?
         "Track ID получены. Выберите ID и вручную назначьте игрока из состава проекта.":
         "Добавьте игроков в состав проекта через управление проектом, чтобы разрешить ручную привязку.");
@@ -539,9 +518,12 @@
     if(candidates.length)select.value=candidates[0].playerId;
     const kind=candidates[0]?.referenceKind==="reviewed_track"?
       " · с подтверждённым ID":" · с фото";
+    const emptySimilarity=state.similarityStatus==="no_reference_photos"?
+      "Нет эталонных фото игроков":state.similarityStatus==="calculated"?
+      "Совпадений с игроками не найдено":"Не рассчитано при постобработке · проверьте журнал";
     const similarity=node("small","track-match-score",candidates.length?
       "Лучшее сходство: "+candidates[0].name+" · "+(candidates[0].score*100).toFixed(1)+"%"+kind:
-      "Сходство не рассчитано");
+      emptySimilarity);
     const link=node("button","primary","Добавить игроку");
     link.type="button";
     const updateLink=()=>updateCardLink(controls);
@@ -1302,31 +1284,9 @@
       typeof result.player_matches!=="object"||Array.isArray(result.player_matches))
       throw Error("Некорректный результат сравнения фотографий");
     state.playerMatches=result.player_matches;
+    state.similarityStatus=Number(result.photo_count)===0?"no_reference_photos":"calculated";
     renderRows();renderGroupCards();
     return {trackCount:ids.length,photoCount:result.photo_count};
-  };
-  const loadPhotoScoresOnFirstView=async(scope,scoreKey,token)=>{
-    if(state.photoScoreLoading)return;
-    state.photoScoreLoading=true;reidUnlock();
-    galleryStatus.textContent="Сравниваем непривязанные ID с сохранёнными фотографиями…";
-    try{
-      const summary=await refreshPhotoMatches(scope,token);
-      const same=scope.project_id===state.project&&scope.video===state.video&&
-        scope.replay_id===state.replay&&scope.expected_source_sha256===state.sourceSha;
-      if(!same)return;
-      // The user may have changed pages while extraction was running;
-      // refresh from persisted evidence rather than applying stale scores.
-      if(!summary)await loadPage({preserveCards:true});
-      galleryStatus.textContent=summary?
-        "Сходство рассчитано · ID: "+summary.trackCount+" · фото: "+summary.photoCount:
-        "Сохранённые совпадения обновлены";
-    }catch(error){
-      if(scope.project_id===state.project&&scope.replay_id===state.replay)
-        galleryStatus.textContent="Не удалось рассчитать совпадения: "+String(error.message||error);
-    }finally{
-      state.photoScoreLoading=false;
-      reidUnlock();
-    }
   };
   const repeatPhotoAnalysis=async()=>{
     if(!reviewReady()||state.busy)return;
@@ -1596,8 +1556,6 @@
     if(active())void loadLibraryRoster();
   });
   window.addEventListener("volley:player-photo-saved",()=>{
-    // Added views must invalidate a previously completed photo comparison.
-    state.photoScoreAttempts.clear();state.forcePhotoScores=true;
     if(active()&&state.tracksLoaded)void loadPage({preserveCards:true});
   });
   if(active())loadVideos();

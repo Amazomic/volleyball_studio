@@ -2609,6 +2609,7 @@ Studio показывает кнопку перехода между debug и re
 - После перезапуска `GET /studio/app.js` отдаёт новую надпись и разделение перегибов; HTML отдаёт максимальную паузу 900. Реальный `GET /api/training/rally-comparison` для run f7daedc9f49a4d2ba44d1201e6ae07da: CPU=152, saved impacts=5, trajectory rallies=0, внутри=0, вне=5; с явной симуляцией `min_impacts=1&max_touch_gap_frames=180` — пять предварительных интервалов и пять кандидатов. Детектор по-прежнему пропускает большинство игрового движения; независимая полнота/точность NOT TESTED.
 
 
+
 ### 2026-11-19 — Разделение веток разработки и релизов
 
 - База: `origin/rust` 57c223b80978873bce0cf97d128e998408a59584; действующий бета-релиз `master` ddb2a8214803a245731bc99735b32b10a00db392. До операции ветки расходились; релизная история `master` не переписана и не объединялась автоматически.
@@ -2624,3 +2625,10 @@ Studio показывает кнопку перехода между debug и re
 - `docs/README.md`, `docs/releases/v0.1.0-beta.1.md`: release notes indexed and mirrored byte-identically to the published tag, with no tag rewrite. `rust/volley-app/README.md` and `docs/RUST_REWRITE_SCOPE.md`: historical migration inventory explicitly separated from current API behavior and unaccepted production gate.
 - `AGENTS.md`, `docs/DEVELOPMENT_WORKFLOW.md`, `docs/TESTING.md`: keep `develop` as main development and PR target, `master` as release branch, immutable tags, and explicit documentation-only release corrections.
 - Docs-only validation: 112 local Markdown links resolved (0 broken), byte-identical beta notes, `git diff --check`, roadmap self-test 84/85 and ownership self-test 20 owners / 61 guarded routes PASS. No application rebuild/restart required; real GPU match accuracy, Docker/MP4 acceptance NOT TESTED in this documentation update.
+
+### 2026-11-19 — Сохранение ReID-признаков игроков отдельно от проектов
+
+- Основа: origin/develop `57c223b`; ветка `fix/20261119-player-similarity-cache`. Владелец ReID: `rust/volley-core/src/reid.rs`; адаптеры: `rust/volley-app/src/native_player_tracks/{photo_comparison,reference_store,assignments,reid_handlers,tests}.rs`, `studio_pipeline.rs`, `static/studio_tracks.js`.
+- Глобальные фото и 256-компонентные признаки каждого игрока сохраняются по `players/native_reference_photos/<player_id>/` в `reid-features.json`. Ключи: SHA-256 фото и fingerprint весов/препроцессинга. Существующие признаки переиспользуются между проектами и перезапусками; новые фото кодируются пакетами по 32. Лимит альбома: 200 фото; референсов в наборе: 4096. Существующие фото/проекты/подтверждения не перезаписываются.
+- Постобработка автоматически рассчитывает и сохраняет сравнения ID с фото; ошибка остаётся видна в её журнале. Открытие вкладки не инициирует повторный ReID. Кнопка ручного пересчёта обновляет предложения, не привязывая ID; отдельная автопривязка использует только актуальные сохранённые результаты. UI различает несчитанное сходство, отсутствие фото и отсутствие кандидатов.
+- Проверки: PASS — scripts/check-all.ps1 (сборка WASM, cargo fmt, строгий clippy, все Rust-тесты и 88 Node-проверок), node --check для studio_tracks.js, git diff --check; интеграционный тест сохранения кеша включается при наличии OpenVINO C runtime. Применение: исходная работающая Studio не затронута до публикации и безопасного обновления. GPU/независимая точность на полных матчах/видеоэкспорт — NOT TESTED.

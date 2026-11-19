@@ -4,13 +4,105 @@ use tokio::io::AsyncWriteExt;
 
 // Allow full multi-angle albums from several players without rejecting the
 // comparison. The 64 MiB source-data bound still applies.
-const MAX_COMPARISON_REFERENCE_PHOTOS: usize = 1024;
-const MAX_CACHED_REFERENCE_FEATURES: usize = 2048;
+const MAX_COMPARISON_REFERENCE_PHOTOS: usize = 4096;
+const MAX_CACHED_REFERENCE_FEATURES: usize = 4096;
+const MAX_GLOBAL_FEATURE_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 type ReferenceFeatureCache = BTreeMap<(String, String), Vec<f32>>;
 static REFERENCE_FEATURES: OnceLock<Mutex<ReferenceFeatureCache>> = OnceLock::new();
 
 fn reference_features() -> &'static Mutex<ReferenceFeatureCache> {
     REFERENCE_FEATURES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn validated_global_features(
+    raw: Option<&[u8]>,
+    player_id: &str,
+    model: &str,
+) -> BTreeMap<String, Vec<f32>> {
+    let Some(doc) = raw.and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok()) else {
+        return BTreeMap::new();
+    };
+    if doc["schema"] != "volley-native-player-reid-features/1"
+        || doc["player_id"] != player_id
+        || doc["model_fingerprint"] != model
+    {
+        return BTreeMap::new();
+    }
+    let Some(features) = doc["features"].as_object() else {
+        return BTreeMap::new();
+    };
+    if features.len() > MAX_PLAYER_PHOTOS {
+        return BTreeMap::new();
+    }
+    let mut result = BTreeMap::new();
+    for (sha, raw_vector) in features {
+        let Ok(vector) = serde_json::from_value::<Vec<f32>>(raw_vector.clone()) else {
+            return BTreeMap::new();
+        };
+        let norm = vector.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>();
+        if !valid_sha(sha)
+            || vector.len() != volley_inference::reid_openvino::DIMENSIONS
+            || vector.iter().any(|v| !v.is_finite())
+            || !(0.99..=1.01).contains(&norm)
+        {
+            return BTreeMap::new();
+        }
+        result.insert(sha.clone(), vector);
+    }
+    result
+}
+
+fn read_global_features(
+    state: &AppState,
+    player_id: &str,
+    model: &str,
+) -> Result<BTreeMap<String, Vec<f32>>, ApiError> {
+    let folder = checked_reference_folder(state, player_id, false)?;
+    let raw = versioned_store::read_optional_bounded(
+        &folder.join("reid-features.json"),
+        MAX_GLOBAL_FEATURE_CACHE_BYTES,
+    )
+    .map_err(storage::bad_request)?;
+    Ok(validated_global_features(raw.as_deref(), player_id, model))
+}
+
+fn save_global_features(
+    state: &AppState,
+    model: &str,
+    photos: &[PhotoInput],
+    vectors: &[Vec<f32>],
+) -> Result<(), ApiError> {
+    if !state.writes_enabled {
+        return Ok(());
+    }
+    let mut by_player = BTreeMap::<String, BTreeMap<String, Vec<f32>>>::new();
+    for (photo, vector) in photos.iter().zip(vectors) {
+        by_player
+            .entry(photo.player_id.clone())
+            .or_default()
+            .insert(photo.image_sha256.clone(), vector.clone());
+    }
+    let _guard = reference_features()
+        .lock()
+        .map_err(|_| storage::internal("Reference ReID cache lock poisoned"))?;
+    for (player_id, features) in by_player {
+        let folder = checked_reference_folder(state, &player_id, true)?;
+        let target = folder.join("reid-features.json");
+        let raw = versioned_store::read_optional_bounded(&target, MAX_GLOBAL_FEATURE_CACHE_BYTES)
+            .map_err(storage::bad_request)?;
+        if validated_global_features(raw.as_deref(), &player_id, model) == features {
+            continue;
+        }
+        let doc = json!({
+            "schema":"volley-native-player-reid-features/1",
+            "player_id":player_id,
+            "model_fingerprint":model,
+            "features":features
+        });
+        versioned_store::write_json_checked(&folder, &target, &doc, MAX_GLOBAL_FEATURE_CACHE_BYTES)
+            .map_err(storage::bad_request)?;
+    }
+    Ok(())
 }
 
 struct PhotoInput {
@@ -20,7 +112,7 @@ struct PhotoInput {
     replay_id: String,
     track_id: u64,
     image_sha256: String,
-    bytes: Vec<u8>,
+    path: PathBuf,
 }
 
 fn exclude_cross_athlete_reference_collisions(photos: &mut Vec<PhotoInput>) {
@@ -90,7 +182,6 @@ pub(super) fn snapshot(state: &AppState, req: &ReidReviewRequest) -> Result<Snap
     }
     let mut albums = Vec::new();
     let mut photos = Vec::new();
-    let mut total_bytes = 0usize;
     for player_id in ctx.roster.keys() {
         let folder = checked_reference_folder(state, player_id, false)?;
         let raw =
@@ -114,18 +205,10 @@ pub(super) fn snapshot(state: &AppState, req: &ReidReviewRequest) -> Result<Snap
             let id = row["id"]
                 .as_str()
                 .ok_or_else(|| storage::bad_request("Invalid reference ID"))?;
-            let bytes = versioned_store::read_optional_bounded(
-                &folder.join(format!("ref-{id}.jpg")),
-                MAX_PHOTO_BYTES as u64,
-            )
-            .map_err(storage::bad_request)?
-            .ok_or_else(|| storage::conflict("Reference photo missing"))?;
-            total_bytes = total_bytes.saturating_add(bytes.len());
-            if total_bytes > 64 * 1024 * 1024 {
-                return Err(storage::bad_request(
-                    "Reference photos exceed 64 MiB for one comparison",
-                ));
-            }
+            let path = folder.join(format!("ref-{id}.jpg"));
+            let bytes = versioned_store::read_optional_bounded(&path, MAX_PHOTO_BYTES as u64)
+                .map_err(storage::bad_request)?
+                .ok_or_else(|| storage::conflict("Reference photo missing"))?;
             if bytes.len() < 100
                 || !bytes.starts_with(&[0xff, 0xd8])
                 || !bytes.ends_with(&[0xff, 0xd9])
@@ -149,7 +232,7 @@ pub(super) fn snapshot(state: &AppState, req: &ReidReviewRequest) -> Result<Snap
                     .as_u64()
                     .ok_or_else(|| storage::bad_request("Invalid reference track"))?,
                 image_sha256: sha.to_owned(),
-                bytes,
+                path,
             });
         }
     }
@@ -390,6 +473,7 @@ pub(super) async fn compare(
             "identity_revision":snap.identity_revision,
             "album_revisions":snap.albums,
             "model_fingerprint":snap.model,
+            "photo_sample_policy":"three_observations_v1",
             "auto_assign_enabled":false,"confirmed":false
         }));
     }
@@ -411,7 +495,7 @@ pub(super) async fn compare(
         .collect::<Vec<_>>();
     if ids.is_empty() {
         return Ok(
-            json!({"schema":"volley-native-player-photo-comparison/1","project_id":snap.ctx.project_id,"replay_id":snap.ctx.replay_id,"source_replay_sha256":snap.ctx.source_sha,"player_matches":{},"photo_count":0,"identity_revision":snap.identity_revision,"album_revisions":snap.albums,"model_fingerprint":snap.model,"auto_assign_enabled":false,"confirmed":false}),
+            json!({"schema":"volley-native-player-photo-comparison/1","project_id":snap.ctx.project_id,"replay_id":snap.ctx.replay_id,"source_replay_sha256":snap.ctx.source_sha,"player_matches":{},"photo_count":snap.photos.len(),"identity_revision":snap.identity_revision,"album_revisions":snap.albums,"model_fingerprint":snap.model,"photo_sample_policy":"three_observations_v1","auto_assign_enabled":false,"confirmed":false}),
         );
     }
     for chunk in ids.chunks(8) {
@@ -464,6 +548,15 @@ pub(super) async fn compare(
     // Reuse features for identical saved images and model fingerprints across
     // explicit refresh and auto-link; neither user data nor cache schema changes.
     let mut photo_vectors = vec![None; snap.photos.len()];
+    let mut global = BTreeMap::<String, BTreeMap<String, Vec<f32>>>::new();
+    for photo in &snap.photos {
+        if !global.contains_key(&photo.player_id) {
+            global.insert(
+                photo.player_id.clone(),
+                read_global_features(&state, &photo.player_id, &snap.model)?,
+            );
+        }
+    }
     {
         let cache = reference_features()
             .lock()
@@ -471,44 +564,66 @@ pub(super) async fn compare(
         for (index, photo) in snap.photos.iter().enumerate() {
             photo_vectors[index] = cache
                 .get(&(snap.model.clone(), photo.image_sha256.clone()))
-                .cloned();
+                .cloned()
+                .or_else(|| {
+                    global
+                        .get(&photo.player_id)?
+                        .get(&photo.image_sha256)
+                        .cloned()
+                });
         }
     }
-    let mut missing_indices = Vec::new();
-    let mut inputs = Vec::new();
-    for (index, photo) in snap.photos.iter().enumerate() {
-        if photo_vectors[index].is_none() {
-            missing_indices.push(index);
-            inputs.push(decode(&photo.bytes).await?);
-        }
-    }
-    if !inputs.is_empty() {
+    let missing_indices = snap
+        .photos
+        .iter()
+        .enumerate()
+        .filter_map(|(index, _)| photo_vectors[index].is_none().then_some(index))
+        .collect::<Vec<_>>();
+    if !missing_indices.is_empty() {
         let library = std::env::var("VOLLEY_OPENVINO_C_LIB")
             .map_err(|_| storage::bad_request("Native OpenVINO C runtime is not configured"))?;
         let repo = state.repository_root.clone();
-        let inferred = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<f32>>, ApiError> {
-            let mut encoder =
-                volley_inference::reid_openvino::Encoder::load(&repo, Path::new(&library))
+        for batch in missing_indices.chunks(32) {
+            let mut inputs = Vec::with_capacity(batch.len());
+            for &index in batch {
+                let photo = &snap.photos[index];
+                let bytes =
+                    versioned_store::read_optional_bounded(&photo.path, MAX_PHOTO_BYTES as u64)
+                        .map_err(storage::bad_request)?
+                        .ok_or_else(|| {
+                            storage::conflict("Reference photo missing during encoding")
+                        })?;
+                inputs.push(decode(&bytes).await?);
+            }
+            let batch_repo = repo.clone();
+            let batch_library = library.clone();
+            let inferred =
+                tokio::task::spawn_blocking(move || -> Result<Vec<Vec<f32>>, ApiError> {
+                    let mut encoder = volley_inference::reid_openvino::Encoder::load(
+                        &batch_repo,
+                        Path::new(&batch_library),
+                    )
                     .map_err(storage::bad_request)?;
-            inputs
-                .iter()
-                .map(|input| encoder.infer(input).map_err(storage::bad_request))
-                .collect()
-        })
-        .await
-        .map_err(|e| storage::internal(format!("Photo ReID worker: {e}")))??;
-        let mut cache = reference_features()
-            .lock()
-            .map_err(|_| storage::internal("Reference ReID cache lock poisoned"))?;
-        if cache.len() + inferred.len() > MAX_CACHED_REFERENCE_FEATURES {
-            cache.clear();
-        }
-        for (index, vector) in missing_indices.into_iter().zip(inferred) {
-            cache.insert(
-                (snap.model.clone(), snap.photos[index].image_sha256.clone()),
-                vector.clone(),
-            );
-            photo_vectors[index] = Some(vector);
+                    inputs
+                        .iter()
+                        .map(|input| encoder.infer(input).map_err(storage::bad_request))
+                        .collect()
+                })
+                .await
+                .map_err(|e| storage::internal(format!("Photo ReID worker: {e}")))??;
+            let mut cache = reference_features()
+                .lock()
+                .map_err(|_| storage::internal("Reference ReID cache lock poisoned"))?;
+            if cache.len() + inferred.len() > MAX_CACHED_REFERENCE_FEATURES {
+                cache.clear();
+            }
+            for (&index, vector) in batch.iter().zip(inferred) {
+                cache.insert(
+                    (snap.model.clone(), snap.photos[index].image_sha256.clone()),
+                    vector.clone(),
+                );
+                photo_vectors[index] = Some(vector);
+            }
         }
     }
     let vectors = photo_vectors
@@ -530,6 +645,7 @@ pub(super) async fn compare(
             "Player assignments, photo album or ReID model changed during comparison",
         ));
     }
+    save_global_features(&state, &snap.model, &snap.photos, &vectors)?;
     let refs = snap
         .photos
         .drain(..)
@@ -736,13 +852,41 @@ mod tests {
     }
 
     #[test]
+    fn player_feature_cache_reuses_only_exact_athlete_model_and_photo_hash() {
+        let photo = "a".repeat(64);
+        let model = "b".repeat(64);
+        let mut unit = vec![0.0_f32; volley_inference::reid_openvino::DIMENSIONS];
+        unit[0] = 1.0;
+        let value = json!({
+            "schema":"volley-native-player-reid-features/1",
+            "player_id":"athlete-1",
+            "model_fingerprint":model,
+            "features":{photo.clone():unit.clone()}
+        });
+        let encoded = serde_json::to_vec(&value).unwrap();
+        let loaded = validated_global_features(Some(&encoded), "athlete-1", &model);
+        assert_eq!(loaded.get(&photo), Some(&unit));
+        assert!(!loaded.contains_key(&"c".repeat(64)));
+        assert!(validated_global_features(Some(&encoded), "athlete-2", &model).is_empty());
+        assert!(validated_global_features(Some(&encoded), "athlete-1", &"d".repeat(64)).is_empty());
+        let mut malformed = value;
+        malformed["features"][&photo] = json!(vec![0.0_f32; 256]);
+        assert!(validated_global_features(
+            Some(&serde_json::to_vec(&malformed).unwrap()),
+            "athlete-1",
+            &model
+        )
+        .is_empty());
+    }
+
+    #[test]
     fn full_multi_athlete_photo_albums_fit_in_one_comparison() {
         // Six existing athlete albums with 46+64+48+32+55+64 photos
         // previously failed at the old hard cap of 256.
         let album_capacity = std::hint::black_box(MAX_COMPARISON_REFERENCE_PHOTOS);
         let cache_capacity = std::hint::black_box(MAX_CACHED_REFERENCE_FEATURES);
         assert!(album_capacity >= 46 + 64 + 48 + 32 + 55 + 64);
-        assert!(album_capacity >= 8 * MAX_PLAYER_PHOTOS);
+        assert!(album_capacity >= 12 * MAX_PLAYER_PHOTOS);
         assert!(cache_capacity >= album_capacity);
     }
 
@@ -755,7 +899,7 @@ mod tests {
             replay_id: "replay".into(),
             track_id: 1,
             image_sha256: sha.to_owned(),
-            bytes: vec![],
+            path: PathBuf::new(),
         };
         let mut refs = vec![
             photo("first", "same"),

@@ -14,16 +14,13 @@ const context={state,reviewReady:()=>true,reviewScope:()=>({project_id:"p",video
   galleryStatus:{textContent:""},
   post:async(url,body)=>{calls.push({url,body});return body.action==="refresh_matches"?
     {schema:"volley-native-player-photo-comparison/1",source_replay_sha256:state.sourceSha,auto_assign_enabled:false,confirmed:false,saved:true,player_matches:{"1":[]},photo_count:1}:{};}};
-runInNewContext(source.slice(start,end)+"\nthis.repeat=repeatPhotoAnalysis;this.background=loadPhotoScoresOnFirstView;",context);
+assert.ok(!source.includes("loadPhotoScoresOnFirstView"),"gallery must not infer ReID on opening");
+runInNewContext(source.slice(start,end)+"\nthis.repeat=repeatPhotoAnalysis;",context);
 await context.repeat();
 assert.deepEqual(calls.map(call=>call.body.action),["refresh_matches"]);
 assert.equal(calls[0].body.rally_run_id,"run");
 assert.ok("1" in state.playerMatches);
 assert.equal(state.busy,false);
-assert.equal(state.busy,false);
-state.playerMatches={};
-await context.background(context.reviewScope(),"project|video|replay",1);
-assert.ok("1" in state.playerMatches,"background comparison updates suggestions");
-assert.equal(state.photoScoreLoading,false);
-assert.deepEqual(calls.map(call=>call.body.action),["refresh_matches","refresh_matches"]);
-console.log("Explicit and background photo comparisons save scores without auto-linking: OK");
+assert.equal(state.similarityStatus,"calculated");
+assert.deepEqual(calls.map(call=>call.body.action),["refresh_matches"]);
+console.log("Photo similarity only refreshes on explicit action: OK");
