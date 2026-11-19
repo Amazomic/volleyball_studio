@@ -124,6 +124,27 @@ pub(super) fn trajectory_profile(lib: &Library) -> TrajectoryProfile {
     }
     best
 }
+fn include_legacy_reviewed_labels(
+    lib: &mut Library,
+    project_id: &str,
+    video: &str,
+    source_sha: &str,
+    replay_sha: &str,
+    scores: &[TrajectoryCandidate],
+) -> bool {
+    if let Some(labels) = lib.videos.iter_mut().find(|labels| {
+        labels.project_id == project_id
+            && labels.video == video
+            && labels.source_sha256 == source_sha
+            && labels.reviewed
+            && labels.trajectory_replay_sha != replay_sha
+    }) {
+        labels.trajectory_replay_sha = replay_sha.to_owned();
+        labels.trajectory_candidates = scores.to_vec();
+        return true;
+    }
+    false
+}
 pub(super) fn scan_trajectory(run: &ValidatedRun) -> Result<Vec<TrajectoryCandidate>, ApiError> {
     let (events, _count) = crate::native_player_tracks::full_video_ball_suggestions(run)
         .map_err(storage::bad_request)?;
@@ -153,7 +174,7 @@ pub async fn calculate(
         let state = worker;
         let run = inspect_project(&state, &req.project_id, &req.rally_run_id)?;
         let source = source_sha(&run)?;
-        let lib = lock(|| read(&state))?;
+        let mut lib = lock(|| read(&state))?;
         let labels = lib
             .videos
             .iter()
@@ -161,11 +182,24 @@ pub async fn calculate(
         if labels.is_some_and(|v| v.source_sha256 != source) {
             return Err(storage::conflict("Source video changed since annotation"));
         }
+        let truth = labels.map(|v| {
+            let mut frames = v.touches.iter().map(|t| t.frame).collect::<Vec<_>>();
+            frames.sort_unstable();
+            frames
+        });
         let scores = if let Some(v) = labels.filter(|v| v.trajectory_replay_sha == run.replay_sha) {
             v.trajectory_candidates.clone()
         } else {
             scan_trajectory(&run)?
         };
+        include_legacy_reviewed_labels(
+            &mut lib,
+            &run.project_id,
+            &run.video,
+            &source,
+            &run.replay_sha,
+            &scores,
+        );
         let calibration = trajectory_profile(&lib);
         let selected = predict(&scores, calibration, run.frames);
         let proposals = selected
@@ -179,11 +213,7 @@ pub async fn calculate(
                 json!({"frame":frame,"score":score})
             })
             .collect::<Vec<_>>();
-        let metrics = labels.map(|v| {
-            let mut truth = v.touches.iter().map(|t| t.frame).collect::<Vec<_>>();
-            truth.sort_unstable();
-            accuracy(&truth, &selected, 1, 30.0)
-        });
+        let metrics = truth.map(|frames| accuracy(&frames, &selected, 1, 30.0));
         Ok(json!({"schema":"volley-trajectory-touch-proposals/1",
             "project_id":run.project_id,"video":run.video,"rally_run_id":run.run_id,
             "source_replay_sha256":run.replay_sha,"total_frames":run.frames,
@@ -227,6 +257,58 @@ mod tests {
                 rallies: vec![],
             }],
         }
+    }
+    #[test]
+    fn existing_reviewed_video_calibrates_without_resaving_annotations() {
+        let mut lib = labeled(&[102], vec![]);
+        lib.videos[0].reviewed = true;
+        lib.videos[0].trajectory_replay_sha.clear();
+        let original = serde_json::to_value(&lib.videos[0]).unwrap();
+        let samples = vec![c(100, 9.0), c(140, 3.0)];
+        assert!(!include_legacy_reviewed_labels(
+            &mut lib,
+            "test",
+            "match.mp4",
+            &"0".repeat(64),
+            &"b".repeat(64),
+            &samples,
+        ));
+        assert!(!include_legacy_reviewed_labels(
+            &mut lib,
+            "test",
+            "other.mp4",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &samples,
+        ));
+        assert_eq!(lib.videos[0].trajectory_replay_sha, "");
+        assert!(include_legacy_reviewed_labels(
+            &mut lib,
+            "test",
+            "match.mp4",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &samples,
+        ));
+        let profile = trajectory_profile(&lib);
+        assert_eq!(profile.training_videos, 1);
+        assert_eq!(profile.shift_frames, 2);
+        assert_eq!(
+            predict(&lib.videos[0].trajectory_candidates, profile, 200),
+            vec![102]
+        );
+        assert_ne!(serde_json::to_value(&lib.videos[0]).unwrap(), original);
+        let mut unreviewed = labeled(&[102], vec![]);
+        unreviewed.videos[0].trajectory_replay_sha.clear();
+        assert!(!include_legacy_reviewed_labels(
+            &mut unreviewed,
+            "test",
+            "match.mp4",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &samples,
+        ));
+        assert_eq!(trajectory_profile(&unreviewed).training_videos, 0);
     }
     #[test]
     fn saved_manual_timing_calibrates_recalculation() {
