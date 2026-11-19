@@ -216,6 +216,7 @@ async fn decode(bytes: &[u8]) -> Result<Vec<f32>, ApiError> {
 
 /// Only a competition for the same athlete needs the extra video crops:
 /// independent tracklets in different rallies already have one clear owner.
+#[cfg(test)]
 pub(super) fn contested_photo_tracks(ctx: &Inputs, matches: &Value) -> BTreeSet<u64> {
     let mut owner_tracks = BTreeMap::<&str, Vec<u64>>::new();
     for (id, proposals) in matches.as_object().into_iter().flat_map(|m| m.iter()) {

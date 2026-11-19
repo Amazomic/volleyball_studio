@@ -140,6 +140,7 @@ fn assigned_visibility_conflicts(
     conflicts
 }
 
+#[cfg(test)]
 pub(super) fn choose_automatic_photo_links(
     ctx: &Inputs,
     doc: &Value,
