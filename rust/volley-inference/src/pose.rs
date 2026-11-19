@@ -48,7 +48,7 @@ impl PoseEngine {
             .join(MODEL_FILE)
             .canonicalize()
             .map_err(|e| format!("RTMPose-M ONNX not installed in models/: {e}"))?;
-        if !path.starts_with(&models) || !path.is_file() {
+        if !path.is_file() {
             return Err("RTMPose model path is outside approved model directory".into());
         }
         let len = path
@@ -58,6 +58,7 @@ impl PoseEngine {
         if !(1024..=256 * 1024 * 1024).contains(&len) {
             return Err("RTMPose model size outside validated range".into());
         }
+        crate::verify_model_sha(&path, MODEL_SHA256)?;
         #[cfg(target_os = "linux")]
         let _ = crate::runtime_library(device)?;
         ort::init()

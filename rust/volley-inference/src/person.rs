@@ -7,7 +7,7 @@ use ort::{
     session::Session,
     value::Tensor,
 };
-use sha2::{Digest, Sha256};
+
 use std::path::Path;
 
 pub const PERSON_SAMPLE_PERIOD_FRAMES: usize = 1;
@@ -184,25 +184,17 @@ impl PersonEngine {
             .join(variant.file())
             .canonicalize()
             .map_err(|e| format!("Person detector {} not installed: {e}", variant.file()))?;
-        if !path.starts_with(&models)
-            || !path.is_file()
-            || path.metadata().map_err(|e| e.to_string())?.len() > 256 * 1024 * 1024
-        {
+        let size = path
+            .metadata()
+            .map_err(|error| format!("RF-DETR model metadata: {error}"))?
+            .len();
+        if !path.is_file() || !(1024..=crate::MAX_MODEL_BYTES).contains(&size) {
             return Err(format!(
                 "Invalid person detector path or size: {}",
                 variant.file()
             ));
         }
-        let fingerprint = format!(
-            "{:x}",
-            Sha256::digest(std::fs::read(&path).map_err(|e| format!("RF-DETR model read: {e}"))?)
-        );
-        if fingerprint != variant.sha256() {
-            return Err(format!(
-                "{} SHA-256 does not match the tested ONNX artifact",
-                variant.file()
-            ));
-        }
+        crate::verify_model_sha(&path, variant.sha256())?;
         // Both GPU sessions explicitly require CUDA; never silently fall back.
         #[cfg(target_os = "linux")]
         let _ = crate::runtime_library(device)?;

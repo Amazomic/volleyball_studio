@@ -16,6 +16,8 @@ use ort::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::io::{BufReader, Read};
 use std::{
     collections::HashSet,
     fs,
@@ -109,6 +111,31 @@ pub struct ModelSpec {
     pub runtime_required: String,
 }
 
+pub(crate) fn verify_model_sha(path: &Path, expected: &str) -> Result<(), String> {
+    let file = fs::File::open(path).map_err(|error| format!("Open ONNX model: {error}"))?;
+    let mut reader = BufReader::new(file);
+    let mut digest = Sha256::new();
+    let mut chunk = [0u8; 1024 * 1024];
+    loop {
+        let count = reader
+            .read(&mut chunk)
+            .map_err(|error| format!("Read ONNX model: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&chunk[..count]);
+    }
+    let actual = format!("{:x}", digest.finalize());
+    if actual != expected {
+        return Err(format!(
+            "ONNX model {} SHA-256 does not match the approved artifact",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown")
+        ));
+    }
+    Ok(())
+}
 fn spec_for(repo: &Path, kind: ModelKind) -> Result<(ModelSpec, PathBuf), String> {
     let models = repo
         .join("models")
@@ -118,7 +145,7 @@ fn spec_for(repo: &Path, kind: ModelKind) -> Result<(ModelSpec, PathBuf), String
         .join(kind.filename())
         .canonicalize()
         .map_err(|e| format!("ONNX model missing: {e}"))?;
-    if !model.starts_with(&models) || !model.is_file() {
+    if !model.is_file() || (kind == ModelKind::Ball && !model.starts_with(&models)) {
         return Err("ONNX model is outside the approved repository models directory".into());
     }
     let size = model
@@ -127,6 +154,9 @@ fn spec_for(repo: &Path, kind: ModelKind) -> Result<(ModelSpec, PathBuf), String
         .len();
     if !(1024..=MAX_MODEL_BYTES).contains(&size) {
         return Err("ONNX model size is invalid".into());
+    }
+    if kind == ModelKind::Players {
+        verify_model_sha(&model, person::RFDETR_MEDIUM_SHA256)?;
     }
     let metadata = model.with_extension("json");
     let bytes = fs::read(&metadata).map_err(|e| format!("Missing ONNX sidecar metadata: {e}"))?;
@@ -408,6 +438,27 @@ mod tests {
             assert!(error.contains("ORT_DYLIB_PATH"));
             assert!(error.contains("scripts/setup_rust_ort_cuda.sh"));
         }
+    }
+    #[test]
+    fn approved_model_hash_validates_external_targets_and_detects_tampering() {
+        let dir = std::env::temp_dir().join(format!(
+            "volley-model-hash-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let external = dir.join("shared-weights.onnx");
+        let contents = vec![0xA7u8; 16 * 1024];
+        fs::write(&external, &contents).unwrap();
+        let expected = format!("{:x}", Sha256::digest(&contents));
+        assert!(verify_model_sha(&external, &expected).is_ok());
+        assert!(verify_model_sha(&external, "incorrect").is_err());
+        fs::write(&external, vec![0x22u8; 16 * 1024]).unwrap();
+        assert!(verify_model_sha(&external, &expected).is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn default_shapes() {
