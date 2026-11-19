@@ -2523,3 +2523,7 @@ Studio показывает кнопку перехода между debug и re
 
 - База `2457262`, ветка `fix/20261119-analysis-selection-fixture`. Путь `scripts/ci/test_studio_analysis_selection.mjs`: изолированный VM-тест не объявлял `window.VolleyStudioChain.latestRun` и падал, хотя реальный `rust/volley-app/static/studio_chain.js` экспортирует этот API. Вместо отдельного фальшивого алгоритма VM исполняет production `studio_chain.js` и использует реальный `latestRun` вместе с тестовой моделью каталога.
 - RED на базе: `TypeError: window.VolleyStudioChain.latestRun is not a function`. GREEN: `node scripts/ci/test_studio_analysis_selection.mjs` PASS, `node --check` PASS, `git diff --check` PASS. Исполняемые файлы Studio и пользовательские данные не менялись; остальные падения общего UI/Clippy gate остаются отдельными задачами.
+### 2026-11-19 — Развёртывание исправленного Rust-хранилища и проверки каталога
+
+- Чистый рабочий каталог работающей Studio `volley-training-redesign-20261119` fast-forward до `65fc2e4`, без затрагивания исходной рабочей копии. WSL: `source "$HOME/.cargo/env"; cargo build --release --offline --locked -p volley-app` PASS. Первичная попытка сборки без загрузки cargo environment завершилась `cargo: command not found`; повторный запуск успешен.
+- `/internal/rewrite-status` перед заменой подтвердил `shutdown_safe=true`, `active_jobs=[]`. Штатные `start-volley-ui.cmd /stop`, `/daemon`, `/status`: PASS. Новый фоновый PID `154098`, `GET /studio` HTTP 200, актуальный `montage-type-picker` отдается. GPU, реальная разметка и MP4: NOT TESTED.
