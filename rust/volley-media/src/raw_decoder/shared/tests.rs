@@ -540,7 +540,8 @@ fn nvdec_preview_clears_display_rotation_before_manual_pixel_rotation() {
         fallback_reason: None,
         rotation_filter: "transpose=clock,",
     };
-    let command = shared_decode_command_with_preview(Path::new("rotated.mp4"), &decision, 2, true);
+    let command =
+        shared_decode_command_with_preview(Path::new("rotated.mp4"), &decision, 2, true, false);
     let args: Vec<_> = command
         .get_args()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -959,4 +960,103 @@ fn primary_preview_cancel_before_publish_cleans_encoded_file_and_source_change_i
         .unwrap();
     assert!(plan.ready_path().is_none());
     fs::remove_dir_all(&temp.0).unwrap();
+}
+
+#[test]
+fn native_pose_source_has_original_decoder_pixels_and_synchronized_frames() {
+    let temp = SocketDir::new().unwrap();
+    let base = temp.0.join("native-base.mp4");
+    assert!(Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=60:duration=1.17",
+            "-c:v",
+            "mpeg4",
+            "-y"
+        ])
+        .arg(&base)
+        .status()
+        .unwrap()
+        .success());
+    for rotation in [0, 90] {
+        let source = temp.0.join(format!("native-{rotation}.mp4"));
+        assert!(Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(&base)
+            .args([
+                "-c",
+                "copy",
+                "-metadata:s:v:0",
+                &format!("rotate={rotation}"),
+                "-y"
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let cancel = AtomicBool::new(false);
+        let native_info = crate::probe(&source).unwrap();
+        let mut classic = Vec::new();
+        let summary = decode_full_video_shared_with_backend_and_tail(
+            &source,
+            9,
+            DecodePreference::Software,
+            2,
+            &cancel,
+            |_| Ok(()),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        crate::raw_decoder::decode_original_frames(
+            &source,
+            summary.decode.decoded_frames,
+            &cancel,
+            |index, frame, width, height| {
+                assert_eq!(
+                    (width, height),
+                    (native_info.width as usize, native_info.height as usize)
+                );
+                classic.push((index, Sha256::digest(frame).to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        let mut checked = 0;
+        let native =
+            decode_full_video_shared_with_native_and_tail(
+                &source,
+                9,
+                DecodePreference::Software,
+                2,
+                &cancel,
+                true,
+                |batch| {
+                    let original = batch.native.expect("Native branch must be populated");
+                    assert_eq!(
+                        (original.width, original.height),
+                        (native_info.width as usize, native_info.height as usize)
+                    );
+                    let frame_bytes = original.width * original.height * 3;
+                    assert_eq!(original.rgb.len(), frame_bytes * 9);
+                    for offset in 0..9 {
+                        let frame = batch.first_frame + offset;
+                        let pixels = &original.rgb
+                            [offset as usize * frame_bytes..(offset as usize + 1) * frame_bytes];
+                        assert_eq!(classic[frame as usize].0, frame);
+                        assert_eq!(Sha256::digest(pixels).to_vec(), classic[frame as usize].1,
+                        "Original-resolution pixels changed at frame {frame}, rotation {rotation}");
+                        checked += 1;
+                    }
+                    Ok(())
+                },
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(native.decode.decoded_frames, summary.decode.decoded_frames);
+        assert_eq!(checked, native.decode.windows * 9);
+    }
 }

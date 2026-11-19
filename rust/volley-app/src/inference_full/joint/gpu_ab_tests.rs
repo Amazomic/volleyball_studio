@@ -577,3 +577,190 @@ fn real_uu_match_gpu_ab_legacy_vs_shared() -> Result<(), String> {
     );
     Ok(())
 }
+
+type PoseBenchmarkRun = (f64, u64, Value, String, String, Vec<Value>);
+
+#[test]
+#[ignore = "requires CUDA models, isolated sample and explicit benchmark inputs"]
+fn original_pose_single_decode_benchmark() -> Result<(), String> {
+    let original = PathBuf::from(std::env::var("VOLLEY_AB_SOURCE").map_err(|e| e.to_string())?);
+    let repo = PathBuf::from(std::env::var("VOLLEY_AB_MODEL_ROOT").map_err(|e| e.to_string())?);
+    let base = std::env::temp_dir().join(format!("volley-pose-perf-{}", Uuid::new_v4().simple()));
+    fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    let _cleanup = IsolatedGpuFixture(base.clone());
+    let data = base.join("sandbox");
+    let uploads = data.join("uploads/project_sources");
+    fs::create_dir_all(&uploads).map_err(|e| e.to_string())?;
+    fs::create_dir_all(data.join("projects/012345abcdef")).map_err(|e| e.to_string())?;
+    let video = "bench.mp4";
+    let source = uploads.join(video);
+    let status = Command::new("ffmpeg")
+        .args(["-v", "error", "-ss", "28", "-i"])
+        .arg(&original)
+        .args(["-t", "4", "-map", "0:v:0", "-an", "-c:v", "copy", "-y"])
+        .arg(&source)
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("Cannot create isolated benchmark sample".into());
+    }
+    crate::storage::write_json_atomic(
+        &data.join("projects/projects.json"),
+        &json!({"schema":1,"projects":[{"id":"012345abcdef","name":"Pose perf","videos":[video]}]}),
+    )
+    .map_err(|e| format!("Create benchmark project: {e:?}"))?;
+    let app = state(repo, data);
+    let abort = AtomicBool::new(false);
+    let info = volley_media::probe(&source)?;
+    let run = |shared_pose: bool| -> Result<PoseBenchmarkRun, String> {
+        let started = Instant::now();
+        let pair = super::run_joint_pair(
+            &app,
+            "012345abcdef",
+            video,
+            &source,
+            info.duration_sec,
+            1,
+            shared_pose,
+            0,
+            4,
+            &abort,
+            |_| Ok(()),
+        )?;
+        let gpu_sec = started.elapsed().as_secs_f64();
+        let ball_sha = model_hash(&app.data_root, &pair.ball_job_id)?;
+        let person_sha = model_hash(&app.data_root, &pair.player_job_id)?;
+        let fusion = fusion_pair(&app, video, &pair.ball_job_id, &pair.player_job_id)?;
+        let pose = if shared_pose {
+            pair.pending_pose
+                .ok_or("Missing shared original pose")?
+                .publish(&fusion, &abort)?
+        } else {
+            crate::pose_inference::process(
+                &app,
+                "012345abcdef",
+                video,
+                fusion["fusion_id"].as_str().ok_or("Missing fusion id")?,
+                0,
+                4,
+                &abort,
+                |_, _| Ok(()),
+            )?
+        };
+        let elapsed = started.elapsed().as_secs_f64();
+        let pose_id = pose["pose_run_id"].as_str().ok_or("Missing pose id")?;
+        let file = app
+            .data_root
+            .join("projects/012345abcdef/native_gpu_pose_runs")
+            .join(pose_id)
+            .join("poses.jsonl");
+        let content = fs::read_to_string(&file).map_err(|e| e.to_string())?;
+        let rows = content
+            .lines()
+            .map(|line| serde_json::from_str(line).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<Value>, String>>()?;
+        println!("POSE_BENCH {} frames={} gpu_seconds={gpu_sec:.3} total_seconds={elapsed:.3} poses={} samples={} pose_sha={}",
+            if shared_pose {"single"} else {"baseline"},
+            pair.decoded_frames,pose["player_poses"],pose["sampled_frames"],pose["sha256"]);
+        Ok((
+            elapsed,
+            pair.decoded_frames,
+            pose,
+            ball_sha,
+            person_sha,
+            rows,
+        ))
+    };
+    match std::env::var("VOLLEY_AB_VARIANT").as_deref() {
+        Ok("compare") | Ok("reverse") => {
+            let (baseline, shared) =
+                if std::env::var("VOLLEY_AB_VARIANT").as_deref() == Ok("reverse") {
+                    let shared = run(true)?;
+                    let baseline = run(false)?;
+                    (baseline, shared)
+                } else {
+                    (run(false)?, run(true)?)
+                };
+            if baseline.1 != shared.1 || baseline.3 != shared.3 || baseline.4 != shared.4 {
+                return Err("GPU detection frame counts or SHA changed with native pose".into());
+            }
+            if baseline.2["sampled_frames"] != shared.2["sampled_frames"]
+                || baseline.2["player_poses"] != shared.2["player_poses"]
+            {
+                return Err("Pose sample or player count differs from reference".into());
+            }
+            if baseline.5.len() != shared.5.len() {
+                return Err("Pose row counts differ".into());
+            }
+            let mut row_mismatches = 0usize;
+            let mut box_mismatches = 0usize;
+            let mut keypoint_mismatches = 0usize;
+            let mut maximum_xy = 0.0f64;
+            let mut maximum_score = 0.0f64;
+            for (old, new) in baseline.5.iter().zip(&shared.5) {
+                if old == new {
+                    continue;
+                }
+                row_mismatches += 1;
+                if old["frame"] != new["frame"] {
+                    return Err("Pose frame indices differ".into());
+                }
+                let old_people = old["players"].as_array().ok_or("Bad reference pose row")?;
+                let new_people = new["players"].as_array().ok_or("Bad streamed pose row")?;
+                if old_people.len() != new_people.len() {
+                    return Err("Pose player counts differ".into());
+                }
+                for (a, b) in old_people.iter().zip(new_people) {
+                    if a["box"] != b["box"] || a["crop_origin"] != b["crop_origin"] {
+                        box_mismatches += 1;
+                    }
+                    let old_points = a["keypoints"]
+                        .as_array()
+                        .ok_or("Missing reference keypoints")?;
+                    let new_points = b["keypoints"]
+                        .as_array()
+                        .ok_or("Missing streamed keypoints")?;
+                    if old_points.len() != new_points.len() {
+                        return Err("Keypoint counts differ".into());
+                    }
+                    for (oa, nb) in old_points.iter().zip(new_points) {
+                        if oa != nb {
+                            keypoint_mismatches += 1;
+                        }
+                        let aa = oa.as_array().ok_or("Invalid reference keypoint")?;
+                        let bb = nb.as_array().ok_or("Invalid streamed keypoint")?;
+                        for index in 0..3 {
+                            let delta = (aa[index].as_f64().ok_or("Invalid reference value")?
+                                - bb[index].as_f64().ok_or("Invalid streamed value")?)
+                            .abs();
+                            if index == 2 {
+                                maximum_score = maximum_score.max(delta);
+                            } else {
+                                maximum_xy = maximum_xy.max(delta);
+                            }
+                        }
+                    }
+                }
+            }
+            println!("POSE_PARITY rows={} box_mismatches={} keypoint_mismatches={} max_xy={maximum_xy:.12} max_score={maximum_score:.12}",
+                row_mismatches, box_mismatches, keypoint_mismatches);
+            println!(
+                "POSE_SPEEDUP old={:.3}s new={:.3}s speedup={:.3}x reduction={:.2}%",
+                baseline.0,
+                shared.0,
+                baseline.0 / shared.0,
+                100.0 * (1.0 - shared.0 / baseline.0)
+            );
+            if box_mismatches != 0 || maximum_xy > 0.00001 || maximum_score > 0.001 {
+                return Err("Pose parity exceeded source-coordinate tolerances".into());
+            }
+        }
+        Ok("single") => {
+            run(true)?;
+        }
+        _ => {
+            run(false)?;
+        }
+    }
+    Ok(())
+}

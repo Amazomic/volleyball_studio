@@ -1216,6 +1216,17 @@ fn selected_gpu(
     }))
 }
 
+#[cfg(unix)]
+fn shared_native_pose_supported(enabled: bool, width: u32, height: u32) -> bool {
+    enabled
+        && width >= 2
+        && height >= 2
+        && (width as u64)
+            .saturating_mul(height as u64)
+            .saturating_mul(3)
+            <= volley_media::raw_decoder::MAX_NATIVE_RGB_FRAME_BYTES as u64
+}
+
 /// The existing fusion evidence uses disjoint 9-frame model windows.
 #[cfg(unix)]
 fn shared_primary_requested(
@@ -1562,6 +1573,17 @@ async fn pipeline(
                     .acquire()
                     .await
                     .map_err(|e| format!("Shared GPU inference limit: {e}"))?;
+                let full_resolution_pose = if request.gpu.pose_enabled {
+                    let native_info = volley_media::probe(&plan.source)?;
+                    shared_native_pose_supported(true, native_info.width, native_info.height)
+                } else {
+                    false
+                };
+                let gpu_label = if full_resolution_pose {
+                    "GPU · общий поток VBallNet + игроки + RTMPose"
+                } else {
+                    "GPU · общий поток VBallNet + игроки"
+                };
                 let result = tokio::task::block_in_place(|| {
                     inference_full::run_joint_pair(
                         app,
@@ -1570,18 +1592,11 @@ async fn pipeline(
                         &plan.source,
                         plan.duration_sec,
                         request.gpu.pose_stride,
-                        false,
+                        full_resolution_pose,
                         request.gpu.gpu_memory_limit_mb,
                         request.gpu.cpu_threads,
                         cancel,
-                        |fraction| {
-                            progress(
-                                path,
-                                status,
-                                "GPU · общий поток VBallNet + игроки",
-                                8.0 + 72.0 * fraction,
-                            )
-                        },
+                        |fraction| progress(path, status, gpu_label, 8.0 + 72.0 * fraction),
                     )
                 })?;
                 crate::preparation::primary_preview::enqueue(
@@ -2611,6 +2626,17 @@ mod tests {
         assert!(!shared_primary_requested(None, 9, true, Video));
         assert!(!shared_primary_requested(Some("1"), 9, true, Video));
     }
+    #[cfg(unix)]
+    #[test]
+    fn original_resolution_pose_is_default_on_supported_primary_frames() {
+        assert!(shared_native_pose_supported(true, 1920, 1080));
+        assert!(shared_native_pose_supported(true, 2560, 1440));
+        assert!(shared_native_pose_supported(true, 3840, 2160));
+        assert!(!shared_native_pose_supported(false, 1920, 1080));
+        assert!(!shared_native_pose_supported(true, 0, 1080));
+        assert!(!shared_native_pose_supported(true, 7680, 4320));
+    }
+
     #[test]
     fn progress_records_stage_transitions_for_history() {
         let dir = std::env::temp_dir().join(format!("studio-history-{}", Uuid::new_v4()));

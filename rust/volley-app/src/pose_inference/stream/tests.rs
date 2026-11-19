@@ -33,7 +33,10 @@ use super::*;
 fn sample(index: u64) -> PendingFrame {
     PendingFrame {
         index,
-        rgb: Vec::new(),
+        rgb: Arc::new(Vec::new()),
+        offset: 0,
+        width: 1920,
+        height: 1080,
         boxes: Vec::new(),
     }
 }
@@ -87,6 +90,8 @@ fn fake_pending() -> (PendingPose, Value) {
         sample_stride: 10,
         emitted_frames: 18,
         decoded_frames: 22,
+        native_width: 1920,
+        native_height: 1080,
         sampled: 1,
         people: 0,
         observed_crops: 0,

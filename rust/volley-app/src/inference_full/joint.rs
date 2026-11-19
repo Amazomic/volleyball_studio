@@ -4,7 +4,7 @@ use super::*;
 use crate::pose_inference::{PendingPose, PoseStream};
 use std::cell::RefCell;
 use volley_media::raw_decoder::{
-    decode_full_video_shared_with_backend_and_tail, DecodeBackend, DecodePreference,
+    decode_full_video_shared_with_native_and_tail, DecodeBackend, DecodePreference,
 };
 
 #[derive(Debug)]
@@ -220,12 +220,13 @@ pub(crate) fn run_joint_pair(
     };
     let pose = RefCell::new(pose);
     let estimated = (duration * 30.0).max(9.0);
-    let summary = decode_full_video_shared_with_backend_and_tail(
+    let summary = decode_full_video_shared_with_native_and_tail(
         original,
         9,
         backend_preference()?,
         cpu_threads,
         cancelled,
+        pose_enabled,
         |batch| {
             if cancelled.load(Ordering::Acquire) {
                 return Err("cancelled".into());

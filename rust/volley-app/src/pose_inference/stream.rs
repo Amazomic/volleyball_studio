@@ -2,15 +2,18 @@
 //! and the detector. Nothing becomes a reusable pose run until fusion SHA
 //! and frame/source identities are verified.
 use super::*;
-use std::{collections::VecDeque, io::BufWriter, path::PathBuf};
-use volley_media::raw_decoder::PrimaryFrameBatch;
+use std::{collections::VecDeque, io::BufWriter, path::PathBuf, sync::Arc};
+use volley_media::raw_decoder::{PrimaryFrameBatch, MAX_NATIVE_RGB_FRAME_BYTES};
 
-const RGB_FRAME_BYTES: usize = 640 * 360 * 3;
+const DETECTOR_RGB_FRAME_BYTES: usize = 640 * 360 * 3;
 
 #[derive(Debug)]
 struct PendingFrame {
     index: u64,
-    rgb: Vec<u8>,
+    rgb: Arc<Vec<u8>>,
+    offset: usize,
+    width: usize,
+    height: usize,
     boxes: Vec<[f64; 4]>,
 }
 
@@ -50,6 +53,8 @@ pub(crate) struct PoseStream {
     pending: VecDeque<PendingFrame>,
     history: VecDeque<interpolation::FrameBoxes>,
     next_frame: u64,
+    native_width: usize,
+    native_height: usize,
     sampled: u64,
     people: u64,
     observed_crops: u64,
@@ -70,6 +75,8 @@ pub(crate) struct PendingPose {
     sample_stride: usize,
     emitted_frames: u64,
     decoded_frames: u64,
+    native_width: usize,
+    native_height: usize,
     sampled: u64,
     people: u64,
     observed_crops: u64,
@@ -132,6 +139,8 @@ impl PoseStream {
             pending: VecDeque::new(),
             history: VecDeque::new(),
             next_frame: 0,
+            native_width: 0,
+            native_height: 0,
             sampled: 0,
             people: 0,
             observed_crops: 0,
@@ -153,18 +162,39 @@ impl PoseStream {
         if cancelled.load(Ordering::Acquire) {
             return Err("cancelled".into());
         }
-        if batch.first_frame != self.next_frame || batch.rgb.len() != RGB_FRAME_BYTES * 9 {
+        if batch.first_frame != self.next_frame {
             return Err("Shared RTMPose frames are not a contiguous nine-frame RGB window".into());
+        }
+        let native = batch
+            .native
+            .as_ref()
+            .ok_or("RTMPose requires original-resolution RGB frames")?;
+        let frame_bytes = native
+            .width
+            .checked_mul(native.height)
+            .and_then(|n| n.checked_mul(3))
+            .filter(|n| *n > 0 && *n <= MAX_NATIVE_RGB_FRAME_BYTES)
+            .ok_or("Invalid original-resolution RTMPose frame dimensions")?;
+        if native.rgb.len() != frame_bytes * 9 {
+            return Err("Native RTMPose frames do not match original dimensions".into());
+        }
+        if self.native_width == 0 {
+            (self.native_width, self.native_height) = (native.width, native.height);
+        } else if (self.native_width, self.native_height) != (native.width, native.height) {
+            return Err("Original RTMPose frame dimensions changed during decoding".into());
         }
         for offset in 0..9 {
             let index = batch.first_frame + offset as u64;
             if index % self.sample_stride as u64 != 0 {
                 continue;
             }
-            let begin = offset * RGB_FRAME_BYTES;
+            let begin = offset * frame_bytes;
             self.pending.push_back(PendingFrame {
                 index,
-                rgb: batch.rgb[begin..begin + RGB_FRAME_BYTES].to_vec(),
+                rgb: native.rgb.clone(),
+                offset: begin,
+                width: native.width,
+                height: native.height,
                 boxes: boxes_from_raw_detections(detected, index)?,
             });
         }
@@ -188,7 +218,7 @@ impl PoseStream {
             .checked_sub(self.next_frame)
             .filter(|count| *count < 9)
             .ok_or("Pose tail frame indices exceed the 30-fps source")?;
-        if rgb_tail.len() != count as usize * RGB_FRAME_BYTES {
+        if rgb_tail.len() != count as usize * DETECTOR_RGB_FRAME_BYTES {
             return Err("Pose tail RGB bytes do not match the final frame count".into());
         }
         self.flush_ready(decoded_frames.saturating_sub(1), cancelled)
@@ -213,18 +243,27 @@ impl PoseStream {
             let inferred = interpolation::interpolate_boxes(&snapshots, frame.index, &frame.boxes);
             let proposals = pose_proposals(frame.boxes.clone(), inferred);
             let mut poses = Vec::with_capacity(proposals.len());
-            for (bb, origin) in proposals {
+            for group in proposals.chunks(8) {
                 if cancelled.load(Ordering::Acquire) {
                     return Err("cancelled".into());
                 }
-                let points = self.engine.infer(&frame.rgb, bb)?;
-                if origin == "interpolated_box" {
-                    self.interpolated_crops += 1;
-                } else {
-                    self.observed_crops += 1;
+                let boxes: Vec<_> = group.iter().map(|(bb, _)| *bb).collect();
+                let frame_bytes = frame.width * frame.height * 3;
+                let points = self.engine.infer_batch_original(
+                    &frame.rgb[frame.offset..frame.offset + frame_bytes],
+                    frame.width,
+                    frame.height,
+                    &boxes,
+                )?;
+                for ((bb, origin), keypoints) in group.iter().zip(points) {
+                    if *origin == "interpolated_box" {
+                        self.interpolated_crops += 1;
+                    } else {
+                        self.observed_crops += 1;
+                    }
+                    let keypoints = keypoints.map(|p| [p.x as f64, p.y as f64, p.score as f64]);
+                    poses.push(json!({"box": bb, "keypoints":keypoints, "crop_origin":origin}));
                 }
-                let keypoints = points.map(|p| [p.x as f64, p.y as f64, p.score as f64]);
-                poses.push(json!({"box": bb, "keypoints":keypoints, "crop_origin":origin}));
             }
             self.history.push_back(interpolation::FrameBoxes {
                 frame: frame.index,
@@ -308,6 +347,8 @@ impl PoseStream {
             sample_stride: self.sample_stride,
             emitted_frames,
             decoded_frames,
+            native_width: self.native_width,
+            native_height: self.native_height,
             sampled: self.sampled,
             people: self.people,
             observed_crops: self.observed_crops,
@@ -368,6 +409,9 @@ impl PendingPose {
             "model_sha256":self.model_sha,
             "original_source":self.original_source,
             "working_stream":"original_rgb_fps30_v1",
+            "pixel_source_version":"original_full_resolution_rgb24_v1",
+            "pixel_dimensions":[self.native_width,self.native_height],
+            "coordinate_system":"normalized_original_display_v1",
             "source_fusion_sha256":fusion["sha256"],
             "source_identity":self.source_identity,
             "box_source_version":"detector_observed_and_bounded_interpolated_v1",
@@ -375,7 +419,7 @@ impl PendingPose {
             "interpolate_players":false,
             "file":POSE_FILE,
             "sha256":self.checksum,
-            "decode_pipeline":"shared_primary_v1"
+            "decode_pipeline":"shared_primary_native_rgb_v2"
         });
         if cancelled.load(Ordering::Acquire) {
             return Err("cancelled".into());

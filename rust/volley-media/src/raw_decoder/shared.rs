@@ -18,6 +18,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
+        Arc,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -26,6 +27,7 @@ use std::{
 const POLL: Duration = Duration::from_millis(100);
 const INIT_LIMIT: Duration = Duration::from_secs(30);
 const IDLE_LIMIT: Duration = Duration::from_secs(120);
+pub const MAX_NATIVE_RGB_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
 /// A synchronized 30-FPS window; both inputs use the canonical FFmpeg CPU
 /// scaling/format filters and have identical source-frame indices.
@@ -34,6 +36,14 @@ pub struct PrimaryFrameBatch {
     pub first_frame: u64,
     pub gray: Vec<u8>,
     pub rgb: Vec<u8>,
+    pub native: Option<NativeRgbBatch>,
+}
+
+#[derive(Debug)]
+pub struct NativeRgbBatch {
+    pub rgb: Arc<Vec<u8>>,
+    pub width: usize,
+    pub height: usize,
 }
 
 /// Immutable summary returned after both outputs reach verified EOF.
@@ -71,6 +81,7 @@ impl Drop for SocketDir {
     fn drop(&mut self) {
         let _ = fs::remove_file(self.0.join("gray.sock"));
         let _ = fs::remove_file(self.0.join("rgb.sock"));
+        let _ = fs::remove_file(self.0.join("native.sock"));
         let _ = fs::remove_dir(&self.0);
     }
 }
@@ -235,6 +246,7 @@ pub fn decode_full_video_shared(
         },
         0,
         None,
+        None,
         consume,
         |_, _| Ok(()),
     )
@@ -256,6 +268,7 @@ pub fn decode_full_video_shared_with_backend(
         cancelled,
         &decision,
         0,
+        None,
         None,
         consume,
         |_, _| Ok(()),
@@ -290,6 +303,55 @@ pub fn decode_full_video_shared_with_backend_and_tail(
         &decision,
         cpu_threads,
         None,
+        None,
+        consume,
+        on_tail,
+    )?;
+    Ok(PrimaryDecodeSummary {
+        decode,
+        backend: decision.backend,
+        fallback_reason: decision.fallback_reason,
+    })
+}
+
+#[expect(clippy::too_many_arguments)]
+pub fn decode_full_video_shared_with_native_and_tail(
+    source: &Path,
+    stride: usize,
+    preference: DecodePreference,
+    cpu_threads: usize,
+    cancelled: &AtomicBool,
+    native: bool,
+    consume: impl FnMut(PrimaryFrameBatch) -> Result<(), String>,
+    on_tail: impl FnMut(&[u8], u64) -> Result<(), String>,
+) -> Result<PrimaryDecodeSummary, String> {
+    if stride != 9 {
+        return Err("Original pose stream requires disjoint nine-frame model windows".into());
+    }
+    let dimensions = if native {
+        let info = crate::probe(source)?;
+        let (width, height) = (info.width as usize, info.height as usize);
+        let bytes = width
+            .checked_mul(height)
+            .and_then(|n| n.checked_mul(3))
+            .filter(|bytes| *bytes <= MAX_NATIVE_RGB_FRAME_BYTES)
+            .ok_or("Native pose frame exceeds 32 MiB streaming limit")?;
+        if bytes == 0 {
+            return Err("Invalid native pose frame dimensions".into());
+        }
+        Some((width, height))
+    } else {
+        None
+    };
+    let decision = select_decode_backend(source, preference, cancelled)?;
+    let decode = decode_full_video_shared_impl(
+        source,
+        stride,
+        cancelled,
+        &decision,
+        cpu_threads,
+        None,
+        dimensions,
         consume,
         on_tail,
     )?;
@@ -328,6 +390,7 @@ pub fn decode_full_video_shared_with_preview(
         &decision,
         cpu_threads,
         preview,
+        None,
         consume,
         on_tail,
     )?;
@@ -392,7 +455,7 @@ fn decode_input_command(
 }
 
 fn shared_decode_command(source: &Path, decision: &DecodeSelection, cpu_threads: usize) -> Command {
-    shared_decode_command_with_preview(source, decision, cpu_threads, false)
+    shared_decode_command_with_preview(source, decision, cpu_threads, false, false)
 }
 
 fn shared_decode_command_with_preview(
@@ -400,6 +463,7 @@ fn shared_decode_command_with_preview(
     decision: &DecodeSelection,
     cpu_threads: usize,
     preview: bool,
+    native: bool,
 ) -> Command {
     let (mut command, prefix) = decode_input_command(source, decision, cpu_threads);
     let input = if preview {
@@ -407,7 +471,11 @@ fn shared_decode_command_with_preview(
     } else {
         format!("[0:v]{prefix}")
     };
-    let mut filters = format!("{input}fps=30,split=2[ball][players];[ball]scale=512:288:flags=bilinear,format=gray[g];[players]scale=640:360:flags=bilinear,format=rgb24[r]");
+    let mut filters = if native {
+        format!("{input}fps=30,split=3[ball][players][original];[ball]scale=512:288:flags=bilinear,format=gray[g];[players]scale=640:360:flags=bilinear,format=rgb24[r];[original]format=rgb24[n]")
+    } else {
+        format!("{input}fps=30,split=2[ball][players];[ball]scale=512:288:flags=bilinear,format=gray[g];[players]scale=640:360:flags=bilinear,format=rgb24[r]")
+    };
     if preview {
         filters.push_str(";[preview]scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,format=yuv420p[p]");
     }
@@ -420,6 +488,7 @@ fn shared_decode_command_with_preview(
     command
 }
 
+#[expect(clippy::too_many_arguments)]
 fn decode_full_video_shared_impl(
     source: &Path,
     stride: usize,
@@ -427,6 +496,7 @@ fn decode_full_video_shared_impl(
     decision: &DecodeSelection,
     cpu_threads: usize,
     preview: Option<PrimaryPreviewOutput<'_>>,
+    native: Option<(usize, usize)>,
     mut consume: impl FnMut(PrimaryFrameBatch) -> Result<(), String>,
     mut on_tail: impl FnMut(&[u8], u64) -> Result<(), String>,
 ) -> Result<DecodeSummary, String> {
@@ -440,6 +510,9 @@ fn decode_full_video_shared_impl(
         return Err("Original source video is not a file".into());
     }
 
+    if native.is_some() && preview.is_some() {
+        return Err("Native source and encoded preview cannot share a decoder".into());
+    }
     let sockets = SocketDir::new()?;
     let gray_path = sockets.0.join("gray.sock");
     let rgb_path = sockets.0.join("rgb.sock");
@@ -447,17 +520,34 @@ fn decode_full_video_shared_impl(
         .map_err(|error| format!("Bind gray decode stream: {error}"))?;
     let rgb_listener = UnixListener::bind(&rgb_path)
         .map_err(|error| format!("Bind RGB decode stream: {error}"))?;
+    let native_listener = if native.is_some() {
+        Some(
+            UnixListener::bind(sockets.0.join("native.sock"))
+                .map_err(|error| format!("Bind native RGB stream: {error}"))?,
+        )
+    } else {
+        None
+    };
     gray_listener
         .set_nonblocking(true)
         .map_err(|error| format!("Gray socket: {error}"))?;
     rgb_listener
         .set_nonblocking(true)
         .map_err(|error| format!("RGB socket: {error}"))?;
+    if let Some(listener) = native_listener.as_ref() {
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| format!("Native RGB socket: {error}"))?;
+    }
 
     let mut command = if preview.is_some() {
-        shared_decode_command_with_preview(source, decision, cpu_threads, true)
+        shared_decode_command_with_preview(source, decision, cpu_threads, true, false)
     } else {
-        shared_decode_command(source, decision, cpu_threads)
+        if native.is_some() {
+            shared_decode_command_with_preview(source, decision, cpu_threads, false, true)
+        } else {
+            shared_decode_command(source, decision, cpu_threads)
+        }
     };
     command
         .args(["-map", "[g]", "-an", "-sn", "-dn"])
@@ -465,7 +555,18 @@ fn decode_full_video_shared_impl(
         .arg(format!("unix://{}", gray_path.display()))
         .args(["-map", "[r]", "-an", "-sn", "-dn"])
         .args(["-f", "rawvideo", "-pix_fmt", "rgb24"])
-        .arg(format!("unix://{}", rgb_path.display()))
+        .arg(format!("unix://{}", rgb_path.display()));
+    if native.is_some() {
+        command
+            .args([
+                "-map", "[n]", "-an", "-sn", "-dn", "-f", "rawvideo", "-pix_fmt", "rgb24",
+            ])
+            .arg(format!(
+                "unix://{}",
+                sockets.0.join("native.sock").display()
+            ));
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -525,6 +626,10 @@ fn decode_full_video_shared_impl(
     let result = (|| -> Result<DecodeSummary, String> {
         let gray = accept(&gray_listener, &mut child, cancelled)?;
         let rgb = accept(&rgb_listener, &mut child, cancelled)?;
+        let native_stream = native_listener
+            .as_ref()
+            .map(|listener| accept(listener, &mut child, cancelled))
+            .transpose()?;
         let (gw, gh, gc, _) = ModelPixels::BallGray.dimensions();
         let (rw, rh, rc, _) = ModelPixels::PlayersRgb.dimensions();
         thread::scope(|scope| {
@@ -532,6 +637,12 @@ fn decode_full_video_shared_impl(
             let (rgb_tx, rgb_rx) = mpsc::sync_channel(2);
             scope.spawn(|| drain(gray, gw * gh * gc, stride, cancelled, gray_tx));
             scope.spawn(|| drain(rgb, rw * rh * rc, stride, cancelled, rgb_tx));
+            let native_rx = native_stream.map(|stream| {
+                let (tx, rx) = mpsc::sync_channel(1);
+                let (width, height) = native.expect("Native dimensions accompany socket");
+                scope.spawn(move || drain(stream, width * height * 3, stride, cancelled, tx));
+                rx
+            });
             let outcome = (|| -> Result<DecodeSummary, String> {
                 let mut windows = 0usize;
                 let decoded_frames;
@@ -546,10 +657,31 @@ fn decode_full_video_shared_impl(
                                     "Shared FFmpeg outputs have different frame indices".into()
                                 );
                             }
+                            let original = if let Some(receiver) = native_rx.as_ref() {
+                                let (width, height) = native.ok_or("Missing native dimensions")?;
+                                match receive(receiver, cancelled)? {
+                                    WindowEvent::Data(window) if window.first_frame == expected => {
+                                        Some(NativeRgbBatch {
+                                            rgb: Arc::new(window.data),
+                                            width,
+                                            height,
+                                        })
+                                    }
+                                    _ => {
+                                        return Err(
+                                            "Native stream window disagrees with detector timeline"
+                                                .into(),
+                                        )
+                                    }
+                                }
+                            } else {
+                                None
+                            };
                             consume(PrimaryFrameBatch {
                                 first_frame: expected,
                                 gray: gray.data,
                                 rgb: rgb.data,
+                                native: original,
                             })?;
                             windows += 1;
                         }
@@ -561,6 +693,26 @@ fn decode_full_video_shared_impl(
                                 return Err(
                                     "Shared FFmpeg outputs have different frame counts".into()
                                 );
+                            }
+                            if let Some(receiver) = native_rx.as_ref() {
+                                let (width, height) = native.ok_or("Missing native dimensions")?;
+                                let expected_tail = gray_frames
+                                    .checked_sub(windows as u64 * stride as u64)
+                                    .filter(|count| *count < stride as u64)
+                                    .ok_or("Invalid native stream tail")?
+                                    as usize;
+                                match receive(receiver, cancelled)? {
+                                    WindowEvent::Eof(frames, tail)
+                                        if frames == gray_frames
+                                            && tail.len() == expected_tail * width * height * 3 => {
+                                    }
+                                    _ => {
+                                        return Err(
+                                            "Native stream EOF differs from detector timeline"
+                                                .into(),
+                                        )
+                                    }
+                                }
                             }
                             if stride == 9 {
                                 let expected_tail = gray_frames
@@ -630,6 +782,7 @@ fn decode_full_video_shared_impl(
             }
             drop(gray_rx);
             drop(rgb_rx);
+            drop(native_rx);
             outcome
         })
     })();
