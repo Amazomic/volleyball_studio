@@ -6,11 +6,11 @@ const source=readFileSync(new URL("../../rust/volley-app/static/studio_tracks.js
 for(const snippet of [
   'galleryAutoThreshold.type="range";galleryAutoThreshold.min="1";galleryAutoThreshold.max="99"',
   'galleryAutoThreshold.value="80"',
-  'autoAssignControls.append(galleryAutoLabel,galleryAuto)',
+  'autoAssignControls.append(galleryAutoLabel,galleryAuto,autoAssignStatus)',
   'ui.list.before(autoAssignControls)',
   'autoAssignControls.hidden=mode==="player"'
 ])assert.ok(source.includes(snippet),"Missing slider UI: "+snippet);
-const start=source.indexOf("  const autoAssignSimilar=async()=>{");
+const start=source.indexOf("  const autoAssignSimilar=async(forcedThreshold)=>{");
 const end=source.indexOf("  const refreshPhotoMatches=",start);
 assert.ok(start>0&&end>start);
 
@@ -18,12 +18,15 @@ const requests=[];
 const events=[];
 const state={
   project:"p",video:"video.mp4",replay:"r",token:4,
-  sourceSha:"a".repeat(64),rallyRun:"run",busy:false,writable:true,total:3
+  sourceSha:"a".repeat(64),rallyRun:"run",busy:false,writable:true,total:3,
+  roster:[{id:"playerA"}],photoScoreLoading:false
 };
 const slider={value:"92"};
 const status={textContent:""};
 const context={
   state,galleryAutoThreshold:slider,galleryStatus:status,
+  autoAssignScope:()=>JSON.stringify([state.project,state.video,state.replay,state.rallyRun,state.sourceSha]),
+  autoAssignMessage:()=>{},
   reviewReady:()=>true,reviewScope:()=>({project_id:"p",video:"video.mp4",replay_id:"r",
     expected_source_sha256:state.sourceSha,threshold_percent:30}),
   window:{dispatchEvent(event){events.push(event)},CustomEvent:function(name,options){

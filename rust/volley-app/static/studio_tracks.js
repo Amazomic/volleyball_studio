@@ -23,7 +23,7 @@
     playerMatches:{},libraryPlayers:[],projectPlayerIds:new Set(),
     rosterEpoch:0,rosterBusy:false,rosterLoaded:false,tracksLoaded:false,loadingKey:null,grouping:false,
     photoIndices:new Map(),groupNavigation:new Map(),viewPlayer:"",viewConflicts:false,filteredTotal:0,unassignedIds:new Set(),identityConflictIds:new Set(),comparisonIds:new Set(),
-    photoScoreAttempts:new Set(),photoScoreLoading:false,forcePhotoScores:false,autoThresholdScope:""
+    photoScoreAttempts:new Set(),photoScoreLoading:false,forcePhotoScores:false,autoThresholdScope:"",autoAssignPending:null
   };
   const node=(tag,klass,text)=>{
     const n=document.createElement(tag);if(klass)n.className=klass;
@@ -232,7 +232,7 @@
     state.groups=[];state.grouped.clear();state.groupLoaded=false;
     state.groupShown=24;state.singleCount=0;state.playerMatches={};
     state.viewPlayer="";state.viewConflicts=false;state.filteredTotal=0;state.unassignedIds.clear();state.identityConflictIds.clear();
-    state.comparisonIds.clear();
+    state.comparisonIds.clear();state.autoAssignPending=null;
     updateUnassignedLabel();viewBack.hidden=true;groupsMode.hidden=false;playerMode.hidden=true;setMode("singles");
     state.rosterEpoch++;state.libraryPlayers=[];state.projectPlayerIds.clear();
     state.rosterLoaded=false;state.rosterBusy=false;
@@ -924,7 +924,19 @@
     galleryAutoValue.textContent=galleryAutoThreshold.value+"%";
   });
   const autoAssignControls=node("div","track-auto-assign-controls");
-  autoAssignControls.append(galleryAutoLabel,galleryAuto);
+  const autoAssignStatus=node("small","track-auto-assign-status");
+  autoAssignStatus.setAttribute("role","status");
+  autoAssignStatus.setAttribute("aria-live","polite");
+  autoAssignStatus.hidden=true;
+  autoAssignControls.append(galleryAutoLabel,galleryAuto,autoAssignStatus);
+  const autoAssignMessage=(message,kind="action")=>{
+    autoAssignStatus.textContent=message;
+    autoAssignStatus.dataset.kind=kind;
+    autoAssignStatus.hidden=!message;
+  };
+  const autoAssignScope=()=>JSON.stringify([
+    state.project,state.video,state.replay,state.rallyRun,state.sourceSha
+  ]);
   const galleryMore=node("button","secondary track-group-more","Показать ещё группы");
   galleryMore.type="button";galleryMore.hidden=true;
   groupGallery.append(groupTitle,galleryStatus,galleryRepeat,galleryExtract,galleryItems,galleryMore);
@@ -1188,18 +1200,48 @@
     reviewExtract.disabled=!ready||state.selected.size<1||state.selected.size>8;
     galleryExtract.disabled=reviewExtract.disabled;
     galleryRepeat.disabled=!ready||!state.comparisonIds.size||state.photoScoreLoading;
-    galleryAuto.disabled=!ready||!state.writable||!state.total||!state.roster.length||state.photoScoreLoading;
-    galleryAutoThreshold.disabled=galleryAuto.disabled;
+    const canIdentify=Boolean(state.project&&state.video&&state.replay)&&
+      /^[a-f0-9]{64}$/.test(state.sourceSha);
+    const autoBlocked=!canIdentify?"Выберите постобработку с Track ID.":
+      !state.writable?"Привязки недоступны для записи.":
+      !state.total?"В выбранной обработке нет Track ID.":
+      !state.roster.length?"Добавьте игроков в состав проекта.":
+      state.busy?"Другая операция ещё выполняется.":"";
+    galleryAuto.disabled=Boolean(autoBlocked||state.autoAssignPending);
+    galleryAuto.title=autoBlocked||(
+      state.autoAssignPending?"Автопривязка уже ожидает расчёта совпадений.":
+      "Привязать ID с максимальным сходством не ниже выбранного порога."
+    );
+    galleryAutoThreshold.disabled=state.busy||Boolean(state.autoAssignPending);
+    if(autoBlocked&&!state.autoAssignPending&&!state.busy)
+      autoAssignMessage(autoBlocked,"blocked");
+    else if(autoAssignStatus.dataset.kind==="blocked")autoAssignMessage("");
+    if(state.autoAssignPending&&!state.photoScoreLoading&&!state.busy){
+      const pending=state.autoAssignPending;
+      state.autoAssignPending=null;
+      if(pending.scope===autoAssignScope())
+        queueMicrotask(()=>void autoAssignSimilar(pending.threshold));
+    }
     singlesExtract.disabled=reviewExtract.disabled;
     reviewMerge.disabled=!ready||!state.writable||!state.groupRevision||state.selected.size<2;
     reviewSplit.disabled=!ready||!state.writable||!state.groupRevision||state.selected.size<1;
   };
-  const autoAssignSimilar=async()=>{
-    if(!reviewReady()||state.busy||!state.writable||!state.total)return;
+  const autoAssignSimilar=async(forcedThreshold)=>{
+    const canIdentify=Boolean(state.project&&state.video&&state.replay)&&
+      /^[a-f0-9]{64}$/.test(state.sourceSha);
+    if(!canIdentify||state.busy||!state.writable||!state.total||!state.roster.length)return;
     const scope=reviewScope(),token=state.token;
-    const threshold=Number(galleryAutoThreshold.value);
+    const threshold=forcedThreshold===undefined?Number(galleryAutoThreshold.value):forcedThreshold;
     if(!Number.isInteger(threshold)||threshold<1||threshold>99)return;
+    if(state.photoScoreLoading){
+      state.autoAssignPending={scope:autoAssignScope(),threshold};
+      autoAssignMessage("Автопривязка с порогом "+threshold+
+        "% поставлена в очередь после фонового расчёта совпадений.");
+      reidUnlock();
+      return;
+    }
     state.busy=true;unlock();reidUnlock();
+    autoAssignMessage("Привязываем ID с порогом "+threshold+"%…");
     galleryStatus.textContent="Автопривязка ID при сходстве от "+threshold+"%…";
     try{
       const result=await post("/api/players/native/reid-review",{
@@ -1218,7 +1260,10 @@
       galleryStatus.textContent="Автопривязано ID: "+result.automatic_count+
         " · порог: "+threshold+"% · остальные остались непривязанными.";
       reviewNote("Автопривязка выполнена. Ручные назначения сохранены.");
+      autoAssignMessage("Привязано ID: "+result.automatic_count+
+        " · порог "+threshold+"% · остальные остаются непривязанными.");
     }catch(error){galleryStatus.textContent="Ошибка автопривязки: "+String(error.message||error);
+      autoAssignMessage("Ошибка автопривязки: "+String(error.message||error));
       reviewNote(String(error.message||error),true);}
     finally{state.busy=false;unlock();reidUnlock();}
   };
