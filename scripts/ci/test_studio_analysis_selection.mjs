@@ -3,6 +3,10 @@ import {readFileSync} from "node:fs";
 import {runInNewContext} from "node:vm";
 
 const src=readFileSync(new URL("../../rust/volley-app/static/studio.js",import.meta.url),"utf8");
+const chainSource=readFileSync(new URL("../../rust/volley-app/static/studio_chain.js",import.meta.url),"utf8");
+const chainRuntime={window:{}};
+runInNewContext(chainSource,chainRuntime);
+const latestRun=chainRuntime.window.VolleyStudioChain.latestRun;
 const slice=(start,end)=>{
   const a=src.indexOf(start),b=src.indexOf(end,a);
   assert.ok(a>=0&&b>a,"Cannot locate "+start);
@@ -104,7 +108,7 @@ const options=(target,rows,key,label)=>{
 const context={s,ui:{analysis,run:cpu,video:{currentTime:0}},overlay:{raw:false},
   ensurePreviewVideo(){},setOverlaySource(){},updateRawDetectorLabel(){},prefetchOverlayAtFrame(){},fps:()=>30,rawFusion:()=>null,
   window:{VolleyballUi:{ready:Promise.resolve()},
-    VolleyStudioChain:{stamp:()=>"",build:()=>refreshed},
+    VolleyStudioChain:{stamp:()=>"",build:()=>refreshed,latestRun},
     dispatchEvent:()=>counters.events++},
   CustomEvent:class{constructor(type){this.type=type;}},
   reset(){counters.reset++;s.run="";},
