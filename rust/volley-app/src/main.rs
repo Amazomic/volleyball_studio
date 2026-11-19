@@ -123,6 +123,10 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
             "/studio/montage-builder.js",
             get(studio_web::montage_builder_js),
         )
+        .route(
+            "/studio/video-library.js",
+            get(studio_web::video_library_js),
+        )
         .route("/studio/quick-reel.js", get(studio_web::quick_reel_js))
         .route("/studio/selection.wasm", get(studio_web::selection_wasm))
         .route("/studio/app.css", get(studio_web::css))
@@ -385,6 +389,7 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
         .route("/api/montage/native/cancel", post(montage::native_cancel))
         .route("/api/montage/native/media", get(montage::native_media))
         .route("/api/montage/native/library", get(montage::native_library))
+        .route("/api/montage/native/delete", post(montage::native_delete))
         .route(
             "/api/montage/native/audio",
             post(montage::native_upload_audio)

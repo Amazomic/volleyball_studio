@@ -2391,3 +2391,12 @@ Studio показывает кнопку перехода между debug и re
 - PASS: сборка WASM, cargo test -p volley-web --offline --locked (9 тестов), test_studio_wasm_ui.mjs, test_volley_web_wasm.mjs, test_studio_dom_ids.mjs, test_studio_media_lifecycle.mjs, test_studio_montage_tab.mjs, test_removed_archive_routes.mjs, test_studio_viewport_layout.mjs, test_training_rally_sources.mjs, node --check и git diff --cached --check. Проверены прямая ссылка #training, переключение обратно и сохранение текущего видеоплеера.
 - Полный scripts/check-all.ps1: FAIL на посторонних незавершённых Rust-правках (cargo clippy, тест storage) и других устаревших UI-тестовых заглушках/проверках. Эти проблемы не менялись в рамках переноса. GPU/реальное качество разметки и ручная визуальная проверка в браузере: NOT TESTED.
 - Применено: WSL release volley-app собран, безопасные /stop и /daemon выполнены при пустом active_jobs; http://127.0.0.1:8875/studio отдаёт новый пункт меню, JS и WASM с 7 маршрутами, HTTP 200; сервер PID 42805, shutdown_safe=true. Предшествующие незакоммиченные правки и пользовательские данные не включены в коммит.
+
+
+### 2026-11-19 — Общая библиотека готовых видео
+
+- База 33d38b7, изолированная ветка feature/studio-video-library-20261119. Rust-монтаж, HTTP, UI и переводы.
+- Две квадратные кнопки внизу: безопасный перезапуск и библиотека созданных роликов из всех проектов. Поиск, проект, дата, длительность, просмотр, скачивание, подтверждённое удаление и восстановление выбранной CPU-версии из сохранённых монтажных материалов. Для прежних роликов без подтверждённого источника действие отключено.
+- PASS: 16 in-process HTTP тестов, сборка Rust/WASM, cargo fmt --check, test_volley_web_wasm.mjs, test_studio_dom_ids.mjs, test_studio_viewport_layout.mjs, test_studio_montage_tab.mjs, check_rust_ownership.mjs --self-test, node --check, git diff --check.
+- Полный scripts/check-all.ps1: FAIL — сторонние Clippy-ошибки volley-core и volley-inference, один тест storage и часть устаревших UI-тестов (не менялись). Визуальный браузерный тест и реальное MP4: NOT TESTED.
+- Применение: в изолированной ветке, рабочая копия студии с незавершёнными изменениями пока не перезаписывается.

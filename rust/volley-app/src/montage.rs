@@ -20,7 +20,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
-    time::Instant,
+    time::{Instant, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -48,6 +48,8 @@ pub struct MontageRequest {
     pub clips: Vec<SelectedClip>,
     #[serde(skip)]
     pub(crate) materials: Vec<MaterialBinding>,
+    #[serde(default)]
+    pub preferred_rally_run_id: Option<String>,
     #[serde(default)]
     pub audio_file: Option<String>,
     #[serde(default = "default_volume")]
@@ -146,6 +148,7 @@ struct Planned {
     clips: Vec<OriginalClip>,
     original_sources: HashMap<PathBuf, Value>,
     materials: Vec<MaterialBinding>,
+    preferred_rally_run_id: Option<String>,
     output_dir: PathBuf,
     audio: Option<PathBuf>,
     audio_volume: f64,
@@ -250,6 +253,17 @@ fn prepare_request(state: &AppState, request: MontageRequest) -> Result<Planned,
             ));
         }
         montage_material::validate_material_binding(state, material)?;
+    }
+    if let Some(preferred) = request.preferred_rally_run_id.as_deref() {
+        if !request
+            .materials
+            .iter()
+            .any(|row| row.rally_run_id == preferred)
+        {
+            return Err(storage::bad_request(
+                "Выбранная CPU-версия не входит в источники монтажа",
+            ));
+        }
     }
     let mut clips = Vec::new();
     let mut total = 0.0;
@@ -369,6 +383,7 @@ fn prepare_request(state: &AppState, request: MontageRequest) -> Result<Planned,
     Ok(Planned {
         original_sources,
         materials: request.materials,
+        preferred_rally_run_id: request.preferred_rally_run_id,
         project_id: request.project_id,
         job_id,
         clips,
@@ -805,6 +820,7 @@ async fn render(plan: Planned, status: Arc<Mutex<JobStatus>>, mut cancel: watch:
             "project_id":plan.project_id,
             "render_source":"original_recording",
             "montage_materials":plan.materials,
+            "preferred_rally_run_id":plan.preferred_rally_run_id,
             "original_sources":plan.original_sources.iter().map(|(path,proof)| json!({"source":path,"proof":proof})).collect::<Vec<_>>(),
             "original_resolution_verified":plan.layout==VideoLayout::Original,
             "source_clips_native_resolution_verified":true,
@@ -1030,9 +1046,43 @@ fn list_montages(state: &AppState, project_id: &str) -> Result<Vec<Value>, ApiEr
             continue;
         };
         let url = format!("/api/montage/native/media?project_id={project_id}&job_id={id}");
+        let sources = receipt["montage_materials"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|material| material["rally_run_id"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let preferred = receipt["preferred_rally_run_id"]
+            .as_str()
+            .filter(|id| sources.contains(id));
+        let mut ordered_sources = sources
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect::<Vec<_>>();
+        if let Some(id) = preferred {
+            ordered_sources.retain(|source| source != id);
+            ordered_sources.insert(0, id.to_owned());
+        }
+        let created_at = stat
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|time| time.as_secs())
+            .unwrap_or_default();
+        let label = if !receipt["verified_highlights"].is_null() {
+            "Рилс игрока"
+        } else if !receipt["verified_report"].is_null() {
+            "Видео с отчётом"
+        } else {
+            "Розыгрыши"
+        };
         results.push(json!({
             "id": id,
             "name": "montage.mp4",
+            "label": label,
+            "created_at": created_at,
+            "source_run_ids": ordered_sources,
+            "preferred_rally_run_id": preferred,
             "project_id": project_id,
             "duration_sec": receipt["duration_sec"],
             "verified_highlights":receipt["verified_highlights"],
@@ -1046,7 +1096,12 @@ fn list_montages(state: &AppState, project_id: &str) -> Result<Vec<Value>, ApiEr
             "download_url": url,
         }));
     }
-    results.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
+    results.sort_by(|a, b| {
+        b["created_at"]
+            .as_u64()
+            .cmp(&a["created_at"].as_u64())
+            .then_with(|| b["id"].as_str().cmp(&a["id"].as_str()))
+    });
     Ok(results)
 }
 
@@ -1054,14 +1109,98 @@ pub async fn native_library(
     State(state): State<Arc<AppState>>,
     Query(query): Query<HashMap<String, String>>,
 ) -> ApiResult<Value> {
-    let project_id = query
-        .get("project_id")
-        .ok_or_else(|| storage::bad_request("Укажите проект"))?
-        .to_owned();
-    let results = tokio::task::spawn_blocking(move || list_montages(&state, &project_id))
-        .await
-        .map_err(|error| storage::internal(format!("Montage listing failed: {error}")))??;
+    let project_id = query.get("project_id").cloned();
+    let results = tokio::task::spawn_blocking(move || {
+        let projects = projects::load_projects(&state)?;
+        let ids = projects
+            .into_iter()
+            .filter_map(|row| {
+                let id = row["id"].as_str()?.to_owned();
+                let name = row["name"]
+                    .as_str()
+                    .or_else(|| row["title"].as_str())
+                    .unwrap_or(&id)
+                    .to_owned();
+                if project_id.as_ref().is_some_and(|expected| expected != &id) {
+                    return None;
+                }
+                Some((id, name))
+            })
+            .collect::<Vec<_>>();
+        if let Some(requested) = &project_id {
+            projects::existing_project(&state, requested)?;
+        }
+        let mut videos = Vec::new();
+        for (id, name) in ids {
+            for mut video in list_montages(&state, &id)? {
+                video["project_name"] = json!(name);
+                videos.push(video);
+            }
+        }
+        videos.sort_by(|a, b| {
+            b["created_at"]
+                .as_u64()
+                .cmp(&a["created_at"].as_u64())
+                .then_with(|| b["id"].as_str().cmp(&a["id"].as_str()))
+        });
+        Ok::<_, ApiError>(videos)
+    })
+    .await
+    .map_err(|error| storage::internal(format!("Montage listing failed: {error}")))??;
     Ok(Json(json!({"videos": results})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MontageDeleteRequest {
+    project_id: String,
+    job_id: String,
+}
+
+pub async fn native_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<MontageDeleteRequest>,
+) -> ApiResult<Value> {
+    storage::validate_origin(&headers)?;
+    if !state.writes_enabled {
+        return Err(storage::conflict("Удаление недоступно в режиме чтения"));
+    }
+    let _guard = project_guard::write_guard(&state, &request.project_id)?;
+    if state
+        .montage
+        .has_active_for_project(&request.project_id)
+        .await
+    {
+        return Err(storage::conflict("Дождитесь завершения текущего монтажа"));
+    }
+    let project_id = request.project_id;
+    let job_id = request.job_id;
+    let state_copy = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let (output, _) = completed_montage(&state_copy, &project_id, &job_id)?;
+        let folder = output
+            .parent()
+            .ok_or_else(|| storage::bad_request("Некорректный каталог монтажа"))?;
+        let root = state_copy
+            .data_root
+            .join("projects")
+            .join(&project_id)
+            .join("montages");
+        let root = root
+            .canonicalize()
+            .map_err(|_| storage::not_found("Каталог монтажей не найден"))?;
+        if folder.parent() != Some(root.as_path())
+            || fs::symlink_metadata(folder).is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            return Err(storage::bad_request("Каталог монтажа вне проекта"));
+        }
+        fs::remove_dir_all(folder)
+            .map_err(|error| storage::internal(format!("Не удалось удалить монтаж: {error}")))?;
+        Ok::<_, ApiError>(Json(json!({"deleted": true, "job_id": job_id})))
+    })
+    .await
+    .map_err(|error| storage::internal(format!("Montage delete failed: {error}")))?
 }
 
 pub async fn native_media(
@@ -1268,6 +1407,7 @@ pub async fn start_native_from_run(
         .collect();
     let montage_request = MontageRequest {
         materials: Vec::new(),
+        preferred_rally_run_id: None,
         project_id: selection.project_id,
         clips,
         audio_file: request.audio_file,
@@ -1321,6 +1461,7 @@ mod highlight_cancellation_tests {
             job_id: "montage_test".into(),
             original_sources: HashMap::new(),
             materials: Vec::new(),
+            preferred_rally_run_id: None,
             clips: vec![OriginalClip {
                 source: original.clone(),
                 start_frame: 0,

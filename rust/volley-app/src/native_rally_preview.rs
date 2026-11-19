@@ -165,6 +165,7 @@ pub async fn start_manual_montage(
         headers,
         Json(montage::MontageRequest {
             materials,
+            preferred_rally_run_id: Some(run_id.clone()),
             project_id,
             clips,
             audio_file: request.audio_file,
