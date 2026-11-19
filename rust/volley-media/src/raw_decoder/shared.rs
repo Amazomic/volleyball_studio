@@ -1,5 +1,5 @@
 //! One FFmpeg decode, with the existing CPU pixel filters on two synchronous
-//! streams. Linux UNIX sockets carry frames without full-video raw caches.
+//! streams. Local Unix sockets or Windows loopback TCP avoid raw-video caches.
 //! No model observations or cache manifests are published by this module.
 mod backend;
 use super::{stderr_tail, DecodeSummary, ManagedChild, ModelPixels};
@@ -9,10 +9,6 @@ use serde::Serialize;
 use std::{
     fs::{self, DirBuilder},
     io::{self, Read},
-    os::unix::{
-        fs::DirBuilderExt,
-        net::{UnixListener, UnixStream},
-    },
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -22,6 +18,14 @@ use std::{
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+#[cfg(windows)]
+use std::net::{TcpListener as DecodeListener, TcpStream as DecodeStream};
+#[cfg(unix)]
+use std::os::unix::{
+    fs::DirBuilderExt,
+    net::{UnixListener as DecodeListener, UnixStream as DecodeStream},
 };
 
 const POLL: Duration = Duration::from_millis(100);
@@ -67,7 +71,11 @@ impl SocketDir {
                 "volley-primary-{}-{nanos}-{attempt}",
                 std::process::id()
             ));
-            match DirBuilder::new().mode(0o700).create(&path) {
+            let mut directory = DirBuilder::new();
+            directory.recursive(false);
+            #[cfg(unix)]
+            directory.mode(0o700);
+            match directory.create(&path) {
                 Ok(()) => return Ok(Self(path)),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(format!("Create private decode directory: {error}")),
@@ -79,18 +87,38 @@ impl SocketDir {
 
 impl Drop for SocketDir {
     fn drop(&mut self) {
+        #[cfg(unix)]
         let _ = fs::remove_file(self.0.join("gray.sock"));
+        #[cfg(unix)]
         let _ = fs::remove_file(self.0.join("rgb.sock"));
+        #[cfg(unix)]
         let _ = fs::remove_file(self.0.join("native.sock"));
         let _ = fs::remove_dir(&self.0);
     }
 }
 
+#[cfg(unix)]
+fn bind_decode_stream(path: &Path) -> Result<(DecodeListener, String), String> {
+    let listener = DecodeListener::bind(path)
+        .map_err(|error| format!("Bind FFmpeg output stream: {error}"))?;
+    Ok((listener, format!("unix://{}", path.display())))
+}
+
+#[cfg(windows)]
+fn bind_decode_stream(_path: &Path) -> Result<(DecodeListener, String), String> {
+    let listener = DecodeListener::bind(("127.0.0.1", 0))
+        .map_err(|error| format!("Bind loopback FFmpeg stream: {error}"))?;
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("Resolve FFmpeg loopback address: {error}"))?;
+    Ok((listener, format!("tcp://{address}")))
+}
+
 fn accept(
-    listener: &UnixListener,
+    listener: &DecodeListener,
     child: &mut ManagedChild,
     cancelled: &AtomicBool,
-) -> Result<UnixStream, String> {
+) -> Result<DecodeStream, String> {
     let started = Instant::now();
     loop {
         if cancelled.load(Ordering::Acquire) {
@@ -124,7 +152,7 @@ fn accept(
 }
 
 struct CancellableSocket<'a> {
-    stream: UnixStream,
+    stream: DecodeStream,
     cancelled: &'a AtomicBool,
 }
 
@@ -168,7 +196,7 @@ enum WindowEvent {
 }
 
 fn drain(
-    stream: UnixStream,
+    stream: DecodeStream,
     frame_bytes: usize,
     stride: usize,
     cancelled: &AtomicBool,
@@ -401,6 +429,7 @@ pub fn decode_full_video_shared_with_preview(
     })
 }
 
+#[cfg(unix)]
 pub(super) fn auto_decode_input(
     source: &Path,
     cancelled: &AtomicBool,
@@ -516,13 +545,13 @@ fn decode_full_video_shared_impl(
     let sockets = SocketDir::new()?;
     let gray_path = sockets.0.join("gray.sock");
     let rgb_path = sockets.0.join("rgb.sock");
-    let gray_listener = UnixListener::bind(&gray_path)
+    let (gray_listener, gray_endpoint) = bind_decode_stream(&gray_path)
         .map_err(|error| format!("Bind gray decode stream: {error}"))?;
-    let rgb_listener = UnixListener::bind(&rgb_path)
+    let (rgb_listener, rgb_endpoint) = bind_decode_stream(&rgb_path)
         .map_err(|error| format!("Bind RGB decode stream: {error}"))?;
     let native_listener = if native.is_some() {
         Some(
-            UnixListener::bind(sockets.0.join("native.sock"))
+            bind_decode_stream(&sockets.0.join("native.sock"))
                 .map_err(|error| format!("Bind native RGB stream: {error}"))?,
         )
     } else {
@@ -534,7 +563,7 @@ fn decode_full_video_shared_impl(
     rgb_listener
         .set_nonblocking(true)
         .map_err(|error| format!("RGB socket: {error}"))?;
-    if let Some(listener) = native_listener.as_ref() {
+    if let Some((listener, _)) = native_listener.as_ref() {
         listener
             .set_nonblocking(true)
             .map_err(|error| format!("Native RGB socket: {error}"))?;
@@ -552,19 +581,16 @@ fn decode_full_video_shared_impl(
     command
         .args(["-map", "[g]", "-an", "-sn", "-dn"])
         .args(["-f", "rawvideo", "-pix_fmt", "gray"])
-        .arg(format!("unix://{}", gray_path.display()))
+        .arg(&gray_endpoint)
         .args(["-map", "[r]", "-an", "-sn", "-dn"])
         .args(["-f", "rawvideo", "-pix_fmt", "rgb24"])
-        .arg(format!("unix://{}", rgb_path.display()));
-    if native.is_some() {
+        .arg(&rgb_endpoint);
+    if let Some((_, native_endpoint)) = native_listener.as_ref() {
         command
             .args([
                 "-map", "[n]", "-an", "-sn", "-dn", "-f", "rawvideo", "-pix_fmt", "rgb24",
             ])
-            .arg(format!(
-                "unix://{}",
-                sockets.0.join("native.sock").display()
-            ));
+            .arg(native_endpoint);
     }
     command
         .stdin(Stdio::null())
@@ -628,7 +654,7 @@ fn decode_full_video_shared_impl(
         let rgb = accept(&rgb_listener, &mut child, cancelled)?;
         let native_stream = native_listener
             .as_ref()
-            .map(|listener| accept(listener, &mut child, cancelled))
+            .map(|(listener, _)| accept(listener, &mut child, cancelled))
             .transpose()?;
         let (gw, gh, gc, _) = ModelPixels::BallGray.dimensions();
         let (rw, rh, rc, _) = ModelPixels::PlayersRgb.dimensions();

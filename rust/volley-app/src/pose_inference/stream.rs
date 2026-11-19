@@ -185,7 +185,7 @@ impl PoseStream {
         }
         for offset in 0..9 {
             let index = batch.first_frame + offset as u64;
-            if index % self.sample_stride as u64 != 0 {
+            if !index.is_multiple_of(self.sample_stride as u64) {
                 continue;
             }
             let begin = offset * frame_bytes;
@@ -310,8 +310,7 @@ impl PoseStream {
             return Err("Shared pose frames do not match the detector timeline".into());
         }
         self.flush_ready(u64::MAX, cancelled)?;
-        let expected_samples =
-            (emitted_frames + self.sample_stride as u64 - 1) / self.sample_stride as u64;
+        let expected_samples = emitted_frames.div_ceil(self.sample_stride as u64);
         if self.sampled != expected_samples {
             return Err("Streamed RTMPose sampled frame count mismatch".into());
         }

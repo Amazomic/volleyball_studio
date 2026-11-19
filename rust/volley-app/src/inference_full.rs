@@ -1,7 +1,7 @@
 //! Experimental full prepared-video ONNX processing with bounded memory.
 //! One model/video per job, immutable raw-detections JSONL, durable status.
 //! This is *not* a complete Studio GPU/CPU analysis or player Track ID result.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod joint;
 use crate::{
     inference_stream, preparation, project_guard, projects,
@@ -13,7 +13,7 @@ use axum::{
     http::HeaderMap,
     Json,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) use joint::run_joint_pair;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

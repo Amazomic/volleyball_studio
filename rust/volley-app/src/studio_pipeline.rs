@@ -1216,7 +1216,7 @@ fn selected_gpu(
     }))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn shared_native_pose_supported(enabled: bool, width: u32, height: u32) -> bool {
     enabled
         && width >= 2
@@ -1228,7 +1228,7 @@ fn shared_native_pose_supported(enabled: bool, width: u32, height: u32) -> bool 
 }
 
 /// The existing fusion evidence uses disjoint 9-frame model windows.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn shared_primary_requested(
     flag: Option<&str>,
     stride: usize,
@@ -1357,7 +1357,7 @@ async fn pipeline(
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let mut pending_shared_pose: Option<crate::pose_inference::PendingPose> = None;
     log_native(
         path,
@@ -1531,27 +1531,15 @@ async fn pipeline(
             )?;
             // Primary shared GPU path has passed real-match evidence/CPU
             // parity; legacy independent inference remains a rollback.
-            #[cfg(unix)]
-            let shared = if shared_primary_requested(
+            #[cfg(any(unix, windows))]
+            let wants_shared = shared_primary_requested(
                 std::env::var("VOLLEY_SHARED_PRIMARY").ok().as_deref(),
                 request.gpu.stride,
                 request.gpu.pose_enabled,
                 request.gpu.pose_mode,
-            ) {
-                progress(path, status, "GPU · общий поток VBallNet + игроки", 8.0)?;
-                log_native(
-                    path,
-                    "Общий GPU",
-                    "inference_full::run_joint_pair",
-                    json!({
-                        "project_id":request.project_id,
-                        "video":request.video,
-                        "stride":request.gpu.stride,
-                        "person_stride":request.gpu.pose_stride,
-                        "mode":"shared_nvdec_primary_v1",
-                        "pose_enabled":request.gpu.pose_enabled,
-                    }),
-                )?;
+            );
+            #[cfg(any(unix, windows))]
+            let shared_plan = if wants_shared {
                 let plan = preparation::plan_for_analysis_async(
                     app.clone(),
                     &request.project_id,
@@ -1566,6 +1554,48 @@ async fn pipeline(
                 if source != plan.source {
                     return Err("Shared GPU analysis requires the original video".into());
                 }
+                #[cfg(windows)]
+                {
+                    let backend = volley_media::raw_decoder::select_decode_backend(
+                        &plan.source,
+                        volley_media::raw_decoder::DecodePreference::Auto,
+                        cancel,
+                    )?;
+                    if backend.backend == volley_media::raw_decoder::DecodeBackend::Nvdec {
+                        Some(plan)
+                    } else {
+                        log_event(
+                            path,
+                            "Общий GPU",
+                            "info",
+                            "NVDEC недоступен для источника: используется исходный режим декодирования",
+                        )?;
+                        None
+                    }
+                }
+                #[cfg(unix)]
+                {
+                    Some(plan)
+                }
+            } else {
+                None
+            };
+            #[cfg(any(unix, windows))]
+            let shared = if let Some(plan) = shared_plan {
+                progress(path, status, "GPU · общий поток VBallNet + игроки", 8.0)?;
+                log_native(
+                    path,
+                    "Общий GPU",
+                    "inference_full::run_joint_pair",
+                    json!({
+                        "project_id":request.project_id,
+                        "video":request.video,
+                        "stride":request.gpu.stride,
+                        "person_stride":request.gpu.pose_stride,
+                        "mode":"shared_nvdec_primary_v1",
+                        "pose_enabled":request.gpu.pose_enabled,
+                    }),
+                )?;
                 // A single permit covers both persistent model sessions. It
                 // also prevents a standalone GPU job from starting concurrently.
                 let _permit = app
@@ -1622,7 +1652,7 @@ async fn pipeline(
             } else {
                 None
             };
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             let shared: Option<(String, String)> = None;
             let (ball, players) = if let Some(ids) = shared {
                 ids
@@ -1687,7 +1717,7 @@ async fn pipeline(
                 "success",
                 &format!("GPU объединён: fusion_id={fusion_id}"),
             )?;
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             if let Some(pending) = pending_shared_pose.take() {
                 if cancel.load(Ordering::Acquire) {
                     return Err("cancelled".into());
@@ -2605,7 +2635,7 @@ mod tests {
         fs::remove_dir_all(base).unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn shared_gpu_is_primary_and_retains_explicit_rollback() {
         use crate::pose_inference::PoseInputMode::{Photo, Video};
@@ -2626,7 +2656,7 @@ mod tests {
         assert!(!shared_primary_requested(None, 9, true, Video));
         assert!(!shared_primary_requested(Some("1"), 9, true, Video));
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn original_resolution_pose_is_default_on_supported_primary_frames() {
         assert!(shared_native_pose_supported(true, 1920, 1080));

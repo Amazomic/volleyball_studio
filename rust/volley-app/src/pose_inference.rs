@@ -1,7 +1,7 @@
 //! Immutable, versioned RTMPose evidence from observed player detector boxes.
 //! Uses the prepared video and selected GPU fusion, never CPU Track IDs.
 pub(crate) mod interpolation;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod stream;
 use crate::{inference_stream, preparation, projects, AppState};
 use serde::{Deserialize, Serialize};
@@ -13,10 +13,10 @@ use std::{
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) use stream::{PendingPose, PoseStream};
 use uuid::Uuid;
-#[cfg(any(test, unix))]
+#[cfg(any(test, unix, windows))]
 use volley_inference::decode::RawDetection;
 use volley_inference::{
     pose::{PoseEngine, MODEL_FILE, MODEL_SHA256},
@@ -112,7 +112,7 @@ pub(crate) fn boxes(frame: &Value) -> Vec<[f64; 4]> {
 /// fusion is written. This intentionally serializes the same RawDetection
 /// payload that the existing fusion reader validates, so score rounding,
 /// geometry, count and NMS guards all stay in this single owner.
-#[cfg(any(test, unix))]
+#[cfg(any(test, unix, windows))]
 pub(crate) fn boxes_from_raw_detections(
     detections: &[RawDetection],
     frame_index: u64,

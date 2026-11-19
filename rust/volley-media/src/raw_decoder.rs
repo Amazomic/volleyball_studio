@@ -1,9 +1,9 @@
 //! One bounded FFmpeg raw-video stream feeding overlapped 9-frame Rust
 //! windows. Never seeks for every window or writes an analysis cache.
 //! Input paths must be validated by the calling project/preparation layer.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod shared;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use shared::{
     decode_full_video_shared, decode_full_video_shared_with_backend,
     decode_full_video_shared_with_backend_and_tail, decode_full_video_shared_with_native_and_tail,

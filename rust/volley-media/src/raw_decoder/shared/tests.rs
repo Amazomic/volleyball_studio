@@ -1,7 +1,118 @@
 //! Hardware/software pixel parity and lifecycle regression tests.
 use super::*;
-use crate::raw_decoder::decode_full_video;
+#[cfg(unix)]
+use crate::raw_decoder::{
+    decode_full_video as reference_software_video,
+    decode_original_frames as reference_software_original,
+};
 use sha2::{Digest, Sha256};
+#[cfg(windows)]
+use std::io::Cursor;
+
+#[cfg(windows)]
+fn reference_software_video(
+    source: &Path,
+    pixels: ModelPixels,
+    stride: usize,
+    cancelled: &AtomicBool,
+    mut consume: impl FnMut(RawWindow) -> Result<(), String>,
+) -> Result<DecodeSummary, String> {
+    let (width, height, channels, format) = pixels.dimensions();
+    let output = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(source)
+        .args([
+            "-map",
+            "0:v:0",
+            "-an",
+            "-sn",
+            "-dn",
+            "-vf",
+            &format!("fps=30,scale={width}:{height}:flags=bilinear,format={format}"),
+            "-pix_fmt",
+            format,
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "Software reference decoder: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let mut reader = FrameWindows::new(
+        Cursor::new(output.stdout),
+        width * height * channels,
+        stride,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut windows = 0;
+    while let Some(window) = reader.next_window().map_err(|error| error.to_string())? {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        consume(window)?;
+        windows += 1;
+    }
+    Ok(DecodeSummary {
+        first_frame: 0,
+        windows,
+        decoded_frames: reader.decoded_frames(),
+        stride,
+    })
+}
+
+#[cfg(windows)]
+fn reference_software_original(
+    source: &Path,
+    expected_frames: u64,
+    cancelled: &AtomicBool,
+    mut consume: impl FnMut(u64, &[u8], usize, usize) -> Result<(), String>,
+) -> Result<(), String> {
+    let info = crate::probe(source)?;
+    let (width, height) = (info.width as usize, info.height as usize);
+    let output = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(source)
+        .args([
+            "-map",
+            "0:v:0",
+            "-an",
+            "-sn",
+            "-dn",
+            "-vf",
+            "fps=30,format=rgb24",
+            "-pix_fmt",
+            "rgb24",
+            "-frames:v",
+            &expected_frames.to_string(),
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "Software original reference: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let frame_bytes = width * height * 3;
+    if output.stdout.len() != expected_frames as usize * frame_bytes {
+        return Err("Software original frame count mismatch".into());
+    }
+    for (index, frame) in output.stdout.chunks_exact(frame_bytes).enumerate() {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        consume(index as u64, frame, width, height)?;
+    }
+    Ok(())
+}
 
 #[test]
 fn shared_cpu_stream_matches_two_separate_decoders_pixel_for_pixel() {
@@ -32,16 +143,18 @@ fn shared_cpu_stream_matches_two_separate_decoders_pixel_for_pixel() {
     for stride in [1, 3, 9] {
         let mut gray = Vec::new();
         let mut rgb = Vec::new();
-        let first = decode_full_video(&source, ModelPixels::BallGray, stride, &cancel, |w| {
-            gray.push((w.first_frame, Sha256::digest(&w.data).to_vec()));
-            Ok(())
-        })
-        .unwrap();
-        let second = decode_full_video(&source, ModelPixels::PlayersRgb, stride, &cancel, |w| {
-            rgb.push((w.first_frame, Sha256::digest(&w.data).to_vec()));
-            Ok(())
-        })
-        .unwrap();
+        let first =
+            reference_software_video(&source, ModelPixels::BallGray, stride, &cancel, |w| {
+                gray.push((w.first_frame, Sha256::digest(&w.data).to_vec()));
+                Ok(())
+            })
+            .unwrap();
+        let second =
+            reference_software_video(&source, ModelPixels::PlayersRgb, stride, &cancel, |w| {
+                rgb.push((w.first_frame, Sha256::digest(&w.data).to_vec()));
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(first.decoded_frames, second.decoded_frames);
         let mut count = 0;
         let shared = decode_full_video_shared(&source, stride, &cancel, |batch| {
@@ -1011,7 +1124,7 @@ fn native_pose_source_has_original_decoder_pixels_and_synchronized_frames() {
             |_, _| Ok(()),
         )
         .unwrap();
-        crate::raw_decoder::decode_original_frames(
+        reference_software_original(
             &source,
             summary.decode.decoded_frames,
             &cancel,
@@ -1059,4 +1172,113 @@ fn native_pose_source_has_original_decoder_pixels_and_synchronized_frames() {
         assert_eq!(native.decode.decoded_frames, summary.decode.decoded_frames);
         assert_eq!(checked, native.decode.windows * 9);
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_nvdec_matches_previous_independent_h264_model_and_pose_frames() {
+    let temp = SocketDir::new().unwrap();
+    let source = temp.0.join("windows-nvdec-parity.mp4");
+    assert!(Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=60:duration=1.17",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
+        ])
+        .arg(&source)
+        .status()
+        .unwrap()
+        .success());
+    let cancelled = AtomicBool::new(false);
+    let backend = select_decode_backend(&source, DecodePreference::Auto, &cancelled).unwrap();
+    if backend.backend != DecodeBackend::Nvdec {
+        eprintln!("NVDEC unavailable; hardware parity requires a supported NVIDIA GPU");
+        return;
+    }
+    let mut old_ball = Vec::new();
+    let mut old_people = Vec::new();
+    let old_ball_receipt = crate::raw_decoder::decode_full_video(
+        &source,
+        ModelPixels::BallGray,
+        9,
+        &cancelled,
+        |window| {
+            old_ball.push(Sha256::digest(&window.data).to_vec());
+            Ok(())
+        },
+    )
+    .unwrap();
+    let old_people_receipt = crate::raw_decoder::decode_full_video(
+        &source,
+        ModelPixels::PlayersRgb,
+        9,
+        &cancelled,
+        |window| {
+            old_people.push(Sha256::digest(&window.data).to_vec());
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        old_ball_receipt.decoded_frames,
+        old_people_receipt.decoded_frames
+    );
+    let mut old_original = Vec::new();
+    crate::raw_decoder::decode_original_frames(
+        &source,
+        old_ball_receipt.decoded_frames,
+        &cancelled,
+        |_, rgb, _, _| {
+            old_original.push(Sha256::digest(rgb).to_vec());
+            Ok(())
+        },
+    )
+    .unwrap();
+    let mut windows = 0;
+    let summary = decode_full_video_shared_with_native_and_tail(
+        &source,
+        9,
+        DecodePreference::Auto,
+        0,
+        &cancelled,
+        true,
+        |batch| {
+            assert_eq!(batch.first_frame, windows as u64 * 9);
+            assert_eq!(Sha256::digest(&batch.gray).to_vec(), old_ball[windows]);
+            assert_eq!(Sha256::digest(&batch.rgb).to_vec(), old_people[windows]);
+            let original = batch.native.expect("Original pixels are required");
+            let frame_bytes = original.width * original.height * 3;
+            for offset in 0..9 {
+                let start = offset * frame_bytes;
+                let old_frame = windows * 9 + offset;
+                assert_eq!(
+                    Sha256::digest(&original.rgb[start..start + frame_bytes]).to_vec(),
+                    old_original[old_frame],
+                    "RTMPose original RGB differs at frame {old_frame}"
+                );
+            }
+            windows += 1;
+            Ok(())
+        },
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(summary.backend, DecodeBackend::Nvdec);
+    assert_eq!(summary.decode.windows, old_ball_receipt.windows);
+    assert_eq!(
+        summary.decode.decoded_frames,
+        old_ball_receipt.decoded_frames
+    );
+    assert_eq!(windows, old_ball.len());
+    fs::remove_file(source).unwrap();
 }
