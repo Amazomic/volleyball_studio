@@ -24,7 +24,7 @@ const overlay={rawPeopleVisible:checkbox,rawDetectors:new Map([
   ["project:fusion-rf:match.mp4","rfdetr-medium"],
   ["project:fusion-rt:match.mp4","legacy"]
 ])};
-const context={overlay,s,rawFusion:()=>s.chain.choices.find(
+const context={overlay,s,$:()=>null,rawFusion:()=>s.chain.choices.find(
   choice=>choice.value===s.analysis&&choice.kind==="fusion")||null};
 runInNewContext(source.slice(start,end)+
   "\nthis.updateRawDetectorLabel=updateRawDetectorLabel;",context);

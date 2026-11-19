@@ -13,7 +13,7 @@ assert.match(html,/id="studio-analysis-player"[\s\S]*id="studio-analysis-court"[
 assert.match(html,/id="studio-analysis-selected-range"/);
 assert.match(html,/id="studio-analysis-zoom-out"/);
 assert.match(html,/id="studio-analysis-zoom-in"/);
-assert.match(css,/\.analysis-editor-media\{[^}]*--frame-ratio/);
+assert.match(css,/\.analysis-editor-stage\{[^}]*aspect-ratio:var\(--frame-ratio/);
 assert.match(css,/\.analysis-editor-stage\.marking/);
 
 const nodes=new Map();
@@ -22,7 +22,8 @@ function el(id){
   if(nodes.has(id))return nodes.get(id);
   const listeners=new Map(),classes=new Set();
   const node={
-    id,value:"0",textContent:"",disabled:false,controls:true,paused:true,
+    id,value:"0",textContent:"",disabled:false,controls:true,paused:true,children:[],
+    appendChild(child){this.children.push(child);},insertBefore(child){this.children.push(child);},
     style:{setProperty(key,value){this[key]=value;}},
     classList:{
       toggle(name,on){if(on)classes.add(name);else classes.delete(name);},
@@ -45,7 +46,7 @@ function el(id){
   return node;
 }
 ids.forEach(el);
-const ctx=new Proxy({}, {get(){return ()=>{};},set(){return true;}});
+const ctx=new Proxy({}, {get(_target,key){return key==="measureText"?()=>({width:20}):()=>{};},set(){return true;}});
 el("studio-analysis-court").getContext=()=>ctx;
 el("studio-analysis-stage").parentElement=el("studio-analysis-media-fixture");
 const video=el("studio-analysis-player");
@@ -73,7 +74,7 @@ const drafts=new Map();
 vm.runInNewContext(js,{
   localStorage:{getItem:k=>drafts.get(k)||null,setItem:(k,v)=>drafts.set(k,v),removeItem:k=>drafts.delete(k)},
   setTimeout,clearTimeout,
-  document:{getElementById:el},
+  document:{getElementById:el,createElement:tag=>el("created-"+tag+"-"+nodes.size),addEventListener(){}},
   window:windowMock,
   URLSearchParams,
   ResizeObserver:windowMock.ResizeObserver,

@@ -51,7 +51,7 @@ const pipelineContext={
   window:{VolleyballTasks:{clear(){},set(){}},
     dispatchEvent:()=>completionEvents++},
   CustomEvent:class{constructor(name,config){this.type=name;this.detail=config.detail;}},
-  saveMessage(){},stopPipelinePolling(){},announce(){},
+  saveMessage(){},stopPipelinePolling(){},announce(){},updateLiveHistory(){},
   updateProfile(){},loadLog:()=>Promise.resolve(),failure:err=>{throw err;}
 };
 runInNewContext(section(tabs,"  const displayPipeline=(status,notifyCompletion=false)=>{",

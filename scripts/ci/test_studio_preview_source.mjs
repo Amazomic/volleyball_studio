@@ -8,9 +8,10 @@ const start=adapterStart>=0?adapterStart:js.indexOf("  const ensurePreviewVideo=
 const end=js.indexOf("  const seekTimeline=",start);
 assert.ok(start>=0&&end>start,"Preview source initialization must exist");
 const s={project:"project",video:"match.mp4",videoKey:"",seekAt:0};
-const video={src:"",loads:0,load(){this.loads++;}};
+const video={src:"",loads:0,load(){this.loads++;},getAttribute(name){return name==="src"?this.src:null;}};
 const emptyVideo={classList:{add(){}}};
-const context={window:{},s,ui:{video,emptyVideo},url:(path,params)=>path+"?"+new URLSearchParams(params),URLSearchParams};
+const context={window:{addEventListener(){}},previewLoad:{timer:null,key:"",retries:0,pending:false,epoch:0},clearTimeout,
+  schedulePreviewRecovery(){},s,ui:{video,emptyVideo},url:(path,params)=>path+"?"+new URLSearchParams(params),URLSearchParams};
 runInNewContext(js.slice(start,end)+"\nthis.ensurePreviewVideo=ensurePreviewVideo;",context);
 context.ensurePreviewVideo();
 assert.equal(video.src,"/api/video-media?project_id=project&video=match.mp4");

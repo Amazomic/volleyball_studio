@@ -14,6 +14,7 @@ assert.doesNotMatch(html,/id="studio-raw-ravel-ball"/,
 const first=source.indexOf("  const rawFusion=()=>");
 const last=source.indexOf("  const cpuTouchStyle=",first);
 assert.ok(first>=0&&last>first);
+const scheduled=[];
 const requests=[];
 const messages=[];
 const s={
@@ -26,13 +27,13 @@ const s={
 const overlay={
   raw:true,flags:{pose:false},
   rawPoseVisible:{checked:true},
-  cache:new Map(),rawFrames:new Map(),failed:new Map(),controllers:new Map(),fetching:new Set()
+  cache:new Map(),rawFrames:new Map(),rawDetectors:new Map(),failed:new Map(),controllers:new Map(),fetching:new Set()
 };
 const ctx={
-  s,overlay,timeline:{data:null},AbortController,Date,
+  s,overlay,timeline:{data:null},AbortController,Date,setTimeout:fn=>{scheduled.push(fn);return scheduled.length;},clearTimeout:()=>{},
   url:(route,params)=>route+"?"+new URLSearchParams(params),
   request:(path)=>new Promise((resolve,reject)=>requests.push({path,resolve,reject})),
-  drawOverlay:()=>{},overlayMessage:message=>messages.push(message),
+  drawOverlay:()=>{},updateRawDetectorLabel:()=>{},overlayMessage:message=>messages.push(message),
   fps:()=>30,
 };
 runInNewContext(source.slice(first,last)+
@@ -40,7 +41,7 @@ runInNewContext(source.slice(first,last)+
 const {raw}=ctx;
 const valid=(fusionId,start=0)=>({
   schema:"volley-native-gpu-overlay/1",project_id:"p",video:"match.mp4",
-  fusion_id:fusionId,source_fusion_sha256:"c".repeat(64),
+  fusion_id:fusionId,source_fusion_sha256:"c".repeat(64),person_detector:"rfdetr-medium",
   fps:30,width:1280,height:720,start_frame:start,end_frame:start+90,total_frames:270,
   frames:Array.from({length:90},(_,i)=>({frame:start+i,raw:{balls:[],players:[],poses:[]}})),
   poses_available:false
@@ -48,6 +49,8 @@ const valid=(fusionId,start=0)=>({
 const flush=()=>new Promise(done=>setImmediate(done));
 const a=s.chain.choices[0].id,b=s.chain.choices[1].id;
 raw.prefetch(0);
+assert.equal(requests.length,0,"GPU prefetch coalesces seeks before requesting overlays");
+scheduled.shift()();
 assert.equal(requests.length,1,"Unknown GPU frame counts prefetch only a safe initial window");
 assert.ok(requests[0].path.startsWith("/api/gpu/native/overlays?"));
 assert.ok(requests[0].path.includes("fusion_id="+a));

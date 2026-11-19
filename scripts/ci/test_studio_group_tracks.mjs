@@ -42,12 +42,12 @@ assert.equal(notes.at(-1)[1],undefined);
 const renderStart=source.indexOf("  const renderGroupCards=()=>{");
 const renderEnd=source.indexOf('  galleryMore.addEventListener',renderStart);
 const items={children:["photo"],append(item){this.children.push(item);}};
-const galleryContext={state:{grouping:true},galleryItems:items,galleryMore:{},
+const galleryContext={state:{grouping:true,groups:[],groupLoaded:true,groupShown:24},galleryItems:items,galleryMore:{},
   clear:element=>{element.children=[];},node:(tag,klass,text)=>({tag,klass,text})};
 runInNewContext(source.slice(renderStart,renderEnd)+"\nthis.renderGroupCards=renderGroupCards;",galleryContext);
 galleryContext.renderGroupCards();
-assert.equal(items.children.length,1);
-assert.equal(items.children[0].text,"Идёт группировка похожих ID…");
+assert.equal(items.children.length,2,"busy gallery retains its empty group status");
+assert.match(items.children[0].text,/Обновление выполняется/);
 assert.equal(galleryContext.galleryMore.hidden,true);
 context.post=async()=>{throw Error("сеть недоступна");};
 await click();

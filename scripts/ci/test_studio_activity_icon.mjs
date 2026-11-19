@@ -35,7 +35,7 @@ runInNewContext(source,{
   setTimeout,clearTimeout,setInterval,clearInterval,
   requestAnimationFrame:fn=>{frames.push(fn);return frames.length;}
 });
-assert.equal(favicon.href,"/studio/volleyball-photo.png","idle favicon keeps the provided volleyball image");
+assert.ok(favicon.href.startsWith("data:image/png"),"idle favicon uses the initial prerendered ball frame");
 assert.equal(frames.length,0,"idle should not animate");
 window.VolleyballStudioActivity.setTaskActive("studio-job",true);
 let time=100;

@@ -31,7 +31,7 @@ const galleryState={project:"project",projectPlayerIds:new Set(["a"]),viewPlayer
 const modeSwitch=make("div"),modeTabs=make("div");modeSwitch.append(modeTabs);
 const galleryContext={state:galleryState,node:make,ui:{list:{before:node=>inserted.push(node)}},
   window:{addEventListener:(name,fn)=>{handlers[name]=fn;}},groupsMode:make("button"),
-  playerMode:make("button"),modeSwitch,groupingControls:make("div"),setMode:mode=>loads.push(mode),loadAlbum:()=>loads.push("album"),loadPage:()=>loads.push(galleryState.viewPlayer)};
+  playerMode:make("button"),modeSwitch,groupingControls:make("div"),autoAssignControls:make("div"),setMode:mode=>loads.push(mode),loadAlbum:()=>loads.push("album"),loadPage:()=>loads.push(galleryState.viewPlayer)};
 runInNewContext(tracks.slice(viewStart,viewEnd)+"\nthis.updateUnassignedLabel=updateUnassignedLabel;",galleryContext);
 galleryContext.updateUnassignedLabel();
 assert.equal(modeSwitch.children[0],modeTabs);
@@ -39,6 +39,7 @@ assert.equal(modeSwitch.children[1].klass,"track-view-bar","conflict filter shar
 assert.equal(modeSwitch.children[2],galleryContext.groupingControls);
 assert.equal(modeSwitch.children[3].textContent,"Непривязанные Track ID · 3");
 assert.equal(inserted[0],modeSwitch,"one toolbar is inserted instead of two stacked rows");
+assert.equal(inserted[1],galleryContext.autoAssignControls,"auto-assign threshold is mounted beside the gallery toolbar");
 galleryState.unassignedIds.delete(1);galleryContext.updateUnassignedLabel();
 assert.equal(modeSwitch.children[3].textContent,"Непривязанные Track ID · 2");
 handlers["volley:player-gallery-select"]({detail:{project_id:"project",player_id:"a",name:"Анна"}});

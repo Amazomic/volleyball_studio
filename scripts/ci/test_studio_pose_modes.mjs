@@ -4,9 +4,9 @@ import {runInNewContext} from "node:vm";
 
 const html=readFileSync(new URL("../../rust/volley-app/static/studio.html",import.meta.url),"utf8");
 const source=readFileSync(new URL("../../rust/volley-app/static/studio_tabs.js",import.meta.url),"utf8");
-assert.match(html,/id="studio-gpu-person-stride"[^>]*min="1"[^>]*max="30"[^>]*value="10"[^>]*data-default="10"/);
+assert.match(html,/id="studio-gpu-person-stride"[^>]*min="1"[^>]*max="30"[^>]*value="1"[^>]*data-default="1"/);
 assert.match(html,/30 кадров в секунду \(30 FPS\)/);
-assert.match(html,/Каждый 10-й кадр → 3 раза\/с/);
+assert.match(html,/Каждый кадр → 30 раз\/с/);
 assert.doesNotMatch(html,/id="studio-gpu-pose-mode"/);
 
 const start=source.indexOf("  const refreshPersonSamplingRate=()=>");
