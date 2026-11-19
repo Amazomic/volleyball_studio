@@ -90,8 +90,9 @@ done
 
 ## Журнал и слияние
 
-Каждый проверенный инкремент = коммит в migration-ветку + запись в
+Каждый проверенный инкремент = коммит в `develop` + запись в
 `docs/RUST_MIGRATION.md` с фактическими командами и результатами
-PASS/FAIL/NOT TESTED. production-переключение запрещено до приёмки этапа 85
-(`docs/RUST_ROADMAP.md`). Review и merge в `master`; автоматического merge
-gate нет.
+PASS/FAIL/NOT TESTED. Исторический критерий production-переключения связан с
+приёмкой этапа 85 (`docs/RUST_ROADMAP.md`). Обычные review и merge — в
+`develop`; `master` обновляется исключительно при выпуске проверенной версии.
+Автоматического merge gate нет.

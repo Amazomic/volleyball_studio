@@ -6,6 +6,8 @@
 
 Documentation: [Index](docs/README.md).
 
+**Branches:** `develop` is the main development branch and the target for day-to-day changes and PRs. `master` is reserved for tested version releases only. See the [development and release workflow](docs/DEVELOPMENT_WORKFLOW.md).
+
 План разработки: 84/85; следующий 85/85
 
 ---

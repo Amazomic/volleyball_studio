@@ -2607,3 +2607,11 @@ Studio показывает кнопку перехода между debug и re
 
 - Коммит 40e4613 опубликован fast-forward в origin/rust и применён fast-forward к чистой live рабочей копии volley-training-redesign-20261119. Перед перезапуском проверено: Studio принадлежит этому checkout; shutdown_safe=true, active_jobs=[]. Сборка WSL `cargo build --release --offline --locked -p volley-app` PASS, затем только штатные `start-volley-ui.cmd /stop` и `/daemon`; новый PID 167296. Исходный пользовательский CPU-результат не изменён.
 - После перезапуска `GET /studio/app.js` отдаёт новую надпись и разделение перегибов; HTML отдаёт максимальную паузу 900. Реальный `GET /api/training/rally-comparison` для run f7daedc9f49a4d2ba44d1201e6ae07da: CPU=152, saved impacts=5, trajectory rallies=0, внутри=0, вне=5; с явной симуляцией `min_impacts=1&max_touch_gap_frames=180` — пять предварительных интервалов и пять кандидатов. Детектор по-прежнему пропускает большинство игрового движения; независимая полнота/точность NOT TESTED.
+
+
+### 2026-11-19 — Разделение веток разработки и релизов
+
+- База: `origin/rust` 57c223b80978873bce0cf97d128e998408a59584; действующий бета-релиз `master` ddb2a8214803a245731bc99735b32b10a00db392. До операции ветки расходились; релизная история `master` не переписана и не объединялась автоматически.
+- Применение: GitHub переименовал ветку `rust` в `develop` без смены HEAD, ветка по умолчанию переключена с `master` на `develop`. Текущая разработка и PR направляются в `develop`; `master` изменяется только для выпуска проверенной версии.
+- Владельцы и документация: `AGENTS.md`, `README.md`, `README.ru.md`, `docs/DEVELOPMENT_WORKFLOW.md`, `docs/AGENT_IMPROVEMENT_CHECKLIST.md`, `docs/TESTING.md`. Существующие незакоммиченные изменения пользовательской основной рабочей копии не тронуты; редактирование в отдельном worktree.
+- Проверка: PASS — `git diff --check`, наличие ссылок и файлов документации, согласованность политики PR и релизов. Документационная правка без изменения исполняемого кода: Rust/WASM, GPU, монтаж, реальный матч — NOT TESTED; перезапуск Studio не требуется.
