@@ -8,6 +8,7 @@
 
 - [О проекте и запуск на русском](../README.ru.md)
 - [О проекте и запуск на английском](../README.md)
+- [Скачать бету v0.1.0-beta.1 (Windows/Linux), ограничения и результаты проверок](releases/v0.1.0-beta.1.md)
 - [Запуск, зависимости и диагностика](RUST_DEPLOYMENT.md)
 - [Обзор UI: смешанная версионная заметка](VOLLEY_STUDIO_UI.md)
 - [Skill монтажа через действующую Studio](../.agents/skills/volleyball-reels-studio/SKILL.md)

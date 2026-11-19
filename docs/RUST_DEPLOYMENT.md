@@ -1,6 +1,21 @@
-# Rust Studio deployment — stage 82/85
+# Volleyball Studio — deployment (Rust beta and source builds)
 
-**Status: isolated migration preview, NOT an accepted production release.**
+**Current release:** [v0.1.0-beta.1](releases/v0.1.0-beta.1.md) on `master`, built from Rust source commit `437b446` (release-doc commit `ddb2a82`). **Pre-release, not production-ready**: `GET /internal/rewrite-status` reports `production_ready=false`. Ongoing development stays in `develop`; the published release tag is immutable.
+
+## Installed beta archives (no compiler required)
+
+Download both formats from [GitHub Releases](https://github.com/Amazomic/volleyball_studio/releases/tag/v0.1.0-beta.1). Verify them against the attached `SHA256SUMS.txt`.
+
+- **Windows x64:** extract `Volleyball-Studio-v0.1.0-beta.1-windows-x64.zip`, open the extracted `Volleyball-Studio-v0.1.0-beta.1-windows-x64` folder and start `run-studio.cmd` (or run `volley-app.exe` with suitable environment variables). This is a **native Windows executable**, not a WSL launch; Rust and WSL are unnecessary for starting the prebuilt application. The default writable data root is `%LOCALAPPDATA%\VolleyballStudioBeta\data`.
+- **Linux x86-64 / WSL2:** extract `Volleyball-Studio-v0.1.0-beta.1-linux-x86_64.tar.gz`, enter the extracted folder and run `bash run-studio.sh`. It is dynamically linked, built with **glibc 2.41** on Ubuntu 25.04 and may not run on older Linux releases. By default, the data root is `${XDG_DATA_HOME:-$HOME/.local/share}/volleyball-studio-beta`.
+- **Both:** open `http://127.0.0.1:8875/studio` in a browser. The `/studio/rust` compatibility URL redirects there. Do not expose the unauthenticated API outside localhost; a second instance cannot bind the same port. The beta archives include the Rust server, embedded HTML/JS/WASM, launch scripts, release notes and MIT license, **not** FFmpeg/FFprobe, model weights, ONNX Runtime, CUDA/cuDNN, OpenVINO or original video.
+- **External inference requirements:** supply compatible models and native runtimes separately; the UI starting successfully is **not** proof of successful GPU inference. An extracted beta archive is a standalone application root, not the full source repository/model distribution. For model-based work, provision the expected model locations and dependencies in the selected runtime environment. Do not open the only copy of production projects or overwrite existing results.
+- **Verified scope:** the published Windows/Linux archives were extracted and their servers started on isolated loopback ports, with `/studio` and embedded WASM returning HTTP 200. The full Rust/Node local gate passed, but real-match accuracy, complete GPU inference and MP4 export were **NOT TESTED** as release acceptance. `production_ready=false` remains correct.
+
+## Build from source on Windows / WSL (developer workflow)
+
+The following `start-volley-ui.cmd` commands apply to a **repository checkout**, not a downloaded beta ZIP. The source launcher compiles as needed and uses the isolated WSL sandbox; its defaults differ from the prebuilt Windows launcher.
+
 The Rust launcher never starts/stops Python or changes original videos,
 historical results, or the global player cache.
 
@@ -21,7 +36,7 @@ start-volley-ui.cmd /doctor
 start-volley-ui.cmd /check
 ~~~
 
-The app stays in the foreground at http://127.0.0.1:8875/studio/rust.
+The source-built app stays in the foreground at http://127.0.0.1:8875/studio. The legacy /studio/rust path redirects here.
 Legacy Python port 8765 is never automatically touched or killed.
 A second launch reuses the running Rust process, and an exclusive file
 lock based on the **canonical repository root** prevents a second
@@ -52,7 +67,7 @@ use native Tokio graceful shutdown; no force kill, Python process kill,
 or generic port-based termination is present. Full shutdown race fault
 injection is deferred to stage83.
 
-## Native offline Linux release
+## Native offline Linux source build
 
 ~~~bash
 cd rust
@@ -164,7 +179,7 @@ The test only starts its own disposable non-root container with
  stopping only its own container. Host-networking support on Docker
  Desktop must be enabled.
 
-## Stage83 security and fault-injection acceptance
+## Historical stage83 security and fault-injection acceptance
 
 An Axum lifecycle barrier closes the status-to-SIGTERM race: after
  confirming zero in-flight requests and active native tasks, incoming
@@ -184,7 +199,7 @@ Run scripts/ci/test_rust_faults.sh for all offline Rust/code fault
  Linux ONNX Runtime or a verified Docker image it exits nonzero.
  Representative match quality and peak VRAM profiling remain stage84.
 
-## Stage83 integrity and release gates
+## Historical stage83 integrity and release gates
 
 Run bash scripts/ci/test_rust_faults.sh for complete offline fault-injection
 and lifecycle regression. Run bash scripts/ci/test_rust_faults.sh

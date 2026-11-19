@@ -2615,3 +2615,12 @@ Studio показывает кнопку перехода между debug и re
 - Применение: GitHub переименовал ветку `rust` в `develop` без смены HEAD, ветка по умолчанию переключена с `master` на `develop`. Текущая разработка и PR направляются в `develop`; `master` изменяется только для выпуска проверенной версии.
 - Владельцы и документация: `AGENTS.md`, `README.md`, `README.ru.md`, `docs/DEVELOPMENT_WORKFLOW.md`, `docs/AGENT_IMPROVEMENT_CHECKLIST.md`, `docs/TESTING.md`. Существующие незакоммиченные изменения пользовательской основной рабочей копии не тронуты; редактирование в отдельном worktree.
 - Проверка: PASS — `git diff --check`, наличие ссылок и файлов документации, согласованность политики PR и релизов. Документационная правка без изменения исполняемого кода: Rust/WASM, GPU, монтаж, реальный матч — NOT TESTED; перезапуск Studio не требуется.
+
+
+### 2026-11-19 — Документация опубликованной beta после перехода на develop
+
+- Base: `origin/develop` `1a1f5c6`; immutable released tag `v0.1.0-beta.1` and `master` at `ddb2a82`. The previously named `rust` branch was renamed by the separate branch-policy commit; no `rust` branch was recreated. Only documentation changed; GPU/CPU code, binaries, models, user data and archives untouched.
+- `README.md`, `README.ru.md`, `docs/RUST_DEPLOYMENT.md`: native Windows x64 and Linux x86-64 extracted beta launch instructions, default isolated data roots, required external models/runtimes, `/studio` route, clear distinction from WSL source builds.
+- `docs/README.md`, `docs/releases/v0.1.0-beta.1.md`: release notes indexed and mirrored byte-identically to the published tag, with no tag rewrite. `rust/volley-app/README.md` and `docs/RUST_REWRITE_SCOPE.md`: historical migration inventory explicitly separated from current API behavior and unaccepted production gate.
+- `AGENTS.md`, `docs/DEVELOPMENT_WORKFLOW.md`, `docs/TESTING.md`: keep `develop` as main development and PR target, `master` as release branch, immutable tags, and explicit documentation-only release corrections.
+- Docs-only validation: 112 local Markdown links resolved (0 broken), byte-identical beta notes, `git diff --check`, roadmap self-test 84/85 and ownership self-test 20 owners / 61 guarded routes PASS. No application rebuild/restart required; real GPU match accuracy, Docker/MP4 acceptance NOT TESTED in this documentation update.
