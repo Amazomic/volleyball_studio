@@ -403,7 +403,7 @@ fn fit_trajectory_settings(
     for min_impacts in [1, 2, 3, 4, 5] {
         for context in [0, 15, 30, 45, 60, 90] {
             for duration in [15, 30, 45, 60, 90, 120] {
-                for gap in [90, 105, 120] {
+                for gap in [90, 105, 120, 180, 240, 360] {
                     let candidate = RallySettings {
                         min_touch_candidates: min_impacts,
                         suggested_context_frames: context,
@@ -503,7 +503,7 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
             json!({"min_impacts":settings.min_touch_candidates,
                 "context_frames":settings.suggested_context_frames,
                 "min_duration_frames":settings.min_rally_frames,
-                "max_touch_gap_frames":settings.max_without_touch_frames.min(120)}),
+                "max_touch_gap_frames":settings.max_without_touch_frames}),
             "ready",
             source,
             calibration,
@@ -524,6 +524,11 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         )
     };
     let simulated_touches = impacts_within_rallies(&impacts, &trajectory);
+    let unassigned_touches = impacts
+        .iter()
+        .copied()
+        .filter(|frame| simulated_touches.binary_search(frame).is_err())
+        .collect::<Vec<_>>();
     let cpu_vs_simulated_touches = (status == "ready")
         .then(|| touch_annotation::compare_touch_frames(&cpu_touches, &simulated_touches));
     let reference_touches = truth.as_ref().map(|(_, touches, _)| touches.as_slice());
@@ -560,6 +565,7 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         "trajectory_detector_version":"ball_down_up_v1",
         "trajectory_impacts":impacts,"parameters":parameters,
         "simulated_touch_candidates":simulated_touches,
+        "unassigned_touch_candidates":unassigned_touches,
         "cpu_touch_candidates":cpu_touches,
         "touch_metrics":{"cpu_trajectory":cpu_vs_simulated_touches,
                          "reference":touch_reference},

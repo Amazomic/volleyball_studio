@@ -84,7 +84,7 @@ pub fn preliminary_rally_intervals(
     let mut begin = 0;
     for end in 1..=impacts.len() {
         if end < impacts.len()
-            && impacts[end] - impacts[end - 1] <= settings.max_without_touch_frames.min(120)
+            && impacts[end] - impacts[end - 1] <= settings.max_without_touch_frames
         {
             continue;
         }
@@ -599,6 +599,27 @@ impl RallySegmenter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interval_grouping_uses_configured_gap_above_two_seconds() {
+        let impacts = [100, 280];
+        let settings = RallySettings {
+            max_without_touch_frames: 180,
+            min_rally_frames: 30,
+            suggested_context_frames: 30,
+            ..RallySettings::default()
+        };
+        assert_eq!(
+            preliminary_rally_intervals(&impacts, 500, settings),
+            vec![(70, 310)]
+        );
+        let narrower = RallySettings {
+            max_without_touch_frames: 120,
+            ..settings
+        };
+        assert!(preliminary_rally_intervals(&impacts, 500, narrower).is_empty());
+    }
+
     #[test]
     fn preliminary_boundaries_are_ball_only_and_discard_isolated_non_gameplay_motion() {
         let settings = RallySettings::default();

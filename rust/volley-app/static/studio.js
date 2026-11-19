@@ -1654,12 +1654,15 @@
     };
     const cpu=data.metrics.cpu_trajectory;
     const simulated=Array.isArray(data.simulated_touch_candidates)?data.simulated_touch_candidates:[];
+    const unassigned=Array.isArray(data.unassigned_touch_candidates)?data.unassigned_touch_candidates:[];
     comparison.summary.textContent=comparison.simulated?
-      "Модель: "+data.trajectory_rallies.length+" розыгрышей · "+simulated.length+
-      " возможных касаний":"Нажмите «Смоделировать»";
+      "Алгоритм по мячу: "+data.trajectory_rallies.length+" розыгрышей · "+simulated.length+
+      " возможных касаний внутри · "+unassigned.length+
+      " перегибов вне розыгрышей":"Нажмите «Смоделировать»";
     addMetric("Розыгрыши CPU",String(data.cpu_rallies.length));
     addMetric("По мячу",String(data.trajectory_rallies.length));
-    addMetric("Кандидаты касаний по мячу",String(simulated.length));
+    addMetric("Кандидаты внутри розыгрышей",String(simulated.length));
+    addMetric("Перегибы вне розыгрышей",String(unassigned.length));
     addMetric("Совпали (IoU ≥ 0,5)",String(cpu.matched));
     addMetric("Только CPU / только мяч",cpu.missed+" / "+cpu.extra);
     addMetric("F1 между детекторами",(cpu.f1*100).toFixed(1)+"%");
@@ -1687,6 +1690,27 @@
         });
         comparison.touches.append(button);
       }
+      if(unassigned.length){
+        const label=document.createElement("small");
+        label.textContent="Перегибы вне розыгрышей (не игровые касания):";
+        comparison.touches.append(label);
+        for(const frame of unassigned.slice(0,160)){
+          const button=document.createElement("button");button.type="button";
+          button.className="studio-simulated-touch";
+          button.textContent="◌ "+comparisonTime(frame);
+          button.title="Проверить перегиб мяча вне розыгрыша (не подтверждённое касание)";
+          button.addEventListener("click",()=>{
+            seekTimeline(frame/fps());
+            showAnnotationContext(frame,{});
+          });
+          comparison.touches.append(button);
+        }
+        if(unassigned.length>160){
+          const count=document.createElement("small");
+          count.textContent="Показаны первые 160 из "+unassigned.length+" перегибов вне розыгрышей";
+          comparison.touches.append(count);
+        }
+      }
       if(simulated.length>160){
         const count=document.createElement("small");
         count.textContent="Показаны первые 160 из "+simulated.length+" · все точки доступны на шкале";
@@ -1700,7 +1724,11 @@
     const rows=data.differences.filter(item=>filter==="all"||
       filter==="disagreement"&&item.kind!=="agreed"||item.kind===filter);
     if(!rows.length){
-      comparison.differences.textContent="Нет расхождений по выбранному фильтру.";
+      comparison.differences.textContent=comparison.simulated&&data.trajectory_rallies.length===0?
+        data.trajectory_impacts.length===0?
+        "Перегибы мяча вниз→вверх не обнаружены в сохранённом треке. Проверьте качество исходных наблюдений мяча.":
+        "Перегибы есть, но ни один не образовал розыгрыш. Уменьшите порог перегибов или увеличьте паузу между ними и смоделируйте снова.":
+        "Нет расхождений по выбранному фильтру.";
       return;
     }
     const total=document.createElement("small");
@@ -1780,6 +1808,10 @@
       comparison.status.textContent=data.calibration?
         "Параметры подобраны по подтверждённой разметке текущего видео. Это обучение на примере, не независимая оценка точности.":
         data.trajectory_status==="ready"?
+        simulate&&data.trajectory_impacts.length===0?
+        "В сохранённом треке мяча не найдено перегибов вниз→вверх. Проверьте данные траектории.":
+        simulate&&data.trajectory_rallies.length===0?
+        "Перегибы есть, но пороги не сформировали розыгрыши. Измените число перегибов или паузу между ними.":
         "Результат по сохранённой траектории VBallNet; возможные касания не подтверждены игроками и не классифицированы.":
         "Траекторных интервалов нет в этой CPU-версии.";
       renderComparison();
@@ -1814,11 +1846,13 @@
     const rally=(annotation.data?.rallies||[]).find(item=>item.id===annotation.rallyId)||
       (annotation.data?.rallies||[]).find(item=>item.start<=frame&&item.end>=frame);
     const trajectoryProposal=annotation.prediction?.proposals?.some(p=>Math.abs(p.frame-frame)<=1);
-    const simulated=Boolean(trajectoryProposal)||(comparison.simulated&&comparisonMatches(comparison.data)&&
+    const rawImpact=Boolean(comparison.simulated&&comparisonMatches(comparison.data)&&
+      comparison.data.unassigned_touch_candidates?.includes(frame));
+    const simulated=Boolean(trajectoryProposal)||rawImpact||(comparison.simulated&&comparisonMatches(comparison.data)&&
       comparison.data.simulated_touch_candidates.includes(frame));
     ui.video.pause();
     annotationContext.actions.replaceChildren();
-    annotationContext.label.textContent=(simulated?"Кандидат касания · ":
+    annotationContext.label.textContent=(rawImpact?"Перегиб вне розыгрыша · ":simulated?"Кандидат касания · ":
       touch?"Размеченное касание · ":"Кадр ")+frame+
       " · "+comparisonTime(frame);
     const action=(label,callback,destructive=false)=>{

@@ -95,7 +95,7 @@ assert.equal(rows.length,3,"disagreements should exclude agreed rallies");
 rows[1].click();
 assert.equal(seeked,220/30);
 assert.equal(paused,true);
-assert.equal(elements.get("studio-comparison-metrics").children.length,7);
+assert.equal(elements.get("studio-comparison-metrics").children.length,8);
 comparison.filter.value="all";
 renderComparison();
 assert.equal(elements.get("studio-comparison-differences").children.filter(
@@ -157,4 +157,17 @@ assert.equal(comparison.gap.value,105);
 assert.ok(elements.get("studio-comparison-metrics").children.some(
   row=>row.children[0]?.textContent.includes("Подбор по этому видео")),
   "Calibration must be marked in-sample rather than general validation");
+comparison.data={...saved,
+  trajectory_status:"ready",trajectory_rallies:[],trajectory_impacts:[25,170],
+  simulated_touch_candidates:[],unassigned_touch_candidates:[25,170],
+  metrics:{cpu_trajectory:{matched:0,missed:2,extra:0,f1:0},
+    cpu_reference:null,trajectory_reference:null},differences:[]};
+comparison.simulated=true;
+renderComparison();
+assert.match(elements.get("studio-simulation-summary").textContent,/2 перегибов вне розыгрышей/);
+assert.equal(elements.get("studio-comparison-touches").children.filter(row=>
+  row.className==="studio-simulated-touch").length,2,
+"Raw trajectory impacts outside accepted rallies must remain inspectable");
+assert.match(elements.get("studio-comparison-differences").textContent,/порог/);
+assert.match(html,/id="studio-comparison-gap"[^>]*max="900"/);
 console.log("Training comparison: source guard, editable params, separate timeline overlays and discrepancy navigation: OK");
