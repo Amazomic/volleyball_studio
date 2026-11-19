@@ -6,6 +6,8 @@
 
 Documentation: [Index](docs/README.md).
 
+**Beta:** [v0.1.0-beta.1](docs/releases/v0.1.0-beta.1.md) — experimental, localhost-only; no production acceptance. Binaries are available in GitHub Releases.
+
 План разработки: 84/85; следующий 85/85
 
 ---

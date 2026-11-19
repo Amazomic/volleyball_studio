@@ -6,6 +6,8 @@
 
 Документация: [указатель](docs/README.md).
 
+**Бета-релиз:** [v0.1.0-beta.1](docs/releases/v0.1.0-beta.1.md) — экспериментальная локальная версия, не production-ready. Архивы — в GitHub Releases.
+
 ---
 
 ## О проекте
