@@ -52,7 +52,22 @@ pub(crate) fn read_optional_bounded(
             return Err(BoundedReadError::Unsafe)
         }
         Ok(_) => (),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut parent = path.parent();
+            while let Some(folder) = parent {
+                match fs::symlink_metadata(folder) {
+                    Ok(meta) if !meta.is_dir() => {
+                        return Err(BoundedReadError::Metadata(error));
+                    }
+                    Ok(_) => break,
+                    Err(parent_error) if parent_error.kind() == io::ErrorKind::NotFound => {
+                        parent = folder.parent();
+                    }
+                    Err(parent_error) => return Err(BoundedReadError::Metadata(parent_error)),
+                }
+            }
+            return Ok(None);
+        }
         Err(error) => return Err(BoundedReadError::Metadata(error)),
     }
     let file = File::open(path).map_err(BoundedReadError::Open)?;
@@ -490,6 +505,16 @@ mod tests {
                 .unwrap_err()
                 .0,
             StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            read_document(&file.join("nested").join("child"), 100, false)
+                .unwrap_err()
+                .0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            read_document(&root.join("missing").join("child"), 100, false).unwrap(),
+            (serde_json::Value::Null, "absent".into())
         );
         assert_eq!(
             read_document(&root, 100, false).unwrap_err().0,
