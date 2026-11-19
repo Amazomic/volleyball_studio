@@ -17,6 +17,7 @@ const oldRecord={
   start_frame:0,end_frame:180,
   frames:[{frame:90,players:[{id:1,box:[0.1,0.2,0.3,0.8]}],ball:null}]
 };
+const timers=[];
 const calls=[];
 let outlines=0;
 const renderedLabels=[];
@@ -25,7 +26,7 @@ const actionColors=[];
 const ballColors=[];
 const poseFills=[];
 const ctx={
-  strokeRect(){outlines++;},
+  save(){},restore(){},setLineDash(){},strokeRect(){outlines++;},
   beginPath(){},arc(){},moveTo(){},lineTo(){},fill(){
     if(["#47e2ff","#ff8f55"].includes(this.fillStyle))ballColors.push(this.fillStyle);
     if(this.fillStyle==="#f9d977")poseFills.push(this.globalAlpha);
@@ -42,7 +43,7 @@ const overlay={
   fetching:new Set(),failed:new Map()
 };
 const timeline={data:{project_id:"p",rally_run_id:"r",video:"v",total_frames:300}};
-const scope={s,ui,overlay,overlayLabels,timeline,
+const scope={s,ui,overlay,overlayLabels,timeline,setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){},
   playerLabelKey:(project,run,video,sha)=>[project,run,video,sha].join(":"),
   requestOverlayLabels:()=>{},
   overlayContext:()=>({ctx,x:0,y:0,width:100,height:100}),
@@ -127,9 +128,9 @@ overlay.raw=false;s.run="r";
 timeline.data.schema="volley-native-rally-timeline/1";
 timeline.data.source_replay_sha256="a".repeat(64);
 timeline.data.touch_annotations=[
-  {frame_index:45,kind:"attack",ball_position_px:[20,20]},
-  {frame_index:45,kind:"block",ball_position_px:[30,30]},
-  {frame_index:45,kind:null,ball_position_px:[40,40]}
+  {frame_index:45,kind:"attack",ball_position_px:[20,20],contact_verified:true},
+  {frame_index:45,kind:"block",ball_position_px:[30,30],contact_verified:true},
+  {frame_index:45,kind:null,ball_position_px:[40,40],contact_verified:true}
 ];
 overlay.actionFlags={attack:true,block:true};
 oldRecord.width=100;oldRecord.height=100;
@@ -151,7 +152,7 @@ renderedLabels.length=0;
 scope.drawOverlay();
 assert.deepEqual(actionColors,["#c38cff","#c6bf96"],
   "Processed mode hides disabled attack but renders CPU block and unclassified touch");
-assert.ok(renderedLabels.includes("≈ Блок"),"Block must be labeled as such, not generic touch");
+assert.ok(renderedLabels.some(label=>label.startsWith("≈ Блок · ")),"Block must be labeled as such with its provisional ID");
 assert.ok(!renderedLabels.includes("Касание?"),"Legacy card touch labels are forbidden");
 timeline.data.touch_annotations=[];
 actionColors.length=0;
@@ -163,13 +164,17 @@ const initEnd=js.indexOf("  const startOverlayFrameLoop=",initStart);
 let changed,redraws=0;
 const checkbox={dataset:{overlayAction:"attack"},checked:false,addEventListener:(name,fn)=>{if(name==="change")changed=fn;}};
 const input={addEventListener(){}};
-const controls={querySelectorAll:()=>[checkbox],classList:{toggle(){}}};
+const controls={querySelectorAll:()=>[checkbox],classList:{toggle(){},remove(){},add(){}}};
 const tab=()=>({attributes:{},closest:()=>controls,addEventListener(name,fn){this[name]=fn;},setAttribute(name,value){this.attributes[name]=value;}});
-const initOverlay={mode:tab(),rawMode:tab(),rawControls:controls,actionControls:controls,
+const initOverlay={mode:tab(),rawMode:tab(),rawControls:controls,actionControls:controls,canvas:{closest:()=>controls},
   rawBall:input,rawVballVisible:input,rawPeopleVisible:input,
   rawPlayer:input,rawPose:input,rawPoseVisible:input,actionFlags:{attack:true}};
 runInNewContext(js.slice(initStart,initEnd),{
-  overlay:initOverlay,$:()=>({}),drawOverlay:()=>{redraws++;},drawTimeline:()=>{},
+  overlay:initOverlay,$:()=>({}),window:{addEventListener(){}},
+  training:{active:false,panel:{classList:{add(){}}}},comparison:{epoch:0},
+  annotation:{lane:{querySelectorAll:()=>[]}},hideAnnotationContext(){},trainingEditorReset(){},
+  updateRawDetectorLabel(){},placeTrainingTimeline(){},
+  drawOverlay:()=>{redraws++;},drawTimeline:()=>{},
   setOverlaySource:()=>{},rawFusion:()=>({id:"f"}),s:{run:"",video:""},
   timeline:{status:{textContent:""},data:null},
   ensurePreviewVideo:()=>{},prefetchOverlayAtFrame:()=>{},overlayMessage:()=>{}
@@ -197,7 +202,7 @@ assert.equal(outlines,beforePresented+1,"Never draw a new CPU version on media f
 s.videoKey="p:v";
 overlay.source.events=[];
 timeline.data.touch_annotations=[
-  {frame_index:45,kind:"block",ball_position_px:[30,30]}
+  {frame_index:45,kind:"block",ball_position_px:[30,30],contact_verified:true}
 ];
 overlay.flags.players=false;overlay.flags.touches=true;
 ui.video.currentTime=45/30;
@@ -220,11 +225,13 @@ overlay.cache.set("p:cpu:r:v:0",savedWindow);
 overlay.fetching.clear();
 const requestsBefore=calls.length;
 scope.prefetchOverlayAtFrame(180);
+assert.equal(calls.length,requestsBefore,"Seeking coalesces overlay requests until debounce expires");
+timers.pop()();
 const early=calls.slice(requestsBefore);
 assert.ok(early.some(path=>path.includes("start_frame=120")),
-  "Seek should request the target player window immediately");
-assert.ok(early.some(path=>path.includes("start_frame=210")),
-  "Seek should also prefetch the next overlapping player window");
+  "Seek should request the target player window after the debounce");
+assert.ok(!early.some(path=>path.includes("start_frame=210")),
+  "Seek should not immediately prefetch the next player window");
 timeline.data.rally_run_id="wrong";
 actionColors.length=0;
 scope.drawOverlay();
@@ -262,12 +269,12 @@ assert.ok(labelPositions.some(label=>label.value==="Ильнур"&&label.y>=80),
 overlayLabels.names.clear();
 renderedLabels.length=0;
 scope.drawOverlay();
-assert.ok(renderedLabels.includes("ID 1"),"Unassigned Track ID keeps numeric fallback");
+assert.ok(renderedLabels.includes("1"),"Unassigned Track ID keeps numeric fallback");
 overlayLabels.names.set("1","Ильнур");
 overlayLabels.key=scope.playerLabelKey("p","old-run","v",oldRecord.replay_sha256);
 renderedLabels.length=0;
 scope.drawOverlay();
-assert.ok(renderedLabels.includes("ID 1"),"Previous CPU run names cannot appear in new run");
+assert.ok(renderedLabels.includes("1"),"Previous CPU run names cannot appear in new run");
 overlayLabels.key=scope.playerLabelKey("p","r","v",oldRecord.replay_sha256);
 overlayLabels.names.clear();
 
@@ -312,7 +319,7 @@ const labelSha="a".repeat(64);
 const labelResponse=(name,run="r",sha=labelSha)=>({
   schema:"volley-native-preview-player-labels/1",
   project_id:"p",rally_run_id:run,video:"v",
-  source_replay_sha256:sha,identity_source:"manual",
+  source_replay_sha256:sha,identity_source:"manual",manual_track_ids:["1"],
   names:{"1":name}
 });
 const flush=()=>new Promise(resolve=>setImmediate(resolve));

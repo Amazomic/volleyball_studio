@@ -15,7 +15,7 @@ const context={state,ui:{list,page:{}},singlesHeader:{},clear:item=>{item.childr
 runInNewContext(source.slice(start,end)+"\nthis.renderRows=renderRows;",context);
 context.renderRows();
 const card=list.children[0];
-const button=card.children.find(child=>child.tag==="button"&&child.text==="Удалить ID у игрока");
+const button=card.children.find(child=>child.tag==="button"&&child.klass.includes("track-remove-assignment"));
 assert.ok(button,"player ID card must include a removal button");
 button.events.click();
 assert.equal(calls.length,1);

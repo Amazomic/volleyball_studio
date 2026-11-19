@@ -15,7 +15,7 @@ const overview=(video,fusion,replay,gpu)=>({
   stages:[
     {key:"gpu",items:gpu||[]},
     {key:"fusion",items:fusion.map(id=>({id,created_at:1700000000,
-      ravel_job_id:id===i(1)?i(7):null,
+      person_job_id:id===i(1)?i(7):null,
       vball_job_id:id===i(1)?i(8):null}))},
     {key:"tracking",items:replay.map(([id,source_fusion_id])=>({id,source_fusion_id}))},
   ]

@@ -14,18 +14,18 @@ for(const script of ["scripts/volley-rust.sh",
   "scripts/ci/test_rust_docker_smoke.sh",
   "scripts/ci/test_rust_faults.sh","scripts/ci/test_rust_shutdown_race.sh",
   "scripts/ci/build_rust_docker_local.sh"]){
-  execFileSync("bash",["-n",join(root,script)]);
+  execFileSync("bash",["-n",script],{cwd:root});
   assert.ok(!readFileSync(join(root,script)).includes(13),
     "CRLF corrupts Bash under Windows autocrlf: "+script);
 }
 const ortInstall=content("scripts/setup_rust_ort_cuda.sh");
 assert.ok(!readFileSync(join(root,"scripts/setup_rust_ort_cuda.sh")).includes(13),
   "ORT install script must retain LF in Windows checkouts");
-execFileSync("bash",["-n",join(root,"scripts/setup_rust_ort_cuda.sh")]);
+execFileSync("bash",["-n","scripts/setup_rust_ort_cuda.sh"],{cwd:root});
 const ortSmoke=content("scripts/ci/test_rust_cuda_runtime.sh");
 assert.ok(!readFileSync(join(root,"scripts/ci/test_rust_cuda_runtime.sh")).includes(13),
   "CUDA smoke script must retain LF in Windows checkouts");
-execFileSync("bash",["-n",join(root,"scripts/ci/test_rust_cuda_runtime.sh")]);
+execFileSync("bash",["-n","scripts/ci/test_rust_cuda_runtime.sh"],{cwd:root});
 for(const value of ["onnxruntime-linux-x64-gpu-1.22.0.tgz",
   "2a19dbfa403672ec27378c3d40a68f793ac7a6327712cd0e8240a86be2b10c55",
   "onnxruntime-gpu[cuda,cudnn]==1.22.0","--target"]){
@@ -57,9 +57,9 @@ for(const term of ["shutdown_safe","active_jobs","active_job_types"]){
   assert.ok(daemon.includes(term),"Missing lifecycle source ownership: "+term);
 }
 const bash=content("scripts/volley-rust.sh");
-for(const command of ["start|stop|status|restart|doctor|check",
+for(const command of ["start|detach|stop|status|restart|doctor|check",
   "shutdown_safe","active_jobs","/proc/$pid/exe","/proc/$pid/cwd",
-  "kill -TERM","cargo build --locked --offline","exec \"$binary\"",
+  "kill -TERM","cargo build --release --locked --offline -p volley-app","exec \"$binary\"",
   "VOLLEY_RUST_DATA_ROOT","ORT_DYLIB_PATH"]){
   assert.ok(bash.includes(command),"Missing Rust deployment contract: "+command);
 }
@@ -74,7 +74,7 @@ const ps=content("scripts/start-volley-rust-dev.ps1");
 assert.match(ps,/Ubuntu-25\.04/);
 assert.match(ps,/127\.0\.0\.1:8875/);
 assert.match(ps,/wsl\.exe -d \$Distro --exec bash/);
-assert.match(ps,/ValidateSet\("Start","Status","Stop","Restart","Doctor","Check"\)/);
+assert.match(ps,/ValidateSet\("Start","Detach","Status","Stop","Restart","Doctor","Check"\)/);
 assert.doesNotMatch(ps,/Stop-Process|taskkill|python\.exe/);
 const cmd=content("start-volley-ui.cmd");
 for(const action of ["/restart","/status","/stop","/doctor","/check"]){
