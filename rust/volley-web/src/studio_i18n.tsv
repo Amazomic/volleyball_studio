@@ -482,6 +482,11 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Розыгрыши: CPU против траектории мяча	Rallies: CPU versus ball trajectory
 Сравнение по одной версии видео, без повторного GPU-анализа	Compare one video version without rerunning GPU analysis
 Рассчитать по траектории	Calculate from trajectory
+Алгоритм розыгрышей	Rally detection algorithm
+Непрерывная траектория	Continuous trajectory
+Перегибы траектории	Trajectory deflections
+Минимальная непрерывная траектория (секунды)	Minimum uninterrupted trajectory (seconds)
+Смоделировать розыгрыши	Simulate rallies
 Перегибов для розыгрыша	Deflections per rally
 Запас до/после (кадры)	Padding before/after (frames)
 Мин. длина (кадры)	Minimum duration (frames)

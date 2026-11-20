@@ -1615,7 +1615,18 @@
     minImpacts:$("studio-comparison-min-impacts"),
     context:$("studio-comparison-context"),
     duration:$("studio-comparison-duration"),
-    gap:$("studio-comparison-gap")
+    gap:$("studio-comparison-gap"),
+    mode:$("studio-comparison-mode"),
+    impactSettings:$("studio-comparison-impact-settings"),
+    continuousSettings:$("studio-comparison-continuous-settings"),
+    minSeconds:$("studio-comparison-min-seconds")
+  };
+  const continuousComparisonMode=()=>comparison.mode.value==="continuous";
+  const updateComparisonModeSettings=()=>{
+    comparison.impactSettings.hidden=continuousComparisonMode();
+    comparison.continuousSettings.hidden=!continuousComparisonMode();
+    comparison.recalculate.textContent=continuousComparisonMode()?
+      "Смоделировать розыгрыши":"Смоделировать розыгрыши и касания";
   };
   const comparisonMatches=data=>data&&
     data.schema==="volley-rally-training-comparison/1"&&
@@ -1629,10 +1640,12 @@
     comparison.metrics.replaceChildren();
     comparison.differences.replaceChildren();
     comparison.touches.replaceChildren();
+    updateComparisonModeSettings();
     for(const input of [comparison.minImpacts,comparison.context,comparison.duration,comparison.gap])
-      input.disabled=!data;
+      input.disabled=!data||continuousComparisonMode();
+    comparison.minSeconds.disabled=!data||!continuousComparisonMode();
     comparison.recalculate.disabled=!data;
-    comparison.calibrate.disabled=!data || !data.reference_reviewed;
+    comparison.calibrate.disabled=!data || continuousComparisonMode() || !data.reference_reviewed;
     if(!data){
       comparison.summary.textContent="Результат моделирования ещё не рассчитан";
       comparison.metrics.textContent="Сравнение ещё не загружено.";
@@ -1653,16 +1666,20 @@
       card.append(label,value);comparison.metrics.append(card);
     };
     const cpu=data.metrics.cpu_trajectory;
+    const continuous=data.mode==="continuous";
     const simulated=Array.isArray(data.simulated_touch_candidates)?data.simulated_touch_candidates:[];
     const unassigned=Array.isArray(data.unassigned_touch_candidates)?data.unassigned_touch_candidates:[];
     comparison.summary.textContent=comparison.simulated?
+      continuous?"Непрерывная траектория: "+data.trajectory_rallies.length+" розыгрышей":
       "Алгоритм по мячу: "+data.trajectory_rallies.length+" розыгрышей · "+simulated.length+
       " возможных касаний внутри · "+unassigned.length+
       " перегибов вне розыгрышей":"Нажмите «Смоделировать»";
     addMetric("Розыгрыши CPU",String(data.cpu_rallies.length));
     addMetric("По мячу",String(data.trajectory_rallies.length));
-    addMetric("Кандидаты внутри розыгрышей",String(simulated.length));
-    addMetric("Перегибы вне розыгрышей",String(unassigned.length));
+    if(!continuous){
+      addMetric("Кандидаты внутри розыгрышей",String(simulated.length));
+      addMetric("Перегибы вне розыгрышей",String(unassigned.length));
+    }
     addMetric("Совпали (IoU ≥ 0,5)",String(cpu.matched));
     addMetric("Только CPU / только мяч",cpu.missed+" / "+cpu.extra);
     addMetric("F1 между детекторами",(cpu.f1*100).toFixed(1)+"%");
@@ -1678,7 +1695,7 @@
       addMetric("Ручной эталон",data.reference_rallies===null?"Нет разметки":
         "Черновик · подтвердите разметку видео");
     }
-    if(comparison.simulated){
+    if(comparison.simulated&&!continuous){
       for(const frame of simulated.slice(0,160)){
         const button=document.createElement("button");button.type="button";
         button.className="studio-simulated-touch";
@@ -1725,6 +1742,8 @@
       filter==="disagreement"&&item.kind!=="agreed"||item.kind===filter);
     if(!rows.length){
       comparison.differences.textContent=comparison.simulated&&data.trajectory_rallies.length===0?
+        continuous?
+        "Не найден непрерывный трек мяча дольше выбранного порога. Попробуйте уменьшить длительность.":
         data.trajectory_impacts.length===0?
         "Перегибы мяча вниз→вверх не обнаружены в сохранённом треке. Проверьте качество исходных наблюдений мяча.":
         "Перегибы есть, но ни один не образовал розыгрыш. Уменьшите порог перегибов или увеличьте паузу между ними и смоделируйте снова.":
@@ -1770,7 +1789,9 @@
     }
     const key=project+":"+run+":"+video;
     const sameSource=comparison.sourceKey===key;
-    const simulate=useControls||calibrate||(sameSource&&comparison.simulated);
+    const selectedMode=comparison.mode.value||"impacts";
+    const simulate=useControls||calibrate||selectedMode==="continuous"||
+      (sameSource&&comparison.simulated);
     if(!sameSource)comparison.simulated=false;
     comparison.status.textContent="Сравниваем выбранную CPU-версию и сохранённую траекторию мяча…";
     comparison.recalculate.disabled=true;
@@ -1778,10 +1799,15 @@
     const options={project_id:project,rally_run_id:run};
     if(simulate){
       options.simulate=true;
-      options.min_impacts=Number(comparison.minImpacts.value);
-      options.context_frames=Number(comparison.context.value);
-      options.min_duration_frames=Number(comparison.duration.value);
-      options.max_touch_gap_frames=Number(comparison.gap.value);
+      options.mode=selectedMode;
+      if(selectedMode==="continuous"){
+        options.min_trajectory_seconds=Number(comparison.minSeconds.value);
+      }else{
+        options.min_impacts=Number(comparison.minImpacts.value);
+        options.context_frames=Number(comparison.context.value);
+        options.min_duration_frames=Number(comparison.duration.value);
+        options.max_touch_gap_frames=Number(comparison.gap.value);
+      }
     }
     if(calibrate)options.calibrate=true;
     window.VolleyballTasks?.set("training-simulation",{
@@ -1793,20 +1819,27 @@
       const data=await request(url("/api/training/rally-comparison",options));
       if(epoch!==comparison.epoch||project!==s.project||run!==s.run||
         video!==s.video||!training.active)return;
-      if(!comparisonMatches(data)||!Array.isArray(data.cpu_rallies)||
+      if(!comparisonMatches(data)||(data.mode&&data.mode!==selectedMode)||
+        !Array.isArray(data.cpu_rallies)||
         !Array.isArray(data.trajectory_rallies)||!Array.isArray(data.differences)||
         !Array.isArray(data.trajectory_impacts))
         throw Error("Источник сравнения не совпадает с выбранным анализом");
       comparison.data=data;comparison.sourceKey=key;comparison.shown=200;
       if(simulate)comparison.simulated=true;
       if(data.parameters){
-        comparison.minImpacts.value=data.parameters.min_impacts;
-        comparison.context.value=data.parameters.context_frames;
-        comparison.duration.value=data.parameters.min_duration_frames;
-        comparison.gap.value=data.parameters.max_touch_gap_frames;
+        if(selectedMode==="continuous"){
+          comparison.minSeconds.value=data.parameters.min_trajectory_seconds;
+        }else{
+          comparison.minImpacts.value=data.parameters.min_impacts;
+          comparison.context.value=data.parameters.context_frames;
+          comparison.duration.value=data.parameters.min_duration_frames;
+          comparison.gap.value=data.parameters.max_touch_gap_frames;
+        }
       }
       comparison.status.textContent=data.calibration?
         "Параметры подобраны по подтверждённой разметке текущего видео. Это обучение на примере, не независимая оценка точности.":
+        data.mode==="continuous"?
+        "Непрерывные участки VBallNet длиннее порога. Касания этим методом не определяются.":
         data.trajectory_status==="ready"?
         simulate&&data.trajectory_impacts.length===0?
         "В сохранённом треке мяча не найдено перегибов вниз→вверх. Проверьте данные траектории.":
@@ -1826,6 +1859,15 @@
       if(epoch===comparison.epoch)window.VolleyballTasks?.clear("training-simulation");
     }
   };
+  comparison.mode.addEventListener("change",()=>{
+    updateComparisonModeSettings();
+    comparison.data=null;
+    comparison.sourceKey="";
+    comparison.simulated=false;
+    renderComparison();
+    void refreshComparison(true);
+  });
+  updateComparisonModeSettings();
   comparison.recalculate.addEventListener("click",()=>void refreshComparison(true));
   comparison.calibrate.addEventListener("click",()=>void refreshComparison(true,true));
   comparison.filter.addEventListener("change",()=>{comparison.shown=200;renderComparison();});

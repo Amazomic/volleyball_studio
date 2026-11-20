@@ -29,6 +29,8 @@ pub struct CompareQuery {
     max_touch_gap_frames: Option<u64>,
     simulate: Option<bool>,
     calibrate: Option<bool>,
+    mode: Option<String>,
+    min_trajectory_seconds: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -448,17 +450,68 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         .transpose()?;
     let reviewed = truth.as_ref().is_some_and(|(_, _, reviewed)| *reviewed);
     let calibration_requested = query.calibrate.unwrap_or(false);
-    let saved = saved_impacts(
-        state,
-        run,
-        query.simulate.unwrap_or(false) || calibration_requested,
-    )?;
-    let (trajectory, impacts, parameters, status, source, calibration) = if let Some((
-        impacts,
-        mut settings,
-        source,
-    )) = saved
+    let mode = query.mode.as_deref().unwrap_or("impacts");
+    if !matches!(mode, "impacts" | "continuous") {
+        return Err(storage::bad_request("Unknown training rally algorithm"));
+    }
+    if (mode == "continuous"
+        && (calibration_requested
+            || query.min_impacts.is_some()
+            || query.context_frames.is_some()
+            || query.min_duration_frames.is_some()
+            || query.max_touch_gap_frames.is_some()))
+        || (mode == "impacts" && query.min_trajectory_seconds.is_some())
     {
+        return Err(storage::bad_request(
+            "Training rally parameters do not match selected algorithm",
+        ));
+    }
+    let saved = if mode == "impacts" {
+        saved_impacts(
+            state,
+            run,
+            query.simulate.unwrap_or(false) || calibration_requested,
+        )?
+    } else {
+        None
+    };
+    let (trajectory, impacts, parameters, status, source, calibration) = if mode == "continuous" {
+        let seconds = query.min_trajectory_seconds.unwrap_or(3.0);
+        if !seconds.is_finite() || !(0.1..=120.0).contains(&seconds) {
+            return Err(storage::bad_request(
+                "Continuous ball minimum must be 0.1–120 seconds",
+            ));
+        }
+        let replay_root = projects::project_root(state)
+            .join(&run.project_id)
+            .join("native_cpu_replays")
+            .join(&run.replay_id);
+        let replay = safe_file(
+            &replay_root,
+            "tracked_frames.jsonl",
+            64 * 1024 * 1024 * 1024,
+        )
+        .map_err(storage::bad_request)?;
+        let segments = crate::cpu_retrack::ball_track::continuous_ball_intervals(
+            &replay,
+            &run.replay_sha,
+            run.frames,
+            run.min_ball_score,
+            seconds,
+        )
+        .map_err(storage::bad_request)?
+        .into_iter()
+        .map(|(start, end)| Interval::new(start, end, run.frames))
+        .collect::<Result<Vec<_>, _>>()?;
+        (
+            segments,
+            Vec::new(),
+            json!({"min_trajectory_seconds":seconds,"min_ball_score":run.min_ball_score}),
+            "ready",
+            "saved_cpu_replay_continuous_ball",
+            None,
+        )
+    } else if let Some((impacts, mut settings, source)) = saved {
         if let Some(n) = query.min_impacts {
             settings.min_touch_candidates = n;
         }
@@ -529,14 +582,14 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         .copied()
         .filter(|frame| simulated_touches.binary_search(frame).is_err())
         .collect::<Vec<_>>();
-    let cpu_vs_simulated_touches = (status == "ready")
+    let cpu_vs_simulated_touches = (status == "ready" && mode == "impacts")
         .then(|| touch_annotation::compare_touch_frames(&cpu_touches, &simulated_touches));
     let reference_touches = truth.as_ref().map(|(_, touches, _)| touches.as_slice());
     let touch_reference = if reviewed {
         reference_touches.map(|touches| {
             json!({
                 "cpu":touch_annotation::compare_touch_frames(touches, &cpu_touches),
-                "trajectory":if status == "ready" {
+                "trajectory":if status == "ready" && mode == "impacts" {
                     Some(touch_annotation::compare_touch_frames(touches, &simulated_touches))
                 } else {None}
             })
@@ -561,8 +614,10 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         "project_id":run.project_id,"video":run.video,
         "rally_run_id":run.run_id,"source_replay_sha256":run.replay_sha,
         "source_touch_sha256":run.touch_sha,"source_rally_sha256":run.rally_sha,
-        "trajectory_status":status,
-        "trajectory_detector_version":"ball_down_up_v1",
+        "trajectory_status":status,"mode":mode,
+        "trajectory_detector_version":if mode == "continuous" {
+            "unbroken_vballnet_trajectory_v1"
+        } else { "ball_down_up_v1" },
         "trajectory_impacts":impacts,"parameters":parameters,
         "simulated_touch_candidates":simulated_touches,
         "unassigned_touch_candidates":unassigned_touches,
@@ -570,7 +625,9 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         "touch_metrics":{"cpu_trajectory":cpu_vs_simulated_touches,
                          "reference":touch_reference},
         "calibration":calibration,
-        "simulation_touch_status":"unverified_ball_direction_change",
+        "simulation_touch_status":if mode == "continuous" {
+            "not_calculated"
+        } else { "unverified_ball_direction_change" },
         "cpu_rallies":cpu,"trajectory_rallies":trajectory,
         "reference_rallies":reference,"reference_reviewed":reviewed,
         "metrics":{"cpu_trajectory":if status=="ready" {Some(cpu_trajectory)} else {None},
@@ -599,6 +656,18 @@ pub async fn get(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn training_continuity_settings_are_distinct_from_impact_settings() {
+        let parsed: CompareQuery = serde_json::from_value(json!({
+            "project_id":"p","rally_run_id":"r","mode":"continuous",
+            "min_trajectory_seconds":3.5,"simulate":true
+        }))
+        .unwrap();
+        assert_eq!(parsed.mode.as_deref(), Some("continuous"));
+        assert_eq!(parsed.min_trajectory_seconds, Some(3.5));
+        assert!(parsed.min_impacts.is_none());
+    }
 
     #[test]
     fn one_to_one_matching_distinguishes_extra_and_missing_rallies() {
