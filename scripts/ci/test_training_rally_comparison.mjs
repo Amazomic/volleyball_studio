@@ -66,6 +66,7 @@ const context={
   seekTimeline:seconds=>{seeked=seconds;},
   training:{active:true},
   drawTimeline:()=>{},cards:()=>{},
+  invalidateTrainingTouchPrediction:()=>{},
   timelineRallyLayers:{candidates:{checked:false}},
   url:(path,query)=>({path,query}),
   request:async()=>{throw Error("Expected mocked API response");}
@@ -179,7 +180,7 @@ assert.match(elements.get("studio-comparison-differences").textContent,/поро
 assert.match(html,/id="studio-comparison-gap"[^>]*max="900"/);
 assert.match(html,/id="studio-comparison-mode"/);
 assert.match(html,/id="studio-comparison-impact-settings"[^>]*hidden/);
-assert.match(html,/id="studio-comparison-min-seconds"[^>]*value="1.5"/);
+assert.match(html,/id="studio-comparison-min-seconds"[^>]*value="1\.5"/);
 comparison.mode.value="continuous";
 comparison.minSeconds.value="3.5";
 context.timelineRallyLayers.candidates.checked=false;

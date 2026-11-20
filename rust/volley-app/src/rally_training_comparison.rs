@@ -34,6 +34,18 @@ pub struct CompareQuery {
     min_trajectory_seconds: Option<f64>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TouchRallyFilter {
+    mode: String,
+    min_trajectory_seconds: Option<f64>,
+    min_impacts: Option<u64>,
+    context_frames: Option<u64>,
+    min_duration_frames: Option<u64>,
+    max_touch_gap_frames: Option<u64>,
+    merge_gap_seconds: f64,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 struct Interval {
     start: u64,
@@ -643,6 +655,76 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         "published_cpu_unchanged":true}))
 }
 
+fn merge_touch_scope(mut ranges: Vec<Interval>, gap_seconds: f64) -> Vec<Interval> {
+    ranges.sort_by_key(|r| (r.start, r.end));
+    let gap_frames = gap_seconds * 30.0;
+    let mut merged: Vec<Interval> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if let Some(previous) = merged.last_mut() {
+            if range.start <= previous.end.saturating_add(1)
+                || ((range.start - previous.end - 1) as f64) < gap_frames
+            {
+                previous.end = previous.end.max(range.end);
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    merged
+}
+
+pub(crate) fn touch_rally_scope(
+    state: &AppState,
+    run: &ValidatedRun,
+    filter: &TouchRallyFilter,
+) -> Result<Vec<(u64, u64)>, ApiError> {
+    if !filter.merge_gap_seconds.is_finite() || !(0.0..=60.0).contains(&filter.merge_gap_seconds) {
+        return Err(storage::bad_request("Invalid training rally merge gap"));
+    }
+    let query = CompareQuery {
+        project_id: run.project_id.clone(),
+        rally_run_id: run.run_id.clone(),
+        mode: Some(filter.mode.clone()),
+        min_trajectory_seconds: filter.min_trajectory_seconds,
+        min_impacts: filter.min_impacts,
+        context_frames: filter.context_frames,
+        min_duration_frames: filter.min_duration_frames,
+        max_touch_gap_frames: filter.max_touch_gap_frames,
+        simulate: Some(true),
+        calibrate: Some(false),
+    };
+    let result = compare(state, run, &query)?;
+    if result["trajectory_status"] != "ready" {
+        return Err(storage::bad_request(
+            "Ball rally detection is unavailable for touch training",
+        ));
+    }
+    let rows = result["trajectory_rallies"]
+        .as_array()
+        .ok_or_else(|| storage::bad_request("Missing ball rally intervals"))?;
+    if rows.len() > MAX_COMPARE_INTERVALS {
+        return Err(storage::bad_request("Too many ball rally intervals"));
+    }
+    let ranges = rows
+        .iter()
+        .map(|row| {
+            Interval::new(
+                row["start"]
+                    .as_u64()
+                    .ok_or_else(|| storage::bad_request("Invalid ball rally start"))?,
+                row["end"]
+                    .as_u64()
+                    .ok_or_else(|| storage::bad_request("Invalid ball rally end"))?,
+                run.frames,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(merge_touch_scope(ranges, filter.merge_gap_seconds)
+        .into_iter()
+        .map(|row| (row.start, row.end))
+        .collect())
+}
+
 pub async fn get(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CompareQuery>,
@@ -659,6 +741,47 @@ pub async fn get(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ball_touch_scope_uses_only_merged_ball_intervals() {
+        let ranges = vec![
+            Interval { start: 0, end: 50 },
+            Interval {
+                start: 100,
+                end: 150,
+            },
+            Interval {
+                start: 300,
+                end: 350,
+            },
+        ];
+        assert_eq!(
+            merge_touch_scope(ranges.clone(), 4.0),
+            vec![
+                Interval { start: 0, end: 150 },
+                Interval {
+                    start: 300,
+                    end: 350
+                },
+            ]
+        );
+        assert_eq!(merge_touch_scope(ranges, 0.0).len(), 3);
+        assert!(merge_touch_scope(Vec::new(), 4.0).is_empty());
+    }
+
+    #[test]
+    fn training_touch_scope_requires_explicit_rally_parameters() {
+        let good = json!({
+            "mode":"continuous",
+            "min_trajectory_seconds":1.5,
+            "merge_gap_seconds":4.0
+        });
+        assert!(serde_json::from_value::<TouchRallyFilter>(good).is_ok());
+        assert!(serde_json::from_value::<TouchRallyFilter>(json!({
+            "mode":"continuous","merge_gap_seconds":4.0,"unknown":true
+        }))
+        .is_err());
+    }
 
     #[test]
     fn training_continuity_settings_are_distinct_from_impact_settings() {

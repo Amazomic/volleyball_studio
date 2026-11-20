@@ -72,6 +72,7 @@ const {timeline,drawTimeline,timelineRallyLayers}=runInNewContext(
     comparisonMatches:()=>true,annotationReady:()=>true,
     annotationSourceValid:()=>true,fps:()=>30,
     cards:()=>{renderedLists++;},renderComparison:()=>{},
+    invalidateTrainingTouchPrediction:()=>{},
     cpuTouchKind:kind=>kind,
     cpuTouchStyle:{unknown_touch:["#f14f4f"]}
   }

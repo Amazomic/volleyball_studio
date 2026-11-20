@@ -1533,29 +1533,57 @@
     drawAnnotation();drawTimeline();
     annotationNotice("Черновик изменён. Сохраните данные касаний, затем повторите расчёт по траектории.");
   };
+  const trainingTouchRallySettings=()=>{
+    const rally={mode:comparison.mode.value,merge_gap_seconds:trainingGapSeconds()};
+    if(rally.mode==="continuous"){
+      rally.min_trajectory_seconds=Number(comparison.minSeconds.value);
+    }else{
+      rally.min_impacts=Number(comparison.minImpacts.value);
+      rally.context_frames=Number(comparison.context.value);
+      rally.min_duration_frames=Number(comparison.duration.value);
+      rally.max_touch_gap_frames=Number(comparison.gap.value);
+    }
+    return rally;
+  };
+  const invalidateTrainingTouchPrediction=()=>{
+    if(!annotation.prediction)return;
+    annotation.prediction=null;
+    drawAnnotation();drawTimeline();
+    annotationNotice("Настройки розыгрышей изменены. Пересчитайте касания внутри новых интервалов.");
+  };
   const calculateTrajectory=async()=>{
     if(annotation.busy||annotation.dirty||!s.run||!annotationSourceValid())return;
     const epoch=annotation.epoch,project=s.project,run=s.run,video=s.video;
     annotation.busy=true;drawAnnotation();
     window.VolleyballTasks?.set("training-trajectory",{label:"Дообучение",stage:"Поиск касаний по траектории VBallNet",progress:null});
-    annotationNotice("Рассчитываем касания по сохранённой траектории мяча без GPU…");
+    annotationNotice("Ищем касания только внутри розыгрышей, найденных по мячу, без GPU…");
+    const rally=trainingTouchRallySettings();
+    const settingsKey=JSON.stringify(rally);
     try{
-      const result=await post("/api/training/trajectory/calculate",{project_id:project,rally_run_id:run});
+      const result=await post("/api/training/trajectory/calculate",{
+        project_id:project,rally_run_id:run,rally
+      });
+      if(settingsKey!==JSON.stringify(trainingTouchRallySettings()))
+        throw Error("Настройки розыгрышей изменились. Повторите расчёт касаний.");
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run||video!==s.video)return;
       if(result.schema!=="volley-trajectory-touch-proposals/1"||
           result.project_id!==project||result.video!==video||result.rally_run_id!==run||
           !Array.isArray(result.proposals)||!Number.isSafeInteger(result.total_frames)||
-          result.proposals.some(p=>!Number.isSafeInteger(p.frame)||p.frame<0||p.frame>=result.total_frames))
-        throw Error("Результат расчёта не соответствует выбранному анализу");
+          !Array.isArray(result.rally_intervals)||
+          result.rally_count!==result.rally_intervals.length||
+          result.rally_intervals.some(r=>!Number.isSafeInteger(r.start)||!Number.isSafeInteger(r.end)||
+            r.start<0||r.start>=r.end||r.end>=result.total_frames)||
+          result.proposals.some(p=>!Number.isSafeInteger(p.frame)||p.frame<0||
+            p.frame>=result.total_frames||
+            !result.rally_intervals.some(r=>r.start<=p.frame&&p.frame<=r.end)))
+        throw Error("Касания выходят за рассчитанные розыгрыши по мячу");
       annotation.prediction=result;
       drawTimeline();
       await refreshComparison(true);
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run||video!==s.video)return;
-      const rallyCount=comparisonMatches(comparison.data)&&comparison.data.trajectory_status==="ready"?
-        trainingRallyGroups().ball.length:null;
-      annotationNotice("Рассчитано "+result.proposals.length+" кандидатов касаний"+
-        (rallyCount===null?"":(" и "+rallyCount+" объединённых розыгрышей по мячу"))+
-        ". Кандидаты не подтверждены игроками. Включите «Кандидаты касаний по мячу», чтобы увидеть жёлтые метки. Можно взять результат для правок.");
+      annotationNotice("Внутри "+result.rally_count+" розыгрышей по мячу найдено "+
+        result.proposals.length+" кандидатов касаний. Вне розыгрышей поиск не выполняется. "+
+        "Типы и игроки не определяются. Включите «Кандидаты касаний по мячу» для просмотра.");
     }catch(error){
       if(epoch===annotation.epoch)annotationNotice("Ошибка расчёта касаний: "+error.message,true);
     }finally{
@@ -1930,6 +1958,7 @@
     }
   };
   comparison.mode.addEventListener("change",()=>{
+    invalidateTrainingTouchPrediction();
     updateComparisonModeSettings();
     comparison.data=null;
     comparison.sourceKey="";
@@ -1938,6 +1967,9 @@
     void refreshComparison(true);
   });
   updateComparisonModeSettings();
+  for(const input of [comparison.minSeconds,comparison.minImpacts,comparison.context,
+    comparison.duration,comparison.gap])
+    input.addEventListener("change",invalidateTrainingTouchPrediction);
   comparison.recalculate.addEventListener("click",()=>void refreshComparison(true));
   comparison.calibrate.addEventListener("click",()=>void refreshComparison(true,true));
   comparison.filter.addEventListener("change",()=>{comparison.shown=200;renderComparison();});
@@ -2330,7 +2362,7 @@
       "После объединения · CPU: "+groups.touches.length+
       " · мяч: "+groups.ball.length+" · пауза < "+trainingGapSeconds()+" с";
     timelineRallyLayers.provenance.textContent=prediction?
-      prediction.length+" кандидатов · отдельный расчёт VBallNet":
+      prediction.length+" кандидатов · в "+annotation.prediction.rally_count+" розыгрышах VBallNet":
       simulated?simulated.length+" кандидатов · перегибы мяча":
       "Нет кандидатов · непрерывная траектория определяет только розыгрыши";
   };
@@ -2355,11 +2387,14 @@
     timelineRallyLayers.candidates])
     layer.addEventListener("change",updateTrainingRallyLayers);
   timelineRallyLayers.gap.addEventListener("input",()=>{
-    if(timelineRallyLayers.gap.value.trim()!=="")
+    if(timelineRallyLayers.gap.value.trim()!==""){
+      invalidateTrainingTouchPrediction();
       updateTrainingRallyLayers();
+    }
   });
   timelineRallyLayers.gap.addEventListener("change",()=>{
     timelineRallyLayers.gap.value=String(trainingGapSeconds());
+    invalidateTrainingTouchPrediction();
     updateTrainingRallyLayers();
   });
   const rallyCardProgresses=new Map();

@@ -1,6 +1,14 @@
 //! Saved-trajectory only detector calibration from explicit manual labels.
 //! Correction records are never substituted for model predictions.
 use super::*;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CalculateRequest {
+    project_id: String,
+    rally_run_id: String,
+    rally: crate::rally_training_comparison::TouchRallyFilter,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TrajectoryCandidate {
@@ -156,12 +164,33 @@ pub(super) fn scan_trajectory(run: &ValidatedRun) -> Result<Vec<TrajectoryCandid
         })
         .collect())
 }
-/// A calculation is a read-only projection: no model weights or annotations are
-/// modified until a separate explicit Save request.
+fn inside_rally(frame: u64, intervals: &[(u64, u64)]) -> bool {
+    let i = intervals.partition_point(|&(_, end)| end < frame);
+    intervals
+        .get(i)
+        .is_some_and(|&(start, end)| start <= frame && frame <= end)
+}
+
+fn scan_scoped_trajectory(
+    run: &ValidatedRun,
+    intervals: &[(u64, u64)],
+) -> Result<Vec<TrajectoryCandidate>, ApiError> {
+    let (events, _) =
+        crate::native_player_tracks::full_video_ball_suggestions_scoped(run, intervals)
+            .map_err(storage::bad_request)?;
+    Ok(events
+        .into_iter()
+        .map(|(frame, score)| TrajectoryCandidate {
+            frame,
+            score: score.clamp(0.0, 10000.0),
+        })
+        .collect())
+}
+
 pub async fn calculate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(req): Json<QueryLabels>,
+    Json(req): Json<CalculateRequest>,
 ) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
     let _permit = state
@@ -173,6 +202,9 @@ pub async fn calculate(
     let output = tokio::task::spawn_blocking(move || -> Result<Value, ApiError> {
         let state = worker;
         let run = inspect_project(&state, &req.project_id, &req.rally_run_id)?;
+        let intervals = crate::rally_training_comparison::touch_rally_scope(
+            &state, &run, &req.rally,
+        )?;
         let source = source_sha(&run)?;
         let mut lib = lock(|| read(&state))?;
         let labels = lib
@@ -183,15 +215,16 @@ pub async fn calculate(
             return Err(storage::conflict("Source video changed since annotation"));
         }
         let truth = labels.map(|v| {
-            let mut frames = v.touches.iter().map(|t| t.frame).collect::<Vec<_>>();
+            let mut frames = v
+                .touches
+                .iter()
+                .map(|t| t.frame)
+                .filter(|&frame| inside_rally(frame, &intervals))
+                .collect::<Vec<_>>();
             frames.sort_unstable();
             frames
         });
-        let scores = if let Some(v) = labels.filter(|v| v.trajectory_replay_sha == run.replay_sha) {
-            v.trajectory_candidates.clone()
-        } else {
-            scan_trajectory(&run)?
-        };
+        let scores = scan_scoped_trajectory(&run, &intervals)?;
         include_legacy_reviewed_labels(
             &mut lib,
             &run.project_id,
@@ -201,7 +234,10 @@ pub async fn calculate(
             &scores,
         );
         let calibration = trajectory_profile(&lib);
-        let selected = predict(&scores, calibration, run.frames);
+        let selected = predict(&scores, calibration, run.frames)
+            .into_iter()
+            .filter(|&frame| inside_rally(frame, &intervals))
+            .collect::<Vec<_>>();
         let proposals = selected
             .iter()
             .map(|&frame| {
@@ -218,6 +254,8 @@ pub async fn calculate(
             "project_id":run.project_id,"video":run.video,"rally_run_id":run.run_id,
             "source_replay_sha256":run.replay_sha,"total_frames":run.frames,
             "proposals":proposals,"candidate_count":scores.len(),
+            "rally_intervals":intervals.iter().map(|&(start,end)| json!({"start":start,"end":end})).collect::<Vec<_>>(),
+            "rally_count":intervals.len(),
             "calibration":calibration,"metrics_on_labeled_video":metrics,
             "gpu_rerun":false,"player_pose_required":false,
             "method":"vballnet_trajectory_breaks_and_motion_extrema"}))
@@ -258,6 +296,29 @@ mod tests {
             }],
         }
     }
+    #[test]
+    fn search_bounds_exclude_contacts_outside_ball_rallies() {
+        let ranges = [(10, 20), (40, 50)];
+        assert!(!inside_rally(9, &ranges));
+        assert!(inside_rally(10, &ranges));
+        assert!(inside_rally(20, &ranges));
+        assert!(!inside_rally(21, &ranges));
+        assert!(inside_rally(50, &ranges));
+        assert!(!inside_rally(51, &ranges));
+        assert!(!inside_rally(20, &[]));
+        let profile = TrajectoryProfile {
+            min_score: 8.0,
+            shift_frames: 2,
+            training_videos: 0,
+            detector_version: "test",
+        };
+        let proposed = predict(&[c(8, 9.0), c(25, 9.0), c(48, 9.0)], profile, 100)
+            .into_iter()
+            .filter(|&frame| inside_rally(frame, &ranges))
+            .collect::<Vec<_>>();
+        assert_eq!(proposed, vec![10, 50]);
+    }
+
     #[test]
     fn existing_reviewed_video_calibrates_without_resaving_annotations() {
         let mut lib = labeled(&[102], vec![]);

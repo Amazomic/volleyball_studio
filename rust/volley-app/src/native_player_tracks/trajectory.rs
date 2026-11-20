@@ -170,6 +170,20 @@ pub async fn ball_trajectory(
 pub(crate) fn full_video_ball_suggestions(
     run: &crate::native_rally_evidence::ValidatedRun,
 ) -> Result<(Vec<(u64, f64)>, usize), String> {
+    full_video_ball_suggestions_scoped(run, &[(0, run.frames.saturating_sub(1))])
+}
+
+pub(crate) fn full_video_ball_suggestions_scoped(
+    run: &crate::native_rally_evidence::ValidatedRun,
+    scope: &[(u64, u64)],
+) -> Result<(Vec<(u64, f64)>, usize), String> {
+    if scope
+        .iter()
+        .any(|&(start, end)| start > end || end >= run.frames)
+        || scope.windows(2).any(|pair| pair[0].1 >= pair[1].0)
+    {
+        return Err("Invalid ball rally search intervals".into());
+    }
     if run.frames == 0
         || run.frames > 48 * 3600 * 30
         || !(64..=16384).contains(&run.width)
@@ -189,6 +203,7 @@ pub(crate) fn full_video_ball_suggestions(
     let mut points = Vec::<BallObservation>::new();
     let mut candidates = Vec::<(u64, f64)>::new();
     let mut observations = 0usize;
+    let mut scope_index = 0usize;
     fn emit(points: &[BallObservation], candidates: &mut Vec<(u64, f64)>) -> Result<(), String> {
         if points.len() < 9 {
             return Ok(());
@@ -213,6 +228,17 @@ pub(crate) fn full_video_ball_suggestions(
             || row.touches_confirmed
         {
             return Err("Ball source frame state differs from saved replay".into());
+        }
+        while scope.get(scope_index).is_some_and(|&(_, end)| end < frame) {
+            emit(&points, &mut candidates)?;
+            points.clear();
+            scope_index += 1;
+        }
+        if !scope
+            .get(scope_index)
+            .is_some_and(|&(start, end)| start <= frame && frame <= end)
+        {
+            continue;
         }
         let Some(ball) = row.selected_ball else {
             if !points.is_empty() && frame as i64 - points.last().unwrap().frame > 4 {
@@ -345,6 +371,13 @@ mod scored_trajectory_tests {
         assert_eq!(observed, 50);
         assert!(!events.is_empty());
         assert!(events.iter().all(|(f, score)| *f < 50 && score.is_finite()));
+        let (scoped, observed) = full_video_ball_suggestions_scoped(&run, &[(20, 30)]).unwrap();
+        assert_eq!(observed, 11);
+        assert!(scoped.iter().all(|(frame, _)| (20..=30).contains(frame)));
+        let (no_rallies, observed) = full_video_ball_suggestions_scoped(&run, &[]).unwrap();
+        assert_eq!(observed, 0);
+        assert!(no_rallies.is_empty());
+        assert!(full_video_ball_suggestions_scoped(&run, &[(20, 30), (25, 40)]).is_err());
         let mut corrupted = run;
         corrupted.replay_sha = "0".repeat(64);
         assert!(full_video_ball_suggestions(&corrupted).is_err());
