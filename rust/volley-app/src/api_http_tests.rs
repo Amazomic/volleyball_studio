@@ -87,7 +87,19 @@ impl TestServer {
     async fn close(self) {
         self.task.abort();
         let _ = self.task.await;
-        fs::remove_dir_all(self.root).unwrap();
+        drop(self.state);
+        for attempt in 0..=20 {
+            match fs::remove_dir_all(&self.root) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::PermissionDenied && attempt < 20 =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("Remove disposable HTTP test directory: {error}"),
+            }
+        }
     }
 }
 

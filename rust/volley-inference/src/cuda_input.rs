@@ -5,6 +5,19 @@ use ort::{
     value::Tensor,
 };
 
+pub struct CudaInput {
+    tensor: Tensor<f32>,
+    _allocator: Allocator,
+}
+
+impl std::ops::Deref for CudaInput {
+    type Target = Tensor<f32>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tensor
+    }
+}
+
 const MAX_INPUT_ELEMENTS: usize = 100_000_000;
 const MAX_OUTPUT_ELEMENTS: usize = 25_000_000;
 
@@ -22,7 +35,7 @@ fn element_count(shape: &[i64]) -> Result<usize, String> {
         .ok_or_else(|| "CUDA model input dimensions exceed the validated limit".into())
 }
 
-pub fn allocate(session: &Session, shape: &[i64], device_id: i32) -> Result<Tensor<f32>, String> {
+pub fn allocate(session: &Session, shape: &[i64], device_id: i32) -> Result<CudaInput, String> {
     element_count(shape)?;
     if !(0..=15).contains(&device_id) {
         return Err("Invalid CUDA input device ID".into());
@@ -36,8 +49,12 @@ pub fn allocate(session: &Session, shape: &[i64], device_id: i32) -> Result<Tens
     .map_err(|error| format!("CUDA input memory description: {error}"))?;
     let allocator =
         Allocator::new(session, info).map_err(|error| format!("CUDA input allocator: {error}"))?;
-    Tensor::<f32>::new(&allocator, shape.to_vec())
-        .map_err(|error| format!("Allocate CUDA model tensor: {error}"))
+    let tensor = Tensor::<f32>::new(&allocator, shape.to_vec())
+        .map_err(|error| format!("Allocate CUDA model tensor: {error}"))?;
+    Ok(CudaInput {
+        tensor,
+        _allocator: allocator,
+    })
 }
 
 pub fn validate(input: &Tensor<f32>, expected_shape: &[i64], device_id: i32) -> Result<(), String> {

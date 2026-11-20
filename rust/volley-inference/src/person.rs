@@ -246,7 +246,7 @@ impl PersonEngine {
         Ok(Self { detector, pose })
     }
 
-    pub fn allocate_cuda_input(&self) -> Result<Tensor<f32>, String> {
+    pub fn allocate_cuda_input(&self) -> Result<crate::cuda_input::CudaInput, String> {
         crate::cuda_input::allocate(&self.detector, &[1, 3, 576, 576], 0)
     }
 

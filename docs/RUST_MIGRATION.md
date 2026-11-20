@@ -2775,3 +2775,32 @@ Studio показывает кнопку перехода между debug и re
 - PASS: Windows WASM release build; `cargo check -p volley-app --offline --locked`; `cargo clippy --workspace --all-targets --offline --locked -- -D warnings`; targeted 1.5-second/trajectory/mask Rust tests; `node scripts/ci/test_training_rally_comparison.mjs`; non-GPU JS gates in `scripts/check-all.ps1`.
 - FAIL / NOT ACCEPTED: `scripts/check-all.ps1` fails at four pre-existing GPU preprocessing tests with `cuInit = 100`; `cargo test -p volley-media` also fails two NVDEC tests with the same GPU initialization issue. `cargo test -p volley-app` runs 404 passed, 1 failed (Windows permission denied cleaning a temporary HTTP test directory), 10 ignored. The test suite is **not green**.
 - NOT TESTED: actual CUDA/NVDEC runtime correctness, real-match quality, A/B timing/VRAM benchmarks, separate test-instance Studio launch, recovery from checkpoints, Windows/Linux GPU parity. No merge to `develop` or release until these are validated.
+
+## 2026-11-21 - second GPU audit and CUDA input lifetime correction
+
+- Verified against branch `agent/gpu-rally-intervals-20261121` at
+  `748bb607` plus its unmerged follow-up changes. The original user
+  checkout remains untouched.
+- Root cause of the native WSL zero-copy SIGSEGV: `cuda_input::allocate`
+  returned a Tensor after dropping the ORT CUDA allocator that created it.
+  `CudaInput` now owns both, dropping the tensor before the allocator.
+  The VBallNet-only first scan no longer advances RTMPose or emits a pose tail.
+  Also corrected the synthetic A/B fixture's 6.0-second duration and
+  tolerated transient Windows temp-directory locks during HTTP-test teardown.
+- PASS: Windows `scripts/check-all.ps1` (Rust build, strict Clippy, Rust
+  workspace tests, WASM and 91 Node gates); Windows CUDA preprocessing 5/5,
+  NVDEC 10/10 (3 hardware-specific tests ignored).
+- PASS: Linux/WSL explicit real ONNX CUDA smoke in a disposable data root,
+  with `VOLLEY_PRIMARY_RALLY_PREFILTER=1` and
+  `VOLLEY_ZERO_COPY_PRIMARY=0` and `=1`. On the tracked
+  `examples/player-touch.gif` converted to isolated H264: 180 canonical
+  frames, 174 selected by the mask, 216 player proposals, 214 pose outputs,
+  and complete CPU replay. These are existence and lineage checks only.
+- NOT PASSED: Strict A/B raw-ball SHA comparison for FFmpeg pixels versus
+  CUDA zero-copy pixels; the tested GPU preprocessing is not byte-identical.
+  Do not accept or weaken the exact A/B gate without separate numerical
+  quality/precision tests.
+- NOT TESTED: full-match rally/Touch precision and recall, true saved-range
+  VFR/PTS end-to-end parity, restart from saved partial GPU evidence,
+  baseline-versus-filtered timing/VRAM savings, and Studio deployment.
+  Keep the PR draft and do not merge until these acceptance gaps are resolved.

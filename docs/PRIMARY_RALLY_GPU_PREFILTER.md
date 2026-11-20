@@ -1,4 +1,4 @@
-# Primary GPU rally prefilter ? experimental (2026-11-21)
+# Primary GPU rally prefilter - experimental (2026-11-21)
 
 The native full/GPU primary path now supports two model passes over each
 video's own saved analysis range:
@@ -43,9 +43,25 @@ motion to limit missed gameplay.
   restart from an already completed ball pass has **not** been implemented.
 - Explicit GPU-stage tuning controls and per-video resource statistics in the
   UI are not complete; the environment toggle supports A/B diagnostics.
-- No real-match precision/recall, GPU timing, VRAM or power reduction has been
-  verified. On HOME-PC, the current CUDA driver initialization returns
-  `cuInit: CUresult = 100`, and WSL doctor cannot initialize NVML. These are
-  blockers, not passed hardware tests.
+- The CUDA primary input allocation now keeps its ONNX Runtime Allocator
+  alive until the GPU tensor has been released. Previously the allocator was
+  released first, triggering SIGSEGV when zero-copy tensor owners were dropped.
+  The first VBallNet-only scan no longer sends empty samples or a tail into
+  RTMPose; only the second scan advances the pose stage.
+- HOME-PC retest: native Windows CUDA preprocessing (5/5) and NVDEC (10/10,
+  3 ignored) pass; full `scripts/check-all.ps1` passes Rust, Clippy, WASM and
+  91 Node gates. In WSL, explicit ONNX Runtime CUDA integration smokes pass
+  both with and without NVDEC zero-copy.
+- A repo-tracked volleyball GIF was converted to an isolated H264 fixture;
+  180 frames were decoded, 174 selected, 216 player proposals and 214 pose
+  results published, and CPU replay completed. This validates execution,
+  **not** rally/Touch precision or a performance gain.
+- The strict old-vs-new A/B raw ball-detection SHA test still fails when
+  CUDA GPU preprocessing replaces FFmpeg pixel preprocessing (the person
+  evidence SHA matches). GPU numerical parity and match-level quality need
+  independent measurement with agreed tolerances, never by silently relaxing
+  the existing SHA gate.
+- No independent real-match precision/recall, matched A/B GPU timing,
+  peak VRAM or power reduction has been verified.
 - No existing user videos, project data or the running Studio instance were
   changed. Do not merge into develop until GPU acceptance is completed.

@@ -159,7 +159,9 @@ pub(super) fn run(
                 if let Some(writer) = person_writer.as_deref_mut() {
                     writer.push(first, &observations)?;
                 }
-                if let Some(stage) = pose.borrow_mut().as_mut() {
+                if keep_pose {
+                    let mut active_pose = pose.borrow_mut();
+                    let stage = active_pose.as_mut().ok_or("Missing primary pose stage")?;
                     stage.observe_cuda(
                         first,
                         std::mem::take(&mut sampled_frames),
@@ -199,12 +201,16 @@ pub(super) fn run(
     if windows == 0 || expected_index < windows as u64 * 9 {
         return Err("NVDEC video does not contain a complete model window".into());
     }
-    if let Some(stage) = pose.borrow_mut().as_mut() {
+    if keep_pose {
+        let mut active_pose = pose.borrow_mut();
+        let stage = active_pose.as_mut().ok_or("Missing primary pose stage")?;
         stage.tail_cuda(expected_index, cancelled)?;
     }
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
+    drop(people_input);
+    drop(ball_input);
     Ok(DecodeSummary {
         first_frame: 0,
         windows,
