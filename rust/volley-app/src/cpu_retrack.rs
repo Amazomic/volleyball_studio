@@ -683,6 +683,7 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             "ball_selection_policy":"vballnet_only_v1",
             "source_identity":{"bytes":size,"mtime_ns":mtime},
             "original_source":manifest["original_source"],
+            "analysis_range":manifest["analysis_range"],
             "fps":30,
             "settings":settings,
             "frames":totals.frames,

@@ -280,6 +280,7 @@ fn real_uu_match_gpu_ab_legacy_vs_shared() -> Result<(), String> {
         &source,
         &source_info,
         duration,
+        None,
         config(ModelKind::Ball),
         1,
     )?;
@@ -290,6 +291,7 @@ fn real_uu_match_gpu_ab_legacy_vs_shared() -> Result<(), String> {
         &source,
         &source_info,
         duration,
+        None,
         config(ModelKind::Players),
         stride,
     )?;
@@ -326,6 +328,7 @@ fn real_uu_match_gpu_ab_legacy_vs_shared() -> Result<(), String> {
         video,
         &source,
         duration,
+        None,
         stride,
         true,
         memory,
@@ -620,6 +623,7 @@ fn original_pose_single_decode_benchmark() -> Result<(), String> {
             video,
             &source,
             info.duration_sec,
+            None,
             1,
             shared_pose,
             0,

@@ -478,6 +478,8 @@ pub struct StartRequest {
     source_analysis_id: Option<String>,
     #[serde(default)]
     client_request_id: Option<String>,
+    #[serde(default)]
+    analysis_range: Option<volley_media::raw_decoder::AnalysisRange>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -550,6 +552,7 @@ impl TryFrom<StartRequestWire> for StartRequest {
             mode: wire.mode,
             source_analysis_id: wire.source_analysis_id,
             client_request_id: wire.client_request_id,
+            analysis_range: None,
         })
     }
 }
@@ -808,6 +811,7 @@ fn gpu_lineage_valid(
         || fusion["project_id"] != request.project_id
         || fusion["video"] != request.video
         || fusion["source_identity"] != *identity
+        || fusion["analysis_range"] != json!(request.analysis_range)
         || fusion["sources"]["vballnet"]["job_id"] != ball_id
         || fusion["sources"]["person_pose"]["job_id"] != players_id
         || fusion["player_sampling_period_frames"] != request.gpu.pose_stride
@@ -828,6 +832,7 @@ fn gpu_lineage_valid(
             id,
             model,
         ) || raw["source_identity"] != *identity
+            || raw["analysis_range"] != json!(request.analysis_range)
             || raw["stride"] != request.gpu.stride
             || (model == "players"
                 && raw["person_sampling_period_frames"] != request.gpu.pose_stride)
@@ -1019,6 +1024,7 @@ fn requested_gpu_model_stack() -> &'static str {
 
 fn compatible_version(saved: &Value, request: &StartRequest, identity: &Value) -> bool {
     saved["schema"] == SCHEMA
+        && saved["analysis_range"] == json!(request.analysis_range)
         && saved["gpu_model_stack"] == requested_gpu_model_stack()
         && saved["project_id"] == request.project_id
         && saved["video"] == request.video
@@ -1167,6 +1173,9 @@ fn selected_gpu(
             };
             let mut scoped = request.clone();
             scoped.gpu = gpu;
+            scoped.analysis_range = serde_json::from_value(saved["analysis_range"].clone())
+                .ok()
+                .flatten();
             if gpu_lineage_valid(&project, &scoped, identity, &saved) {
                 return Ok(saved);
             }
@@ -1211,6 +1220,7 @@ fn selected_gpu(
             id,
             model,
         ) || raw["source_identity"] != *identity
+            || raw["analysis_range"] != fusion["analysis_range"]
             || raw["sha256"] != fusion["sources"][source]["sha256"]
             || (model == "players" && raw["person_sampling_period_frames"] != player_stride)
             || stride.is_some_and(|s| s != current_stride)
@@ -1222,6 +1232,7 @@ fn selected_gpu(
     Ok(json!({
         "analysis_id": analysis_id,
         "gpu_jobs": {"ball":ball,"players":players},
+        "analysis_range":fusion["analysis_range"],
         "id": analysis_id,
         // Standalone GPU manifests preserve the player sampling period.
         "profile": {"gpu": {"stride":stride.unwrap_or(9),
@@ -1300,7 +1311,8 @@ async fn gpu(
         "stride": request.gpu.stride,
         "person_stride": request.gpu.pose_stride,
         "gpu_memory_limit_mb": request.gpu.gpu_memory_limit_mb,
-        "cpu_threads": request.gpu.cpu_threads
+        "cpu_threads": request.gpu.cpu_threads,
+        "analysis_range":request.analysis_range
     });
     let config: inference_full::StartRequest = serde_json::from_value(payload.clone())
         .map_err(|e| format!("Неверный GPU-профиль: {e}"))?;
@@ -1452,6 +1464,7 @@ async fn pipeline(
             return Err("Для пересчёта по движению точек тела в выбранном GPU-анализе нужна сохранённая поза".into());
         }
         status["analysis_id"] = source["analysis_id"].clone();
+        status["analysis_range"] = source["analysis_range"].clone();
         status["gpu_jobs"] = source["gpu_jobs"].clone();
         let (gpu, _) = decode_profiles(source["profile"]["gpu"].clone(), empty_profile())?;
         status["profile"]["gpu"] = json!(gpu);
@@ -1633,7 +1646,10 @@ async fn pipeline(
                         &request.project_id,
                         &request.video,
                         &plan.source,
-                        plan.duration_sec,
+                        request
+                            .analysis_range
+                            .map_or(plan.duration_sec, |range| range.end_sec - range.start_sec),
+                        request.analysis_range,
                         request.gpu.pose_stride,
                         full_resolution_pose,
                         request.gpu.gpu_memory_limit_mb,
@@ -2155,7 +2171,7 @@ async fn perform(
 pub async fn start(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(request): Json<StartRequest>,
+    Json(mut request): Json<StartRequest>,
 ) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
     if !state.writes_enabled {
@@ -2174,6 +2190,12 @@ pub async fn start(
     }
     storage::project_id(&request.project_id)?;
     storage::video_name(&request.video)?;
+    if request.mode.allows_gpu_execution()
+        && projects::canonical_source(&state, &request.video).is_ok()
+    {
+        request.analysis_range =
+            crate::video_edits::analysis_range(&state, &request.project_id, &request.video)?;
+    }
     if request.mode == PipelineMode::Post
         && request
             .source_analysis_id
@@ -2300,6 +2322,7 @@ pub async fn start(
         "profile":{"gpu":request.gpu,"post":request.post},
         "mode":request.mode,"source_analysis_id":request.source_analysis_id,
         "client_request_id":request.client_request_id,
+        "analysis_range":request.analysis_range,
         "gpu_model_stack":requested_gpu_model_stack(),
         "zero_copy_request":zero_copy_requested(),"zero_copy_active":false,
         "gpu_jobs":{},"cpu_runs":{},"analysis_id":null,

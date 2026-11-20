@@ -640,5 +640,11 @@
     ro.observe(stage);ro.observe(frame);
   }
   syncControls();
-  window.VolleyballEditor={load};
+  window.VolleyballEditor={
+    load,
+    hasUnsavedChanges:(projectId,videoName)=>
+      project===projectId&&source===videoName&&dirty,
+    isLoading:(projectId,videoName)=>
+      project===projectId&&source===videoName&&settingsLoading
+  };
 })();

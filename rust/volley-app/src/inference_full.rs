@@ -37,7 +37,7 @@ use volley_inference::{
 };
 use volley_media::{
     frame_windows::normalized_model_window,
-    raw_decoder::{decode_full_video, DecodeSummary, ModelPixels},
+    raw_decoder::{decode_full_video_in_range, AnalysisRange, DecodeSummary, ModelPixels},
 };
 
 const STATUS_FILE: &str = "status.json";
@@ -109,6 +109,8 @@ pub struct StartRequest {
     gpu_memory_limit_mb: u64,
     #[serde(default = "default_threads")]
     cpu_threads: usize,
+    #[serde(default)]
+    analysis_range: Option<AnalysisRange>,
 }
 fn default_stride() -> usize {
     9
@@ -273,6 +275,7 @@ struct JobContext {
     original: PathBuf,
     original_source: Value,
     duration_sec: f64,
+    analysis_range: Option<AnalysisRange>,
     config: Config,
     stride: usize,
     person_stride: usize,
@@ -392,6 +395,7 @@ fn finalize_model_output(
         } else { 1 },
         "provider":context.config.device,
         "source_identity":{"bytes":before.0,"mtime_ns":before.1},
+        "analysis_range":context.analysis_range,
         "fps":30,
         "stride":context.stride,
         "decoded_frames":summary.decoded_frames,
@@ -448,10 +452,11 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
     };
     let mut sink = EvidenceWriter::create(&context.folder)?;
     let estimated_frames = (context.duration_sec * 30.0).max(9.0);
-    let summary = decode_full_video(
+    let summary = decode_full_video_in_range(
         &context.original,
         pixels,
         context.stride,
+        context.analysis_range,
         &context.cancelled,
         |window| {
             if context.cancelled.load(Ordering::Acquire) {
@@ -595,6 +600,14 @@ pub async fn start(
         .await
         .map_err(storage::bad_request)?
         .ok_or_else(|| storage::bad_request("Сначала подготовьте видео для анализа"))?;
+    if request.analysis_range.is_some() {
+        let actual_range = crate::video_edits::analysis_range(&state, &project_id, &request.video)?;
+        if request.analysis_range != actual_range {
+            return Err(storage::conflict(
+                "Video analysis interval changed before GPU start",
+            ));
+        }
+    }
     if !(0.3..=48.0 * 3600.0).contains(&plan.duration_sec) {
         return Err(storage::bad_request(
             "Длительность видео для инференса некорректна",
@@ -627,7 +640,10 @@ pub async fn start(
         original_source: volley_media::preparation::source_provenance(&plan.source)
             .map_err(storage::bad_request)?,
         original: plan.source.clone(),
-        duration_sec: plan.duration_sec,
+        duration_sec: request
+            .analysis_range
+            .map_or(plan.duration_sec, |r| r.end_sec - r.start_sec),
+        analysis_range: request.analysis_range,
         config,
         stride: request.stride,
         person_stride: request.person_stride,
@@ -919,6 +935,7 @@ mod tests {
             full_inference: FullInferenceManager::new(),
         });
         let request = StartRequest {
+            analysis_range: None,
             project_id: project_id.into(),
             video: video.into(),
             model: ModelKind::Players,
@@ -1051,6 +1068,7 @@ mod tests {
         };
         for model in [ModelKind::Ball, ModelKind::Players] {
             let request = StartRequest {
+                analysis_range: None,
                 project_id: id.into(),
                 video: video.into(),
                 model,

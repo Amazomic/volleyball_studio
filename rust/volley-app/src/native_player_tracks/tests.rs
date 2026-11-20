@@ -1006,6 +1006,7 @@ fn context(root: &Path, sha: String, tracks: BTreeMap<u64, Aggregate>) -> Inputs
         video: "match.mp4".into(),
         replay_id: "0123456789abcdef0123456789abcdef".into(),
         source_sha: sha,
+        analysis_offset_sec: 0.0,
         tracks,
         roster: BTreeMap::from([("abcdef012345".into(), "Ильнур".into())]),
         sidecar: root

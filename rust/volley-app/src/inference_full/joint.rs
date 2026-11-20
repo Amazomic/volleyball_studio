@@ -5,10 +5,7 @@ mod zero_copy;
 use crate::pose_inference::{PendingPose, PoseStream};
 use std::cell::RefCell;
 use volley_media::nvdec::NvdecCodec;
-use volley_media::raw_decoder::{
-    decode_full_video_shared_with_native_and_tail, DecodeBackend, DecodePreference,
-    PrimaryDecodeSummary,
-};
+use volley_media::raw_decoder::{DecodeBackend, DecodePreference, PrimaryDecodeSummary};
 
 fn zero_copy_color_matrix(space: Option<&str>, range: Option<&str>) -> Option<bool> {
     if !matches!(range, None | Some("unknown") | Some("tv")) {
@@ -110,6 +107,7 @@ fn new_context(
     source: &Path,
     provenance: &Value,
     duration: f64,
+    range: Option<volley_media::raw_decoder::AnalysisRange>,
     config: Config,
     person_stride: usize,
 ) -> Result<JobContext, String> {
@@ -138,6 +136,7 @@ fn new_context(
         original: source.to_path_buf(),
         original_source: provenance.clone(),
         duration_sec: duration,
+        analysis_range: range,
         config,
         stride: 9,
         person_stride,
@@ -194,6 +193,7 @@ pub(crate) fn run_joint_pair(
     video: &str,
     original: &Path,
     duration: f64,
+    range: Option<volley_media::raw_decoder::AnalysisRange>,
     person_stride: usize,
     pose_enabled: bool,
     gpu_memory_limit_mb: u64,
@@ -213,6 +213,9 @@ pub(crate) fn run_joint_pair(
     let session_count = 2u64 + u64::from(pose_enabled);
     if gpu_memory_limit_mb > 0 && gpu_memory_limit_mb < session_count {
         return Err("GPU memory limit too small for shared sessions".into());
+    }
+    if let Some(range) = range {
+        range.validate(volley_media::probe(original)?.duration_sec)?;
     }
     let original_provenance = volley_media::preparation::source_provenance(original)?;
     volley_media::preparation::verify_source_provenance(original, &original_provenance)?;
@@ -253,6 +256,7 @@ pub(crate) fn run_joint_pair(
         original,
         &original_provenance,
         duration,
+        range,
         ball_config,
         1,
     )?;
@@ -264,6 +268,7 @@ pub(crate) fn run_joint_pair(
         original,
         &original_provenance,
         duration,
+        range,
         person_config,
         person_stride,
     )?;
@@ -288,7 +293,11 @@ pub(crate) fn run_joint_pair(
     };
     let pose = RefCell::new(pose);
     let estimated = (duration * 30.0).max(9.0);
-    let zero_copy_codec = zero_copy_codec(original, cancelled);
+    let zero_copy_codec = if range.is_some() {
+        None
+    } else {
+        zero_copy_codec(original, cancelled)
+    };
     let zero_copy = zero_copy_codec.is_some();
     let summary = if let Some((codec, bt709)) = zero_copy_codec {
         let decode = zero_copy::run(
@@ -313,11 +322,12 @@ pub(crate) fn run_joint_pair(
             fallback_reason: None,
         }
     } else {
-        decode_full_video_shared_with_native_and_tail(
+        volley_media::raw_decoder::decode_full_video_shared_with_native_and_tail_in_range(
             original,
             9,
             backend_preference()?,
             cpu_threads,
+            range,
             cancelled,
             pose_enabled,
             |batch| {

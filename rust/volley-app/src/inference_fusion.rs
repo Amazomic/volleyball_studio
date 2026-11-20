@@ -82,6 +82,7 @@ struct ModelEvidence {
     decoded_frames: u64,
     source_identity: Value,
     original_source: Value,
+    analysis_range: Value,
     person_sampling_period_frames: u64,
 }
 
@@ -134,6 +135,7 @@ fn open_evidence(
         decoded_frames: decoded,
         source_identity: manifest["source_identity"].clone(),
         original_source: manifest["original_source"].clone(),
+        analysis_range: manifest["analysis_range"].clone(),
         person_sampling_period_frames: manifest["person_sampling_period_frames"]
             .as_u64()
             .filter(|n| (1..=30).contains(n))
@@ -335,6 +337,11 @@ pub(crate) fn do_fusion(state: &AppState, request: &FuseRequest) -> Result<Value
         "ball",
     )
     .map_err(storage::bad_request)?;
+    if ravel.analysis_range != ball.analysis_range {
+        return Err(storage::conflict(
+            "GPU models use different video analysis intervals",
+        ));
+    }
     if ravel.original_source != ball.original_source {
         return Err(storage::conflict(
             "GPU models belong to different original content",
@@ -382,6 +389,7 @@ pub(crate) fn do_fusion(state: &AppState, request: &FuseRequest) -> Result<Value
             },
             "source_identity":identity,
             "original_source":ball.original_source,
+            "analysis_range":ball.analysis_range,
             "fps":30,
             "windows":ball.windows,
             "decoded_frames":ball.decoded_frames,
@@ -513,6 +521,7 @@ mod tests {
             decoded_frames: 18,
             source_identity: manifest["source_identity"].clone(),
             original_source: manifest["original_source"].clone(),
+            analysis_range: manifest["analysis_range"].clone(),
             person_sampling_period_frames: 1,
         }
     }

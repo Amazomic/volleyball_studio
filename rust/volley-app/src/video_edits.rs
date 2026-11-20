@@ -38,6 +38,52 @@ enum GeometryOrigin {
     Automatic,
 }
 
+pub(crate) fn analysis_range(
+    state: &AppState,
+    project_id: &str,
+    video: &str,
+) -> Result<Option<volley_media::raw_decoder::AnalysisRange>, storage::ApiError> {
+    let path = edit_path(state, project_id, video)?;
+    if fs::symlink_metadata(&path)
+        .is_ok_and(|meta| meta.file_type().is_symlink() || !meta.is_file())
+    {
+        return Err(storage::bad_request("Unsafe video analysis edit"));
+    }
+    let Some(edit) = storage::read_json(&path)? else {
+        return Ok(None);
+    };
+    if edit["schema"] != "volley-video-edit/1"
+        || edit["project_id"] != project_id
+        || edit["video"] != video
+    {
+        return Err(storage::bad_request("Video trim belongs to another source"));
+    }
+    let source = projects::canonical_source(state, video)?;
+    let duration = volley_media::probe(&source)
+        .map_err(storage::bad_request)?
+        .duration_sec;
+    let start = edit["trim_start_sec"]
+        .as_f64()
+        .ok_or_else(|| storage::bad_request("Video trim start missing"))?;
+    let end = if edit["trim_end_sec"].is_null() {
+        duration
+    } else {
+        edit["trim_end_sec"]
+            .as_f64()
+            .ok_or_else(|| storage::bad_request("Video trim end invalid"))?
+    };
+    let range = volley_media::raw_decoder::AnalysisRange {
+        start_sec: start,
+        end_sec: end.min(duration),
+    };
+    range.validate(duration).map_err(storage::bad_request)?;
+    if start == 0.0 && (end - duration).abs() <= 0.01 {
+        Ok(None)
+    } else {
+        Ok(Some(range))
+    }
+}
+
 pub(crate) fn calibration_source(
     state: &AppState,
     project_id: &str,

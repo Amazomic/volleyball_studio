@@ -76,6 +76,7 @@ pub(crate) fn montage_material(state: &AppState, run: &ValidatedRun) -> Result<V
         .iter()
         .filter(|row| row["player_id"].is_null())
         .count();
+    let offset = run.analysis_range.map_or(0.0, |r| r.start_sec);
     let clips = timeline["rallies"]
         .as_array()
         .ok_or_else(|| storage::bad_request("Missing final rallies"))?
@@ -91,8 +92,9 @@ pub(crate) fn montage_material(state: &AppState, run: &ValidatedRun) -> Result<V
                 .saturating_add(run.context)
                 .min(run.frames.saturating_sub(1));
             json!({"candidate_id":row["candidate_id"],"video":run.video,
-                "start_frame":start,"end_frame":end,"analysis_offset_sec":0.0,
-                "start_sec":start as f64 / 30.0,"end_sec":(end+1) as f64 / 30.0,
+                "start_frame":start,"end_frame":end,"analysis_offset_sec":offset,
+                "start_sec":offset+start as f64 / 30.0,
+                "end_sec":offset+(end+1) as f64 / 30.0,
                 "render_source":"original_recording"})
         })
         .collect::<Vec<_>>();

@@ -22,7 +22,7 @@ use volley_inference::{
     pose::{PoseEngine, MODEL_FILE, MODEL_SHA256},
     Device,
 };
-use volley_media::raw_decoder::decode_original_frames;
+use volley_media::raw_decoder::{decode_original_frames_in_range, AnalysisRange};
 
 const MAX_FUSION: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_LINE: u64 = 512 * 1024;
@@ -355,9 +355,16 @@ pub fn process(
             .filter(|n| *n >= frames_expected && *n <= frames_expected + 8)
             .ok_or("GPU fusion decoded frame count is invalid")?;
         let native_video = volley_media::probe(&plan.source)?;
-        decode_original_frames(
+        let range: Option<AnalysisRange> =
+            serde_json::from_value(manifest["analysis_range"].clone())
+                .map_err(|e| format!("Invalid fused analysis interval: {e}"))?;
+        if let Some(range) = range {
+            range.validate(native_video.duration_sec)?;
+        }
+        decode_original_frames_in_range(
             &plan.source,
             decoded_frames,
+            range,
             cancel,
             |index, rgb, width, height| {
                 if index >= frames_expected || index % stride as u64 != 0 {
@@ -443,6 +450,7 @@ pub fn process(
             "working_stream":"original_rgb_fps30_v1",
             "original_source":manifest["original_source"],
             "source_fusion_sha256":manifest["sha256"], "source_identity":manifest["source_identity"],
+            "analysis_range":manifest["analysis_range"],
             "box_source_version":"detector_observed_and_bounded_interpolated_v1",
             "pixel_source_version":"original_full_resolution_rgb24_v1",
             "pixel_dimensions":[native_video.width,native_video.height],

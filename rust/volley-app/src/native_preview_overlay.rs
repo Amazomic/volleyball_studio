@@ -1054,7 +1054,7 @@ fn gpu_person_detector(project_root: &Path, fusion: &Value) -> &'static str {
         _ => "unknown",
     }
 }
-type GpuSourceInspection = (PathBuf, String, u64, u32, u32, PathBuf, &'static str);
+type GpuSourceInspection = (PathBuf, String, u64, u32, u32, PathBuf, &'static str, f64);
 
 fn inspect_gpu_source(
     state: &AppState,
@@ -1128,6 +1128,14 @@ fn inspect_gpu_source(
     let path =
         safe_file(&folder, "frames.jsonl", MAX_REPLAY_BYTES).map_err(storage::bad_request)?;
     let person_detector = gpu_person_detector(&root, &manifest);
+    let range: Option<volley_media::raw_decoder::AnalysisRange> =
+        serde_json::from_value(manifest["analysis_range"].clone())
+            .map_err(|e| storage::bad_request(format!("Invalid GPU interval: {e}")))?;
+    if let Some(range) = range {
+        range
+            .validate(dimensions.duration_sec)
+            .map_err(storage::bad_request)?;
+    }
     Ok((
         path,
         sha,
@@ -1136,6 +1144,7 @@ fn inspect_gpu_source(
         dimensions.height,
         root,
         person_detector,
+        range.map_or(0.0, |r| r.start_sec),
     ))
 }
 
@@ -1146,19 +1155,20 @@ pub async fn gpu(
     if query.count == 0 || query.count > MAX_WINDOW {
         return Err(storage::bad_request("Invalid GPU overlay window"));
     }
-    let (path, sha, total, width, height, root, person_detector) = tokio::task::spawn_blocking({
-        let state = state.clone();
-        let query = GpuOverlayQuery {
-            project_id: query.project_id.clone(),
-            video: query.video.clone(),
-            fusion_id: query.fusion_id.clone(),
-            start_frame: query.start_frame,
-            count: query.count,
-        };
-        move || inspect_gpu_source(&state, &query)
-    })
-    .await
-    .map_err(|e| storage::internal(format!("GPU source inspect task: {e}")))??;
+    let (path, sha, total, width, height, root, person_detector, analysis_offset) =
+        tokio::task::spawn_blocking({
+            let state = state.clone();
+            let query = GpuOverlayQuery {
+                project_id: query.project_id.clone(),
+                video: query.video.clone(),
+                fusion_id: query.fusion_id.clone(),
+                start_frame: query.start_frame,
+                count: query.count,
+            };
+            move || inspect_gpu_source(&state, &query)
+        })
+        .await
+        .map_err(|e| storage::internal(format!("GPU source inspect task: {e}")))??;
     if query.start_frame >= total {
         return Err(storage::bad_request("GPU overlay frame is beyond source"));
     }
@@ -1179,6 +1189,7 @@ pub async fn gpu(
         "project_id":query.project_id,"video":query.video,"fusion_id":query.fusion_id,
         "source_fusion_sha256":response_sha,"fps":30,
         "width":width,"height":height,"total_frames":total,"person_detector":person_detector,
+        "analysis_offset_sec":analysis_offset,
         "start_frame":start,"end_frame":end,"frames":frames,
         "poses_available":pose_run_id.is_some(),"pose_run_id":pose_run_id,
         "touches_verified":false,"athlete_identities_verified":false})))

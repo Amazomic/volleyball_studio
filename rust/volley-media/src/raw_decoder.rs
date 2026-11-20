@@ -7,13 +7,13 @@ mod shared;
 pub use shared::{
     decode_full_video_shared, decode_full_video_shared_with_backend,
     decode_full_video_shared_with_backend_and_tail, decode_full_video_shared_with_native_and_tail,
-    decode_full_video_shared_with_preview, select_decode_backend, DecodeBackend, DecodePreference,
-    DecodeSelection, PrimaryDecodeSummary, PrimaryFrameBatch, PrimaryPreviewOutput,
-    MAX_NATIVE_RGB_FRAME_BYTES,
+    decode_full_video_shared_with_native_and_tail_in_range, decode_full_video_shared_with_preview,
+    select_decode_backend, DecodeBackend, DecodePreference, DecodeSelection, PrimaryDecodeSummary,
+    PrimaryFrameBatch, PrimaryPreviewOutput, MAX_NATIVE_RGB_FRAME_BYTES,
 };
 
 use crate::frame_windows::{FrameWindows, RawWindow, CLIP_FRAMES, MAX_FRAMES};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     io::{self, Read},
@@ -26,6 +26,37 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnalysisRange {
+    pub start_sec: f64,
+    pub end_sec: f64,
+}
+impl AnalysisRange {
+    pub fn validate(self, duration: f64) -> Result<(), String> {
+        if !duration.is_finite()
+            || !self.start_sec.is_finite()
+            || !self.end_sec.is_finite()
+            || self.start_sec < 0.0
+            || self.end_sec <= self.start_sec
+            || self.end_sec > duration + 0.5
+            || self.end_sec - self.start_sec < 9.0 / 30.0
+        {
+            return Err("Invalid per-video analysis interval".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn seek_input(self, command: &mut Command) {
+        command.args([
+            "-ss",
+            &format!("{:.6}", self.start_sec),
+            "-t",
+            &format!("{:.6}", self.end_sec - self.start_sec),
+        ]);
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum ModelPixels {
@@ -160,9 +191,17 @@ fn checked_total_frames(first: u64, windows: usize, stride: usize) -> Result<usi
 }
 
 fn auto_decode_input(source: &Path, cancelled: &AtomicBool) -> Result<(Command, String), String> {
+    auto_decode_input_in_range(source, cancelled, None)
+}
+
+fn auto_decode_input_in_range(
+    source: &Path,
+    cancelled: &AtomicBool,
+    range: Option<AnalysisRange>,
+) -> Result<(Command, String), String> {
     #[cfg(unix)]
     {
-        shared::auto_decode_input(source, cancelled)
+        shared::auto_decode_input_in_range(source, cancelled, range)
     }
     #[cfg(not(unix))]
     {
@@ -170,19 +209,20 @@ fn auto_decode_input(source: &Path, cancelled: &AtomicBool) -> Result<(Command, 
             return Err("cancelled".into());
         }
         let mut command = Command::new("ffmpeg");
-        command
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-nostdin",
-                "-threads",
-                "0",
-                "-hwaccel",
-                "auto",
-                "-i",
-            ])
-            .arg(source);
+        command.args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-threads",
+            "0",
+            "-hwaccel",
+            "auto",
+        ]);
+        if let Some(range) = range {
+            range.seek_input(&mut command);
+        }
+        command.arg("-i").arg(source);
         Ok((command, String::new()))
     }
 }
@@ -330,6 +370,17 @@ pub fn decode_full_video(
     pixels: ModelPixels,
     stride: usize,
     cancelled: &AtomicBool,
+    consume: impl FnMut(RawWindow) -> Result<(), String>,
+) -> Result<DecodeSummary, String> {
+    decode_full_video_in_range(source, pixels, stride, None, cancelled, consume)
+}
+
+pub fn decode_full_video_in_range(
+    source: &Path,
+    pixels: ModelPixels,
+    stride: usize,
+    range: Option<AnalysisRange>,
+    cancelled: &AtomicBool,
     mut consume: impl FnMut(RawWindow) -> Result<(), String>,
 ) -> Result<DecodeSummary, String> {
     if !(1..=crate::frame_windows::MAX_FULL_VIDEO_STRIDE).contains(&stride) {
@@ -342,7 +393,10 @@ pub fn decode_full_video(
         return Err("Prepared source video is not a file".into());
     }
     let (w, h, channels, format) = pixels.dimensions();
-    let (mut ff, prefix) = auto_decode_input(source, cancelled)?;
+    if let Some(range) = range {
+        range.validate(crate::probe(source)?.duration_sec)?;
+    }
+    let (mut ff, prefix) = auto_decode_input_in_range(source, cancelled, range)?;
     ff.args(["-map", "0:v:0", "-an", "-sn", "-dn"])
         .args([
             "-vf",
@@ -461,6 +515,16 @@ pub fn decode_original_frames(
     source: &Path,
     expected_frames: u64,
     cancelled: &AtomicBool,
+    consume: impl FnMut(u64, &[u8], usize, usize) -> Result<(), String>,
+) -> Result<(), String> {
+    decode_original_frames_in_range(source, expected_frames, None, cancelled, consume)
+}
+
+pub fn decode_original_frames_in_range(
+    source: &Path,
+    expected_frames: u64,
+    range: Option<AnalysisRange>,
+    cancelled: &AtomicBool,
     mut consume: impl FnMut(u64, &[u8], usize, usize) -> Result<(), String>,
 ) -> Result<(), String> {
     if expected_frames == 0 || expected_frames > MAX_FRAMES {
@@ -478,7 +542,10 @@ pub fn decode_original_frames(
         .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(3))
         .ok_or("Original RGB frame size overflow")?;
-    let (mut ff, prefix) = auto_decode_input(source, cancelled)?;
+    if let Some(range) = range {
+        range.validate(info.duration_sec)?;
+    }
+    let (mut ff, prefix) = auto_decode_input_in_range(source, cancelled, range)?;
     configure_original_rgb_output(&mut ff, &prefix, expected_frames);
     ff.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -567,6 +634,139 @@ pub fn decode_original_frames(
 mod tests {
     use super::*;
     use std::{fs, process::Command};
+
+    #[test]
+    fn bounded_source_decode_reads_only_saved_interval_and_keeps_local_indices() {
+        if Command::new("ffmpeg").arg("-version").output().is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "volley-trim-decode-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("input.mkv");
+        let output = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=160x90:r=30:d=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=white:s=160x90:r=30:d=2",
+                "-filter_complex",
+                "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+                "-map",
+                "[v]",
+                "-c:v",
+                "mpeg4",
+                "-y",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let cancel = AtomicBool::new(false);
+        let clip_one = AnalysisRange {
+            start_sec: 0.5,
+            end_sec: 1.5,
+        };
+        let clip_two = AnalysisRange {
+            start_sec: 2.5,
+            end_sec: 3.5,
+        };
+        let mut samples = Vec::new();
+        for clip in [clip_one, clip_two] {
+            let mut first = None;
+            let report = decode_full_video_in_range(
+                &source,
+                ModelPixels::BallGray,
+                9,
+                Some(clip),
+                &cancel,
+                |window| {
+                    assert_eq!(window.first_frame % 9, 0);
+                    if first.is_none() {
+                        first = Some(window.data[0]);
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(report.decoded_frames, 30);
+            assert_eq!(report.windows, 3);
+            samples.push(first.unwrap());
+        }
+        assert!(samples[0] < 30, "{:?}", samples);
+        assert!(samples[1] > 200, "{:?}", samples);
+        let mut shared_windows = 0;
+        let shared = decode_full_video_shared_with_native_and_tail_in_range(
+            &source,
+            9,
+            DecodePreference::Software,
+            0,
+            Some(clip_two),
+            &cancel,
+            false,
+            |batch| {
+                if shared_windows == 0 {
+                    assert!(batch.gray[0] > 200);
+                }
+                assert_eq!(batch.first_frame, shared_windows * 9);
+                shared_windows += 1;
+                Ok(())
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(shared_windows, 3);
+        assert_eq!(shared.decode.decoded_frames, 30);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_ranges_fail_closed_before_decode() {
+        let duration = 3600.0;
+        for invalid in [
+            AnalysisRange {
+                start_sec: -1.0,
+                end_sec: 20.0,
+            },
+            AnalysisRange {
+                start_sec: 20.0,
+                end_sec: 20.0,
+            },
+            AnalysisRange {
+                start_sec: 20.0,
+                end_sec: 3602.0,
+            },
+            AnalysisRange {
+                start_sec: f64::NAN,
+                end_sec: 22.0,
+            },
+        ] {
+            assert!(invalid.validate(duration).is_err());
+        }
+        assert!(AnalysisRange {
+            start_sec: 601.0,
+            end_sec: 780.0
+        }
+        .validate(duration)
+        .is_ok());
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

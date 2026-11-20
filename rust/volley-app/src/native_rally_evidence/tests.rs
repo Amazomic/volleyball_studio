@@ -134,6 +134,7 @@ fn fixture() -> (ValidatedRun, PathBuf) {
         touch_sha: format!("{:x}", Sha256::digest(events)),
         frames: 480,
         source_duration_sec: 16.0,
+        analysis_range: None,
         width: 640,
         height: 360,
         context: 45,

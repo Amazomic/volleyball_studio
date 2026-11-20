@@ -401,8 +401,9 @@ async fn decode_track_crop(
     video: &Path,
     frame: u64,
     [x, y, w, h]: [u32; 4],
+    analysis_offset: f64,
 ) -> Result<Vec<f32>, ApiError> {
-    let sec = format!("{:.6}", frame as f64 / 30.0);
+    let sec = format!("{:.6}", analysis_offset + frame as f64 / 30.0);
     let filter = format!(
         "crop={w}:{h}:{x}:{y},scale={}:{}:flags=bilinear,format=bgr24",
         volley_inference::reid_openvino::WIDTH,
@@ -719,12 +720,15 @@ pub(super) async fn compare(
         let mut decoded = Vec::new();
         for (id, index, key, frame, crop) in cached_inputs {
             let path = source.clone();
+            let analysis_offset = snap.ctx.analysis_offset_sec;
             set.spawn(async move {
                 (
                     id,
                     index,
                     key,
-                    decode_track_crop(&path, frame, crop).await.ok(),
+                    decode_track_crop(&path, frame, crop, analysis_offset)
+                        .await
+                        .ok(),
                 )
             });
             if set.len() >= 4 {

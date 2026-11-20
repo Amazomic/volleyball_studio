@@ -32,7 +32,7 @@
     project:"",analysis:"",run:"",video:"",items:[],total:0,offset:0,limit:24,
     projectCatalog:[],projectVideos:[],chain:null,chainEpoch:0,catalogEpoch:0,
     filtered:0,gold:new Set(),revision:"absent",writable:false,marksLoaded:false,selected:new Map(),
-    current:"",videoKey:"",seekAt:0,stopAt:null,clipStart:null,clipEnd:null,
+    current:"",videoKey:"",seekAt:0,stopAt:null,clipStart:null,clipEnd:null,analysisOffset:0,
     playbackMode:"sequence",generation:0,busy:false,jobId:"",timer:null,
     loadingMore:false,canLoadMore:true,pageLoading:false,pageError:""
   };
@@ -351,7 +351,7 @@
     rawPose:$("studio-raw-pose"),rawPoseVisible:$("studio-raw-pose-visible"),
     raw:false,
     actionFlags:{attack:true,block:true,serve:true,overhead_pass:true,dig:true,low_touch:true},
-    source:null,cache:new Map(),rawFrames:new Map(),rawDetectors:new Map(),presentedTime:null,
+    source:null,cache:new Map(),rawFrames:new Map(),rawDetectors:new Map(),rawOffsets:new Map(),presentedTime:null,
     fetching:new Set(),controllers:new Map(),failed:new Map(),loop:0,
     flags:{rallies:true,touches:true,trajectory:true,players:true,pose:true,court:true}
   };
@@ -558,7 +558,18 @@
       if(s.project!==project||s.video!==video||overlay.raw!==isRaw||
          overlaySourceId()!==run)return;
       if(isRaw){
-        overlay.rawFrames.set([project,run,video].join(":"),value.total_frames);
+        const offset=Number(value.analysis_offset_sec??0);
+        if(!Number.isFinite(offset)||offset<0)throw Error("Недостоверная граница GPU-отрезка");
+        const sourceKey=[project,run,video].join(":");
+        overlay.rawOffsets=overlay.rawOffsets||new Map();
+        const previous=overlay.rawOffsets.get(sourceKey);
+        overlay.rawOffsets.set(sourceKey,offset);
+        s.analysisOffset=offset;
+        if(previous===undefined&&offset>0&&s.seekAt===0){
+          s.seekAt=offset;
+          if(ui.video.readyState>=1)ui.video.currentTime=offset;
+        }
+        overlay.rawFrames.set(sourceKey,value.total_frames);
         overlay.rawDetectors.set(rawDetectorKey(project,run,video),value.person_detector);
         updateRawDetectorLabel();
       }
@@ -719,7 +730,9 @@
     // requestVideoFrameCallback.mediaTime is the actual frame on screen.
     const shown=Number.isFinite(overlay.presentedTime)?
       overlay.presentedTime:ui.video.currentTime;
-    const frame=Math.max(0,Math.floor(shown*fps()+0.001));
+    const localTime=shown-(Number(s.analysisOffset)||0);
+    if(localTime<0)return;
+    const frame=Math.max(0,Math.floor(localTime*fps()+0.001));
     const project=s.project,run=overlaySourceId(),video=s.video;
     if(!run){if(overlay.raw)overlayMessage("Для просмотра сырых данных выберите объединённый GPU-анализ (fusion).");return;}
     const start=overlayWindowStart(frame);
@@ -2229,7 +2242,8 @@
       // A single shared seek lane: Touch ticks are overlaid on rally bands.
       if(overlay.flags.rallies){
         for(const rally of data.rallies){
-          const start=Number(rally.start_frame)/fps(),end=(Number(rally.end_frame)+1)/fps();
+          const start=(Number(s.analysisOffset)||0)+Number(rally.start_frame)/fps(),
+            end=(Number(s.analysisOffset)||0)+(Number(rally.end_frame)+1)/fps();
           const x=Math.max(0,Math.min(width,start/duration*width));
           const x2=Math.max(0,Math.min(width,end/duration*width));
           // Muted rally bands keep the bright Touch markers legible.
@@ -2243,20 +2257,20 @@
       if(training.active&&comparisonMatches(comparison.data)&&
         comparison.data.trajectory_status==="ready"){
         for(const rally of comparison.data.trajectory_rallies){
-          const x=rally.start/fps()/duration*width;
-          const x2=(rally.end+1)/fps()/duration*width;
+          const x=((Number(s.analysisOffset)||0)+rally.start/fps())/duration*width;
+          const x2=((Number(s.analysisOffset)||0)+(rally.end+1)/fps())/duration*width;
           ctx.fillStyle="#efb157d0";
           ctx.fillRect(x,y+Math.floor(bandHeight*0.55),
             Math.max(2,x2-x),Math.max(2,Math.ceil(bandHeight*0.45)));
         }
         for(const impact of comparison.data.trajectory_impacts){
-          const x=impact/fps()/duration*width;
+          const x=((Number(s.analysisOffset)||0)+impact/fps())/duration*width;
           ctx.fillStyle="#f8ce87";
           ctx.fillRect(x,y,Math.max(1,Math.ceil(dpr)),Math.max(2,bandHeight*0.35));
         }
         if(comparison.simulated){
           for(const frame of comparison.data.simulated_touch_candidates){
-            const x=frame/fps()/duration*width;
+            const x=((Number(s.analysisOffset)||0)+frame/fps())/duration*width;
             ctx.fillStyle="#ffc857";
             ctx.fillRect(x-2,y+Math.floor(bandHeight*0.1),5,Math.max(3,bandHeight*0.8));
           }
@@ -2264,19 +2278,19 @@
       }
       if(training.active&&annotation.prediction&&annotationSourceValid()){
         for(const proposal of annotation.prediction.proposals){
-          const x=proposal.frame/fps()/duration*width;
+          const x=((Number(s.analysisOffset)||0)+proposal.frame/fps())/duration*width;
           ctx.fillStyle="#ffbd55";
           ctx.fillRect(x-1,y,Math.max(2,Math.ceil(dpr)),bandHeight);
         }
       }
       if(training.active&&annotationReady()){
         for(const mark of annotation.data.rallies){
-          const x=mark.start/fps()/duration*width;
-          const x2=(mark.end+1)/fps()/duration*width;
+          const x=((Number(s.analysisOffset)||0)+mark.start/fps())/duration*width;
+          const x2=((Number(s.analysisOffset)||0)+(mark.end+1)/fps())/duration*width;
           ctx.fillStyle="#00ad9470";ctx.fillRect(x,y,Math.max(1,x2-x),bandHeight);
         }
         for(const mark of annotation.data.touches){
-          const x=mark.frame/fps()/duration*width;
+          const x=((Number(s.analysisOffset)||0)+mark.frame/fps())/duration*width;
           ctx.fillStyle="#10deb2";ctx.fillRect(x,y,Math.max(2,Math.ceil(dpr)),bandHeight);
         }
       }
@@ -2286,7 +2300,7 @@
             if(touch.touch_attributed!==true&&touch.contact_verified!==true)continue;
             const style=cpuTouchStyle[touch.kind];
             if(Boolean(style)!==classified||style&&!overlay.actionFlags[touch.kind])continue;
-            const x=Math.floor(Number(touch.frame_index)/fps()/duration*width);
+            const x=Math.floor(((Number(s.analysisOffset)||0)+Number(touch.frame_index)/fps())/duration*width);
             if(!Number.isFinite(x)||x<0||x>=width)continue;
             ctx.fillStyle=style?style[0]:"#c6bf96";
             ctx.fillRect(x,y,Math.max(2,Math.ceil(dpr)),bandHeight);
@@ -2331,6 +2345,7 @@
         (s.video&&raw.video!==s.video))
         throw Error("Недостоверный индекс временной шкалы");
       timeline.data=raw;
+      s.analysisOffset=Number(raw.analysis_offset_sec)||0;
       s.fps=Number(raw.fps)||0;
       if(!s.video)s.video=raw.video;
       ensurePreviewVideo();
@@ -2365,7 +2380,7 @@
   const rallyAtTimelineTime=seconds=>{
     const rows=timeline.data?.rallies||[];
     let left=0,right=rows.length;
-    const frame=seconds*fps();
+    const frame=(seconds-(Number(s.analysisOffset)||0))*fps();
     while(left<right){
       const mid=(left+right)>>>1;
       if(rows[mid].start_frame<=frame)left=mid+1;else right=mid;
@@ -2441,7 +2456,8 @@
     if(s.current){s.current="";cards();}
     // Preserve player boxes and trajectory when seeking outside the selected card.
     if(!overlay.source)setOverlaySource({motion_events:[]});
-    prefetchOverlayAtFrame(Math.floor(position*fps()));
+    if(position>=(Number(s.analysisOffset)||0))
+      prefetchOverlayAtFrame(Math.floor((position-(Number(s.analysisOffset)||0))*fps()));
     const rally=rallyAtTimelineTime(position);
     ui.viewTitle.textContent=rally?
       "Розыгрыш · "+timeLabel(rally.start_frame/fps())+" – "+
@@ -2668,7 +2684,7 @@
       count===0||count>80||s.selected.size!==count;
   };
   const reset=()=>{
-    s.generation++;s.run="";s.video="";s.items=[];s.total=0;s.filtered=0;s.offset=0;
+    s.generation++;s.run="";s.video="";s.items=[];s.total=0;s.filtered=0;s.offset=0;s.analysisOffset=0;
     s.loadingMore=false;s.canLoadMore=true;s.pageLoading=false;s.pageError="";s.fps=0;
     s.gold=new Set();s.revision="absent";s.writable=false;s.marksLoaded=false;s.selected.clear();
     s.jobId="";stopPoll();clearVideo();clearTimeline();wipe(ui.list);
@@ -2714,7 +2730,7 @@
     setOverlaySource(overlay.raw||s.run?{}:null);
     updateRawDetectorLabel();
     if(s.run&&s.video)
-      prefetchOverlayAtFrame(Math.max(0,Math.floor((ui.video.currentTime||0)*fps())));
+      prefetchOverlayAtFrame(Math.max(0,Math.floor(((ui.video.currentTime||0)-(Number(s.analysisOffset)||0))*fps())));
     if(s.analysis)sourceSelection.save(s.project,s.analysis,s.run);
     window.dispatchEvent(new CustomEvent("volley:postprocessing-change",{
       detail:{project_id:s.project,rally_run_id:s.run}
@@ -2926,6 +2942,7 @@
       s.pageLoading=false;
       s.fps=Number(raw.fps)||0;
       s.items=Array.isArray(raw.items)?raw.items:[];
+      s.analysisOffset=Number(raw.analysis_offset_sec)||0;
       s.total=Number(raw.total_candidates)||0;
       s.filtered=Number(raw.filtered_candidates??s.total)||0;
       s.canLoadMore=s.items.length<s.filtered;
@@ -3041,13 +3058,13 @@
       Number.isFinite(ui.video.currentTime)?
         (Number.isFinite(overlay.presentedTime)&&!ui.video.paused?
           overlay.presentedTime:ui.video.currentTime):s.seekAt;
-    const fraction=(current-start/fps())/(Math.max(1,end-start+1)/fps());
+    const fraction=(current-(Number(s.analysisOffset)||0)-start/fps())/(Math.max(1,end-start+1)/fps());
     progress.style.setProperty("--rally-progress",
       Math.max(0,Math.min(100,fraction*100))+"%");
-    const relative=Math.max(0,Math.min((end-start+1)/fps(),current-start/fps()));
+    const relative=Math.max(0,Math.min((end-start+1)/fps(),current-(Number(s.analysisOffset)||0)-start/fps()));
     progress.setAttribute("aria-valuenow",relative.toFixed(1));
     progress.setAttribute("aria-valuetext",
-      second(Math.max(start,Math.min(end,current*fps())))+" с на видео");
+      second(Math.max(start,Math.min(end,(current-(Number(s.analysisOffset)||0))*fps()))+(Number(s.analysisOffset)||0)*fps())+" с на видео");
   };
   // Event pills and summary are derived from the same selected postprocessing
   // timeline as the canvas. The 14-event card sample is never used here.
@@ -3096,20 +3113,21 @@
     // Full timeline entries may not belong to the currently loaded (or sorted) card page.
     const {start,end}=rallyClipFrames(item);
     const key=s.project+":"+s.video;
-    s.clipStart=start/fps();s.clipEnd=(end+1)/fps();
+    s.clipStart=(Number(s.analysisOffset)||0)+start/fps();
+    s.clipEnd=(Number(s.analysisOffset)||0)+(end+1)/fps();
     s.stopAt=s.playbackMode==="free"?null:s.clipEnd;
-    ui.viewTitle.textContent="Розыгрыш · "+clock(start)+" – "+clock(end);
-    ui.videoTime.textContent=clock(start)+" – "+clock(end);
+    ui.viewTitle.textContent="Розыгрыш · "+clock(s.clipStart*fps())+" – "+clock(s.clipEnd*fps());
+    ui.videoTime.textContent=clock(s.clipStart*fps())+" – "+clock(s.clipEnd*fps());
     renderRallyTouches(item,start,end);
     ui.emptyVideo.classList.add("hidden");
     // Direct seeking on the card must not jump back to the rally start.
     s.seekAt=Number.isFinite(requestedTime)?
-      Math.max(s.clipStart,Math.min(end/fps(),requestedTime)):s.clipStart;
+      Math.max(s.clipStart,Math.min(s.clipEnd-1/fps(),requestedTime)):s.clipStart;
     rallyCardProgresses.get(s.current)?.progress.style.setProperty("--rally-progress",
       (100*(s.seekAt-s.clipStart)/(s.clipEnd-s.clipStart))+"%");
     overlay.presentedTime=null;
     setOverlaySource(item);
-    prefetchOverlayAtFrame(Math.floor(s.seekAt*fps()));
+    prefetchOverlayAtFrame(Math.max(0,Math.floor((s.seekAt-(Number(s.analysisOffset)||0))*fps())));
     drawTimeline();
     let deferredPlay=false;
     if(s.videoKey!==key){
@@ -3151,7 +3169,7 @@
       const card=make("article","rally-card"+(gold?" gold":"")+
         (s.current===id?" active":""));
       card.tabIndex=0;card.setAttribute("role","button");
-      card.setAttribute("aria-label","Просмотр розыгрыша "+clock(item.detected_start_frame));
+      card.setAttribute("aria-label","Просмотр розыгрыша "+clock(item.detected_start_frame+(Number(s.analysisOffset)||0)*fps()));
       card.addEventListener("click",e=>{
         if(!e.target.closest(".rally-card-progress,button,label,input"))view(item);
       });
@@ -3170,9 +3188,9 @@
       top.append(idLabel);
       const when=make("div","rally-card-time-range");
       when.append(make("strong","rally-card-time-value",
-        second(item.detected_start_frame)+"–"+second(item.detected_end_frame)+" с"));
-      when.title="На видео: "+second(item.detected_start_frame)+"–"+
-        second(item.detected_end_frame)+" с";
+        second(item.detected_start_frame+(Number(s.analysisOffset)||0)*fps())+"–"+second(item.detected_end_frame+(Number(s.analysisOffset)||0)*fps())+" с"));
+      when.title="На видео: "+second(item.detected_start_frame+(Number(s.analysisOffset)||0)*fps())+"–"+
+        second(item.detected_end_frame+(Number(s.analysisOffset)||0)*fps())+" с";
       top.append(when);
       const stats=make("div","card-stats");
       const touches=make("div","rally-card-stat");
@@ -3214,7 +3232,7 @@
       progress.title="Нажмите, чтобы воспроизвести розыгрыш с выбранного момента";
       const playFromFraction=fraction=>{
         const bounded=Math.max(0,Math.min(1,fraction));
-        view(item,(start+bounded*(end-start+1))/fps());
+        view(item,(Number(s.analysisOffset)||0)+(start+bounded*(end-start+1))/fps());
         // Clicking the timeline inside an already selected card retains focus.
       };
       progress.addEventListener("click",event=>{
@@ -3228,14 +3246,14 @@
         if(!["ArrowLeft","ArrowRight","Home","End","PageUp","PageDown","Enter"," "].includes(key))return;
         event.preventDefault();event.stopPropagation();
         if(key==="Enter"||key===" "){
-          view(item,Number.isFinite(ui.video.currentTime)?ui.video.currentTime:start/fps());
+          view(item,Number.isFinite(ui.video.currentTime)?ui.video.currentTime:(Number(s.analysisOffset)||0)+start/fps());
           return;
         }
         const current=Number.isFinite(ui.video.currentTime)?
-          ui.video.currentTime:start/fps();
+          ui.video.currentTime:(Number(s.analysisOffset)||0)+start/fps();
         const duration=(end-start+1)/fps();
         const fraction=key==="Home"?0:key==="End"?1:
-          (current-start/fps()+(
+          (current-(Number(s.analysisOffset)||0)-start/fps()+(
             key==="ArrowRight"||key==="PageUp"?1:-1
           )*(key==="PageUp"||key==="PageDown"||event.shiftKey?5:1))/duration;
         playFromFraction(fraction);
@@ -3687,7 +3705,7 @@
       .sort((a,b)=>start(a)-start(b));
     const index=ordered.findIndex(row=>row.candidate_id===s.current);
     const row=index>=0?ordered[index+1]:
-      ordered.find(entry=>start(entry)/fps()>=(s.clipEnd??ui.video.currentTime)-0.02);
+      ordered.find(entry=>(Number(s.analysisOffset)||0)+start(entry)/fps()>=(s.clipEnd??ui.video.currentTime)-0.02);
     return row?(s.items.find(item=>item.candidate_id===row.candidate_id)||row):null;
   };
   const onRallyBoundary=()=>{

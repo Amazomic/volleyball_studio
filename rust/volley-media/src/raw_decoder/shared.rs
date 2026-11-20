@@ -275,6 +275,7 @@ pub fn decode_full_video_shared(
         0,
         None,
         None,
+        None,
         consume,
         |_, _| Ok(()),
     )
@@ -296,6 +297,7 @@ pub fn decode_full_video_shared_with_backend(
         cancelled,
         &decision,
         0,
+        None,
         None,
         None,
         consume,
@@ -332,6 +334,7 @@ pub fn decode_full_video_shared_with_backend_and_tail(
         cpu_threads,
         None,
         None,
+        None,
         consume,
         on_tail,
     )?;
@@ -348,6 +351,31 @@ pub fn decode_full_video_shared_with_native_and_tail(
     stride: usize,
     preference: DecodePreference,
     cpu_threads: usize,
+    cancelled: &AtomicBool,
+    native: bool,
+    consume: impl FnMut(PrimaryFrameBatch) -> Result<(), String>,
+    on_tail: impl FnMut(&[u8], u64) -> Result<(), String>,
+) -> Result<PrimaryDecodeSummary, String> {
+    decode_full_video_shared_with_native_and_tail_in_range(
+        source,
+        stride,
+        preference,
+        cpu_threads,
+        None,
+        cancelled,
+        native,
+        consume,
+        on_tail,
+    )
+}
+
+#[expect(clippy::too_many_arguments)]
+pub fn decode_full_video_shared_with_native_and_tail_in_range(
+    source: &Path,
+    stride: usize,
+    preference: DecodePreference,
+    cpu_threads: usize,
+    range: Option<super::AnalysisRange>,
     cancelled: &AtomicBool,
     native: bool,
     consume: impl FnMut(PrimaryFrameBatch) -> Result<(), String>,
@@ -380,6 +408,7 @@ pub fn decode_full_video_shared_with_native_and_tail(
         cpu_threads,
         None,
         dimensions,
+        range,
         consume,
         on_tail,
     )?;
@@ -419,6 +448,7 @@ pub fn decode_full_video_shared_with_preview(
         cpu_threads,
         preview,
         None,
+        None,
         consume,
         on_tail,
     )?;
@@ -440,13 +470,24 @@ pub(super) fn auto_decode_input(
         decision.backend,
         decision.fallback_reason.as_deref().unwrap_or("none")
     );
-    Ok(decode_input_command(source, &decision, 0))
+    Ok(decode_input_command(source, &decision, 0, None))
+}
+
+#[cfg(unix)]
+pub(super) fn auto_decode_input_in_range(
+    source: &Path,
+    cancelled: &AtomicBool,
+    range: Option<super::AnalysisRange>,
+) -> Result<(Command, String), String> {
+    let decision = select_decode_backend(source, DecodePreference::Auto, cancelled)?;
+    Ok(decode_input_command(source, &decision, 0, range))
 }
 
 fn decode_input_command(
     source: &Path,
     decision: &DecodeSelection,
     cpu_threads: usize,
+    range: Option<super::AnalysisRange>,
 ) -> (Command, String) {
     let mut command = Command::new("ffmpeg");
     let decoder_threads = if decision.backend == DecodeBackend::Nvdec {
@@ -479,12 +520,20 @@ fn decode_input_command(
     } else {
         String::new()
     };
+    if let Some(range) = range {
+        range.seek_input(&mut command);
+    }
     command.arg("-i").arg(source);
     (command, prefix)
 }
 
-fn shared_decode_command(source: &Path, decision: &DecodeSelection, cpu_threads: usize) -> Command {
-    shared_decode_command_with_preview(source, decision, cpu_threads, false, false)
+fn shared_decode_command(
+    source: &Path,
+    decision: &DecodeSelection,
+    cpu_threads: usize,
+    range: Option<super::AnalysisRange>,
+) -> Command {
+    shared_decode_command_with_preview(source, decision, cpu_threads, false, false, range)
 }
 
 fn shared_decode_command_with_preview(
@@ -493,8 +542,9 @@ fn shared_decode_command_with_preview(
     cpu_threads: usize,
     preview: bool,
     native: bool,
+    range: Option<super::AnalysisRange>,
 ) -> Command {
-    let (mut command, prefix) = decode_input_command(source, decision, cpu_threads);
+    let (mut command, prefix) = decode_input_command(source, decision, cpu_threads, range);
     let input = if preview {
         format!("[0:v]{prefix}split=2[model][preview];[model]")
     } else {
@@ -526,6 +576,7 @@ fn decode_full_video_shared_impl(
     cpu_threads: usize,
     preview: Option<PrimaryPreviewOutput<'_>>,
     native: Option<(usize, usize)>,
+    range: Option<super::AnalysisRange>,
     mut consume: impl FnMut(PrimaryFrameBatch) -> Result<(), String>,
     mut on_tail: impl FnMut(&[u8], u64) -> Result<(), String>,
 ) -> Result<DecodeSummary, String> {
@@ -570,12 +621,12 @@ fn decode_full_video_shared_impl(
     }
 
     let mut command = if preview.is_some() {
-        shared_decode_command_with_preview(source, decision, cpu_threads, true, false)
+        shared_decode_command_with_preview(source, decision, cpu_threads, true, false, range)
     } else {
         if native.is_some() {
-            shared_decode_command_with_preview(source, decision, cpu_threads, false, true)
+            shared_decode_command_with_preview(source, decision, cpu_threads, false, true, range)
         } else {
-            shared_decode_command(source, decision, cpu_threads)
+            shared_decode_command(source, decision, cpu_threads, range)
         }
     };
     command

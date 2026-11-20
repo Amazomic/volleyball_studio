@@ -297,6 +297,7 @@ pub(crate) struct ValidatedRun {
     pub(crate) touch_sha: String,
     pub(crate) frames: u64,
     pub(crate) source_duration_sec: f64,
+    pub(crate) analysis_range: Option<volley_media::raw_decoder::AnalysisRange>,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) context: u64,
@@ -436,13 +437,28 @@ pub(crate) fn inspect_project(
         .ok_or_else(|| storage::bad_request("Invalid saved context padding"))?;
     volley_media::preparation::verify_source_provenance(&plan.source, &rally["original_source"])
         .map_err(storage::conflict)?;
+    if rally["analysis_range"] != touch["analysis_range"] {
+        return Err(storage::conflict(
+            "Rally and Touch analysis intervals differ",
+        ));
+    }
     if rally["original_source"] != touch["original_source"] {
         return Err(storage::conflict(
             "Rally and Touch original content differs",
         ));
     }
     let source_info = volley_media::probe(&plan.source).map_err(storage::bad_request)?;
-    if frames as f64 / 30.0 > source_info.duration_sec + 0.067 {
+    let analysis_range: Option<volley_media::raw_decoder::AnalysisRange> =
+        serde_json::from_value(rally["analysis_range"].clone())
+            .map_err(|e| storage::bad_request(format!("Invalid saved analysis range: {e}")))?;
+    if let Some(range) = analysis_range {
+        range
+            .validate(source_info.duration_sec)
+            .map_err(storage::bad_request)?;
+    }
+    let analyzed_duration =
+        analysis_range.map_or(source_info.duration_sec, |r| r.end_sec - r.start_sec);
+    if frames as f64 / 30.0 > analyzed_duration + 0.067 {
         return Err(storage::bad_request(
             "Rally source frames exceed original video's timeline",
         ));
@@ -465,6 +481,7 @@ pub(crate) fn inspect_project(
         touch_sha,
         frames,
         source_duration_sec: source_info.duration_sec,
+        analysis_range,
         width: dimensions.width,
         height: dimensions.height,
         context,
@@ -817,6 +834,8 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
                 "video": run.video,
                 "total_frames": run.frames,
                 "video_duration_sec": run.source_duration_sec,
+                "analysis_offset_sec": run.analysis_range.map_or(0.0, |r| r.start_sec),
+                "analysis_range":run.analysis_range,
                 "rallies": timeline_rallies,
                 "touch_frames": touch_frames,
                 "raw_touch_candidates": raw_touch_count,
@@ -893,13 +912,14 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
             video: run.video.clone(),
             start_frame: clip.start_frame,
             end_frame: clip.end_frame,
-            analysis_offset_sec: Some(0.0),
+            analysis_offset_sec: Some(run.analysis_range.map_or(0.0, |r| r.start_sec)),
         };
         let scoped = verify_rally_interval("native_cpu", &id, interval, clip.clone(), run.frames)?;
         record["source_interval_contract"] = json!(scoped);
         record["manual_clip"] = json!({
             "video":run.video,"start_frame":clip.start_frame,
-            "end_frame":clip.end_frame,"analysis_offset_sec":0.0
+            "end_frame":clip.end_frame,
+            "analysis_offset_sec":run.analysis_range.map_or(0.0, |r| r.start_sec)
         });
         record["clip_boundaries_provisional"] = json!(true);
         record["manual_selection_only"] = json!(true);
@@ -1049,6 +1069,8 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
             "project_id":run.project_id,
             "video":run.video,
             "rally_run_id":run.run_id,
+            "analysis_offset_sec":run.analysis_range.map_or(0.0, |r| r.start_sec),
+            "analysis_range":run.analysis_range,
             "source_replay_id":run.replay_id,
             "source_touch_id":run.touch_id,
             "total_candidates":intervals.len(),

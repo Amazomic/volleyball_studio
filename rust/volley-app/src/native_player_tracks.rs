@@ -144,6 +144,7 @@ struct Inputs {
     video: String,
     replay_id: String,
     source_sha: String,
+    analysis_offset_sec: f64,
     tracks: BTreeMap<u64, Aggregate>,
     roster: BTreeMap<String, String>,
     sidecar: PathBuf,

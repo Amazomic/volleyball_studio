@@ -707,6 +707,17 @@ fn source_with_verified_tracks(
             "Track ID replay is not valid for this video",
         ));
     }
+    let analysis_range: Option<volley_media::raw_decoder::AnalysisRange> =
+        serde_json::from_value(manifest["analysis_range"].clone())
+            .map_err(|error| storage::bad_request(format!("Track source interval: {error}")))?;
+    if let Some(range) = analysis_range {
+        let original_duration = volley_media::probe(&plan.source)
+            .map_err(storage::bad_request)?
+            .duration_sec;
+        range
+            .validate(original_duration)
+            .map_err(storage::bad_request)?;
+    }
     let frames = manifest["frames"]
         .as_u64()
         .filter(|x| *x > 0 && *x <= 48 * 3600 * 30)
@@ -786,6 +797,7 @@ fn source_with_verified_tracks(
         video: video.into(),
         replay_id: replay_id.into(),
         source_sha: sha,
+        analysis_offset_sec: analysis_range.map_or(0.0, |r| r.start_sec),
         tracks,
         roster,
         sidecar: links_dir.join(format!("{replay_id}.json")),

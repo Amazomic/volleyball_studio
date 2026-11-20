@@ -333,6 +333,7 @@ mod scored_trajectory_tests {
             touch_sha: "e".repeat(64),
             frames: 50,
             source_duration_sec: 50.0 / 30.0,
+            analysis_range: None,
             width: 640,
             height: 360,
             context: 0,

@@ -712,6 +712,7 @@ mod tests {
             touch_sha: format!("{:x}", Sha256::digest(&touch_bytes)),
             frames: 80,
             source_duration_sec: 80.0 / 30.0,
+            analysis_range: None,
             width: 640,
             height: 360,
             context: 45,

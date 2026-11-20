@@ -774,6 +774,14 @@
     const project=projectId(),video=ui.video.value;
     if(!project||!video){saveMessage("Выберите проект и исходное видео.",true);return;}
     const source=mode==="post"?selectedGpuSource():"";
+    if(mode!=="post"&&window.VolleyballEditor?.hasUnsavedChanges?.(project,video)){
+      saveMessage("Сохраните начало и конец отрезка перед запуском анализа.",true);
+      return;
+    }
+    if(mode!=="post"&&window.VolleyballEditor?.isLoading?.(project,video)){
+      saveMessage("Настройки отрезка этого видео ещё загружаются.",true);
+      return;
+    }
     if(mode==="post"&&!source){
       saveMessage("Для постобработки выберите объединённый GPU-анализ в шапке.",true);
       return;

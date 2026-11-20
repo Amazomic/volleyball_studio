@@ -92,6 +92,76 @@ impl TestServer {
 }
 
 #[tokio::test]
+async fn per_video_saved_intervals_do_not_cross_between_project_videos() {
+    if std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let server = TestServer::spawn(true).await;
+    let project = "123456abcdef";
+    let root = server.root.join("original/project");
+    fs::create_dir_all(&root).unwrap();
+    for name in ["first.mp4", "second.mp4"] {
+        let output = std::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=30:duration=10",
+                "-c:v",
+                "mpeg4",
+                "-y",
+            ])
+            .arg(root.join(name))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+    fs::create_dir_all(server.root.join("sandbox/projects").join(project)).unwrap();
+    storage::write_json_atomic(
+        &server.root.join("sandbox/projects/projects.json"),
+        &serde_json::json!({"schema":1,"projects":[{
+            "id":project,"name":"Two-video project","videos":["first.mp4","second.mp4"]
+        }]}),
+    )
+    .unwrap();
+    assert_eq!(
+        video_edits::analysis_range(&server.state, project, "first.mp4").unwrap(),
+        None
+    );
+    assert_eq!(
+        video_edits::analysis_range(&server.state, project, "second.mp4").unwrap(),
+        None
+    );
+    for (name, start, end) in [("first.mp4", 1.0, 3.0), ("second.mp4", 5.0, 8.0)] {
+        let body = serde_json::json!({
+            "project_id":project,"video":name,"trim_start_sec":start,
+            "trim_end_sec":end,"court":[],"net":null
+        })
+        .to_string();
+        let (code, result) = server.request("POST", "/api/video-edit", Some(&body)).await;
+        assert_eq!(code, 200, "{result}");
+    }
+    let first = video_edits::analysis_range(&server.state, project, "first.mp4")
+        .unwrap()
+        .unwrap();
+    let second = video_edits::analysis_range(&server.state, project, "second.mp4")
+        .unwrap()
+        .unwrap();
+    assert_eq!((first.start_sec, first.end_sec), (1.0, 3.0));
+    assert_eq!((second.start_sec, second.end_sec), (5.0, 8.0));
+    assert_ne!(first, second);
+    server.close().await;
+}
+
+#[tokio::test]
 async fn projects_api_returns_empty_list_on_fresh_root() {
     let server = TestServer::spawn(false).await;
     let (code, body) = server.request("GET", "/api/projects", None).await;

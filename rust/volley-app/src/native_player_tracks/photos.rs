@@ -91,12 +91,18 @@ pub async fn photo(
         let (frame, bbox) = photo_candidate(track, query.photo_index);
         let crop = crop_box(bbox, video.width, video.height).map_err(storage::bad_request)?;
         let stamp = inference_stream::source_stamp(prepared).map_err(storage::bad_request)?;
-        Ok((prepared.to_path_buf(), frame, crop, stamp))
+        Ok((
+            prepared.to_path_buf(),
+            frame,
+            crop,
+            stamp,
+            inputs.analysis_offset_sec,
+        ))
     })
     .await
     .map_err(|e| storage::internal(format!("Player photo verification task: {e}")))??;
-    let (prepared, frame, [x, y, width, height], stamp) = photo_plan;
-    let time = format!("{:.4}", frame as f64 / 30.0);
+    let (prepared, frame, [x, y, width, height], stamp, analysis_offset) = photo_plan;
+    let time = format!("{:.4}", analysis_offset + frame as f64 / 30.0);
     let vf = format!("crop={width}:{height}:{x}:{y},scale=240:-2,setsar=1");
     let mut cmd = tokio::process::Command::new("ffmpeg");
     cmd.args([

@@ -653,8 +653,14 @@ fn nvdec_preview_clears_display_rotation_before_manual_pixel_rotation() {
         fallback_reason: None,
         rotation_filter: "transpose=clock,",
     };
-    let command =
-        shared_decode_command_with_preview(Path::new("rotated.mp4"), &decision, 2, true, false);
+    let command = shared_decode_command_with_preview(
+        Path::new("rotated.mp4"),
+        &decision,
+        2,
+        true,
+        false,
+        None,
+    );
     let args: Vec<_> = command
         .get_args()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -683,7 +689,7 @@ fn shared_command_honors_requested_decoder_and_filter_threads() {
         rotation_filter: "",
     };
     for threads in [0, 1, 32] {
-        let command = shared_decode_command(Path::new("input.mp4"), &decision, threads);
+        let command = shared_decode_command(Path::new("input.mp4"), &decision, threads, None);
         let args: Vec<_> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())

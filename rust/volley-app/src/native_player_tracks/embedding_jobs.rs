@@ -54,7 +54,7 @@ pub async fn embeddings(
     let transient = req.transient;
     let scope_requires_new_embedding = req.rally_run_id.is_some() || transient;
     let planned_state = state.clone();
-    let (source_file, source_stamp, replay_file, replay_stamp, crops, evidence) =
+    let (source_file, source_stamp, replay_file, replay_stamp, crops, evidence, analysis_offset) =
         tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
             let _guard = project_guard::write_guard(&planned_state, &req.project_id)?;
             let ctx = source_for_rallies(
@@ -105,6 +105,7 @@ pub async fn embeddings(
                 replay_stamp,
                 crops,
                 ctx.evidence,
+                ctx.analysis_offset_sec,
             ))
         })
         .await
@@ -149,7 +150,7 @@ pub async fn embeddings(
         if selected.contains_key(&track_id) {
             continue;
         }
-        let secs = format!("{:.6}", best_frame as f64 / 30.0);
+        let secs = format!("{:.6}", analysis_offset + best_frame as f64 / 30.0);
         let vf = format!(
             "crop={w}:{h}:{x}:{y},scale={}:{}:flags=bilinear,format=bgr24",
             volley_inference::reid_openvino::WIDTH,

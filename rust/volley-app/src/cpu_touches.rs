@@ -1256,6 +1256,7 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
             "source_replay_sha256":sha,
             "source_identity":{"bytes":size,"mtime_ns":mtime},
             "original_source":manifest["original_source"],
+            "analysis_range":manifest["analysis_range"],
             "width":dimensions.width,"height":dimensions.height,"fps":30,
             "frames":frames,
             "settings":settings,
