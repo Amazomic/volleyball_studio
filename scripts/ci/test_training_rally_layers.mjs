@@ -11,6 +11,8 @@ for(const id of ["studio-training-rallies-by-touches","studio-training-rallies-b
 }
 assert.ok(css.includes("#studio-preview-view.training-workspace .studio-training-rally-visibility{display:grid}"));
 assert.ok(css.includes("left:69%"),"Checkboxes must be inside the upper right of the video area");
+assert.ok(css.includes('.studio-trajectory-proposal)[hidden]{display:none!important}'),
+  "Hidden timeline marker elements must not remain visible");
 assert.ok(js.includes('overlay.canvas.addEventListener("contextmenu"'));
 assert.ok(!js.includes('showAnnotationContext(annotationFrame(),event);\n  });\n  const pickTrainingPlayer'));
 
@@ -35,10 +37,18 @@ const canvas=Object.assign(new Node(),{
 });
 elements.set("studio-timeline-canvas",canvas);
 const training={active:true,panel:{before(){}}};
-const overlay={raw:false,flags:{rallies:false,touches:false}};
+const overlay={raw:false,flags:{rallies:false,touches:true},actionFlags:{unknown_touch:true}};
 const comparison={simulated:false,data:{trajectory_status:"ready",
   trajectory_rallies:[{start:30,end:105}],trajectory_impacts:[]}};
-const annotation={prediction:null};
+const marks={
+  ".studio-annotation-tick":[{hidden:false}],
+  ".studio-trajectory-proposal":[{hidden:false}]
+};
+const annotation={
+  prediction:{proposals:[{frame:37}]},
+  data:{rallies:[{start:16,end:91}],touches:[{frame:48}]},
+  lane:{querySelectorAll:selector=>marks[selector]||[]}
+};
 const s={project:"p",video:"match.mp4",videoKey:"p:match.mp4",
   analysisOffset:0,seekAt:0,current:null,gold:new Set()};
 const ui={video:{duration:10,currentTime:0}};
@@ -50,28 +60,47 @@ const {timeline,drawTimeline,timelineRallyLayers}=runInNewContext(
     $,s,ui,training,overlay,comparison,annotation,
     window:{devicePixelRatio:1},requestAnimationFrame:()=>{},
     document:{querySelector:()=>({append(){}})},
-    comparisonMatches:()=>true,annotationReady:()=>false,
-    annotationSourceValid:()=>false,fps:()=>30
+    comparisonMatches:()=>true,annotationReady:()=>true,
+    annotationSourceValid:()=>true,fps:()=>30,
+    cpuTouchKind:kind=>kind,
+    cpuTouchStyle:{unknown_touch:["#f14f4f"]}
   }
 );
-timeline.data={rallies:[{start_frame:0,end_frame:90,candidate_id:"r1"}],touch_annotations:[]};
+timeline.data={
+  rallies:[{start_frame:0,end_frame:90,candidate_id:"r1"}],
+  touch_annotations:[{frame_index:32,kind:"unknown_touch",touch_attributed:true}]
+};
 const palette=()=>rects.map(r=>r.color);
 drawTimeline();
 assert.ok(palette().includes("#37b9ce80"),"CPU rallies must be translucent cyan");
 assert.ok(palette().includes("#efb15773"),"Ball rallies must be translucent amber");
+for(const color of ["#00ad9470","#10deb2","#ffbd55","#f14f4f"])
+  assert.ok(palette().includes(color),"Initial manual/ball/CPU marker missing: "+color);
 const cpu=rects.find(r=>r.color==="#37b9ce80");
 const ball=rects.find(r=>r.color==="#efb15773");
 assert.ok(cpu.x<ball.x&&ball.x<cpu.x+cpu.w,"Overlapping rally layers share the same lane");
 rects.length=0;timelineRallyLayers.touches.checked=false;
 timelineRallyLayers.touches.listeners.change();
 assert.ok(!palette().includes("#37b9ce80"));
+for(const color of ["#00ad9470","#10deb2","#f14f4f"])
+  assert.ok(!palette().includes(color),"Touch-based mark remains after disabling touch rallies: "+color);
+assert.equal(marks[".studio-annotation-tick"][0].hidden,true,
+  "Manual touch marker must be hidden with touch-rally layer");
+assert.equal($("studio-timeline-touch-key").hidden,true,
+  "The CPU touch legend must also disappear with its marks");
+assert.equal(marks[".studio-trajectory-proposal"][0].hidden,false);
 assert.ok(palette().includes("#efb15773"));
 rects.length=0;timelineRallyLayers.ball.checked=false;
 timelineRallyLayers.ball.listeners.change();
 assert.ok(!palette().includes("#37b9ce80")&&!palette().includes("#efb15773"));
+assert.ok(!palette().includes("#ffbd55"),"Trajectory proposal markers must obey ball checkbox");
+assert.equal(marks[".studio-trajectory-proposal"][0].hidden,true);
 rects.length=0;timelineRallyLayers.touches.checked=true;
 timelineRallyLayers.touches.listeners.change();
 assert.ok(palette().includes("#37b9ce80")&&!palette().includes("#efb15773"));
+assert.ok(palette().includes("#00ad9470")&&palette().includes("#f14f4f"));
+assert.equal(marks[".studio-annotation-tick"][0].hidden,false);
+assert.equal($("studio-timeline-touch-key").hidden,false);
 rects.length=0;training.active=false;drawTimeline();
 assert.ok(!palette().includes("#37b9ce80"),"Outside training, the existing rally toggle still controls the lane");
-console.log("Training rally visibility: two independent translucent layers, overlap and non-training fallback: OK");
+console.log("Training rally visibility: both checkboxes hide associated canvas AND DOM marks, preserving non-training behavior: OK");

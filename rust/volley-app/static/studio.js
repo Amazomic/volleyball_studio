@@ -1195,6 +1195,7 @@
   // from pose examples: training mode never rewrites immutable inference.
   const annotation={
     data:null,epoch:0,busy:false,dirty:false,prediction:null,source:"",priorFlags:null,touchId:null,rallyId:null,pendingStart:null,
+    touchLayerVisible:true,ballLayerVisible:true,
     status:$("studio-annotation-status"),current:$("studio-annotation-current"),
     lane:$("studio-timeline-track"),touchList:$("studio-annotation-touch-list"),
     rallies:$("studio-annotation-rallies"),metrics:$("studio-annotation-metrics"),
@@ -1291,6 +1292,7 @@
       for(const item of annotation.prediction.proposals.slice(0,600)){
         const marker=document.createElement("button");
         marker.type="button";marker.className="studio-trajectory-proposal";
+        marker.hidden=annotation.ballLayerVisible===false;
         marker.style.left=annotationPosition(item.frame)+"%";
         marker.title="Прогноз мяча · кадр "+item.frame+" · сигнал "+Number(item.score).toFixed(2);
         marker.setAttribute("aria-label",marker.title);
@@ -1320,6 +1322,7 @@
       tick.type="button";tick.className="studio-annotation-tick"+
         (item.id===annotation.touchId?" selected":"");
       tick.style.left=annotationPosition(item.frame)+"%";
+      tick.hidden=annotation.touchLayerVisible===false;
       tick.dataset.trainingTouchId=item.id;
       tick.title="Касание "+annotationClock(item.frame)+
         ". Перетащите или выберите и нажмите «Перенести»";
@@ -2236,8 +2239,19 @@
     touches:$("studio-training-rallies-by-touches"),
     ball:$("studio-training-rallies-by-trajectory")
   };
+  const updateTrainingRallyLayers=()=>{
+    annotation.touchLayerVisible=timelineRallyLayers.touches.checked;
+    annotation.ballLayerVisible=timelineRallyLayers.ball.checked;
+    for(const [selector,visible] of [
+      [".studio-annotation-tick",annotation.touchLayerVisible],
+      [".studio-trajectory-proposal",annotation.ballLayerVisible]
+    ])annotation.lane.querySelectorAll(selector).forEach(marker=>{marker.hidden=!visible;});
+    drawTimeline();
+  };
+  annotation.touchLayerVisible=timelineRallyLayers.touches.checked;
+  annotation.ballLayerVisible=timelineRallyLayers.ball.checked;
   for(const layer of Object.values(timelineRallyLayers))
-    layer.addEventListener("change",()=>drawTimeline());
+    layer.addEventListener("change",updateTrainingRallyLayers);
   const rallyCardProgresses=new Map();
   const placeTrainingTimeline=active=>{
     const element=$("studio-timeline");
@@ -2327,14 +2341,15 @@
           }
         }
       }
-      if(training.active&&annotation.prediction&&annotationSourceValid()){
+      if(training.active&&timelineRallyLayers.ball.checked&&
+        annotation.prediction&&annotationSourceValid()){
         for(const proposal of annotation.prediction.proposals){
           const x=((Number(s.analysisOffset)||0)+proposal.frame/fps())/duration*width;
           ctx.fillStyle="#ffbd55";
           ctx.fillRect(x-1,y,Math.max(2,Math.ceil(dpr)),bandHeight);
         }
       }
-      if(training.active&&annotationReady()){
+      if(training.active&&timelineRallyLayers.touches.checked&&annotationReady()){
         for(const mark of annotation.data.rallies){
           const x=((Number(s.analysisOffset)||0)+mark.start/fps())/duration*width;
           const x2=((Number(s.analysisOffset)||0)+(mark.end+1)/fps())/duration*width;
@@ -2345,7 +2360,8 @@
           ctx.fillStyle="#10deb2";ctx.fillRect(x,y,Math.max(2,Math.ceil(dpr)),bandHeight);
         }
       }
-      if(overlay.flags.touches&&Array.isArray(data.touch_annotations)){
+      if(overlay.flags.touches&&(!training.active||timelineRallyLayers.touches.checked)&&
+        Array.isArray(data.touch_annotations)){
         for(const classified of [false,true]){
           for(const touch of data.touch_annotations){
             if(touch.touch_attributed!==true&&touch.contact_verified!==true)continue;
@@ -2362,7 +2378,8 @@
     $("studio-timeline-rally-key").hidden=overlay.raw||(training.active?!timelineRallyLayers.touches.checked:!overlay.flags.rallies);
     $("studio-timeline-ball-key").hidden=!training.active||overlay.raw||!timelineRallyLayers.ball.checked||
       !comparisonMatches(comparison.data)||comparison.data.trajectory_status!=="ready";
-    $("studio-timeline-touch-key").hidden=overlay.raw||!overlay.flags.touches;
+    $("studio-timeline-touch-key").hidden=overlay.raw||!overlay.flags.touches||
+      (training.active&&!timelineRallyLayers.touches.checked);
     updateTimelineProgress();
   };
   const clearTimeline=()=>{

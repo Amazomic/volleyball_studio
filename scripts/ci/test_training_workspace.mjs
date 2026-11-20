@@ -1,4 +1,4 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {fileURLToPath} from "node:url";
 import {join} from "node:path";
@@ -69,7 +69,14 @@ const context={
 const slice=js.slice(js.indexOf("  const annotationReady="),js.indexOf("  const refreshAnnotation="));
 assert.ok(slice.includes('querySelectorAll(".studio-annotation-tick,.studio-trajectory-proposal")'));
 const draw=runInNewContext(slice+"\n({drawAnnotation})",context).drawAnnotation;
+annotation.touchLayerVisible=false;
 draw();
+assert.equal(lane.querySelectorAll(".studio-annotation-tick")[0].hidden,true,
+  "Redrawing annotations must keep touch markers hidden when the checkbox is off");
+annotation.touchLayerVisible=true;
+draw();
+assert.equal(lane.querySelectorAll(".studio-annotation-tick")[0].hidden,false,
+  "Re-enabling the checkbox restores touch markers after redraw");
 assert.equal(lane.children.includes(canvas),true,"Timeline canvas is never removed");
 assert.equal(lane.children.includes(playhead),true,"Single playhead is preserved");
 assert.equal(lane.querySelectorAll(".studio-annotation-tick").length,1);

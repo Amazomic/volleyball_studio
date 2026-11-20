@@ -651,6 +651,7 @@ body[data-ui-theme="light"] #studio-preview-view #studio-timeline-middle{color:#
 #studio-preview-view .video-timeline-legend .rally-key{background:#37b9ce80;border:1px solid #4dd5e0bb}
 #studio-preview-view .video-timeline-legend .trajectory-rally-key{background:#efb15773;border:1px solid #f4c576c2}
 #studio-preview-view .video-timeline-legend .touch-key{background:#f1bd58;width:3px;height:11px}
+#studio-preview-view .video-timeline-track :is(.studio-annotation-tick,.studio-trajectory-proposal)[hidden]{display:none!important}
 /* Playback buttons replace the browser's second, native seek slider. */
 #studio-preview-view .viewer-playback-controls{
   position:absolute;z-index:4;left:10px;bottom:10px;
