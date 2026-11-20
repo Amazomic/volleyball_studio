@@ -132,14 +132,14 @@ timeline.data.touch_annotations=[
   {frame_index:45,kind:"block",ball_position_px:[30,30],contact_verified:true},
   {frame_index:45,kind:null,ball_position_px:[40,40],contact_verified:true}
 ];
-overlay.actionFlags={attack:true,block:true};
+overlay.actionFlags={attack:true,block:true,serve:true,overhead_pass:true,dig:true,low_touch:true};
 oldRecord.width=100;oldRecord.height=100;
 oldRecord.replay_sha256=timeline.data.source_replay_sha256;
 actionColors.length=0;
 scope.drawOverlay();
 assert.deepEqual(actionColors,["#ff6b6b","#c38cff","#c6bf96"],
   "Processed mode alone shows classified CPU Touchs");
-overlay.flags.players=false;overlay.actionFlags={attack:false,block:true};
+overlay.flags.players=false;overlay.actionFlags.attack=false;
 oldRecord.width=100;oldRecord.height=100;
 oldRecord.replay_sha256=timeline.data.source_replay_sha256;
 overlay.source.events=[
@@ -150,8 +150,8 @@ overlay.source.events=[
 actionColors.length=0;
 renderedLabels.length=0;
 scope.drawOverlay();
-assert.deepEqual(actionColors,["#c38cff","#c6bf96"],
-  "Processed mode hides disabled attack but renders CPU block and unclassified touch");
+assert.deepEqual(actionColors,["#c38cff"],
+  "A subset renders selected CPU block but hides attack and unclassified touch");
 assert.ok(renderedLabels.some(label=>label.startsWith("≈ Блок · ")),"Block must be labeled as such with its provisional ID");
 assert.ok(!renderedLabels.includes("Касание?"),"Legacy card touch labels are forbidden");
 timeline.data.touch_annotations=[];
@@ -161,7 +161,7 @@ assert.equal(actionColors.length,0,
   "Legacy card motion_events alone cannot create a Touch annotation");
 const initStart=js.indexOf("  if(overlay.mode){");
 const initEnd=js.indexOf("  const startOverlayFrameLoop=",initStart);
-let changed,redraws=0;
+let changed,redraws=0,timelineRedraws=0,cardRedraws=0;
 const checkbox={dataset:{overlayAction:"attack"},checked:false,addEventListener:(name,fn)=>{if(name==="change")changed=fn;}};
 const input={addEventListener(){}};
 const controls={querySelectorAll:()=>[checkbox],classList:{toggle(){},remove(){},add(){}}};
@@ -174,7 +174,8 @@ runInNewContext(js.slice(initStart,initEnd),{
   training:{active:false,panel:{classList:{add(){}}}},comparison:{epoch:0},
   annotation:{lane:{querySelectorAll:()=>[]}},hideAnnotationContext(){},trainingEditorReset(){},
   updateRawDetectorLabel(){},placeTrainingTimeline(){},
-  drawOverlay:()=>{redraws++;},drawTimeline:()=>{},
+  drawOverlay:()=>{redraws++;},drawTimeline:()=>{timelineRedraws++;},
+  refreshRallyCardTouchTicks:()=>{cardRedraws++;},updateOverlayToggles:()=>{},
   setOverlaySource:()=>{},rawFusion:()=>({id:"f"}),s:{run:"",video:""},
   timeline:{status:{textContent:""},data:null},
   ensurePreviewVideo:()=>{},prefetchOverlayAtFrame:()=>{},overlayMessage:()=>{}
@@ -182,6 +183,8 @@ runInNewContext(js.slice(initStart,initEnd),{
 changed();
 assert.equal(initOverlay.actionFlags.attack,false,"Checkbox disables the matching action");
 assert.equal(redraws,1,"Changing the checkbox redraws the player");
+assert.equal(timelineRedraws,1,"Changing the checkbox redraws timeline markers");
+assert.equal(cardRedraws,1,"Changing the checkbox redraws rally card markers");
 initOverlay.rawMode.click();
 assert.equal(initOverlay.raw,true);
 assert.equal(initOverlay.rawMode.attributes["aria-selected"],"true");

@@ -368,6 +368,7 @@
       const button=overlay[key];
       button.setAttribute("aria-pressed",String(overlay.flags[key]));
     }
+    overlay.actionControls.classList.toggle("hidden",overlay.raw||!overlay.flags.touches);
   };
   updateOverlayToggles();
   const overlayMessage=text=>{
@@ -622,6 +623,8 @@
   };
   // The timeline belongs to the selected saved CPU postprocessing snapshot.
   // Raw GPU detections and limited rally-card motion_events are never Touchs.
+  const showCpuTouchType=kind=>Object.hasOwn(cpuTouchStyle,kind)?
+    overlay.actionFlags[kind]===true:Object.values(overlay.actionFlags).every(Boolean);
   const cpuTouchesForFrame=(project,run,video,sha,frame)=>{
     const data=timeline.data;
     if(!data||data.schema!=="volley-native-rally-timeline/1"||
@@ -644,7 +647,7 @@
     const events=cpuTouchesForFrame(project,run,video,record.replay_sha256,frame);
     for(const event of events){
       const kind=event.kind;
-      if(kind&&(!Object.hasOwn(cpuTouchStyle,kind)||!overlay.actionFlags[kind]))continue;
+      if(!showCpuTouchType(kind))continue;
       if(!Array.isArray(event.ball_position_px)||event.ball_position_px.length!==2)continue;
       const [bx,by]=event.ball_position_px;
       if(!Number.isFinite(bx)||!Number.isFinite(by)||
@@ -1016,6 +1019,7 @@
       try{localStorage.setItem("volley:preview-overlays:v2",JSON.stringify(overlay.flags));}catch{}
       drawOverlay();
       drawTimeline();
+      if(key==="touches")refreshRallyCardTouchTicks();
     });
   }
   // Manual examples are audited in Rust; the browser only selects the saved
@@ -2077,7 +2081,7 @@
       overlay.mode.setAttribute("aria-selected",String(!raw));
       overlay.rawMode.setAttribute("aria-selected",String(raw));
       overlay.rawControls.classList.toggle("hidden",!raw);
-      overlay.actionControls.classList.toggle("hidden",raw);
+      updateOverlayToggles();
       overlay.mode.closest(".video-overlay-toggles").classList.toggle("raw-selected",raw);
       setOverlaySource(raw||s.run?{}:null);
       if(raw&&s.video){ensurePreviewVideo();prefetchOverlayAtFrame(0);}
@@ -2089,6 +2093,7 @@
         timeline.data.rallies.length+" розыгрышей · "+timeline.data.touch_annotations.filter(event=>event.touch_attributed===true||event.contact_verified===true).length+" касаний (CPU)";
       placeTrainingTimeline(false);
       drawTimeline();
+      refreshRallyCardTouchTicks();
       drawOverlay();
     };
     overlay.mode.addEventListener("click",()=>selectMode(false));
@@ -2101,7 +2106,6 @@
       overlay.mode.setAttribute("aria-selected","false");
       overlay.rawMode.setAttribute("aria-selected","false");
       overlay.rawControls.classList.add("hidden");
-      overlay.actionControls.classList.remove("hidden");
       training.panel.classList.remove("hidden");
       placeTrainingTimeline(true);
       annotationFocus();
@@ -2124,7 +2128,7 @@
     for(const input of [overlay.rawVballVisible,overlay.rawPeopleVisible,overlay.rawPlayerInterpolated,overlay.rawPoseVisible,overlay.rawBallTrail].filter(Boolean))
       input.addEventListener("change",drawOverlay);
     for(const input of overlay.actionControls.querySelectorAll("[data-overlay-action]")){
-      input.addEventListener("change",()=>{overlay.actionFlags[input.dataset.overlayAction]=input.checked;drawOverlay();});
+      input.addEventListener("change",()=>{overlay.actionFlags[input.dataset.overlayAction]=input.checked;drawOverlay();drawTimeline();refreshRallyCardTouchTicks();});
     }
   }
   const startOverlayFrameLoop=()=>{
@@ -2299,7 +2303,7 @@
           for(const touch of data.touch_annotations){
             if(touch.touch_attributed!==true&&touch.contact_verified!==true)continue;
             const style=cpuTouchStyle[touch.kind];
-            if(Boolean(style)!==classified||style&&!overlay.actionFlags[touch.kind])continue;
+            if(Boolean(style)!==classified||!showCpuTouchType(touch.kind))continue;
             const x=Math.floor(((Number(s.analysisOffset)||0)+Number(touch.frame_index)/fps())/duration*width);
             if(!Number.isFinite(x)||x<0||x>=width)continue;
             ctx.fillStyle=style?style[0]:"#c6bf96";
@@ -3036,6 +3040,7 @@
       let count=0;
       for(const event of touches){
         if(event.frame_index<start||event.frame_index>end)continue;
+        if(overlay.raw||!overlay.flags.touches||!showCpuTouchType(event.kind))continue;
         const [color,label]=cpuTouchStyle[event.kind]||["#c6bf96","Касание без типа"];
         const tick=make("span","rally-card-touch-tick");
         tick.style.left=(100*(event.frame_index-start)/duration)+"%";
