@@ -56,7 +56,9 @@ const timeline={data:{
 const ui={video:{currentTime:3.333,addEventListener(){}}};
 let drawn=0;
 const context={
-  $,s,timeline,ui,comparison:{data:null},comparisonMatches:()=>false,
+  $,s,timeline,ui,comparison:{data:null,mode:{value:"continuous"},
+    minSeconds:{value:"1.5"}},comparisonMatches:()=>false,
+  trainingGapSeconds:()=>4,
   document:{createElement:()=>new Element()},
   window:{crypto:{randomUUID:()=>`00000000-0000-4000-8000-${String(++uuid).padStart(12,"0")}`},
     addEventListener(){},confirm:()=>true,VolleyballTasks:{
@@ -75,6 +77,7 @@ const context={
       return {schema:"volley-trajectory-touch-proposals/1",project_id:"p",
         rally_run_id:"r",video:"match.mp4",total_frames:200,
         source_replay_sha256:"a".repeat(64),
+        rally_count:1,rally_intervals:[{start:95,end:150}],
         proposals:calculations.length===1?
           [{frame:100,score:9},{frame:140,score:3}]:
           [{frame:102,score:9}],
@@ -95,8 +98,8 @@ const start=js.indexOf("  const annotation={");
 const end=js.indexOf("  const comparison={",start);
 assert.ok(start>0&&end>start);
 const api=runInNewContext(js.slice(start,end)+
-  "\n({annotation,drawAnnotation,refreshAnnotation,editAnnotation})",context);
-const {annotation,refreshAnnotation,editAnnotation}=api;
+  "\n({annotation,drawAnnotation,refreshAnnotation,editAnnotation,invalidateTrainingTouchPrediction})",context);
+const {annotation,refreshAnnotation,editAnnotation,invalidateTrainingTouchPrediction}=api;
 
 await refreshAnnotation();
 assert.equal(annotation.data.revision,0);
@@ -104,6 +107,8 @@ assert.equal(annotation.calculate.disabled,false);
 assert.equal(annotation.save.disabled,true);
 await elements.get("studio-annotation-calculate").click();
 assert.equal(calculations.length,1);
+assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].rally)),
+  {mode:"continuous",merge_gap_seconds:4,min_trajectory_seconds:1.5});
 assert.equal(annotation.prediction.proposals.length,2);
 assert.equal(elements.get("studio-annotation-seed-trajectory").disabled,false);
 assert.equal(elements.get("studio-trajectory-proposal"),undefined);
@@ -135,6 +140,8 @@ assert.equal(calculations.length,2);
 assert.equal(annotation.prediction.calibration.shift_frames,2);
 assert.equal(annotation.prediction.calibration.training_videos,1);
 assert.equal(annotation.prediction.proposals[0].frame,102);
+invalidateTrainingTouchPrediction();
+assert.equal(annotation.prediction,null,"Changed rally settings must invalidate old touch candidates");
 assert.ok(drawn>=4);
 assert.ok(logs.some(entry=>entry.key==="training-trajectory"));
 assert.ok(logs.some(entry=>entry.key==="training-annotation"));
