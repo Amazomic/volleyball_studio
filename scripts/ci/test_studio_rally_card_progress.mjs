@@ -53,7 +53,17 @@ const {rallyClipFrames,refreshRallyCardTouchTicks,updateRallyCardProgress,cpuTou
 assert.equal(JSON.stringify(rallyClipFrames({
   detected_start_frame:90,detected_end_frame:160,
   manual_clip:{start_frame:100,end_frame:149},
-})),JSON.stringify({start:100,end:149}));
+})),JSON.stringify({start:90,end:160}),
+"Preview must use detected boundaries rather than padded montage boundaries");
+assert.equal(JSON.stringify(rallyClipFrames({
+  detected_start_frame:174,detected_end_frame:366,
+  manual_clip:{start_frame:129,end_frame:411}
+})),JSON.stringify({start:174,end:366}),
+"Live 30 FPS run: preview start must match timeline at 5.8 s, not montage at 4.3 s");
+assert.equal(JSON.stringify(rallyClipFrames({
+  start_frame:912,end_frame:1440
+})),JSON.stringify({start:912,end:1440}),
+"Full CPU timeline items use the same start/end frame fields");
 
 const markers=make("span","rally-card-progress-markers");
 const progress=make("div","rally-card-progress");
@@ -108,7 +118,7 @@ assert.match(source,/refreshRallyCardTouchTicks\(\);updateRallyCardProgress\(\)/
 const viewStart=source.indexOf("  const view=(item,requestedTime=null)=>");
 const viewEnd=source.indexOf("  const cards=()=>{",viewStart);
 assert.ok(viewStart>=0&&viewEnd>viewStart,"Rally view handler must exist");
-let playCalls=0;
+let playCalls=0,drawnPosition=NaN;
 const viewContext={
   s:current,ui:{
     video:{
@@ -122,14 +132,18 @@ const viewContext={
   clock:frame=>(frame/10).toFixed(1),rallyClipFrames,
   rallyCardProgresses, cards(){throw Error("An active card must not rebuild");},
   renderRallyTouches(){},setOverlaySource(){},prefetchOverlayAtFrame(){},
-  drawTimeline(){},previewIsVisible:()=>true,message(){},
+  drawTimeline(){drawnPosition=viewContext.ui.video.currentTime;},
+  previewIsVisible:()=>true,message(){},
   url:path=>path,
 };
 runInNewContext(source.slice(viewStart,viewEnd)+"\nthis.view=view;",viewContext);
-const rally={candidate_id:"rally-a",detected_start_frame:100,detected_end_frame:149};
+const rally={candidate_id:"rally-a",detected_start_frame:100,detected_end_frame:149,
+  manual_clip:{start_frame:85,end_frame:165}};
 current.playbackMode="sequence";
 viewContext.view(rally,12.5);
 assert.equal(viewContext.ui.video.currentTime,12.5);
+assert.equal(drawnPosition,12.5,
+  "Full-video playhead must redraw after actual seek, not at the prior timestamp");
 assert.equal(current.seekAt,12.5);
 assert.equal(current.clipStart,10);
 assert.equal(current.clipEnd,15);
@@ -142,6 +156,22 @@ viewContext.view(rally);
 assert.equal(viewContext.ui.video.currentTime,10,
   "Clicking the card body should still start at the beginning");
 assert.equal(playCalls,3);
+assert.equal(drawnPosition,10,"Click must immediately align the playhead with detected start");
 assert.ok(source.includes('event.target?.closest?.(".rally-card-progress")'),
   "Global media shortcuts must defer to the focused card slider");
-console.log("Rally card markers, palette, manual clip and interactive playback: OK");
+const nextStart=source.indexOf("  const nextRally=()=>{");
+const nextEnd=source.indexOf("  const onRallyBoundary=()=>{",nextStart);
+assert.ok(nextStart>0&&nextEnd>nextStart);
+const rowA={candidate_id:"a",detected_start_frame:174,detected_end_frame:366,
+  manual_clip:{start_frame:129,end_frame:411}};
+const rowB={candidate_id:"b",detected_start_frame:533,detected_end_frame:656,
+  manual_clip:{start_frame:488,end_frame:701}};
+const nextContext={
+  s:{project:"p",run:"r",current:"",analysisOffset:0,clipEnd:520/30,
+    items:[rowA,rowB]},
+  timeline:{data:null},ui:{video:{currentTime:520/30}},fps:()=>30,
+};
+runInNewContext(source.slice(nextStart,nextEnd)+"\nthis.nextRally=nextRally;",nextContext);
+assert.equal(nextContext.nextRally().candidate_id,"b",
+  "Sequence mode must choose the next detected boundary, not its 45-frame montage lead-in");
+console.log("Rally preview: detected boundaries align with timeline, padded manual clips preserved for montage, seek/redraw and sequence: OK");

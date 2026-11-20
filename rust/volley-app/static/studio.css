@@ -605,7 +605,7 @@ body[data-ui-theme="light"] .analysis-run-log-output{background:#101c2a;color:#d
 
 /* Source-scoped whole-video timeline: overview above metadata, below the player. */
 #studio-preview-view .video-timeline{
-  grid-area:timeline;min-width:0;width:100%;
+  grid-area:timeline;grid-column:1 / -1;min-width:0;width:100%;
   margin:0;padding:14px 17px 12px;
   border:0;border-top:1px solid #2d4058;border-radius:0;background:transparent;
 }
@@ -1804,6 +1804,17 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 #studio-preview-view.training-workspace .video-timeline-legend{flex-wrap:wrap}
 @media(max-width:650px){.studio-training-compare-row{grid-template-columns:1fr;gap:4px}.studio-training-comparison{padding:12px}.studio-training-compare-controls label{min-width:115px}}
 
+#studio-preview-view.training-workspace .viewer-layout{
+  grid-template-areas:"player list" "timeline timeline" "training training";
+}
+#studio-preview-view.training-workspace .studio-training-panel{
+  grid-area:training;min-width:0;
+}
+@media(max-width:780px){
+  #studio-preview-view.training-workspace .viewer-layout{
+    grid-template-areas:"player" "timeline" "list" "training";
+  }
+}
 #studio-preview-view .studio-training-video-actions{display:none}
 #studio-preview-view.training-workspace .studio-training-video-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 #studio-preview-view.training-workspace .viewer-head{align-items:center;flex-wrap:wrap;gap:9px}

@@ -13,7 +13,16 @@ assert.ok(!html.includes('id="studio-annotation-touch-lane"'),"Training has no d
 assert.equal([...html.matchAll(/id="studio-timeline-track"/g)].length,1,"One shared seek ruler");
 assert.ok(html.indexOf('id="studio-timeline"')>html.indexOf('id="studio-video"'));
 assert.ok(js.includes('lane:$("studio-timeline-track")'),"Annotation ticks use the shared timeline");
-assert.ok(js.includes('if(active)training.panel.before(element)'),"Training ruler is placed under video");
+assert.ok(!js.includes('training.panel.before(element)'),
+  "Training must not relocate the full-width ruler into the player column");
+assert.ok(js.includes('if(element.parentElement!==layout)layout.append(element)'),
+  "Training and preview must keep the shared ruler in the two-column workspace");
+assert.ok(css.includes('grid-area:timeline;grid-column:1 / -1;min-width:0;width:100%'),
+  "Full-video ruler must span the entire width of the viewer workspace");
+assert.ok(css.includes('grid-template-areas:"player list" "timeline timeline" "training training"'),
+  "The training editor must follow the full-width ruler instead of preceding it");
+assert.ok(css.includes('grid-template-areas:"player" "timeline" "list" "training"'),
+  "Narrow screens must retain the timeline immediately under the video");
 assert.match(js,/training\.panel\.classList\.add\("hidden"\);\s*if\(annotation\.priorFlags\)/,
   "Leaving training clears its interactive ticks");
 
@@ -91,4 +100,36 @@ assert.deepEqual(seeks,[]);
 draw();
 assert.equal(lane.children.filter(row=>!row.removed&&row===canvas).length,1);
 
-console.log("Training workspace: one ruler under video, browse and update examples: OK");
+const layout={children:[],append(element){
+  if(element.parentElement&&element.parentElement!==this)
+    element.parentElement.children=element.parentElement.children.filter(node=>node!==element);
+  element.parentElement=this;
+  if(!this.children.includes(element))this.children.push(element);
+},querySelector:selector=>selector===".viewer-panel"?player:null};
+const player={children:[],append:layout.append};
+const ruler={parentElement:player};
+const trainingPanel={parentElement:player};
+player.children.push(ruler,trainingPanel);
+let redraws=0;
+const timelineStart=js.indexOf("  const placeTrainingTimeline=");
+const timelineEnd=js.indexOf("  const timeLabel=",timelineStart);
+const {placeTrainingTimeline}=runInNewContext(
+  js.slice(timelineStart,timelineEnd)+"\n({placeTrainingTimeline})",{
+    $:id=>id==="studio-timeline"?ruler:null,
+    training:{panel:trainingPanel},
+    document:{querySelector:selector=>
+      selector==="#studio-preview-view .viewer-layout"?layout:null},
+    requestAnimationFrame:fn=>fn(),
+    drawTimeline:()=>{redraws++;}
+  }
+);
+placeTrainingTimeline(true);
+assert.equal(ruler.parentElement,layout,"Training ruler must span the full viewer width");
+assert.equal(player.children.includes(ruler),false);
+assert.equal(trainingPanel.parentElement,layout,"Editor goes below the full-width ruler");
+assert.deepEqual(layout.children,[ruler,trainingPanel],"Training order: player/list, timeline, editor");
+placeTrainingTimeline(false);
+assert.equal(layout.children.length,1,"Preview/training must not create duplicate rulers");
+assert.equal(trainingPanel.parentElement,player,"Leaving training restores original editor parent");
+assert.equal(redraws,2,"Switching both modes must recalculate timeline canvas dimensions");
+console.log("Training workspace: one full-width ruler, no duplicate seek track, browse and update examples: OK");

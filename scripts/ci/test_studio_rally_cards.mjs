@@ -27,6 +27,7 @@ const list=element("div","rally-grid");
 const ui={list,video:{currentTime:0},caption:{textContent:""},previous:{disabled:false},next:{disabled:false}};
 const s={items:[{
   candidate_id:"a".repeat(24),detected_start_frame:1263,detected_end_frame:1592,
+  manual_clip:{start_frame:1218,end_frame:1637},
   motion_event_count:7,motion_supported_touch_proposals:7,
   provisional_track_ids:[4,4,9],ball_coverage:0.8,
   estimated_action_counts:{attack:3,dig:2},unclassified_action_count:2,
@@ -58,6 +59,8 @@ progress.listeners.click({
 assert.equal(bubbling,true,"Card time clicks must not bubble into the card-start handler");
 assert.equal(playbackCalls.length,1);
 assert.equal(playbackCalls[0][0],s.items[0]);
+assert.equal(playbackCalls[0][1],(1263+330/2)/30,
+  "Card progress uses detected range, not the 45-frame montage padding");
 assert.ok(Math.abs(playbackCalls[0][1]-(1263+330/2)/30)<0.00001,
   "Clicking the center of a card must seek to the center of its detected clip");
 playbackCalls.length=0;

@@ -2269,9 +2269,15 @@
     layer.addEventListener("change",updateTrainingRallyLayers);
   const rallyCardProgresses=new Map();
   const placeTrainingTimeline=active=>{
+    // The single timeline spans both columns, directly under the player and list.
+    // Move the editor below it in training; restore its original parent on exit.
     const element=$("studio-timeline");
-    if(active)training.panel.before(element);
-    else document.querySelector("#studio-preview-view .viewer-layout").append(element);
+    const layout=document.querySelector("#studio-preview-view .viewer-layout");
+    const player=layout.querySelector(".viewer-panel");
+    if(element.parentElement!==layout)layout.append(element);
+    if(active){
+      if(training.panel.parentElement!==layout)layout.append(training.panel);
+    }else if(training.panel.parentElement!==player)player.append(training.panel);
     requestAnimationFrame(drawTimeline);
   };
   const timeLabel=value=>{
@@ -2449,10 +2455,7 @@
       if(s.current){
         const selected=s.items.find(item=>item.candidate_id===s.current);
         if(selected){
-          const start=Number(selected.manual_clip?.start_frame??
-            selected.detected_start_frame??selected.start_frame??0);
-          const end=Number(selected.manual_clip?.end_frame??
-            selected.detected_end_frame??selected.end_frame??0);
+          const {start,end}=rallyClipFrames(selected);
           renderRallyTouches(selected,start,end);
         }
       }
@@ -3104,11 +3107,13 @@
   };
   // Card timelines use the same authoritative CPU Touchs and palette as the video.
   // The short motion_events preview is not a source of contact markers.
+  // Preview follows the highlighted detection on the full-video timeline.
+  // manual_clip carries deliberate montage padding and must not shift playback.
   const rallyClipFrames=item=>({
-    start:Number(item.manual_clip?.start_frame??
-      item.detected_start_frame??item.start_frame??0),
-    end:Number(item.manual_clip?.end_frame??
-      item.detected_end_frame??item.end_frame??0)
+    start:Number(item.detected_start_frame??item.start_frame??
+      item.manual_clip?.start_frame??0),
+    end:Number(item.detected_end_frame??item.end_frame??
+      item.manual_clip?.end_frame??0)
   });
   const refreshRallyCardTouchTicks=()=>{
     const data=timeline.data;
@@ -3224,7 +3229,6 @@
     overlay.presentedTime=null;
     setOverlaySource(item);
     prefetchOverlayAtFrame(Math.max(0,Math.floor((s.seekAt-(Number(s.analysisOffset)||0))*fps())));
-    drawTimeline();
     let deferredPlay=false;
     if(s.videoKey!==key){
       s.videoKey=key;
@@ -3233,6 +3237,9 @@
     }else if(ui.video.readyState>=1){
       try{ui.video.currentTime=s.seekAt;}catch{}
     }
+    // Draw only after seeking; otherwise the playhead temporarily shows the
+    // previously played position instead of the selected rally start.
+    drawTimeline();
     // Metadata/seek is restored by loadedmetadata without background playback.
     if(previewIsVisible()&&!deferredPlay)ui.video.play().catch(error=>
       message("Воспроизведение недоступно: "+error.message,"error"));
@@ -3849,8 +3856,8 @@
     // The full CPU timeline is authoritative; filtered/paginated cards are only a fallback.
     const rows=timeline.data?.project_id===s.project&&
       timeline.data?.rally_run_id===s.run?timeline.data.rallies:s.items;
-    const start=row=>Number(row.manual_clip?.start_frame??
-      row.detected_start_frame??row.start_frame??Infinity);
+    const start=row=>Number(row.detected_start_frame??row.start_frame??
+      row.manual_clip?.start_frame??Infinity);
     const ordered=[...rows].filter(row=>Number.isFinite(start(row)))
       .sort((a,b)=>start(a)-start(b));
     const index=ordered.findIndex(row=>row.candidate_id===s.current);
