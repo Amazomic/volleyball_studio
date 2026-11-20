@@ -37,6 +37,66 @@ pub(crate) struct PreliminaryRallyScope {
     pub intervals: Vec<(u64, u64)>,
 }
 
+pub(crate) fn continuous_ball_intervals(
+    source: &Path,
+    expected_sha: &str,
+    frames: u64,
+    min_score: f64,
+    min_seconds: f64,
+) -> Result<Vec<(u64, u64)>, String> {
+    if frames == 0
+        || !min_score.is_finite()
+        || !(0.01..=1.0).contains(&min_score)
+        || !min_seconds.is_finite()
+        || !(0.1..=120.0).contains(&min_seconds)
+    {
+        return Err("Invalid continuous ball trajectory settings".into());
+    }
+    let minimum_frames = (min_seconds * 30.0).floor() as u64 + 1;
+    let mut reader = BoundedReader::open(source)?;
+    let mut intervals = Vec::new();
+    let mut started = None::<u64>;
+    let mut close = |end: u64, started: &mut Option<u64>| {
+        if let Some(start) = started.take() {
+            if end >= start && end - start + 1 >= minimum_frames {
+                intervals.push((start, end));
+            }
+        }
+    };
+    for frame in 0..frames {
+        let line = reader.line()?.ok_or("Truncated continuous ball source")?;
+        let row: BallOnlyFrame =
+            serde_json::from_slice(&line).map_err(|_| "Malformed continuous ball source")?;
+        if row.frame_index != frame {
+            return Err("Continuous ball source frames out of order".into());
+        }
+        let present = row.selected_ball.as_ref().is_some_and(|ball| {
+            let bbox = &ball.detection.bbox_xyxy_norm;
+            ball.source_model == "vballnet"
+                && ball.detection.score.is_finite()
+                && ball.detection.score >= min_score
+                && bbox
+                    .iter()
+                    .all(|coord| coord.is_finite() && (0.0..=1.0).contains(coord))
+                && bbox[0] < bbox[2]
+                && bbox[1] < bbox[3]
+        });
+        if present {
+            started.get_or_insert(frame);
+        } else if frame > 0 {
+            close(frame - 1, &mut started);
+        }
+    }
+    close(frames - 1, &mut started);
+    if reader.line()?.is_some() || reader.finish() != expected_sha {
+        return Err("Continuous ball source SHA-256 mismatch".into());
+    }
+    if intervals.len() > 4096 {
+        return Err("Too many continuous ball intervals".into());
+    }
+    Ok(intervals)
+}
+
 pub(crate) fn preliminary_rally_scope(
     source: &Path,
     expected_sha: &str,
@@ -353,6 +413,45 @@ mod tests {
     use super::*;
     use serde_json::json;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn continuous_ball_requires_more_than_threshold_without_dropped_frames() {
+        let root = std::env::temp_dir().join(format!("continuous-ball-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("tracked.jsonl");
+        let mut bytes = Vec::new();
+        for frame in 0..310_u64 {
+            let present = frame < 90
+                || (100..191).contains(&frame)
+                || ((200..310).contains(&frame) && frame != 260);
+            let score = if frame == 220 { 0.2 } else { 0.9 };
+            bytes.extend(
+                serde_json::to_vec(&json!({
+                    "frame_index":frame,
+                    "selected_ball":if present {Some(json!({
+                        "source_model":"vballnet",
+                        "detection":{"score":score,"bbox_xyxy_norm":[0.4,0.4,0.5,0.5]}
+                    }))} else {None}
+                }))
+                .unwrap(),
+            );
+            bytes.push(b'\n');
+        }
+        fs::write(&path, &bytes).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        assert_eq!(
+            continuous_ball_intervals(&path, &sha, 310, 0.35, 3.0).unwrap(),
+            vec![(100, 190)]
+        );
+        assert_eq!(
+            continuous_ball_intervals(&path, &sha, 310, 0.35, 1.0).unwrap(),
+            vec![(0, 89), (100, 190), (221, 259), (261, 309)]
+        );
+        assert!(continuous_ball_intervals(&path, &"0".repeat(64), 310, 0.35, 1.0).is_err());
+        assert!(continuous_ball_intervals(&path, &sha, 310, 0.35, f64::NAN).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn preliminary_ball_only_reversals_define_gameplay_scope_without_player_tracks() {

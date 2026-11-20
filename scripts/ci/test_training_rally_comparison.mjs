@@ -13,7 +13,9 @@ for(const id of ["studio-comparison-recalculate","studio-comparison-status",
   "studio-comparison-metrics","studio-comparison-differences",
   "studio-comparison-min-impacts","studio-comparison-context",
   "studio-comparison-duration","studio-comparison-gap","studio-comparison-filter",
-  "studio-comparison-calibrate"]){
+  "studio-comparison-calibrate","studio-comparison-mode",
+  "studio-comparison-min-seconds","studio-comparison-impact-settings",
+  "studio-comparison-continuous-settings"]){
   assert.ok(html.includes('id="'+id+'"'),"Missing comparison control: "+id);
 }
 assert.equal((html.match(/id="studio-timeline-track"/g)||[]).length,1);
@@ -170,4 +172,40 @@ assert.equal(elements.get("studio-comparison-touches").children.filter(row=>
 "Raw trajectory impacts outside accepted rallies must remain inspectable");
 assert.match(elements.get("studio-comparison-differences").textContent,/порог/);
 assert.match(html,/id="studio-comparison-gap"[^>]*max="900"/);
-console.log("Training comparison: source guard, editable params, separate timeline overlays and discrepancy navigation: OK");
+assert.match(html,/id="studio-comparison-mode"/);
+assert.match(html,/id="studio-comparison-impact-settings"[^>]*hidden/);
+assert.match(html,/id="studio-comparison-min-seconds"[^>]*value="3"/);
+comparison.mode.value="continuous";
+comparison.minSeconds.value="3.5";
+renderComparison();
+assert.equal(comparison.impactSettings.hidden,true);
+assert.equal(comparison.continuousSettings.hidden,false);
+assert.equal(comparison.recalculate.textContent,"Смоделировать розыгрыши");
+assert.equal(comparison.calibrate.disabled,true);
+assert.equal(comparison.minImpacts.disabled,true);
+assert.equal(comparison.minSeconds.disabled,false);
+context.request=async value=>{
+  queries.push(value.query);
+  return {...saved,mode:"continuous",trajectory_status:"ready",
+    trajectory_rallies:[{start:100,end:191}],trajectory_impacts:[],
+    simulated_touch_candidates:[],unassigned_touch_candidates:[],
+    metrics:{cpu_trajectory:{matched:0,missed:2,extra:1,f1:0},
+      cpu_reference:null,trajectory_reference:null},
+    parameters:{min_trajectory_seconds:3.5}};
+};
+await refreshComparison(true);
+assert.equal(queries.at(-1).mode,"continuous");
+assert.equal(queries.at(-1).min_trajectory_seconds,3.5);
+assert.equal(Object.hasOwn(queries.at(-1),"min_impacts"),false);
+assert.equal(Object.hasOwn(queries.at(-1),"context_frames"),false);
+assert.equal(Object.hasOwn(queries.at(-1),"max_touch_gap_frames"),false);
+assert.match(elements.get("studio-simulation-summary").textContent,/Непрерывная траектория/);
+assert.doesNotMatch(elements.get("studio-simulation-summary").textContent,/касаний/);
+comparison.mode.value="impacts";
+renderComparison();
+assert.equal(comparison.impactSettings.hidden,false);
+assert.equal(comparison.continuousSettings.hidden,true);
+assert.equal(comparison.recalculate.textContent,"Смоделировать розыгрыши и касания");
+assert.equal(comparison.minSeconds.disabled,true);
+assert.equal(comparison.minImpacts.disabled,false);
+console.log("Training comparison: source guard, two exclusive modes, separate parameters and discrepancy navigation: OK");
