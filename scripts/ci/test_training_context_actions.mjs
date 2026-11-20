@@ -10,6 +10,8 @@ assert.match(html,/id="studio-comparison-recalculate">Смоделировать
 assert.ok(html.includes('id="studio-annotation-context-actions"'));
 assert.ok(css.includes(".video-wrap.training-annotation #studio-video-overlay"));
 assert.ok(js.includes("showAnnotationContext(item.frame,e,item.id)"));
+assert.ok(js.includes('overlay.canvas.addEventListener("contextmenu"'));
+assert.ok(js.includes('timeline.track.addEventListener("contextmenu"'));
 assert.ok(js.includes("comparison.data.simulated_touch_candidates"));
 
 class Node {
@@ -102,4 +104,18 @@ assert.deepEqual(JSON.parse(JSON.stringify(input.at(-1).fields)),{start:200,end:
 showAnnotationContext(300,{});
 keys({key:"Escape"});
 assert.equal(elements.get("studio-annotation-context").classList.contains("hidden"),true);
-console.log("Training context actions: video click, simulated touch confirmation, manual touch, rally bounds, keyboard dismissal: OK");
+canvas.listeners.click({});
+assert.equal(elements.get("studio-annotation-context").classList.contains("hidden"),true,
+  "Ordinary left click must never open the action menu");
+let prevented=false;
+canvas.listeners.contextmenu({preventDefault(){prevented=true;},clientX:240,clientY:130});
+assert.equal(prevented,true);
+assert.equal(elements.get("studio-annotation-context").classList.contains("hidden"),false,
+  "Right click opens the annotation actions");
+keys({key:"Escape"});
+assert.equal(elements.get("studio-annotation-context").classList.contains("hidden"),true);
+context.training.poseAdvanced.open=true;
+canvas.listeners.contextmenu({preventDefault(){throw Error("Do not intercept pose context menu");}});
+assert.equal(elements.get("studio-annotation-context").classList.contains("hidden"),true,
+  "Right click must not enter annotation mode while pose editing");
+console.log("Training context actions: right-click only, candidate confirmation, manual touch, rally bounds and Escape: OK");

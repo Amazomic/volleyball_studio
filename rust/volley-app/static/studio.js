@@ -1295,8 +1295,11 @@
         marker.title="Прогноз мяча · кадр "+item.frame+" · сигнал "+Number(item.score).toFixed(2);
         marker.setAttribute("aria-label",marker.title);
         marker.addEventListener("click",event=>{
-          event.stopPropagation();seekTimeline(item.frame/fps());
-          showAnnotationContext(item.frame,event);
+          event.stopPropagation();seekTimeline(item.frame/fps());hideAnnotationContext();
+        });
+        marker.addEventListener("contextmenu",event=>{
+          event.preventDefault();event.stopPropagation();
+          seekTimeline(item.frame/fps());showAnnotationContext(item.frame,event);
         });
         annotation.lane.append(marker);
       }
@@ -1347,13 +1350,21 @@
         pointer=null;
         if(destination!==item.frame)editAnnotation("move_touch",{id:item.id,frame:destination});
         else {
-          seekTimeline(item.frame/fps());drawAnnotation();
-          showAnnotationContext(item.frame,e,item.id);
+          seekTimeline(item.frame/fps());drawAnnotation();hideAnnotationContext();
         }
       });
       tick.addEventListener("pointercancel",e=>{e.stopPropagation();pointer=null;drawAnnotation();});
       tick.addEventListener("click",e=>e.stopPropagation());
+      tick.addEventListener("contextmenu",e=>{
+        e.preventDefault();e.stopPropagation();
+        annotation.touchId=item.id;seekTimeline(item.frame/fps());
+        showAnnotationContext(item.frame,e,item.id);
+      });
       tick.addEventListener("keydown",e=>{
+        if(e.key==="ContextMenu"||(e.shiftKey&&e.key==="F10")){
+          e.preventDefault();annotation.touchId=item.id;
+          showAnnotationContext(item.frame,{},item.id);return;
+        }
         if(e.key==="ArrowLeft"||e.key==="ArrowRight"){
           e.preventDefault();
           annotation.touchId=item.id;
@@ -1371,7 +1382,11 @@
       row.title="Выбрать касание и перейти к нему";
       row.addEventListener("click",()=>{
         annotation.touchId=item.id;seekTimeline(item.frame/fps());drawAnnotation();
-        showAnnotationContext(item.frame,{},item.id);
+        hideAnnotationContext();
+      });
+      row.addEventListener("contextmenu",event=>{
+        event.preventDefault();annotation.touchId=item.id;
+        seekTimeline(item.frame/fps());showAnnotationContext(item.frame,event,item.id);
       });
       annotation.touchList.append(row);
     }
@@ -1386,8 +1401,11 @@
         annotationClock(item.end);
       jump.addEventListener("click",()=>{
         annotation.rallyId=item.id;annotation.pendingStart=null;
-        seekTimeline(item.start/fps());drawAnnotation();
-        showAnnotationContext(item.start,{});
+        seekTimeline(item.start/fps());drawAnnotation();hideAnnotationContext();
+      });
+      jump.addEventListener("contextmenu",event=>{
+        event.preventDefault();annotation.rallyId=item.id;
+        seekTimeline(item.start/fps());showAnnotationContext(item.start,event);
       });
       const remove=document.createElement("button");remove.type="button";
       remove.className="secondary";remove.textContent="×";remove.title="Удалить розыгрыш";
@@ -1733,9 +1751,9 @@
         button.className="studio-simulated-touch";
         button.textContent="◉ "+comparisonTime(frame);
         button.title="Перейти к кандидату касания (не подтверждён)";
-        button.addEventListener("click",()=>{
-          seekTimeline(frame/fps());
-          showAnnotationContext(frame,{});
+        button.addEventListener("click",()=>seekTimeline(frame/fps()));
+        button.addEventListener("contextmenu",event=>{
+          event.preventDefault();seekTimeline(frame/fps());showAnnotationContext(frame,event);
         });
         comparison.touches.append(button);
       }
@@ -1748,9 +1766,9 @@
           button.className="studio-simulated-touch";
           button.textContent="◌ "+comparisonTime(frame);
           button.title="Проверить перегиб мяча вне розыгрыша (не подтверждённое касание)";
-          button.addEventListener("click",()=>{
-            seekTimeline(frame/fps());
-            showAnnotationContext(frame,{});
+          button.addEventListener("click",()=>seekTimeline(frame/fps()));
+          button.addEventListener("contextmenu",event=>{
+            event.preventDefault();seekTimeline(frame/fps());showAnnotationContext(frame,event);
           });
           comparison.touches.append(button);
         }
@@ -2001,8 +2019,12 @@
   document.addEventListener("keydown",event=>{
     if(event.key==="Escape")hideAnnotationContext();
   });
-  overlay.canvas.addEventListener("click",event=>{
-    if(!training.active||training.poseAdvanced.open||!s.run)return;
+  overlay.canvas.addEventListener("click",()=>{
+    if(training.active&&!training.poseAdvanced.open)hideAnnotationContext();
+  });
+  overlay.canvas.addEventListener("contextmenu",event=>{
+    if(!training.active||training.poseAdvanced.open||!s.run||!s.video)return;
+    event.preventDefault();
     showAnnotationContext(annotationFrame(),event);
   });
   const pickTrainingPlayer=event=>{
@@ -2210,6 +2232,12 @@
     middle:$("studio-timeline-middle"),end:$("studio-timeline-end"),
     data:null,epoch:0,dragging:false
   };
+  const timelineRallyLayers={
+    touches:$("studio-training-rallies-by-touches"),
+    ball:$("studio-training-rallies-by-trajectory")
+  };
+  for(const layer of Object.values(timelineRallyLayers))
+    layer.addEventListener("change",()=>drawTimeline());
   const rallyCardProgresses=new Map();
   const placeTrainingTimeline=active=>{
     const element=$("studio-timeline");
@@ -2262,28 +2290,29 @@
     const data=timeline.data,duration=timelineDuration();
     if(!overlay.raw&&data&&duration){
       // A single shared seek lane: Touch ticks are overlaid on rally bands.
-      if(overlay.flags.rallies){
+      if((training.active?timelineRallyLayers.touches.checked:overlay.flags.rallies)){
         for(const rally of data.rallies){
           const start=(Number(s.analysisOffset)||0)+Number(rally.start_frame)/fps(),
             end=(Number(s.analysisOffset)||0)+(Number(rally.end_frame)+1)/fps();
           const x=Math.max(0,Math.min(width,start/duration*width));
           const x2=Math.max(0,Math.min(width,end/duration*width));
-          // Muted rally bands keep the bright Touch markers legible.
           const selected=s.current===rally.candidate_id;
-          ctx.fillStyle=s.gold.has(rally.candidate_id)?
-            (selected?"#8d7955":"#736448"):
-            (selected?"#597a91":"#365469");
+          const gold=s.gold.has(rally.candidate_id);
+          ctx.fillStyle=gold?"#cfaf6959":selected?"#57c9e099":"#37b9ce80";
           ctx.fillRect(x,y,Math.max(1,x2-x),bandHeight);
+          ctx.fillStyle=gold?"#eac77dc7":selected?"#8ae4f6":"#4dd5e0bb";
+          ctx.fillRect(x,y,Math.max(1,x2-x),Math.min(3,bandHeight));
         }
       }
-      if(training.active&&comparisonMatches(comparison.data)&&
-        comparison.data.trajectory_status==="ready"){
+      if(training.active&&timelineRallyLayers.ball.checked&&
+        comparisonMatches(comparison.data)&&comparison.data.trajectory_status==="ready"){
         for(const rally of comparison.data.trajectory_rallies){
           const x=((Number(s.analysisOffset)||0)+rally.start/fps())/duration*width;
           const x2=((Number(s.analysisOffset)||0)+(rally.end+1)/fps())/duration*width;
-          ctx.fillStyle="#efb157d0";
-          ctx.fillRect(x,y+Math.floor(bandHeight*0.55),
-            Math.max(2,x2-x),Math.max(2,Math.ceil(bandHeight*0.45)));
+          ctx.fillStyle="#efb15773";
+          ctx.fillRect(x,y,Math.max(2,x2-x),bandHeight);
+          ctx.fillStyle="#f4c576c2";
+          ctx.fillRect(x,y+Math.max(0,bandHeight-3),Math.max(2,x2-x),Math.min(3,bandHeight));
         }
         for(const impact of comparison.data.trajectory_impacts){
           const x=((Number(s.analysisOffset)||0)+impact/fps())/duration*width;
@@ -2330,7 +2359,9 @@
         }
       }
     }
-    $("studio-timeline-rally-key").hidden=overlay.raw||!overlay.flags.rallies;
+    $("studio-timeline-rally-key").hidden=overlay.raw||(training.active?!timelineRallyLayers.touches.checked:!overlay.flags.rallies);
+    $("studio-timeline-ball-key").hidden=!training.active||overlay.raw||!timelineRallyLayers.ball.checked||
+      !comparisonMatches(comparison.data)||comparison.data.trajectory_status!=="ready";
     $("studio-timeline-touch-key").hidden=overlay.raw||!overlay.flags.touches;
     updateTimelineProgress();
   };
@@ -2523,10 +2554,12 @@
       timeLabel(row.start_frame/fps())+" – "+timeLabel(row.end_frame/fps()):
       "Нажмите для перехода к моменту видео";
   });
-  timeline.track.addEventListener("pointerup",event=>{
-    const pressed=timeline.contextPress;
+  timeline.track.addEventListener("pointerup",()=>{
     timeline.dragging=false;timeline.contextPress=null;
-    if(!training.active||!pressed||pressed.moved||!annotation.data)return;
+  });
+  timeline.track.addEventListener("contextmenu",event=>{
+    if(!training.active||!s.run)return;
+    event.preventDefault();
     let frame=Math.round(timelinePosition(event)*fps());
     if(comparison.simulated&&comparisonMatches(comparison.data)){
       const candidates=comparison.data.simulated_touch_candidates;
@@ -2552,6 +2585,9 @@
     });
   }
   timeline.track.addEventListener("keydown",event=>{
+    if(training.active&&(event.key==="ContextMenu"||(event.shiftKey&&event.key==="F10"))){
+      event.preventDefault();showAnnotationContext(annotationFrame(),{});return;
+    }
     const steps={PageDown:-30,PageUp:30};
     let target;
     if(event.key==="Home")target=0;

@@ -534,3 +534,8 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Взять расчёт для правок	Use predictions for editing
 Сохранить данные касаний	Save touch annotations
 Взять CPU-метки за основу	Use CPU annotations as starting point
+
+Розыгрыши по касаниям	Touch-based rallies
+Розыгрыши по траектории мяча	Ball-trajectory rallies
+Розыгрыши по мячу	Ball-based rallies
+Отображение розыгрышей на временной шкале	Rally layers on the timeline

@@ -648,7 +648,8 @@ body[data-ui-theme="light"] #studio-preview-view #studio-timeline-middle{color:#
 #studio-preview-view .video-timeline-legend i{
   display:inline-block;width:11px;height:9px;border-radius:2px;
 }
-#studio-preview-view .video-timeline-legend .rally-key{background:#365469}
+#studio-preview-view .video-timeline-legend .rally-key{background:#37b9ce80;border:1px solid #4dd5e0bb}
+#studio-preview-view .video-timeline-legend .trajectory-rally-key{background:#efb15773;border:1px solid #f4c576c2}
 #studio-preview-view .video-timeline-legend .touch-key{background:#f1bd58;width:3px;height:11px}
 /* Playback buttons replace the browser's second, native seek slider. */
 #studio-preview-view .viewer-playback-controls{
@@ -1809,6 +1810,15 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 #studio-preview-view.training-workspace #studio-comparison-recalculate{padding:8px 11px;font-size:12px;justify-content:center;white-space:normal}
 #studio-simulation-summary{font-size:11px;color:#f5cc78}
 #studio-preview-view .video-wrap.training-annotation #studio-video-overlay{pointer-events:auto;cursor:crosshair}
+#studio-preview-view .studio-training-rally-visibility{display:none;position:absolute;z-index:7;top:14px;left:69%;right:10px;min-width:0;gap:8px;pointer-events:auto}
+#studio-preview-view.training-workspace .studio-training-rally-visibility{display:grid}
+#studio-preview-view .studio-training-rally-visibility label{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:600;line-height:1.35;color:#e7f3ff;cursor:pointer;text-shadow:0 1px 4px #08172f}
+#studio-preview-view .studio-training-rally-visibility input{width:15px;height:15px;margin:0;flex:0 0 auto;accent-color:#53c7c6;cursor:pointer}
+#studio-preview-view .studio-training-rally-visibility label:nth-child(2) input{accent-color:#efb157}
+@container (max-width:750px){
+  #studio-preview-view .studio-training-rally-visibility{top:56px;left:auto;right:8px;max-width:min(260px,55%);padding:8px;background:#0a182ddc;border:1px solid #3b5770;border-radius:8px}
+  #studio-preview-view .studio-training-rally-visibility label{font-size:10px}
+}
 .studio-annotation-context{position:absolute;z-index:35;width:min(268px,calc(100% - 16px));padding:12px;border:1px solid #759bb4;border-radius:12px;background:#102338f2;box-shadow:0 12px 34px #000a;pointer-events:auto;display:grid;gap:8px;backdrop-filter:blur(8px)}
 .studio-annotation-context strong{display:block;font-size:12px;color:#f5f9ff}
 #studio-annotation-context-actions{display:flex;flex-direction:column;gap:5px;max-height:240px;overflow-y:auto}
