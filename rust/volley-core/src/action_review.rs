@@ -3,14 +3,7 @@
 //! This is independent of verified athlete identity.
 use serde::Serialize;
 
-pub const REVIEWABLE_ACTIONS: [&str; 6] = [
-    "serve",
-    "attack",
-    "block",
-    "dig",
-    "overhead_pass",
-    "low_touch",
-];
+pub const REVIEWABLE_ACTIONS: [&str; 5] = ["serve", "attack", "block", "dig", "overhead_pass"];
 #[derive(Clone, Copy, Debug)]
 pub struct ContactEvidence {
     pub frame_index: u64,
@@ -89,14 +82,7 @@ mod tests {
         assert_eq!(item.action_kind, "unknown_touch");
         assert!(!item.action_verified);
         assert!(!item.athlete_identity_verified);
-        for kind in [
-            "attack",
-            "serve",
-            "block",
-            "dig",
-            "overhead_pass",
-            "low_touch",
-        ] {
+        for kind in ["attack", "serve", "block", "dig", "overhead_pass"] {
             let checked = classify(source(), Some(kind)).unwrap();
             assert_eq!(checked.action_kind, kind);
             assert!(checked.action_verified);
@@ -114,6 +100,7 @@ mod tests {
         assert!(classify(input, Some("block")).is_err());
         assert_eq!(classify(input, None).unwrap().action_kind, "unknown_touch");
         input = source();
+        assert!(classify(input, Some("low_touch")).is_err());
         assert!(classify(input, Some("attack_if_fast")).is_err());
         input.probability = f64::NAN;
         assert!(classify(input, Some("attack")).is_err());

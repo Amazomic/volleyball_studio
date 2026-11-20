@@ -682,7 +682,7 @@ mod tests {
                     "action_prediction":if frame==20 {
                         json!({
                             "kind":"attack","evidence_score":0.84,
-                            "method":"pose_keypoints_v1","depth_ratio":-0.2,
+                            "method":"pose_keypoints_motion_v1","depth_ratio":-0.2,
                             "posture_ratio":0.25
                         })
                     } else {Value::Null},

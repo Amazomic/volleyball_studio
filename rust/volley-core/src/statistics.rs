@@ -203,7 +203,11 @@ pub fn summarize(
             format!("event:{identity}")
         };
         let next = Contact {
-            kind: action.kind.clone(),
+            kind: if action.kind == "low_touch" {
+                "unknown_touch".to_owned()
+            } else {
+                action.kind.clone()
+            },
             confidence: action.confidence,
             owner,
             track_id: action.track_id.clone(),

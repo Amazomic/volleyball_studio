@@ -71,6 +71,53 @@ fn motion_court_context_roundtrip_is_source_bounded() {
     let malformed: NativeMotion = serde_json::from_value(row).unwrap();
     assert!(!malformed.valid(400, 640, 360));
 }
+
+#[test]
+fn pose_and_motion_are_required_to_name_a_touch() {
+    let row = json!({
+        "frame_index":40,"provisional_track_id":3,"probability":0.93,
+        "ball_x_px":150.0,"ball_y_px":100.0,"motion_frame_index":40,
+        "direction_change_deg":90.0,"speed_before_px_frame":4.0,
+        "speed_after_px_frame":12.0,"velocity_residual_px_frame":8.0,
+        "technique":"unknown_touch","physical_motion_supported":true,
+        "athlete_identity_verified":false,"body_contact_supported":true,
+        "contact_landmark":{"joint_indices":[9,9],"point_px":[150.0,100.0],
+            "distance_px":0.0,"normalized_distance":0.0},
+        "action_prediction":{"kind":"attack","evidence_score":0.85,
+            "method":"contact_geometry_v1","depth_ratio":-0.1,"posture_ratio":0.4}
+    });
+    let mut event: NativeMotion = serde_json::from_value(row.clone()).unwrap();
+    let mut last = BTreeMap::new();
+    let result = finalize_touch(&event, true, None, &mut last).unwrap();
+    assert!(result.attributed && result.pose_supported);
+    assert!(result.kind.is_none());
+    event.action_prediction.as_mut().unwrap().method =
+        volley_core::action_prediction::PredictionMethod::PoseKeypointsMotionV1;
+    assert_eq!(
+        finalize_touch(&event, true, None, &mut BTreeMap::new())
+            .unwrap()
+            .kind,
+        Some(ActionKind::Attack)
+    );
+    event.action_prediction.as_mut().unwrap().method =
+        volley_core::action_prediction::PredictionMethod::CourtGeometryV1;
+    assert!(finalize_touch(&event, true, None, &mut BTreeMap::new())
+        .unwrap()
+        .kind
+        .is_none());
+    event.action_prediction.as_mut().unwrap().method =
+        volley_core::action_prediction::PredictionMethod::PoseKeypointsV1;
+    assert!(finalize_touch(&event, true, None, &mut BTreeMap::new())
+        .unwrap()
+        .kind
+        .is_none());
+    event.action_prediction.as_mut().unwrap().kind = ActionKind::LowTouch;
+    assert!(finalize_touch(&event, true, None, &mut BTreeMap::new())
+        .unwrap()
+        .kind
+        .is_none());
+}
+
 fn fixture() -> (ValidatedRun, PathBuf) {
     let root =
         std::env::temp_dir().join(format!("rally-evidence-preview-{}", uuid::Uuid::new_v4()));
@@ -107,7 +154,7 @@ fn fixture() -> (ValidatedRun, PathBuf) {
             "velocity_residual_px_frame":8.0,
             "technique":"unknown_touch",
             "action_prediction":(frame==115).then(|| json!({
-                "kind":"dig","evidence_score":0.86,"method":"contact_geometry_v1",
+                "kind":"dig","evidence_score":0.86,"method":"pose_keypoints_motion_v1",
                 "depth_ratio":0.35,"posture_ratio":0.4
             })),
             "physical_motion_supported":true,"athlete_identity_verified":false,
@@ -183,7 +230,7 @@ fn timeline_covers_the_whole_video_and_all_verified_touches() {
     );
     let annotations = result.value["touch_annotations"].as_array().unwrap();
     assert_eq!(annotations.len(), 6);
-    assert_eq!(annotations[0]["kind"], Value::Null);
+    assert_eq!(annotations[0]["kind"], "unknown_touch");
     assert_eq!(annotations[0]["provisional_track_id"], 3);
     assert_eq!(annotations[0]["ball_position_px"], json!([150.0, 100.0]));
     assert_eq!(annotations[2]["kind"], "dig");
@@ -239,7 +286,10 @@ fn preview_counts_unverified_as_generic_assigned_touches() {
         timeline.value["touch_annotations"][0]["touch_attributed"],
         true
     );
-    assert_eq!(timeline.value["touch_annotations"][0]["kind"], Value::Null);
+    assert_eq!(
+        timeline.value["touch_annotations"][0]["kind"],
+        "unknown_touch"
+    );
     assert_eq!(
         timeline.value["touch_annotations"][0]["assignment_method"],
         "nearest_player"
@@ -288,7 +338,7 @@ fn paged_preview_has_safe_original_clips_and_evidence_labels() {
     assert_eq!(card["unclassified_action_count"], 1);
     assert_eq!(
         card["motion_events"][0]["action_prediction"]["method"],
-        "contact_geometry_v1"
+        "pose_keypoints_motion_v1"
     );
     assert_eq!(
         card["motion_events"][0]["motion_pattern"],
@@ -333,6 +383,10 @@ fn saved_rally_context_hides_toss_without_changing_immutable_touch_source() {
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
     touch_events[1]["provisional_track_id"] = json!(3);
+    touch_events[1]["action_prediction"] = json!({
+        "kind":"attack","evidence_score":0.85,"method":"pose_keypoints_motion_v1",
+        "depth_ratio":-0.1,"posture_ratio":0.4
+    });
     let mut touch_bytes = Vec::new();
     for event in &touch_events {
         touch_bytes.extend(serde_json::to_vec(event).unwrap());

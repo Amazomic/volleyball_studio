@@ -6,7 +6,7 @@ const source=readFileSync(
   new URL("../../rust/volley-app/static/studio.js",import.meta.url),"utf8"
 );
 const colorsStart=source.indexOf("  const cpuTouchStyle={");
-const colorsEnd=source.indexOf("  };",colorsStart)+4;
+const colorsEnd=source.indexOf("  // The timeline belongs",colorsStart);
 const start=source.indexOf("  const rallyClipFrames=item=>");
 const end=source.indexOf("  // Event pills and summary",start);
 assert.ok(colorsStart>0&&colorsEnd>colorsStart,"CPU overlay palette must exist");
@@ -39,7 +39,8 @@ const timeline={data:{
 }};
 const rallyCardProgresses=new Map();
 const video={currentTime:12.5,paused:false};
-const overlay={presentedTime:null};
+const overlay={presentedTime:null,flags:{touches:true},
+  actionFlags:{serve:true,attack:true,dig:true,block:true,unknown_touch:true}};
 const context={
   make,wipe,s:current,timeline,rallyCardProgresses,overlay,
   ui:{video},fps:()=>10,second:frame=>(frame/10).toFixed(1),
@@ -67,6 +68,17 @@ assert.equal(markers.children[2].style.backgroundColor,"#c6bf96",
   "Untyped touches have the same color as in the video");
 assert.match(progress.attrs["aria-label"],/3 касаний/);
 assert.match(markers.children[1].title,/12.5 с/);
+overlay.actionFlags.unknown_touch=false;
+refreshRallyCardTouchTicks();
+assert.equal(markers.children.length,2,"Unknown-type checkbox filters card timeline");
+overlay.actionFlags.unknown_touch=true;
+refreshRallyCardTouchTicks();
+assert.equal(markers.children.length,3,"Re-enabling unknown restores card markers");
+overlay.flags.touches=false;
+refreshRallyCardTouchTicks();
+assert.equal(markers.children.length,0,"Hiding touches hides all card markers");
+overlay.flags.touches=true;
+refreshRallyCardTouchTicks();
 
 updateRallyCardProgress();
 assert.equal(progress.style["--rally-progress"],"50%");

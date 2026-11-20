@@ -132,14 +132,14 @@ timeline.data.touch_annotations=[
   {frame_index:45,kind:"block",ball_position_px:[30,30],contact_verified:true},
   {frame_index:45,kind:null,ball_position_px:[40,40],contact_verified:true}
 ];
-overlay.actionFlags={attack:true,block:true};
+overlay.actionFlags={attack:true,block:true,unknown_touch:true};
 oldRecord.width=100;oldRecord.height=100;
 oldRecord.replay_sha256=timeline.data.source_replay_sha256;
 actionColors.length=0;
 scope.drawOverlay();
 assert.deepEqual(actionColors,["#ff6b6b","#c38cff","#c6bf96"],
   "Processed mode alone shows classified CPU Touchs");
-overlay.flags.players=false;overlay.actionFlags={attack:false,block:true};
+overlay.flags.players=false;overlay.actionFlags={attack:false,block:true,unknown_touch:true};
 oldRecord.width=100;oldRecord.height=100;
 oldRecord.replay_sha256=timeline.data.source_replay_sha256;
 overlay.source.events=[
@@ -168,13 +168,14 @@ const controls={querySelectorAll:()=>[checkbox],classList:{toggle(){},remove(){}
 const tab=()=>({attributes:{},closest:()=>controls,addEventListener(name,fn){this[name]=fn;},setAttribute(name,value){this.attributes[name]=value;}});
 const initOverlay={mode:tab(),rawMode:tab(),rawControls:controls,actionControls:controls,canvas:{closest:()=>controls},
   rawBall:input,rawVballVisible:input,rawPeopleVisible:input,
-  rawPlayer:input,rawPose:input,rawPoseVisible:input,actionFlags:{attack:true}};
+  rawPlayer:input,rawPose:input,rawPoseVisible:input,
+  flags:{touches:true},actionFlags:{attack:true,unknown_touch:true}};
 runInNewContext(js.slice(initStart,initEnd),{
   overlay:initOverlay,$:()=>({}),window:{addEventListener(){}},
   training:{active:false,panel:{classList:{add(){}}}},comparison:{epoch:0},
   annotation:{lane:{querySelectorAll:()=>[]}},hideAnnotationContext(){},trainingEditorReset(){},
   updateRawDetectorLabel(){},placeTrainingTimeline(){},
-  drawOverlay:()=>{redraws++;},drawTimeline:()=>{},
+  drawOverlay:()=>{redraws++;},drawTimeline:()=>{},refreshRallyCardTouchTicks:()=>{},
   setOverlaySource:()=>{},rawFusion:()=>({id:"f"}),s:{run:"",video:""},
   timeline:{status:{textContent:""},data:null},
   ensurePreviewVideo:()=>{},prefetchOverlayAtFrame:()=>{},overlayMessage:()=>{}

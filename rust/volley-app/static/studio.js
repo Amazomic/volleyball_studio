@@ -350,7 +350,7 @@
     rawBall:$("studio-raw-ball"),rawBallTrail:$("studio-raw-ball-trail"),rawVballVisible:$("studio-raw-vball-visible"),rawPeopleVisible:$("studio-raw-people-visible"),rawPlayer:$("studio-raw-player"),rawPlayerInterpolated:$("studio-raw-player-interpolated"),
     rawPose:$("studio-raw-pose"),rawPoseVisible:$("studio-raw-pose-visible"),
     raw:false,
-    actionFlags:{attack:true,block:true,serve:true,overhead_pass:true,dig:true,low_touch:true},
+    actionFlags:{unknown_touch:true,attack:true,block:true,serve:true,overhead_pass:true,dig:true},
     source:null,cache:new Map(),rawFrames:new Map(),rawDetectors:new Map(),rawOffsets:new Map(),presentedTime:null,
     fetching:new Set(),controllers:new Map(),failed:new Map(),loop:0,
     flags:{rallies:true,touches:true,trajectory:true,players:true,pose:true,court:true}
@@ -368,6 +368,7 @@
       const button=overlay[key];
       button.setAttribute("aria-pressed",String(overlay.flags[key]));
     }
+    overlay.actionControls.classList.toggle("hidden",overlay.raw||!overlay.flags.touches);
   };
   updateOverlayToggles();
   const overlayMessage=text=>{
@@ -616,10 +617,11 @@
     attack:["#ff6b6b","≈ Атака"],
     block:["#c38cff","≈ Блок"],
     serve:["#f29d49","≈ Подача"],
-    overhead_pass:["#55d6ff","≈ Передача"],
-    dig:["#71e49e","≈ Приём"],
-    low_touch:["#e5c55d","≈ Нижнее касание"]
+    overhead_pass:["#55d6ff","≈ Передача сверху"],
+    dig:["#71e49e","≈ Приём снизу"],
+    unknown_touch:["#c6bf96","Касание"]
   };
+  const cpuTouchKind=kind=>Object.hasOwn(cpuTouchStyle,kind)?kind:"unknown_touch";
   // The timeline belongs to the selected saved CPU postprocessing snapshot.
   // Raw GPU detections and limited rally-card motion_events are never Touchs.
   const cpuTouchesForFrame=(project,run,video,sha,frame)=>{
@@ -643,14 +645,14 @@
     if(!overlay.flags.touches||!record.width||!record.height)return;
     const events=cpuTouchesForFrame(project,run,video,record.replay_sha256,frame);
     for(const event of events){
-      const kind=event.kind;
-      if(kind&&(!Object.hasOwn(cpuTouchStyle,kind)||!overlay.actionFlags[kind]))continue;
+      const kind=cpuTouchKind(event.kind);
+      if(!overlay.actionFlags[kind])continue;
       if(!Array.isArray(event.ball_position_px)||event.ball_position_px.length!==2)continue;
       const [bx,by]=event.ball_position_px;
       if(!Number.isFinite(bx)||!Number.isFinite(by)||
          bx<0||by<0||bx>record.width||by>record.height)continue;
       const [px,py]=[x+bx/record.width*width,y+by/record.height*height];
-      const [color,label]=cpuTouchStyle[kind]||["#c6bf96","Касание"];
+      const [color,label]=cpuTouchStyle[kind];
       const contact=event.contact_landmark;
       if(contact&&Array.isArray(contact.point_px)&&contact.point_px.length===2){
         const [lx,ly]=contact.point_px;
@@ -663,8 +665,8 @@
           ctx.fillStyle=color;ctx.fill();
         }
       }
-      ctx.beginPath();ctx.arc(px,py,kind?12:8,0,2*Math.PI);
-      ctx.strokeStyle=color;ctx.lineWidth=kind?3:1.7;ctx.stroke();
+      ctx.beginPath();ctx.arc(px,py,kind!=="unknown_touch"?12:8,0,2*Math.PI);
+      ctx.strokeStyle=color;ctx.lineWidth=kind!=="unknown_touch"?3:1.7;ctx.stroke();
       ctx.font="bold 12px Inter, sans-serif";
       ctx.textBaseline="bottom";
       const labelsKey=playerLabelKey(project,run,video,record.replay_sha256);
@@ -1012,10 +1014,12 @@
   for(const key of ["rallies","touches","trajectory","players","pose","court"]){
     overlay[key].addEventListener("click",()=>{
       overlay.flags[key]=!overlay.flags[key];
+      overlay.actionControls.classList.toggle("hidden",overlay.raw||!overlay.flags.touches);
       updateOverlayToggles();
       try{localStorage.setItem("volley:preview-overlays:v2",JSON.stringify(overlay.flags));}catch{}
       drawOverlay();
       drawTimeline();
+      if(key==="touches")refreshRallyCardTouchTicks();
     });
   }
   // Manual examples are audited in Rust; the browser only selects the saved
@@ -1034,7 +1038,7 @@
     training.status.classList.toggle("is-error",error);
   };
   const trainingNames={attack:"Атака",block:"Блок",serve:"Подача",
-    overhead_pass:"Передача сверху",dig:"Приём снизу",low_touch:"Нижнее касание"};
+    overhead_pass:"Передача сверху",dig:"Приём снизу",low_touch:"Касание"};
   const trainingEditorReset=()=>{
     training.editId=null;
     training.save.textContent="Сохранить пример";
@@ -2077,7 +2081,7 @@
       overlay.mode.setAttribute("aria-selected",String(!raw));
       overlay.rawMode.setAttribute("aria-selected",String(raw));
       overlay.rawControls.classList.toggle("hidden",!raw);
-      overlay.actionControls.classList.toggle("hidden",raw);
+      overlay.actionControls.classList.toggle("hidden",raw||!overlay.flags.touches);
       overlay.mode.closest(".video-overlay-toggles").classList.toggle("raw-selected",raw);
       setOverlaySource(raw||s.run?{}:null);
       if(raw&&s.video){ensurePreviewVideo();prefetchOverlayAtFrame(0);}
@@ -2101,7 +2105,7 @@
       overlay.mode.setAttribute("aria-selected","false");
       overlay.rawMode.setAttribute("aria-selected","false");
       overlay.rawControls.classList.add("hidden");
-      overlay.actionControls.classList.remove("hidden");
+      overlay.actionControls.classList.toggle("hidden",!overlay.flags.touches);
       training.panel.classList.remove("hidden");
       placeTrainingTimeline(true);
       annotationFocus();
@@ -2124,7 +2128,10 @@
     for(const input of [overlay.rawVballVisible,overlay.rawPeopleVisible,overlay.rawPlayerInterpolated,overlay.rawPoseVisible,overlay.rawBallTrail].filter(Boolean))
       input.addEventListener("change",drawOverlay);
     for(const input of overlay.actionControls.querySelectorAll("[data-overlay-action]")){
-      input.addEventListener("change",()=>{overlay.actionFlags[input.dataset.overlayAction]=input.checked;drawOverlay();});
+      input.addEventListener("change",()=>{
+        overlay.actionFlags[input.dataset.overlayAction]=input.checked;
+        drawOverlay();drawTimeline();refreshRallyCardTouchTicks();
+      });
     }
   }
   const startOverlayFrameLoop=()=>{
@@ -2298,11 +2305,11 @@
         for(const classified of [false,true]){
           for(const touch of data.touch_annotations){
             if(touch.touch_attributed!==true&&touch.contact_verified!==true)continue;
-            const style=cpuTouchStyle[touch.kind];
-            if(Boolean(style)!==classified||style&&!overlay.actionFlags[touch.kind])continue;
+            const kind=cpuTouchKind(touch.kind),style=cpuTouchStyle[kind];
+            if((kind!=="unknown_touch")!==classified||!overlay.actionFlags[kind])continue;
             const x=Math.floor(((Number(s.analysisOffset)||0)+Number(touch.frame_index)/fps())/duration*width);
             if(!Number.isFinite(x)||x<0||x>=width)continue;
-            ctx.fillStyle=style?style[0]:"#c6bf96";
+            ctx.fillStyle=style[0];
             ctx.fillRect(x,y,Math.max(2,Math.ceil(dpr)),bandHeight);
           }
         }
@@ -3000,15 +3007,16 @@
   // determine which action types are shown on a rally card.
   const estimatedTypes=item=>{
     const labels={attack:"Атака",block:"Блок",serve:"Подача",
-      overhead_pass:"Передача сверху",dig:"Приём снизу",low_touch:"Нижнее касание"};
+      overhead_pass:"Передача сверху",dig:"Приём снизу"};
     const counts=item?.estimated_action_counts;
     const known=counts&&typeof counts==="object"&&!Array.isArray(counts)?
       Object.entries(labels).filter(([kind])=>
         Number.isSafeInteger(counts[kind])&&counts[kind]>0)
         .map(([kind,label])=>label+" ×"+counts[kind]):[];
-    const unknown=item?.unclassified_action_count;
+    const unknown=(Number(item?.unclassified_action_count)||0)+
+      (Number(counts?.low_touch)||0);
     if(Number.isSafeInteger(unknown)&&unknown>0)
-      known.push("Без типа ×"+unknown);
+      known.push("Касание ×"+unknown);
     return known.length?"≈ "+known.join(" · "):"Типы не определены";
   };
   // Card timelines use the same authoritative CPU Touchs and palette as the video.
@@ -3024,8 +3032,9 @@
     const validTimeline=Boolean(data)&&data.project_id===s.project&&
       data.rally_run_id===s.run&&data.video===s.video&&
       Array.isArray(data.touch_annotations);
-    const touches=validTimeline?data.touch_annotations.filter(event=>
-      event.touch_attributed===true||event.contact_verified===true):[];
+    const touches=validTimeline&&overlay.flags.touches?data.touch_annotations.filter(event=>
+      (event.touch_attributed===true||event.contact_verified===true)&&
+      overlay.actionFlags[cpuTouchKind(event.kind)]):[];
     for(const {progress,markers,start,end} of rallyCardProgresses.values()){
       wipe(markers);
       if(!validTimeline){
@@ -3036,7 +3045,7 @@
       let count=0;
       for(const event of touches){
         if(event.frame_index<start||event.frame_index>end)continue;
-        const [color,label]=cpuTouchStyle[event.kind]||["#c6bf96","Касание без типа"];
+        const [color,label]=cpuTouchStyle[cpuTouchKind(event.kind)];
         const tick=make("span","rally-card-touch-tick");
         tick.style.left=(100*(event.frame_index-start)/duration)+"%";
         tick.style.backgroundColor=color;
@@ -3079,29 +3088,30 @@
       return;
     }
     const touches=data.touch_annotations.filter(event=>
-      (event.touch_attributed===true||event.contact_verified===true)&&event.frame_index>=start&&event.frame_index<=end);
+      (event.touch_attributed===true||event.contact_verified===true)&&
+      event.frame_index>=start&&event.frame_index<=end);
     const labels={attack:"Атака",block:"Блок",serve:"Подача",
-      overhead_pass:"Передача сверху",dig:"Приём снизу",low_touch:"Нижнее касание"};
+      overhead_pass:"Передача сверху",dig:"Приём снизу"};
     const counts=new Map();
     for(const touch of touches){
-      const kind=touch.kind||"unclassified";
+      const kind=cpuTouchKind(touch.kind);
       counts.set(kind,(counts.get(kind)||0)+1);
     }
     const breakdown=Object.entries(labels)
       .filter(([kind])=>counts.has(kind))
       .map(([kind,label])=>label+" ×"+counts.get(kind));
-    if(counts.has("unclassified"))
-      breakdown.push("Без типа ×"+counts.get("unclassified"));
+    if(counts.has("unknown_touch"))
+      breakdown.push("Касание ×"+counts.get("unknown_touch"));
     ui.viewDescription.textContent="Фрагмент "+clock(start)+" – "+clock(end)+
       ". Касаний из CPU-постобработки: "+touches.length+
       ". Оценка типов: "+(breakdown.join(" · ")||"нет данных")+
       ". Классификация автоматическая, не подтверждена вручную.";
     for(const touch of touches.slice(0,32)){
-      const label=touch.kind&&labels[touch.kind]?"≈ "+labels[touch.kind]:"Касание без типа";
+      const kind=cpuTouchKind(touch.kind);
+      const label=kind!=="unknown_touch"?"≈ "+labels[kind]:"Касание";
       const pill=make("span","event-pill",clock(touch.frame_index)+" · "+label);
       pill.title="Результат выбранной CPU-постобработки. Автоматическая оценка.";
-      if(cpuTouchStyle[touch.kind])
-        pill.style.borderColor=cpuTouchStyle[touch.kind][0];
+      pill.style.borderColor=cpuTouchStyle[kind][0];
       ui.events.append(pill);
     }
   };

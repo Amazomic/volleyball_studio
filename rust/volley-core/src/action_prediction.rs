@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 
 const OVERHEAD_TOP_DEPTH: f64 = -0.05;
 const OVERHEAD_DEPTH_LIMIT: f64 = 0.25;
-const DIG_DEPTH_LIMIT: f64 = 0.95;
 const WIDE_POSTURE_RATIO: f64 = 0.65;
 const WIDE_POSTURE_OVERHEAD_LIMIT: f64 = 0.0;
 const BALL_RADIUS_CM: f64 = 10.5;
@@ -67,7 +66,9 @@ pub struct ActionPrediction {
 pub enum PredictionMethod {
     ContactGeometryV1,
     PoseKeypointsV1,
+    PoseKeypointsMotionV1,
     CourtGeometryV1,
+    CourtPoseMotionV1,
     LearnedPoseV1,
 }
 
@@ -84,7 +85,9 @@ impl ActionPrediction {
                 self.method,
                 PredictionMethod::ContactGeometryV1
                     | PredictionMethod::PoseKeypointsV1
+                    | PredictionMethod::PoseKeypointsMotionV1
                     | PredictionMethod::CourtGeometryV1
+                    | PredictionMethod::CourtPoseMotionV1
                     | PredictionMethod::LearnedPoseV1
             )
     }
@@ -153,10 +156,8 @@ pub fn predict(evidence: PositionEvidence) -> Option<ActionPrediction> {
         };
         if depth < overhead_limit {
             ActionKind::OverheadPass
-        } else if depth <= DIG_DEPTH_LIMIT {
-            ActionKind::Dig
         } else {
-            ActionKind::LowTouch
+            ActionKind::Dig
         }
     };
     let prediction = ActionPrediction {
@@ -186,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn python_describe_technique_attack_overhead_dig_low() {
+    fn geometry_only_provides_a_pose_prior() {
         assert_eq!(
             predict(sample(80.0)).expect("above head").kind,
             ActionKind::Attack
@@ -201,7 +202,7 @@ mod tests {
         );
         assert_eq!(
             predict(sample(285.0)).expect("below knees").kind,
-            ActionKind::LowTouch
+            ActionKind::Dig
         );
     }
 

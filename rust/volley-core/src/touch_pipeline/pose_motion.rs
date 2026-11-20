@@ -30,6 +30,29 @@ pub struct PoseFrame {
     pub players: Vec<PosePlayer>,
 }
 
+pub type PoseMotionSamples = ([[f64; 3]; 17], [[f64; 3]; 17]);
+
+pub fn observed_pose_motion(
+    poses: &[PoseFrame],
+    frame: u64,
+    track_id: u64,
+) -> Option<PoseMotionSamples> {
+    let position = poses.partition_point(|item| item.frame_index < frame);
+    let before = poses[..position]
+        .iter()
+        .rev()
+        .take_while(|item| frame - item.frame_index <= 9)
+        .flat_map(|item| &item.players)
+        .find(|player| player.track_id == track_id && !player.interpolated)?;
+    let after = poses[position..]
+        .iter()
+        .take_while(|item| item.frame_index <= frame.saturating_add(9))
+        .filter(|item| item.frame_index > frame)
+        .flat_map(|item| &item.players)
+        .find(|player| player.track_id == track_id && !player.interpolated)?;
+    Some((before.keypoints, after.keypoints))
+}
+
 /// One rebound may create several nearby gravity-compensated motion peaks.
 /// For the same Track ID, only the strongest physical discontinuity survives
 /// the longer (up to 0.4s) impact window, not the strongest neural Touch score.
@@ -680,8 +703,8 @@ pub fn evaluate_pose_block(
                 })
             })
             .and_then(|geometry| {
-                pose_classification::refine(&evidence, &geometry)
-                    .or_else(|| (!settings.require_pose).then_some(geometry))
+                let (before, after) = observed_pose_motion(poses, frame.frame_index, track_id)?;
+                pose_classification::refine_with_motion(&evidence, &geometry, &before, &after)
             });
         result.push(PhysicalTouchCandidate {
             frame_index: frame.frame_index,
@@ -811,10 +834,9 @@ pub fn evaluate_pose_block(
                 })
             })
             .and_then(|geometry| {
-                witness
-                    .as_ref()
-                    .and_then(|evidence| pose_classification::refine(evidence, &geometry))
-                    .or_else(|| (!settings.require_pose).then_some(geometry))
+                let evidence = witness.as_ref()?;
+                let (before, after) = observed_pose_motion(poses, frame.frame_index, track_id)?;
+                pose_classification::refine_with_motion(evidence, &geometry, &before, &after)
             });
         result.push(PhysicalTouchCandidate {
             frame_index: frame.frame_index,
