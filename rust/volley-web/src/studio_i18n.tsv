@@ -542,3 +542,18 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 По мячу	From ball trajectory
 По касаниям	From touches
 Отображение розыгрышей на временной шкале	Rally layers on the timeline
+Сравнение алгоритмов · дообучение	Algorithm comparison · training
+По касаниям · CPU	From touches · CPU
+По траектории мяча	From ball trajectory
+Нет данных	No data
+Нет расчёта	Not calculated
+Объединять при паузе меньше	Merge if the gap is shorter than
+Кандидаты касаний по мячу	Ball-based touch candidates
+Не рассчитаны · отдельно от розыгрышей	Not calculated · separate from rallies
+Максимальная пауза между розыгрышами для объединения, секунды	Maximum pause to merge adjacent rallies, seconds
+Отображение тестовых розыгрышей	Test rally visibility
+Касания CPU (автоматические)	CPU touches (automatic)
+Ручная разметка	Manual annotation
+Кандидаты по мячу (не подтверждены)	Ball touch candidates (unverified)
+Не подтверждены игроками. Дополнительная функция расчёта по траектории.	Not verified against players. Optional trajectory-based touch detection.
+с	sec

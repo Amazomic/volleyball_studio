@@ -60,7 +60,7 @@ const dummy={hidden:false};
 const timelineCtx={
   timeline,overlay,window:{devicePixelRatio:1},
   s:{analysisOffset:0},training:{active:false},fps:()=>10,
-  timelineDuration:()=>10,updateTimelineProgress(){},
+  timelineDuration:()=>10,updateTimelineProgress(){},showBallCandidates:()=>false,
   cpuTouchStyle:filterCtx.cpuTouchStyle,cpuTouchKind:filterCtx.cpuTouchKind,
   $:()=>dummy
 };

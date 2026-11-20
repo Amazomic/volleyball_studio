@@ -37,8 +37,15 @@ const playbackCalls=[];
 const training={active:false};
 const timelineRallyLayers={touches:{checked:true},ball:{checked:true}};
 const comparison={data:null};
+const trainingRallyGroups=()=>({
+  touches:s.items.map(item=>({start:item.detected_start_frame,end:item.detected_end_frame,
+    members:[item]})),
+  ball:(comparison.data?.trajectory_rallies||[]).map(item=>({
+    start:item.start,end:item.end,members:[item]}))
+});
 const context={fps:()=>30,ui,s,wasmReady:true,
   training,timelineRallyLayers,comparison,comparisonMatches:data=>Boolean(data),
+  trainingRallyGroups,updateTrainingSummaries:()=>{},
   second:frame=>(frame/30).toFixed(1).replace(".",","),
   rallyCardProgresses:new Map(),timeline:{data:null},
   make:element, wipe:el=>el.replaceChildren(),

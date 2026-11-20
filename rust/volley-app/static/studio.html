@@ -369,7 +369,7 @@
             </section>
             <aside class="rallies-panel" aria-label="Список розыгрышей">
               <div class="rallies-panel-head">
-                <div class="rallies-panel-titles"><strong>Список розыгрышей</strong><span>Выберите для просмотра</span></div>
+                <div class="rallies-panel-titles"><strong>Список розыгрышей</strong><span>Сравнение алгоритмов · дообучение</span></div>
                 <div class="studio-rallies-sort-control">
                   <label class="sr-only" for="studio-filter">Фильтр розыгрышей</label>
                   <select id="studio-filter" aria-label="Фильтр и сортировка розыгрышей" title="Фильтр и сортировка розыгрышей">
@@ -380,9 +380,24 @@
                     <option value="unmarked">Обычные</option>
                   </select>
                 </div>
-                <div class="studio-training-rally-visibility" role="group" aria-label="Отображение розыгрышей в списке и на временной шкале">
-                  <label><input type="checkbox" id="studio-training-rallies-by-touches" checked> Розыгрыши по касаниям</label>
-                  <label><input type="checkbox" id="studio-training-rallies-by-trajectory" checked> Розыгрыши по траектории мяча</label>
+                <div class="studio-training-rally-visibility" role="group" aria-label="Отображение тестовых розыгрышей">
+                  <label class="studio-training-source studio-training-source-cpu">
+                    <input type="checkbox" id="studio-training-rallies-by-touches" checked>
+                    <span class="studio-training-source-details"><strong>По касаниям · CPU</strong><small id="studio-training-cpu-summary">Нет данных</small></span>
+                  </label>
+                  <label class="studio-training-source studio-training-source-ball">
+                    <input type="checkbox" id="studio-training-rallies-by-trajectory" checked>
+                    <span class="studio-training-source-details"><strong>По траектории мяча</strong><small id="studio-training-ball-summary">Нет расчёта</small></span>
+                  </label>
+                  <label class="studio-training-merge-gap">Объединять при паузе меньше
+                    <input type="number" id="studio-training-merge-gap-seconds" min="0" max="60" step="0.5" value="4" aria-label="Максимальная пауза между розыгрышами для объединения, секунды">
+                    <span>с</span>
+                  </label>
+                  <label class="studio-training-candidate-toggle">
+                    <input type="checkbox" id="studio-training-ball-touch-candidates">
+                    <span>Кандидаты касаний по мячу</span>
+                    <small id="studio-training-ball-touch-provenance" title="Не подтверждены игроками. Дополнительная функция расчёта по траектории.">Не рассчитаны · отдельно от розыгрышей</small>
+                  </label>
                 </div>
               </div>
               <div id="studio-rallies" class="rally-grid" aria-live="polite"><div class="empty-state">Здесь появятся карточки после выбора CPU-анализа.</div></div>
@@ -405,7 +420,9 @@
                 <div class="video-timeline-legend">
                   <span id="studio-timeline-rally-key"><i class="rally-key"></i> Розыгрыши по касаниям</span>
                   <span id="studio-timeline-ball-key" hidden><i class="trajectory-rally-key"></i> Розыгрыши по мячу</span>
-                  <span id="studio-timeline-touch-key"><i class="touch-key"></i> Касания CPU (оценка типов)</span>
+                  <span id="studio-timeline-touch-key"><i class="touch-key"></i> Касания CPU (автоматические)</span>
+                  <span id="studio-timeline-manual-key" hidden><i class="manual-touch-key"></i> Ручная разметка</span>
+                  <span id="studio-timeline-candidates-key" hidden><i class="ball-candidate-key"></i> Кандидаты по мячу (не подтверждены)</span>
                   <span>Клик или перетаскивание — переход</span>
                 </div>
               </div>

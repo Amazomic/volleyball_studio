@@ -651,6 +651,8 @@ body[data-ui-theme="light"] #studio-preview-view #studio-timeline-middle{color:#
 #studio-preview-view .video-timeline-legend .rally-key{background:#37b9ce80;border:1px solid #4dd5e0bb}
 #studio-preview-view .video-timeline-legend .trajectory-rally-key{background:#efb15773;border:1px solid #f4c576c2}
 #studio-preview-view .video-timeline-legend .touch-key{background:#f1bd58;width:3px;height:11px}
+#studio-preview-view .video-timeline-legend .manual-touch-key{background:#10deb2;width:3px;height:11px}
+#studio-preview-view .video-timeline-legend .ball-candidate-key{background:#ffbd55;width:3px;height:11px}
 #studio-preview-view .video-timeline-track :is(.studio-annotation-tick,.studio-trajectory-proposal)[hidden]{display:none!important}
 /* Playback buttons replace the browser's second, native seek slider. */
 #studio-preview-view .viewer-playback-controls{
@@ -1826,8 +1828,19 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 #studio-preview-view .studio-rallies-sort-control select{width:100%}
 #studio-preview-view.training-workspace .studio-rallies-sort-control{display:none}
 #studio-preview-view .studio-training-rally-visibility{display:none;min-width:0;gap:8px;align-items:center}
-#studio-preview-view.training-workspace .rallies-panel-head .studio-training-rally-visibility{display:flex;flex:1 1 220px;justify-content:flex-end}
-#studio-preview-view.training-workspace .rallies-panel-titles{flex:0 1 125px}
+#studio-preview-view.training-workspace .rallies-panel-head{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;padding:12px}
+#studio-preview-view.training-workspace .rallies-panel-head .studio-training-rally-visibility{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;width:100%}
+#studio-preview-view.training-workspace .studio-training-source{border:1px solid #426079;background:#172e43;border-radius:8px;padding:8px 6px;max-width:none;align-items:flex-start;min-height:58px}
+#studio-preview-view.training-workspace .studio-training-source-cpu{border-left:3px solid #37b9ce}
+#studio-preview-view.training-workspace .studio-training-source-ball{border-left:3px solid #efb157}
+#studio-preview-view.training-workspace .studio-training-source-details{display:grid;gap:6px;min-width:0}
+#studio-preview-view.training-workspace .studio-training-source-details strong{font-size:10px;line-height:1.25;color:#ebf5ff}
+#studio-preview-view.training-workspace .studio-training-source-details small{font-size:10px;font-weight:700;color:#b2d8e9;font-variant-numeric:tabular-nums}
+#studio-preview-view.training-workspace .studio-training-merge-gap{grid-column:1 / -1;display:flex;align-items:center;justify-content:space-between;gap:6px;max-width:none;color:#b9cde1;font-size:10px}
+#studio-preview-view.training-workspace .studio-training-merge-gap input{width:48px;min-width:48px;padding:5px 4px;text-align:center;background:#1b3149;border:1px solid #5d7490;border-radius:6px;color:#fff;font:inherit}
+#studio-preview-view.training-workspace .studio-training-candidate-toggle{grid-column:1 / -1;max-width:none;display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:#f6ca81;font-size:10px}
+#studio-preview-view.training-workspace .studio-training-candidate-toggle small{flex-basis:100%;color:#9fb0be;font-weight:400;padding-left:22px}
+#studio-preview-view.training-workspace .rallies-panel-titles{width:100%;min-width:0}
 #studio-preview-view .studio-training-rally-visibility label{display:flex;align-items:center;gap:5px;min-width:0;max-width:133px;font-size:10px;font-weight:600;line-height:1.3;color:#d9eafd;cursor:pointer}
 #studio-preview-view .studio-training-rally-visibility input{width:16px;height:16px;margin:0;flex:0 0 16px;accent-color:#53c7c6;cursor:pointer}
 #studio-preview-view .studio-training-rally-visibility label:nth-child(2) input{accent-color:#efb157}
@@ -1838,7 +1851,7 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 #studio-preview-view .rally-card.training-ball .rally-card-techniques{color:#dab77f}
 @media(max-width:900px){
   #studio-preview-view.training-workspace .rallies-panel-head{align-items:flex-start}
-  #studio-preview-view.training-workspace .rallies-panel-head .studio-training-rally-visibility{flex-wrap:wrap;justify-content:flex-start}
+  #studio-preview-view.training-workspace .rallies-panel-head .studio-training-rally-visibility{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 .studio-annotation-context{position:absolute;z-index:35;width:min(268px,calc(100% - 16px));padding:12px;border:1px solid #759bb4;border-radius:12px;background:#102338f2;box-shadow:0 12px 34px #000a;pointer-events:auto;display:grid;gap:8px;backdrop-filter:blur(8px)}
 .studio-annotation-context strong{display:block;font-size:12px;color:#f5f9ff}

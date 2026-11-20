@@ -66,6 +66,7 @@ const context={
   seekTimeline:seconds=>{seeked=seconds;},
   training:{active:true},
   drawTimeline:()=>{},cards:()=>{},
+  timelineRallyLayers:{candidates:{checked:false}},
   url:(path,query)=>({path,query}),
   request:async()=>{throw Error("Expected mocked API response");}
 };
@@ -131,6 +132,10 @@ comparison.sourceKey="p:r:source.mp4";
 await refreshComparison(true);
 assert.equal(queries.at(-1).simulate,true);
 assert.equal(comparison.simulated,true);
+assert.equal(elements.get("studio-comparison-touches").children.length,0,
+  "Unverified candidates are hidden until explicitly enabled");
+context.timelineRallyLayers.candidates.checked=true;
+renderComparison();
 assert.equal(elements.get("studio-comparison-touches").children.length,2);
 assert.equal(comparison.calibrate.disabled,true,"Unreviewed labels cannot calibrate");
 assert.match(elements.get("studio-simulation-summary").textContent,/возможных касаний/);
@@ -177,6 +182,7 @@ assert.match(html,/id="studio-comparison-impact-settings"[^>]*hidden/);
 assert.match(html,/id="studio-comparison-min-seconds"[^>]*value="3"/);
 comparison.mode.value="continuous";
 comparison.minSeconds.value="3.5";
+context.timelineRallyLayers.candidates.checked=false;
 renderComparison();
 assert.equal(comparison.impactSettings.hidden,true);
 assert.equal(comparison.continuousSettings.hidden,false);
