@@ -39,7 +39,7 @@ const timeline={data:{
 }};
 const rallyCardProgresses=new Map();
 const video={currentTime:12.5,paused:false};
-const overlay={presentedTime:null,flags:{touches:true},
+const overlay={presentedTime:null,raw:false,flags:{touches:true},
   actionFlags:{serve:true,attack:true,dig:true,block:true,unknown_touch:true}};
 const context={
   make,wipe,s:current,timeline,rallyCardProgresses,overlay,
@@ -77,8 +77,12 @@ assert.equal(markers.children.length,3,"Re-enabling unknown restores card marker
 overlay.flags.touches=false;
 refreshRallyCardTouchTicks();
 assert.equal(markers.children.length,0,"Hiding touches hides all card markers");
-overlay.flags.touches=true;
+overlay.flags.touches=true;overlay.raw=true;
 refreshRallyCardTouchTicks();
+assert.equal(markers.children.length,0,"Raw mode never renders CPU touch marks");
+overlay.raw=false;
+refreshRallyCardTouchTicks();
+assert.equal(markers.children.length,3);
 
 updateRallyCardProgress();
 assert.equal(progress.style["--rally-progress"],"50%");

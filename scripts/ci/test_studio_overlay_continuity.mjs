@@ -151,7 +151,12 @@ actionColors.length=0;
 renderedLabels.length=0;
 scope.drawOverlay();
 assert.deepEqual(actionColors,["#c38cff","#c6bf96"],
-  "Processed mode hides disabled attack but renders CPU block and unclassified touch");
+  "A subset preserves explicitly enabled unknown touches");
+overlay.actionFlags.unknown_touch=false;
+actionColors.length=0;scope.drawOverlay();
+assert.deepEqual(actionColors,["#c38cff"],
+  "Unknown touches disappear only when their own filter is disabled");
+overlay.actionFlags.unknown_touch=true;
 assert.ok(renderedLabels.some(label=>label.startsWith("≈ Блок · ")),"Block must be labeled as such with its provisional ID");
 assert.ok(!renderedLabels.includes("Касание?"),"Legacy card touch labels are forbidden");
 timeline.data.touch_annotations=[];
@@ -161,7 +166,7 @@ assert.equal(actionColors.length,0,
   "Legacy card motion_events alone cannot create a Touch annotation");
 const initStart=js.indexOf("  if(overlay.mode){");
 const initEnd=js.indexOf("  const startOverlayFrameLoop=",initStart);
-let changed,redraws=0;
+let changed,redraws=0,timelineRedraws=0,cardRedraws=0;
 const checkbox={dataset:{overlayAction:"attack"},checked:false,addEventListener:(name,fn)=>{if(name==="change")changed=fn;}};
 const input={addEventListener(){}};
 const controls={querySelectorAll:()=>[checkbox],classList:{toggle(){},remove(){},add(){}}};
@@ -175,7 +180,8 @@ runInNewContext(js.slice(initStart,initEnd),{
   training:{active:false,panel:{classList:{add(){}}}},comparison:{epoch:0},
   annotation:{lane:{querySelectorAll:()=>[]}},hideAnnotationContext(){},trainingEditorReset(){},
   updateRawDetectorLabel(){},placeTrainingTimeline(){},
-  drawOverlay:()=>{redraws++;},drawTimeline:()=>{},refreshRallyCardTouchTicks:()=>{},
+  drawOverlay:()=>{redraws++;},drawTimeline:()=>{timelineRedraws++;},
+  refreshRallyCardTouchTicks:()=>{cardRedraws++;},updateOverlayToggles:()=>{},
   setOverlaySource:()=>{},rawFusion:()=>({id:"f"}),s:{run:"",video:""},
   timeline:{status:{textContent:""},data:null},
   ensurePreviewVideo:()=>{},prefetchOverlayAtFrame:()=>{},overlayMessage:()=>{}
@@ -183,6 +189,8 @@ runInNewContext(js.slice(initStart,initEnd),{
 changed();
 assert.equal(initOverlay.actionFlags.attack,false,"Checkbox disables the matching action");
 assert.equal(redraws,1,"Changing the checkbox redraws the player");
+assert.equal(timelineRedraws,1,"Changing the checkbox redraws timeline markers");
+assert.equal(cardRedraws,1,"Changing the checkbox redraws rally card markers");
 initOverlay.rawMode.click();
 assert.equal(initOverlay.raw,true);
 assert.equal(initOverlay.rawMode.attributes["aria-selected"],"true");

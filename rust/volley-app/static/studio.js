@@ -2081,7 +2081,7 @@
       overlay.mode.setAttribute("aria-selected",String(!raw));
       overlay.rawMode.setAttribute("aria-selected",String(raw));
       overlay.rawControls.classList.toggle("hidden",!raw);
-      overlay.actionControls.classList.toggle("hidden",raw||!overlay.flags.touches);
+      updateOverlayToggles();
       overlay.mode.closest(".video-overlay-toggles").classList.toggle("raw-selected",raw);
       setOverlaySource(raw||s.run?{}:null);
       if(raw&&s.video){ensurePreviewVideo();prefetchOverlayAtFrame(0);}
@@ -2093,6 +2093,7 @@
         timeline.data.rallies.length+" розыгрышей · "+timeline.data.touch_annotations.filter(event=>event.touch_attributed===true||event.contact_verified===true).length+" касаний (CPU)";
       placeTrainingTimeline(false);
       drawTimeline();
+      refreshRallyCardTouchTicks();
       drawOverlay();
     };
     overlay.mode.addEventListener("click",()=>selectMode(false));
@@ -2105,7 +2106,6 @@
       overlay.mode.setAttribute("aria-selected","false");
       overlay.rawMode.setAttribute("aria-selected","false");
       overlay.rawControls.classList.add("hidden");
-      overlay.actionControls.classList.toggle("hidden",!overlay.flags.touches);
       training.panel.classList.remove("hidden");
       placeTrainingTimeline(true);
       annotationFocus();
@@ -3032,7 +3032,7 @@
     const validTimeline=Boolean(data)&&data.project_id===s.project&&
       data.rally_run_id===s.run&&data.video===s.video&&
       Array.isArray(data.touch_annotations);
-    const touches=validTimeline&&overlay.flags.touches?data.touch_annotations.filter(event=>
+    const touches=validTimeline&&!overlay.raw&&overlay.flags.touches?data.touch_annotations.filter(event=>
       (event.touch_attributed===true||event.contact_verified===true)&&
       overlay.actionFlags[cpuTouchKind(event.kind)]):[];
     for(const {progress,markers,start,end} of rallyCardProgresses.values()){

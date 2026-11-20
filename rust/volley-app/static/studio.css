@@ -958,7 +958,7 @@ body[data-ui-theme="light"] #studio-preview-view .rallies-panel-head span{color:
     justify-content:flex-start;
   }
 }
-#studio-preview-view .video-overlay-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;align-self:flex-end;pointer-events:auto;gap:4px 10px;max-width:100%;border:0;padding:6px 8px;margin:0;background:rgba(9,20,35,.9);color:#fff;border-radius:6px;font-size:12px}
+#studio-preview-view .video-overlay-actions{display:flex;flex-wrap:wrap;justify-content:flex-start;align-self:flex-start;pointer-events:auto;gap:4px 10px;max-width:100%;border:0;padding:6px 8px;margin:0;background:rgba(9,20,35,.9);color:#fff;border-radius:6px;font-size:12px}
 #studio-preview-view .video-overlay-actions label{display:flex;align-items:center;gap:4px;white-space:nowrap}
 #studio-preview-view .action-attack{color:#ff6b6b}
 #studio-preview-view .action-block{color:#c38cff}
