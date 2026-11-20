@@ -1,11 +1,10 @@
 use mini_cuda::{driver::try_init_driver, CUresult};
 use mini_nvcodec::{
     cuvid_sys::{
-        cudaVideoChromaFormat, cudaVideoCodec, cudaVideoCreate_PreferCUVID,
-        cudaVideoDeinterlaceMode, cudaVideoSurfaceFormat, CUvideodecoder, CUvideoparser,
-        CUVIDDECODECAPS, CUVIDDECODECREATEINFO, CUVIDEOFORMAT, CUVIDPARSERDISPINFO,
-        CUVIDPARSERPARAMS, CUVIDPICPARAMS, CUVIDPROCPARAMS, CUVIDRECT, CUVIDSOURCEDATAPACKET,
-        CUVID_PKT_ENDOFSTREAM,
+        cudaVideoCodec, cudaVideoCreate_PreferCUVID, cudaVideoDeinterlaceMode,
+        cudaVideoSurfaceFormat, CUvideodecoder, CUvideoparser, CUVIDDECODECAPS,
+        CUVIDDECODECREATEINFO, CUVIDEOFORMAT, CUVIDPARSERDISPINFO, CUVIDPARSERPARAMS,
+        CUVIDPICPARAMS, CUVIDPROCPARAMS, CUVIDRECT, CUVIDSOURCEDATAPACKET, CUVID_PKT_ENDOFSTREAM,
     },
     loader::{try_init_cuvid, CuvidApi},
 };
@@ -25,6 +24,14 @@ const MAX_SURFACES: u8 = 32;
 pub enum NvdecCodec {
     H264,
     Hevc,
+    Vp8,
+    Vp9,
+    Av1,
+    Mpeg1,
+    Mpeg2,
+    Mpeg4,
+    Vc1,
+    Mjpeg,
 }
 
 impl NvdecCodec {
@@ -32,8 +39,49 @@ impl NvdecCodec {
         match self {
             Self::H264 => cudaVideoCodec::H264,
             Self::Hevc => cudaVideoCodec::HEVC,
+            Self::Vp8 => cudaVideoCodec::VP8,
+            Self::Vp9 => cudaVideoCodec::VP9,
+            Self::Av1 => cudaVideoCodec::AV1,
+            Self::Mpeg1 => cudaVideoCodec::MPEG1,
+            Self::Mpeg2 => cudaVideoCodec::MPEG2,
+            Self::Mpeg4 => cudaVideoCodec::MPEG4,
+            Self::Vc1 => cudaVideoCodec::VC1,
+            Self::Mjpeg => cudaVideoCodec::JPEG,
         }
     }
+}
+
+pub fn codec_supported(codec: NvdecCodec, bit_depth: u8) -> bool {
+    codec_supported_format(codec, bit_depth, 1)
+}
+
+pub fn codec_supported_format(codec: NvdecCodec, bit_depth: u8, chroma: u8) -> bool {
+    if !matches!(bit_depth, 8 | 10 | 12)
+        || !matches!(chroma, 1..=3)
+        || mini_cuda::bind_primary_ctx_for_device(0).is_err()
+    {
+        return false;
+    }
+    let Some(api) = try_init_cuvid() else {
+        return false;
+    };
+    let mut caps: CUVIDDECODECAPS = unsafe { std::mem::zeroed() };
+    caps.eCodecType = codec.native();
+    caps.eChromaFormat.0 = i32::from(chroma);
+    caps.nBitDepthMinus8 = u32::from(bit_depth - 8);
+    let status = unsafe { (api.cuvidGetDecoderCaps)(&mut caps) };
+    let output = match (chroma, bit_depth == 8) {
+        (1, true) => cudaVideoSurfaceFormat::NV12,
+        (1, false) => cudaVideoSurfaceFormat::P016,
+        (2, true) => cudaVideoSurfaceFormat::NV16,
+        (2, false) => cudaVideoSurfaceFormat::P216,
+        (3, true) => cudaVideoSurfaceFormat::YUV444,
+        (3, false) => cudaVideoSurfaceFormat::YUV444_16BIT,
+        _ => return false,
+    };
+    status == CUresult::CUDA_SUCCESS
+        && caps.bIsSupported == 1
+        && (caps.nOutputFormatMask & (1 << output.0 as u32)) != 0
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +97,8 @@ pub struct GpuNv12Frame<'a> {
     pub pitch: usize,
     pub width: usize,
     pub height: usize,
+    pub bit_depth: u8,
+    pub chroma: u8,
     _mapped: PhantomData<&'a mut ()>,
 }
 
@@ -61,6 +111,8 @@ struct DecoderState<F> {
     height: usize,
     progressive: bool,
     surfaces: u8,
+    bit_depth: u8,
+    chroma: u8,
     callback: F,
     failure: Option<String>,
 }
@@ -76,24 +128,35 @@ where
             );
         }
         if format.codec != self.codec.native()
-            || format.chroma_format != cudaVideoChromaFormat::YUV420
-            || format.bit_depth_luma_minus8 != 0
-            || format.progressive_sequence == 0
+            || !matches!(format.chroma_format.0, 1..=3)
+            || !matches!(format.bit_depth_luma_minus8, 0 | 2 | 4)
         {
-            return Err("NVDEC source must use progressive 8-bit H264/HEVC YUV420".into());
+            return Err("NVDEC source chroma or bit depth is unsupported".into());
         }
+        let chroma = format.chroma_format.0 as u8;
+        let depth = format.bit_depth_luma_minus8 + 8;
+        let output_format = match (chroma, depth == 8) {
+            (1, true) => cudaVideoSurfaceFormat::NV12,
+            (1, false) => cudaVideoSurfaceFormat::P016,
+            (2, true) => cudaVideoSurfaceFormat::NV16,
+            (2, false) => cudaVideoSurfaceFormat::P216,
+            (3, true) => cudaVideoSurfaceFormat::YUV444,
+            (3, false) => cudaVideoSurfaceFormat::YUV444_16BIT,
+            _ => return Err("NVDEC surface format not supported".into()),
+        };
         let (coded_width, coded_height) =
             (format.coded_width as usize, format.coded_height as usize);
         let area = format.display_area;
         let width = (area.right - area.left) as usize;
         let height = (area.bottom - area.top) as usize;
-        if !(144..=8192).contains(&width)
-            || !(144..=8192).contains(&height)
+        if width == 0
+            || height == 0
             || width > coded_width
             || height > coded_height
             || !width.is_multiple_of(2)
             || !height.is_multiple_of(2)
-            || (width as u64) * (height as u64) > 8192 * 4320
+            || width > i16::MAX as usize
+            || height > i16::MAX as usize
         {
             return Err("NVDEC sequence dimensions or crop are not supported".into());
         }
@@ -103,19 +166,31 @@ where
         }
         let mut caps: CUVIDDECODECAPS = unsafe { std::mem::zeroed() };
         caps.eCodecType = self.codec.native();
-        caps.eChromaFormat = cudaVideoChromaFormat::YUV420;
+        caps.eChromaFormat = format.chroma_format;
+        caps.nBitDepthMinus8 = format.bit_depth_luma_minus8 as _;
         let status = unsafe { (self.api.cuvidGetDecoderCaps)(&mut caps) };
         if status != CUresult::CUDA_SUCCESS || caps.bIsSupported != 1 {
             return Err(format!("NVDEC decoder capability probe failed: {status:?}"));
+        }
+        if (caps.nOutputFormatMask & (1 << output_format.0 as u32)) == 0 {
+            return Err("NVDEC cannot output the stream bit depth on this GPU".into());
+        }
+        if coded_width < caps.nMinWidth as usize
+            || coded_height < caps.nMinHeight as usize
+            || coded_width > caps.nMaxWidth as usize
+            || coded_height > caps.nMaxHeight as usize
+        {
+            return Err("NVDEC codec cannot decode source dimensions on this GPU".into());
         }
         let mut info: CUVIDDECODECREATEINFO = unsafe { std::mem::zeroed() };
         info.ulWidth = coded_width as _;
         info.ulHeight = coded_height as _;
         info.ulNumDecodeSurfaces = surfaces as _;
         info.CodecType = self.codec.native();
-        info.ChromaFormat = cudaVideoChromaFormat::YUV420;
+        info.ChromaFormat = format.chroma_format;
         info.ulCreationFlags = cudaVideoCreate_PreferCUVID;
-        info.OutputFormat = cudaVideoSurfaceFormat::NV12;
+        info.bitDepthMinus8 = format.bit_depth_luma_minus8 as _;
+        info.OutputFormat = output_format;
         info.DeinterlaceMode = cudaVideoDeinterlaceMode::WEAVE;
         info.ulTargetWidth = width as _;
         info.ulTargetHeight = height as _;
@@ -132,7 +207,9 @@ where
         }
         self.width = width;
         self.height = height;
-        self.progressive = true;
+        self.progressive = format.progressive_sequence != 0;
+        self.bit_depth = depth;
+        self.chroma = chroma;
         self.surfaces = surfaces;
         Ok(surfaces as i32)
     }
@@ -175,6 +252,8 @@ where
             pitch: pitch as usize,
             width: self.width,
             height: self.height,
+            bit_depth: self.bit_depth,
+            chroma: self.chroma,
             _mapped: PhantomData,
         });
         let completion = try_init_driver()
@@ -299,6 +378,8 @@ where
         height: 0,
         progressive: false,
         surfaces: 0,
+        bit_depth: 0,
+        chroma: 0,
         callback: on_frame,
         failure: None,
     });
@@ -316,20 +397,61 @@ where
         return Err(format!("Create NVDEC video parser: {status:?}"));
     }
     let mut run = DecodeRun { state, parser };
-    let mut bytes = [0_u8; MAX_BYTES_PER_PACKET];
+    let ivf = matches!(codec, NvdecCodec::Vp8 | NvdecCodec::Vp9 | NvdecCodec::Av1);
+    if ivf {
+        let mut header = [0u8; 32];
+        source
+            .read_exact(&mut header)
+            .map_err(|error| format!("Read compressed IVF header: {error}"))?;
+        if &header[..4] != b"DKIF" {
+            return Err("NVDEC IVF source does not have a valid signature".into());
+        }
+        let expected = match codec {
+            NvdecCodec::Av1 => b"AV01",
+            NvdecCodec::Vp9 => b"VP90",
+            _ => b"VP80",
+        };
+        if &header[8..12] != expected {
+            return Err("NVDEC IVF codec signature mismatch".into());
+        }
+    }
+    let mut bytes = Vec::<u8>::new();
     loop {
         if cancelled.load(Ordering::Acquire) {
             return Err("cancelled".into());
         }
-        let count = source
-            .read(&mut bytes)
-            .map_err(|error| format!("Read compressed source: {error}"))?;
-        if count == 0 {
-            break;
+        if ivf {
+            let mut header = [0u8; 12];
+            let size = source
+                .read(&mut header[..1])
+                .map_err(|error| format!("Read IVF packet: {error}"))?;
+            if size == 0 {
+                break;
+            }
+            source
+                .read_exact(&mut header[1..])
+                .map_err(|error| format!("Read IVF packet header: {error}"))?;
+            let length = u32::from_le_bytes(header[..4].try_into().unwrap()) as usize;
+            if !(1..=64 * 1024 * 1024).contains(&length) {
+                return Err("NVDEC IVF packet size outside accepted bounds".into());
+            }
+            bytes.resize(length, 0);
+            source
+                .read_exact(&mut bytes)
+                .map_err(|error| format!("Read IVF packet payload: {error}"))?;
+        } else {
+            bytes.resize(MAX_BYTES_PER_PACKET, 0);
+            let count = source
+                .read(&mut bytes)
+                .map_err(|error| format!("Read compressed source: {error}"))?;
+            if count == 0 {
+                break;
+            }
+            bytes.truncate(count);
         }
         let mut packet = CUVIDSOURCEDATAPACKET {
             flags: 0,
-            payload_size: count as _,
+            payload_size: bytes.len() as _,
             payload: bytes.as_ptr(),
             timestamp: 0,
         };
@@ -364,6 +486,111 @@ where
         width: run.state.width,
         height: run.state.height,
     })
+}
+
+pub fn display_timestamps(source: &std::path::Path) -> Result<Vec<f64>, String> {
+    use std::io::Read;
+    let mut child = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=pts_time",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(source)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Read NVDEC display timestamps: {error}"))?;
+    let mut pipe = child
+        .stdout
+        .take()
+        .ok_or("Missing packet timestamp stream")?;
+    let reader = std::thread::spawn(move || {
+        let mut values = Vec::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let n = pipe.read(&mut buffer).map_err(|error| error.to_string())?;
+            if n == 0 {
+                break;
+            }
+            if values.len() > 96 * 1024 * 1024 {
+                return Err("NVDEC timestamp metadata exceeds safe bounds".into());
+            }
+            values.extend_from_slice(&buffer[..n]);
+        }
+        Ok::<_, String>(values)
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err("NVDEC timestamp probe timed out".into());
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(format!("NVDEC timestamp probe: {error}"));
+            }
+        }
+    };
+    let bytes = reader
+        .join()
+        .map_err(|_| "NVDEC timestamp worker panicked")??;
+    if !status.success() {
+        return Err("NVDEC timestamp probe failed".into());
+    }
+    let mut times = Vec::new();
+    for line in bytes.split(|&byte| byte == b'\n') {
+        let trimmed = std::str::from_utf8(line)
+            .map_err(|_| "Invalid timestamp encoding")?
+            .trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let time = trimmed
+            .parse::<f64>()
+            .map_err(|_| "NVDEC packet has no presentation timestamp")?;
+        if !time.is_finite() || time < -3600.0 || time > 48.0 * 3600.0 + 3600.0 {
+            return Err("NVDEC presentation time outside media bounds".into());
+        }
+        times.push(time);
+    }
+    if times.is_empty() {
+        return Err("NVDEC source has no display timestamps".into());
+    }
+    times.sort_by(|a, b| a.total_cmp(b));
+    let first = times[0];
+    for timestamp in &mut times {
+        *timestamp -= first;
+    }
+    Ok(times)
+}
+
+pub fn closest_display_frame(times: &[f64], time_sec: f64) -> Option<u64> {
+    if times.is_empty() || !time_sec.is_finite() || time_sec < 0.0 {
+        return None;
+    }
+    let next = times.partition_point(|value| *value < time_sec);
+    let frame = if next == 0 {
+        0
+    } else if next == times.len() || time_sec - times[next - 1] <= times[next] - time_sec {
+        next - 1
+    } else {
+        next
+    };
+    Some(frame as u64)
 }
 
 struct CompressedStream<'a> {
@@ -430,17 +657,25 @@ where
         return Err("NVDEC input source must exist".into());
     }
     let (filter, format) = match codec {
-        NvdecCodec::H264 => ("h264_mp4toannexb", "h264"),
-        NvdecCodec::Hevc => ("hevc_mp4toannexb", "hevc"),
+        NvdecCodec::H264 => (Some("h264_mp4toannexb"), "h264"),
+        NvdecCodec::Hevc => (Some("hevc_mp4toannexb"), "hevc"),
+        NvdecCodec::Vp8 | NvdecCodec::Vp9 | NvdecCodec::Av1 => (None, "ivf"),
+        NvdecCodec::Mpeg1 => (None, "mpeg1video"),
+        NvdecCodec::Mpeg2 => (None, "mpeg2video"),
+        NvdecCodec::Mpeg4 => (Some("dump_extra"), "m4v"),
+        NvdecCodec::Vc1 => (None, "vc1"),
+        NvdecCodec::Mjpeg => (None, "mjpeg"),
     };
     let mut command = std::process::Command::new("ffmpeg");
     command
         .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
         .arg(source)
-        .args([
-            "-map", "0:v:0", "-an", "-sn", "-dn", "-c:v", "copy", "-bsf:v", filter, "-f", format,
-            "pipe:1",
-        ])
+        .args(["-map", "0:v:0", "-an", "-sn", "-dn", "-c:v", "copy"]);
+    if let Some(filter) = filter {
+        command.args(["-bsf:v", filter]);
+    }
+    command
+        .args(["-f", format, "pipe:1"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
@@ -499,6 +734,267 @@ mod tests {
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn hevc_10bit_nvdec_delivers_p016_gpu_surfaces() {
+        if !codec_supported(NvdecCodec::Hevc, 10) {
+            return;
+        }
+        let source = std::env::temp_dir().join(format!(
+            "volley-p016-{}-{}.mkv",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let output = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=25:duration=0.8",
+                "-c:v",
+                "libx265",
+                "-preset",
+                "ultrafast",
+                "-x265-params",
+                "pools=1:frame-threads=1:log-level=error",
+                "-pix_fmt",
+                "yuv420p10le",
+                "-y",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let canceled = AtomicBool::new(false);
+        let pts = display_timestamps(&source).unwrap();
+        let mut count = 0;
+        let result = decode_video_file(&source, NvdecCodec::Hevc, &canceled, |surface| {
+            assert_eq!(surface.frame_index, count);
+            assert_eq!(surface.bit_depth, 10);
+            assert!(surface.pitch >= surface.width * 2);
+            count += 1;
+            Ok(())
+        });
+        let _ = fs::remove_file(source);
+        let summary = result.unwrap();
+        assert_eq!(summary.frames, 20);
+        assert_eq!(pts.len(), 20);
+    }
+
+    #[test]
+    fn nvdec_legacy_supported_codecs_use_vram_surfaces() {
+        let cancelled = AtomicBool::new(false);
+        for (codec, encoder) in [
+            (NvdecCodec::Vp8, "libvpx"),
+            (NvdecCodec::Mpeg1, "mpeg1video"),
+            (NvdecCodec::Mpeg2, "mpeg2video"),
+            (NvdecCodec::Mpeg4, "mpeg4"),
+            (NvdecCodec::Mjpeg, "mjpeg"),
+        ] {
+            if !codec_supported(codec, 8) {
+                continue;
+            }
+            let source = std::env::temp_dir().join(format!(
+                "volley-extra-codec-{}-{}-{}.mkv",
+                std::process::id(),
+                encoder,
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            let output = Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=320x180:rate=25:duration=0.4",
+                    "-c:v",
+                    encoder,
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-y",
+                ])
+                .arg(&source)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let mut seen = 0u64;
+            let result = decode_video_file(&source, codec, &cancelled, |frame| {
+                assert_eq!(frame.frame_index, seen);
+                assert_eq!(frame.chroma, 1);
+                assert_eq!(frame.bit_depth, 8);
+                seen += 1;
+                Ok(())
+            });
+            let _ = fs::remove_file(source);
+            assert_eq!(
+                result
+                    .unwrap_or_else(|error| panic!("{codec:?}: {error}"))
+                    .frames,
+                10,
+                "{codec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nvdec_handles_yuv422_and_yuv444_on_compatible_gpu() {
+        let canceled = AtomicBool::new(false);
+        for (codec, depth, chroma, encoder, pix_fmt) in [
+            (NvdecCodec::Hevc, 10, 2, "libx265", "yuv422p10le"),
+            (NvdecCodec::H264, 8, 3, "libx264", "yuv444p"),
+        ] {
+            if !codec_supported_format(codec, depth, chroma) {
+                eprintln!(
+                    "{codec:?} {depth}bit chroma {chroma} not supported by current NVDEC GPU"
+                );
+                continue;
+            }
+            let source = std::env::temp_dir().join(format!(
+                "volley-chroma-{}-{}-{}.mkv",
+                std::process::id(),
+                pix_fmt,
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            let output = Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=320x180:rate=25:duration=0.4",
+                    "-c:v",
+                    encoder,
+                    "-preset",
+                    "ultrafast",
+                    "-pix_fmt",
+                    pix_fmt,
+                    "-y",
+                ])
+                .arg(&source)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let mut frames = 0;
+            let result = decode_video_file(&source, codec, &canceled, |frame| {
+                assert_eq!(frame.chroma, chroma);
+                assert_eq!(frame.bit_depth, depth);
+                assert_eq!(frame.frame_index, frames);
+                frames += 1;
+                Ok(())
+            });
+            let _ = fs::remove_file(source);
+            assert_eq!(result.unwrap().frames, 10);
+        }
+    }
+
+    #[test]
+    fn ivf_vp9_and_av1_are_decoded_by_hardware_when_supported() {
+        let canceled = AtomicBool::new(false);
+        for (codec, encoder) in [
+            (NvdecCodec::Vp9, "libvpx-vp9"),
+            (NvdecCodec::Av1, "libaom-av1"),
+        ] {
+            if !codec_supported(codec, 8) {
+                continue;
+            }
+            let source = std::env::temp_dir().join(format!(
+                "volley-ivf-{}-{}-{}.mkv",
+                std::process::id(),
+                encoder,
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            let output = Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=320x180:rate=24:duration=0.5",
+                    "-c:v",
+                    encoder,
+                    "-cpu-used",
+                    "8",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-y",
+                ])
+                .arg(&source)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}: {}",
+                encoder,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let pts = display_timestamps(&source).unwrap();
+            let mut seen = 0u64;
+            let result = decode_video_file(&source, codec, &canceled, |frame| {
+                assert_eq!(frame.frame_index, seen);
+                assert_eq!(frame.bit_depth, 8);
+                seen += 1;
+                Ok(())
+            });
+            let _ = fs::remove_file(source);
+            let summary = result.unwrap();
+            assert_eq!(seen, 12);
+            assert_eq!(pts.len() as u64, summary.frames);
+        }
+    }
+
+    #[test]
+    fn exact_presentation_frame_sampling_handles_24_and_60_fps() {
+        let frames24 = (0..24).map(|index| index as f64 / 24.0).collect::<Vec<_>>();
+        let frames60 = (0..60).map(|index| index as f64 / 60.0).collect::<Vec<_>>();
+        let samples24 = (0..30)
+            .map(|index| closest_display_frame(&frames24, index as f64 / 30.0).unwrap())
+            .collect::<Vec<_>>();
+        let samples60 = (0..30)
+            .map(|index| closest_display_frame(&frames60, index as f64 / 30.0).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(samples24[0], 0);
+        assert_eq!(samples24[29], 23);
+        assert!(samples24.windows(2).any(|pair| pair[0] == pair[1]));
+        assert_eq!(samples60[0], 0);
+        assert_eq!(samples60[1], 2);
+        assert_eq!(samples60[29], 58);
+        let vfr = [0.0, 0.015, 0.071, 0.102];
+        assert_eq!(closest_display_frame(&vfr, 0.033), Some(1));
+        assert_eq!(closest_display_frame(&vfr, 0.066), Some(2));
+    }
 
     #[test]
     fn ffmpeg_compressed_demuxer_keeps_original_pixels_in_nvdec_vram() {

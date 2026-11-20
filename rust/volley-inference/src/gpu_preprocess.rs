@@ -21,9 +21,9 @@ impl Nv12View {
     pub fn validate(&self) -> Result<(), String> {
         if self.ptr == 0
             || self.pitch < self.width
-            || self.pitch > 32768
-            || !(144..=8192).contains(&self.width)
-            || !(144..=8192).contains(&self.height)
+            || self.pitch > 65536
+            || !(2..=16384).contains(&self.width)
+            || !(2..=16384).contains(&self.height)
             || !self.width.is_multiple_of(2)
             || !self.height.is_multiple_of(2)
             || self
@@ -112,6 +112,7 @@ pub struct GpuPreprocessor {
     rgb: CUfunction,
     person: CUfunction,
     pose: CUfunction,
+    canonical: CUfunction,
 }
 
 impl GpuPreprocessor {
@@ -139,6 +140,7 @@ impl GpuPreprocessor {
                 rgb: load("rgb_640")?,
                 person: load("rfdetr_image")?,
                 pose: load("pose_crop")?,
+                canonical: load("canonical_nv12")?,
             })
         })();
         if result.is_err() {
@@ -180,6 +182,64 @@ impl GpuPreprocessor {
         )
     }
 
+    pub fn canonical_frame(
+        &self,
+        frame: Nv12View,
+        bit_depth: u8,
+        chroma: u8,
+        rotation: i32,
+        full_range: bool,
+    ) -> Result<(GpuBuffer, usize, usize), String> {
+        if !matches!(bit_depth, 8 | 10 | 12)
+            || !matches!(chroma, 1..=3)
+            || !matches!(rotation, 0 | 90 | 180 | 270)
+            || frame.ptr == 0
+            || frame.width < 2
+            || frame.height < 2
+            || (frame.width | frame.height) & 1 != 0
+            || frame.pitch < frame.width * if bit_depth > 8 { 2 } else { 1 }
+        {
+            return Err("CUDA source surface or orientation is invalid".into());
+        }
+        let (ow, oh) = if rotation == 90 || rotation == 270 {
+            (frame.height, frame.width)
+        } else {
+            (frame.width, frame.height)
+        };
+        let len = ow
+            .checked_mul(oh)
+            .and_then(|v| v.checked_mul(3))
+            .map(|v| v / 2)
+            .ok_or("CUDA canonical surface too large")?;
+        let output = GpuBuffer::allocate(len)?;
+        let mut src = frame.ptr;
+        let mut pitch = frame.pitch as i32;
+        let mut sw = frame.width as i32;
+        let mut sh = frame.height as i32;
+        let mut dst = output.ptr;
+        let mut ow_arg = ow as i32;
+        let mut oh_arg = oh as i32;
+        let mut orientation = rotation;
+        let mut depth = i32::from(bit_depth);
+        let mut chroma = i32::from(chroma);
+        let mut range = i32::from(full_range);
+        let mut args: [*mut c_void; 11] = [
+            (&mut src as *mut u64).cast(),
+            (&mut pitch as *mut i32).cast(),
+            (&mut sw as *mut i32).cast(),
+            (&mut sh as *mut i32).cast(),
+            (&mut dst as *mut u64).cast(),
+            (&mut ow_arg as *mut i32).cast(),
+            (&mut oh_arg as *mut i32).cast(),
+            (&mut orientation as *mut i32).cast(),
+            (&mut depth as *mut i32).cast(),
+            (&mut chroma as *mut i32).cast(),
+            (&mut range as *mut i32).cast(),
+        ];
+        self.launch(self.canonical, ow as u32, oh as u32, 1, &mut args)?;
+        Ok((output, ow, oh))
+    }
+
     pub fn ball_input(
         &self,
         frame: Nv12View,
@@ -213,7 +273,7 @@ impl GpuPreprocessor {
         &self,
         frame: Nv12View,
         tensor: &Tensor<f32>,
-        bt709: bool,
+        matrix: u8,
     ) -> Result<(), String> {
         frame.validate()?;
         if tensor.dtype().tensor_shape().map(|v| v.as_ref()) != Some(&[1, 3, 576, 576][..]) {
@@ -225,14 +285,14 @@ impl GpuPreprocessor {
         let mut width = frame.width as i32;
         let mut height = frame.height as i32;
         let mut rgb_ptr = rgb.ptr;
-        let mut bt709 = i32::from(bt709);
+        let mut matrix = i32::from(matrix);
         let mut args: [*mut c_void; 6] = [
             (&mut src as *mut u64).cast(),
             (&mut pitch as *mut i32).cast(),
             (&mut width as *mut i32).cast(),
             (&mut height as *mut i32).cast(),
             (&mut rgb_ptr as *mut u64).cast(),
-            (&mut bt709 as *mut i32).cast(),
+            (&mut matrix as *mut i32).cast(),
         ];
         self.launch(self.rgb, 640, 360, 1, &mut args)?;
         let mut dst = tensor.data_ptr() as u64;
@@ -248,7 +308,7 @@ impl GpuPreprocessor {
         frame: Nv12View,
         tensor: &Tensor<f32>,
         boxes: &[[f64; 4]],
-        bt709: bool,
+        matrix: u8,
     ) -> Result<(), String> {
         frame.validate()?;
         if boxes.is_empty()
@@ -278,7 +338,7 @@ impl GpuPreprocessor {
         let mut height = frame.height as i32;
         let mut rects = coords.ptr;
         let mut output = tensor.data_ptr() as u64;
-        let mut bt709 = i32::from(bt709);
+        let mut matrix = i32::from(matrix);
         let mut args: [*mut c_void; 7] = [
             (&mut src as *mut u64).cast(),
             (&mut pitch as *mut i32).cast(),
@@ -286,7 +346,7 @@ impl GpuPreprocessor {
             (&mut height as *mut i32).cast(),
             (&mut rects as *mut u64).cast(),
             (&mut output as *mut u64).cast(),
-            (&mut bt709 as *mut i32).cast(),
+            (&mut matrix as *mut i32).cast(),
         ];
         self.launch(self.pose, 192, 256, boxes.len() as u32, &mut args)
     }
@@ -358,6 +418,144 @@ impl Drop for GpuBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cuda_p016_rotation_preserves_expected_luma_in_device_memory() {
+        if mini_cuda::driver::try_init_driver().is_none()
+            || mini_cuda::nvrtc::try_init_nvrtc().is_none()
+        {
+            return;
+        }
+        let gpu = GpuPreprocessor::new().unwrap();
+        let driver = ensure().unwrap();
+        for rotation in [0, 90, 180, 270] {
+            let mut pixels = [0u8; 48];
+            for y in 0..4 {
+                for x in 0..4 {
+                    let value = ((32 + y * 4 + x) as u16) << 8;
+                    let offset = y * 8 + x * 2;
+                    pixels[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+                }
+            }
+            for pair in pixels[32..].as_chunks_mut::<2>().0 {
+                pair.copy_from_slice(&(128u16 << 8).to_le_bytes());
+            }
+            let input = GpuBuffer::allocate(pixels.len()).unwrap();
+            cuda(
+                unsafe {
+                    (driver.cuMemcpyHtoD_v2)(input.ptr, pixels.as_ptr().cast(), pixels.len())
+                },
+                "P016 sample upload",
+            )
+            .unwrap();
+            let (out, width, height) = gpu
+                .canonical_frame(
+                    Nv12View {
+                        ptr: input.ptr,
+                        pitch: 8,
+                        width: 4,
+                        height: 4,
+                    },
+                    10,
+                    1,
+                    rotation,
+                    false,
+                )
+                .unwrap();
+            assert_eq!((width, height), (4, 4));
+            let mut data = vec![0u8; 24];
+            cuda(
+                unsafe { (driver.cuMemcpyDtoH_v2)(data.as_mut_ptr().cast(), out.ptr, data.len()) },
+                "P016 canonical download",
+            )
+            .unwrap();
+            for y in 0..4 {
+                for x in 0..4 {
+                    let (sx, sy) = match rotation {
+                        90 => (3 - y, x),
+                        180 => (3 - x, 3 - y),
+                        270 => (y, 3 - x),
+                        _ => (x, y),
+                    };
+                    assert_eq!(data[y * 4 + x], (32 + sy * 4 + sx) as u8);
+                }
+            }
+            assert!(data[16..].iter().all(|value| *value == 128));
+        }
+    }
+
+    #[test]
+    fn cuda_nv16_p216_and_yuv444_convert_to_nv12_without_host_pixels() {
+        if mini_cuda::driver::try_init_driver().is_none()
+            || mini_cuda::nvrtc::try_init_nvrtc().is_none()
+        {
+            return;
+        }
+        let gpu = GpuPreprocessor::new().unwrap();
+        let driver = ensure().unwrap();
+        for chroma in [2, 3] {
+            let mut pixels = if chroma == 2 {
+                vec![0u8; 64]
+            } else {
+                vec![0u8; 48]
+            };
+            let pitch = if chroma == 2 { 8 } else { 4 };
+            let depth = if chroma == 2 { 10 } else { 8 };
+            if chroma == 2 {
+                for row in 0..4 {
+                    for x in 0..4 {
+                        pixels[row * 8 + x * 2..row * 8 + x * 2 + 2].copy_from_slice(
+                            &((32u16 + row as u16 * 4 + x as u16) << 8).to_le_bytes(),
+                        );
+                        let chroma_value = if x % 2 == 0 { 64 + row } else { 180 + row };
+                        pixels[32 + row * 8 + x * 2..32 + row * 8 + x * 2 + 2]
+                            .copy_from_slice(&((chroma_value as u16) << 8).to_le_bytes());
+                    }
+                }
+            } else {
+                pixels[..16].fill(64);
+                pixels[16..32].fill(80);
+                pixels[32..].fill(190);
+            }
+            let source = GpuBuffer::allocate(pixels.len()).unwrap();
+            cuda(
+                unsafe {
+                    (driver.cuMemcpyHtoD_v2)(source.ptr, pixels.as_ptr().cast(), pixels.len())
+                },
+                "YUV444 or P216 upload",
+            )
+            .unwrap();
+            let (out, w, h) = gpu
+                .canonical_frame(
+                    Nv12View {
+                        ptr: source.ptr,
+                        pitch,
+                        width: 4,
+                        height: 4,
+                    },
+                    depth,
+                    chroma,
+                    0,
+                    false,
+                )
+                .unwrap();
+            assert_eq!((w, h), (4, 4));
+            let mut result = [0u8; 24];
+            cuda(
+                unsafe {
+                    (driver.cuMemcpyDtoH_v2)(result.as_mut_ptr().cast(), out.ptr, result.len())
+                },
+                "Canonical multi-chroma download",
+            )
+            .unwrap();
+            if chroma == 2 {
+                assert_eq!(&result[16..20], &[64, 180, 64, 180]);
+                assert_eq!(&result[20..24], &[66, 182, 66, 182]);
+            } else {
+                assert_eq!(&result[16..], &[80, 190, 80, 190, 80, 190, 80, 190]);
+            }
+        }
+    }
+
     #[test]
     fn cuda_nv12_preprocessing_runs_on_device() {
         if mini_cuda::driver::try_init_driver().is_none()

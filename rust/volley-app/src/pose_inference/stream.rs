@@ -17,7 +17,7 @@ enum FramePixels {
     Cuda {
         frame: Arc<GpuBuffer>,
         pitch: usize,
-        bt709: bool,
+        matrix: u8,
     },
 }
 #[derive(Debug)]
@@ -230,7 +230,7 @@ impl PoseStream {
         first_frame: u64,
         frames: Vec<Option<Arc<GpuBuffer>>>,
         pitch: usize,
-        bt709: bool,
+        matrix: u8,
         width: usize,
         height: usize,
         detected: &[RawDetection],
@@ -265,7 +265,7 @@ impl PoseStream {
                 pixels: FramePixels::Cuda {
                     frame,
                     pitch,
-                    bt709,
+                    matrix,
                 },
                 width,
                 height,
@@ -350,14 +350,14 @@ impl PoseStream {
                     FramePixels::Cuda {
                         frame: nv12,
                         pitch,
-                        bt709,
+                        matrix,
                     } => {
                         let view = nv12.view(*pitch, frame.width, frame.height)?;
                         let input = self.engine.allocate_cuda_pose_input(boxes.len())?;
                         self.cuda_processor
                             .as_ref()
                             .ok_or("CUDA pose preprocessor was not initialized")?
-                            .pose_input(view, &input, &boxes, *bt709)?;
+                            .pose_input(view, &input, &boxes, *matrix)?;
                         self.engine.infer_cuda_pose_input(
                             &input,
                             frame.width,

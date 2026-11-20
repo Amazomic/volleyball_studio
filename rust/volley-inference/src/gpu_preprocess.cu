@@ -43,21 +43,21 @@ __device__ __forceinline__ float sample_uv(
     }
     return total>0.f ? sum/total : 128.f;
 }
-__device__ __forceinline__ float rgb_pixel(const uchar* src,int pitch,int width,int height,int x,int y,int channel,int bt709) {
+__device__ __forceinline__ float rgb_pixel(const uchar* src,int pitch,int width,int height,int x,int y,int channel,int matrix) {
     if(x<0 || y<0 || x>=width || y>=height) return 0.f;
     const uchar *uv=src+pitch*height;
     float yy=(float)src[y*pitch+x] - 16.f;
     int cx=x/2, cy=y/2;
     float u=(float)uv[cy*pitch+cx*2]-128.f;
     float v=(float)uv[cy*pitch+cx*2+1]-128.f;
-    float r=1.16438356f*yy+(bt709 ? 1.79274107f:1.59602678f)*v;
-    float g=1.16438356f*yy-(bt709 ? 0.21324861f:0.39176229f)*u-(bt709 ? 0.53290933f:0.81296765f)*v;
-    float b=1.16438356f*yy+(bt709 ? 2.11240179f:2.01723214f)*u;
+    float r=1.16438356f*yy+(matrix==1 ? 1.79274107f:matrix==2 ? 1.67867f:1.59602678f)*v;
+    float g=1.16438356f*yy-(matrix==1 ? 0.21324861f:matrix==2 ? 0.187326f:0.39176229f)*u-(matrix==1 ? 0.53290933f:matrix==2 ? 0.650424f:0.81296765f)*v;
+    float b=1.16438356f*yy+(matrix==1 ? 2.11240179f:matrix==2 ? 2.14177f:2.01723214f)*u;
     float value= channel==0?r:channel==1?g:b;
     return floorf(fminf(fmaxf(value,0.f),255.f)+0.5f);
 }
 __device__ __forceinline__ float sample_rgb(
-    const uchar* src,int pitch,int width,int height,float sx,float sy,int channel,int bt709
+    const uchar* src,int pitch,int width,int height,float sx,float sy,int channel,int matrix
 ) {
     float yy=sample_y(src,pitch,width,height,sx,sy,640.f,360.f)-16.f;
     const uchar* uv=src+pitch*height;
@@ -65,9 +65,9 @@ __device__ __forceinline__ float sample_rgb(
     float ux=(sx-0.5f)*0.5f,uy=(sy-0.5f)*0.5f;
     float u=sample_uv(uv,pitch,width/2,height/2,ux,uy,rx,ry,0)-128.f;
     float v=sample_uv(uv,pitch,width/2,height/2,ux,uy,rx,ry,1)-128.f;
-    float r=1.16438356f*yy+(bt709 ? 1.79274107f:1.59602678f)*v;
-    float g=1.16438356f*yy-(bt709 ? 0.21324861f:0.39176229f)*u-(bt709 ? 0.53290933f:0.81296765f)*v;
-    float b=1.16438356f*yy+(bt709 ? 2.11240179f:2.01723214f)*u;
+    float r=1.16438356f*yy+(matrix==1 ? 1.79274107f:matrix==2 ? 1.67867f:1.59602678f)*v;
+    float g=1.16438356f*yy-(matrix==1 ? 0.21324861f:matrix==2 ? 0.187326f:0.39176229f)*u-(matrix==1 ? 0.53290933f:matrix==2 ? 0.650424f:0.81296765f)*v;
+    float b=1.16438356f*yy+(matrix==1 ? 2.11240179f:matrix==2 ? 2.14177f:2.01723214f)*u;
     return channel==0?r:channel==1?g:b;
 }
 extern "C" __global__ void ball_gray(
@@ -82,7 +82,7 @@ extern "C" __global__ void ball_gray(
     dst[slot*512*288+y*512+x]=fminf(fmaxf((luma-16.f)/219.f,0.f),1.f);
 }
 extern "C" __global__ void rgb_640(
-    const uchar* src,int pitch,int width,int height,uchar* dst,int bt709
+    const uchar* src,int pitch,int width,int height,uchar* dst,int matrix
 ) {
     int x=(int)(blockIdx.x*blockDim.x+threadIdx.x);
     int y=(int)(blockIdx.y*blockDim.y+threadIdx.y);
@@ -90,7 +90,7 @@ extern "C" __global__ void rgb_640(
     float sx=((float)x+0.5f)*(float)width/640.f-0.5f;
     float sy=((float)y+0.5f)*(float)height/360.f-0.5f;
     for(int c=0;c<3;c++) {
-        float val=sample_rgb(src,pitch,width,height,sx,sy,c,bt709);
+        float val=sample_rgb(src,pitch,width,height,sx,sy,c,matrix);
         dst[(y*640+x)*3+c]=(uchar)(fminf(fmaxf(floorf(val+0.5f),0.f),255.f));
     }
 }
@@ -113,7 +113,7 @@ extern "C" __global__ void rfdetr_image(const uchar* rgb,float* dst) {
     }
 }
 extern "C" __global__ void pose_crop(
-    const uchar* src,int pitch,int width,int height,const float* boxes,float* dst,int bt709
+    const uchar* src,int pitch,int width,int height,const float* boxes,float* dst,int matrix
 ) {
     int x=(int)(blockIdx.x*blockDim.x+threadIdx.x);
     int y=(int)(blockIdx.y*blockDim.y+threadIdx.y);
@@ -128,11 +128,55 @@ extern "C" __global__ void pose_crop(
     const float mean[3]={123.675f,116.28f,103.53f};
     const float stds[3]={58.395f,57.12f,57.375f};
     for(int c=0;c<3;c++) {
-        float a=rgb_pixel(src,pitch,width,height,x0,y0,c,bt709);
-        float b=rgb_pixel(src,pitch,width,height,x0+1,y0,c,bt709);
-        float d=rgb_pixel(src,pitch,width,height,x0,y0+1,c,bt709);
-        float e=rgb_pixel(src,pitch,width,height,x0+1,y0+1,c,bt709);
+        float a=rgb_pixel(src,pitch,width,height,x0,y0,c,matrix);
+        float b=rgb_pixel(src,pitch,width,height,x0+1,y0,c,matrix);
+        float d=rgb_pixel(src,pitch,width,height,x0,y0+1,c,matrix);
+        float e=rgb_pixel(src,pitch,width,height,x0+1,y0+1,c,matrix);
         float pixel=(a+(b-a)*u)*(1.f-v)+(d+(e-d)*u)*v;
         dst[(crop*3+c)*256*192+y*192+x]=(pixel-mean[c])/stds[c];
+    }
+}
+
+
+__device__ __forceinline__ int normalized_luma(const uchar* src,int pitch,int x,int y,int depth,int full_range) {
+    int val=depth==8 ? (int)src[y*pitch+x] :
+        (int)(*((const unsigned short*)(src+y*pitch)+x)>>8);
+    if (full_range) val=(int)floorf(16.f+(float)val*219.f/255.f+0.5f);
+    return bound(val,256);
+}
+__device__ __forceinline__ int normalized_chroma(const uchar* uv,int pitch,int x,int y,int depth,int full_range) {
+    int val=depth==8 ? (int)uv[y*pitch+x] :
+        (int)(*((const unsigned short*)(uv+y*pitch)+x)>>8);
+    if (full_range) val=(int)floorf(128.f+((float)val-128.f)*224.f/255.f+0.5f);
+    return bound(val,256);
+}
+__device__ __forceinline__ void map_rotation(int x,int y,int sw,int sh,int rotation,int* sx,int* sy) {
+    if(rotation==90){*sx=sw-1-y;*sy=x;}
+    else if(rotation==180){*sx=sw-1-x;*sy=sh-1-y;}
+    else if(rotation==270){*sx=y;*sy=sh-1-x;}
+    else {*sx=x;*sy=y;}
+}
+extern "C" __global__ void canonical_nv12(
+    const uchar* src,int pitch,int sw,int sh,uchar* dst,int ow,int oh,int rotation,int depth,int chroma,int full_range
+) {
+    int x=(int)(blockIdx.x*blockDim.x+threadIdx.x);
+    int y=(int)(blockIdx.y*blockDim.y+threadIdx.y);
+    if(x>=ow||y>=oh)return;
+    int sx,sy;
+    map_rotation(x,y,sw,sh,rotation,&sx,&sy);
+    dst[y*ow+x]=(uchar)normalized_luma(src,pitch,sx,sy,depth,full_range);
+    if((x&1)==0 && (y&1)==0) {
+        const uchar* uv=src+pitch*sh;
+        int cx=(sx/2)*2, cy=chroma==1 ? sy/2 : sy;
+        uchar* out_uv=dst+ow*oh+(y/2)*ow+x;
+        if(chroma==3) {
+            const uchar* v=uv+pitch*sh;
+            int off=sx;
+            out_uv[0]=(uchar)normalized_chroma(uv,pitch,off,sy,depth,full_range);
+            out_uv[1]=(uchar)normalized_chroma(v,pitch,off,sy,depth,full_range);
+        } else {
+            out_uv[0]=(uchar)normalized_chroma(uv,pitch,cx,cy,depth,full_range);
+            out_uv[1]=(uchar)normalized_chroma(uv,pitch,cx+1,cy,depth,full_range);
+        }
     }
 }

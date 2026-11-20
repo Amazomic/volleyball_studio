@@ -7,18 +7,31 @@ use std::cell::RefCell;
 use volley_media::nvdec::NvdecCodec;
 use volley_media::raw_decoder::{DecodeBackend, DecodePreference, PrimaryDecodeSummary};
 
-fn zero_copy_color_matrix(space: Option<&str>, range: Option<&str>) -> Option<bool> {
-    if !matches!(range, None | Some("unknown") | Some("tv")) {
-        return None;
-    }
-    match space {
-        Some("bt709") => Some(true),
-        None | Some("unknown" | "bt470bg" | "smpte170m") => Some(false),
-        _ => None,
-    }
+#[derive(Clone, Debug, PartialEq)]
+struct ZeroCopySource {
+    codec: NvdecCodec,
+    matrix: u8,
+    full_range: bool,
+    rotation: i32,
+    timestamps: Vec<f64>,
 }
 
-fn source_color_matrix(source: &Path) -> Option<bool> {
+fn zero_copy_color_matrix(space: Option<&str>, range: Option<&str>) -> Option<(u8, bool)> {
+    let full_range = match range {
+        Some("pc" | "jpeg") => true,
+        None | Some("unknown" | "tv" | "mpeg") => false,
+        _ => return None,
+    };
+    let matrix = match space {
+        Some("bt709") => 1,
+        Some("bt2020nc") => 2,
+        None | Some("unknown" | "bt470bg" | "smpte170m" | "smpte240m") => 0,
+        _ => return None,
+    };
+    Some((matrix, full_range))
+}
+
+fn source_color_matrix(source: &Path) -> Option<(u8, bool, u8, u8)> {
     let output = std::process::Command::new("ffprobe")
         .args([
             "-v",
@@ -26,7 +39,7 @@ fn source_color_matrix(source: &Path) -> Option<bool> {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=color_space,color_range",
+            "stream=color_space,color_range,pix_fmt",
             "-of",
             "json",
         ])
@@ -38,37 +51,62 @@ fn source_color_matrix(source: &Path) -> Option<bool> {
     }
     let document: Value = serde_json::from_slice(&output.stdout).ok()?;
     let video = document["streams"].as_array()?.first()?;
-    zero_copy_color_matrix(video["color_space"].as_str(), video["color_range"].as_str())
+    let (matrix, full_range) =
+        zero_copy_color_matrix(video["color_space"].as_str(), video["color_range"].as_str())?;
+    let (bit_depth, chroma) = match video["pix_fmt"].as_str()? {
+        "yuv420p" | "yuvj420p" | "nv12" => (8, 1),
+        "yuv420p10le" | "p010le" => (10, 1),
+        "yuv420p12le" | "p012le" => (12, 1),
+        "yuv422p" | "yuvj422p" | "nv16" => (8, 2),
+        "yuv422p10le" | "p210le" => (10, 2),
+        "yuv422p12le" | "p212le" => (12, 2),
+        "yuv444p" | "yuvj444p" => (8, 3),
+        "yuv444p10le" => (10, 3),
+        "yuv444p12le" => (12, 3),
+        _ => return None,
+    };
+    Some((matrix, full_range, bit_depth, chroma))
 }
-fn zero_copy_codec(original: &Path, cancelled: &AtomicBool) -> Option<(NvdecCodec, bool)> {
+fn zero_copy_codec(original: &Path, cancelled: &AtomicBool) -> Option<ZeroCopySource> {
     if !matches!(
         std::env::var("VOLLEY_ZERO_COPY_PRIMARY").ok().as_deref(),
         None | Some("1") | Some("true")
-    ) {
+    ) || cancelled.load(Ordering::Acquire)
+    {
         return None;
     }
     let info = volley_media::probe(original).ok()?;
-    if info.rotation != 0 || info.fps.is_none_or(|fps| (fps - 30.0).abs() > 0.0001) {
+    let rotation = info.rotation.rem_euclid(360);
+    if !matches!(rotation, 0 | 90 | 180 | 270) {
         return None;
     }
-    let backend = volley_media::raw_decoder::select_decode_backend(
-        original,
-        DecodePreference::Nvdec,
-        cancelled,
-    )
-    .ok()?;
-    if backend.backend != DecodeBackend::Nvdec {
+    let codec = match info.codec.as_str() {
+        "h264" => NvdecCodec::H264,
+        "hevc" => NvdecCodec::Hevc,
+        "vp8" => NvdecCodec::Vp8,
+        "vp9" => NvdecCodec::Vp9,
+        "av1" => NvdecCodec::Av1,
+        "mpeg1video" => NvdecCodec::Mpeg1,
+        "mpeg2video" => NvdecCodec::Mpeg2,
+        "mpeg4" => NvdecCodec::Mpeg4,
+        "vc1" => NvdecCodec::Vc1,
+        "mjpeg" => NvdecCodec::Mjpeg,
+        _ => return None,
+    };
+    let (matrix, full_range, bit_depth, chroma) = source_color_matrix(original)?;
+    if !volley_media::nvdec::codec_supported_format(codec, bit_depth, chroma)
+        || volley_inference::gpu_preprocess::GpuPreprocessor::new().is_err()
+    {
         return None;
     }
-    let bt709 = source_color_matrix(original)?;
-    if volley_inference::gpu_preprocess::GpuPreprocessor::new().is_err() {
-        return None;
-    }
-    match info.codec.as_str() {
-        "h264" => Some((NvdecCodec::H264, bt709)),
-        "hevc" => Some((NvdecCodec::Hevc, bt709)),
-        _ => None,
-    }
+    let timestamps = volley_media::nvdec::display_timestamps(original).ok()?;
+    Some(ZeroCopySource {
+        codec,
+        matrix,
+        full_range,
+        rotation,
+        timestamps,
+    })
 }
 
 #[derive(Debug)]
@@ -293,17 +331,13 @@ pub(crate) fn run_joint_pair(
     };
     let pose = RefCell::new(pose);
     let estimated = (duration * 30.0).max(9.0);
-    let zero_copy_codec = if range.is_some() {
-        None
-    } else {
-        zero_copy_codec(original, cancelled)
-    };
+    let zero_copy_codec = zero_copy_codec(original, cancelled);
     let zero_copy = zero_copy_codec.is_some();
-    let summary = if let Some((codec, bt709)) = zero_copy_codec {
+    let summary = if let Some(source_info) = zero_copy_codec {
         let decode = zero_copy::run(
             original,
-            codec,
-            bt709,
+            source_info,
+            range,
             &mut ball_engine,
             &mut person_engine,
             &pose,
@@ -427,20 +461,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn zero_copy_source_color_contract_only_accepts_supported_limited_matrices() {
+    fn zero_copy_source_color_matrix_preserves_range_and_bt2020() {
         assert_eq!(
             zero_copy_color_matrix(Some("bt709"), Some("tv")),
-            Some(true)
+            Some((1, false))
         );
         assert_eq!(
             zero_copy_color_matrix(Some("bt470bg"), Some("tv")),
-            Some(false)
+            Some((0, false))
         );
-        assert_eq!(zero_copy_color_matrix(Some("smpte170m"), None), Some(false));
-        assert_eq!(zero_copy_color_matrix(None, None), Some(false));
-        assert_eq!(zero_copy_color_matrix(Some("bt709"), Some("pc")), None);
-        assert_eq!(zero_copy_color_matrix(Some("bt2020nc"), Some("tv")), None);
-        assert_eq!(zero_copy_color_matrix(Some("smpte240m"), Some("tv")), None);
+        assert_eq!(
+            zero_copy_color_matrix(Some("smpte170m"), None),
+            Some((0, false))
+        );
+        assert_eq!(zero_copy_color_matrix(None, None), Some((0, false)));
+        assert_eq!(
+            zero_copy_color_matrix(Some("bt709"), Some("pc")),
+            Some((1, true))
+        );
+        assert_eq!(
+            zero_copy_color_matrix(Some("bt2020nc"), Some("tv")),
+            Some((2, false))
+        );
+        assert_eq!(
+            zero_copy_color_matrix(Some("smpte240m"), Some("tv")),
+            Some((0, false))
+        );
+        assert_eq!(zero_copy_color_matrix(Some("reserved"), Some("tv")), None);
     }
     #[test]
     fn pose_provenance_does_not_swap_original_content_and_file_stamp() {
