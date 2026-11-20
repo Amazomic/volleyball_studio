@@ -1643,6 +1643,12 @@ async fn pipeline(
                 } else {
                     "GPU · общий поток VBallNet + игроки"
                 };
+                let primary_prefilter = !matches!(
+                    std::env::var("VOLLEY_PRIMARY_RALLY_PREFILTER")
+                        .ok()
+                        .as_deref(),
+                    Some("0" | "false")
+                );
                 let result = tokio::task::block_in_place(|| {
                     inference_full::run_joint_pair(
                         app,
@@ -1658,7 +1664,20 @@ async fn pipeline(
                         request.gpu.gpu_memory_limit_mb,
                         request.gpu.cpu_threads,
                         cancel,
-                        |fraction| progress(path, status, gpu_label, 8.0 + 72.0 * fraction),
+                        |fraction| {
+                            let label = if !primary_prefilter {
+                                gpu_label
+                            } else if fraction < 0.4 {
+                                "GPU · VBallNet: анализ мяча"
+                            } else if fraction <= 0.4 {
+                                "GPU · построение траектории и поиск розыгрышей"
+                            } else if full_resolution_pose {
+                                "GPU · RF-DETR + RTMPose: игровые интервалы"
+                            } else {
+                                "GPU · RF-DETR: игровые интервалы"
+                            };
+                            progress(path, status, label, 8.0 + 72.0 * fraction)
+                        },
                     )
                 })?;
                 crate::preparation::primary_preview::enqueue(
@@ -1672,7 +1691,8 @@ async fn pipeline(
                     "Общий GPU",
                     "success",
                     &format!(
-                        "Один декодер: {:?}, окон={}, кадров={}, zero_copy={}, fallback={}",
+                        "GPU-проходов={}: {:?}, окон={}, кадров={}, zero_copy={}, fallback={}",
+                        if primary_prefilter { 2 } else { 1 },
                         result.backend,
                         result.windows,
                         result.decoded_frames,
@@ -1681,6 +1701,25 @@ async fn pipeline(
                     ),
                 )?;
                 status["zero_copy_active"] = json!(result.zero_copy);
+                status["gpu_rally_mask"] = result.rally_filter.unwrap_or(Value::Null);
+                if status["gpu_rally_mask"].is_object() {
+                    log_event(
+                        path,
+                        "Поиск розыгрышей",
+                        "success",
+                        &format!(
+                            "Исходных={}, объединённых={}, выбранных кадров={}, fallback={}",
+                            status["gpu_rally_mask"]["detected"]
+                                .as_array()
+                                .map_or(0, Vec::len),
+                            status["gpu_rally_mask"]["merged"]
+                                .as_array()
+                                .map_or(0, Vec::len),
+                            status["gpu_rally_mask"]["selected_frames"],
+                            status["gpu_rally_mask"]["fallback_reason"]
+                        ),
+                    )?;
+                }
                 save(path, status)?;
                 pending_shared_pose = result.pending_pose;
                 Some((result.ball_job_id, result.player_job_id))

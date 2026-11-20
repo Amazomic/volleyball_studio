@@ -1,8 +1,10 @@
 //! Experimental single-source GPU pair. The existing raw model manifests
 //! and fusion contracts remain unchanged; no tracking or touches are invented.
 use super::*;
+mod rally_mask;
 mod zero_copy;
 use crate::pose_inference::{PendingPose, PoseStream};
+use rally_mask::RallyMask;
 use std::cell::RefCell;
 use volley_media::nvdec::NvdecCodec;
 use volley_media::raw_decoder::{DecodeBackend, DecodePreference, PrimaryDecodeSummary};
@@ -120,6 +122,7 @@ pub(crate) struct JointPair {
     pub decoded_frames: u64,
     pub pending_pose: Option<PendingPose>,
     pub source_provenance: Value,
+    pub rally_filter: Option<Value>,
 }
 
 #[derive(Default)]
@@ -333,7 +336,176 @@ pub(crate) fn run_joint_pair(
     let estimated = (duration * 30.0).max(9.0);
     let zero_copy_codec = zero_copy_codec(original, cancelled);
     let zero_copy = zero_copy_codec.is_some();
-    let summary = if let Some(source_info) = zero_copy_codec {
+    let mut rally_filter = None;
+    let prefilter = !matches!(
+        std::env::var("VOLLEY_PRIMARY_RALLY_PREFILTER")
+            .ok()
+            .as_deref(),
+        Some("0" | "false")
+    );
+    if prefilter {
+        ball_writer.ball_samples = Some(Vec::new());
+    }
+    let summary = if prefilter {
+        let ball_scan = if let Some(source_info) = zero_copy_codec.clone() {
+            let decode = zero_copy::run(
+                original,
+                source_info,
+                range,
+                &mut ball_engine,
+                &mut person_engine,
+                &pose,
+                Some(&mut ball_writer),
+                None,
+                zero_copy::ScanPass::BallOnly,
+                &ball,
+                &players,
+                person_stride,
+                duration,
+                cancelled,
+                |fraction| report(0.4 * fraction),
+            )?;
+            PrimaryDecodeSummary {
+                decode,
+                backend: DecodeBackend::Nvdec,
+                fallback_reason: None,
+            }
+        } else {
+            volley_media::raw_decoder::decode_full_video_shared_with_native_and_tail_in_range(
+                original,
+                9,
+                backend_preference()?,
+                cpu_threads,
+                range,
+                cancelled,
+                false,
+                |batch| {
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err("cancelled".into());
+                    }
+                    let balls = detect_ball_window(
+                        &mut ball_engine,
+                        &batch.gray,
+                        batch.first_frame,
+                        cancelled,
+                    )?;
+                    ball_writer.push(batch.first_frame, &balls)?;
+                    if ball_writer.count.is_multiple_of(10) {
+                        let frames = batch.first_frame + 9;
+                        update_progress(&ball.status, ball_writer.count, frames, estimated);
+                        persist(&ball.folder, &snapshot(&ball.status))?;
+                        report(0.4 * (frames as f64 / estimated).clamp(0.0, 0.99))?;
+                    }
+                    Ok(())
+                },
+                |_, _| Ok(()),
+            )?
+        };
+        if cancelled.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        let mask = RallyMask::from_ball_samples(
+            ball_writer.ball_samples.as_deref().unwrap_or(&[]),
+            ball_scan.decode.decoded_frames,
+        )?;
+        ball_writer.ball_samples = None;
+        let selected_frames = mask.included_frames();
+        let mut mask_value = serde_json::to_value(&mask)
+            .map_err(|error| format!("Serialize primary rally mask: {error}"))?;
+        mask_value["selected_frames"] = json!(selected_frames);
+        storage::write_json_atomic(
+            &ball.folder.join("rally_mask.json"),
+            &json!({
+                "schema":"volley-primary-rally-mask-evidence/1",
+                "ball_job_id":ball.id,
+                "original_source":original_provenance,
+                "analysis_range":range,
+                "selected_frames":selected_frames,
+                "mask":mask_value
+            }),
+        )
+        .map_err(|error| format!("Save primary rally mask: {error:?}"))?;
+        rally_filter = Some(mask_value);
+        report(0.4)?;
+        let people_scan = if let Some(source_info) = zero_copy_codec.clone() {
+            let decode = zero_copy::run(
+                original,
+                source_info,
+                range,
+                &mut ball_engine,
+                &mut person_engine,
+                &pose,
+                None,
+                Some(&mut person_writer),
+                zero_copy::ScanPass::PlayersOnly(&mask),
+                &ball,
+                &players,
+                person_stride,
+                duration,
+                cancelled,
+                |fraction| report(0.4 + 0.6 * fraction),
+            )?;
+            PrimaryDecodeSummary {
+                decode,
+                backend: DecodeBackend::Nvdec,
+                fallback_reason: None,
+            }
+        } else {
+            volley_media::raw_decoder::decode_full_video_shared_with_native_and_tail_in_range(
+                original,
+                9,
+                backend_preference()?,
+                cpu_threads,
+                range,
+                cancelled,
+                pose_enabled,
+                |batch| {
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err("cancelled".into());
+                    }
+                    let selected = (batch.first_frame..batch.first_frame + 9).any(|frame| {
+                        frame.is_multiple_of(person_stride as u64) && mask.includes(frame)
+                    });
+                    let mut persons = if selected {
+                        detect_player_window(
+                            &mut person_engine,
+                            &batch.rgb,
+                            batch.first_frame,
+                            person_stride as u64,
+                            cancelled,
+                        )?
+                    } else {
+                        Vec::new()
+                    };
+                    persons.retain(|person| mask.includes(person.frame_index));
+                    person_writer.push(batch.first_frame, &persons)?;
+                    if let Some(stage) = pose.borrow_mut().as_mut() {
+                        stage.observe(&batch, &persons, cancelled)?;
+                    }
+                    if person_writer.count.is_multiple_of(10) {
+                        let frames = batch.first_frame + 9;
+                        update_progress(&players.status, person_writer.count, frames, estimated);
+                        persist(&players.folder, &snapshot(&players.status))?;
+                        report(0.4 + 0.6 * (frames as f64 / estimated).clamp(0.0, 0.99))?;
+                    }
+                    Ok(())
+                },
+                |tail, decoded| {
+                    if let Some(stage) = pose.borrow_mut().as_mut() {
+                        stage.tail(tail, decoded, cancelled)?;
+                    }
+                    Ok(())
+                },
+            )?
+        };
+        if people_scan.decode.decoded_frames != ball_scan.decode.decoded_frames
+            || people_scan.decode.windows != ball_scan.decode.windows
+            || people_scan.decode.first_frame != ball_scan.decode.first_frame
+        {
+            return Err("Primary ball and people scans disagree on video timeline".into());
+        }
+        people_scan
+    } else if let Some(source_info) = zero_copy_codec {
         let decode = zero_copy::run(
             original,
             source_info,
@@ -341,8 +513,9 @@ pub(crate) fn run_joint_pair(
             &mut ball_engine,
             &mut person_engine,
             &pose,
-            &mut ball_writer,
-            &mut person_writer,
+            Some(&mut ball_writer),
+            Some(&mut person_writer),
+            zero_copy::ScanPass::Both,
             &ball,
             &players,
             person_stride,
@@ -453,6 +626,7 @@ pub(crate) fn run_joint_pair(
         decoded_frames: summary.decode.decoded_frames,
         pending_pose,
         source_provenance: original_provenance,
+        rally_filter,
     })
 }
 

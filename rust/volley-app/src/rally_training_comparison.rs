@@ -17,6 +17,7 @@ use volley_core::rally_reconstruction::{preliminary_rally_intervals, RallySettin
 const MAX_MANIFEST: u64 = 16 * 1024;
 const MAX_TRAJECTORY_DATA: u64 = 16 * 1024 * 1024;
 const MAX_COMPARE_INTERVALS: usize = 4096;
+const DEFAULT_MIN_TRAJECTORY_SECONDS: f64 = 1.5;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -476,7 +477,9 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         None
     };
     let (trajectory, impacts, parameters, status, source, calibration) = if mode == "continuous" {
-        let seconds = query.min_trajectory_seconds.unwrap_or(3.0);
+        let seconds = query
+            .min_trajectory_seconds
+            .unwrap_or(DEFAULT_MIN_TRAJECTORY_SECONDS);
         if !seconds.is_finite() || !(0.1..=120.0).contains(&seconds) {
             return Err(storage::bad_request(
                 "Continuous ball minimum must be 0.1–120 seconds",

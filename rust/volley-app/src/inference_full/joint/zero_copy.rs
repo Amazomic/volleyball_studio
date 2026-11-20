@@ -3,6 +3,13 @@ use std::sync::Arc;
 use volley_inference::gpu_preprocess::{GpuBuffer, GpuPreprocessor, Nv12View};
 use volley_media::nvdec::{closest_display_frame, decode_video_file};
 
+#[derive(Clone, Copy)]
+pub(super) enum ScanPass<'a> {
+    Both,
+    BallOnly,
+    PlayersOnly(&'a rally_mask::RallyMask),
+}
+
 #[expect(clippy::too_many_arguments)]
 pub(super) fn run(
     original: &Path,
@@ -11,8 +18,9 @@ pub(super) fn run(
     ball_engine: &mut Engine,
     person_engine: &mut PersonEngine,
     pose: &RefCell<Option<PoseStream>>,
-    ball_writer: &mut EvidenceWriter,
-    person_writer: &mut EvidenceWriter,
+    mut ball_writer: Option<&mut EvidenceWriter>,
+    mut person_writer: Option<&mut EvidenceWriter>,
+    pass: ScanPass<'_>,
     ball: &JobContext,
     players: &JobContext,
     person_stride: usize,
@@ -24,8 +32,12 @@ pub(super) fn run(
         return Err("cancelled".into());
     }
     let gpu = GpuPreprocessor::new()?;
-    let ball_input = ball_engine.allocate_cuda_clip_input()?;
-    let people_input = person_engine.allocate_cuda_input()?;
+    let ball_input = (!matches!(pass, ScanPass::PlayersOnly(_)))
+        .then(|| ball_engine.allocate_cuda_clip_input())
+        .transpose()?;
+    let people_input = (!matches!(pass, ScanPass::BallOnly))
+        .then(|| person_engine.allocate_cuda_input())
+        .transpose()?;
     let mut observations = Vec::<RawDetection>::new();
     let mut sampled_frames: Vec<Option<Arc<GpuBuffer>>> = Vec::with_capacity(9);
     let mut expected_index = 0u64;
@@ -36,7 +48,7 @@ pub(super) fn run(
     let target_frames = (duration * 30.0).round().max(0.0) as u64;
     let start = range.map_or(0.0, |r| r.start_sec);
     let timestamps = &source.timestamps;
-    let keep_pose = pose.borrow().is_some();
+    let keep_pose = pose.borrow().is_some() && !matches!(pass, ScanPass::BallOnly);
     let receipt = decode_video_file(original, source.codec, cancelled, |frame| {
         if cancelled.load(Ordering::Acquire) {
             return Err("cancelled".into());
@@ -100,10 +112,18 @@ pub(super) fn run(
                 break;
             }
             let frame_slot = (expected_index % 9) as usize;
-            gpu.ball_input(view, &ball_input, frame_slot)?;
-            if expected_index.is_multiple_of(person_stride as u64) {
-                gpu.person_input(view, &people_input, source.matrix)?;
-                let found = person_engine.detect_cuda_input(&people_input)?;
+            if let Some(input) = &ball_input {
+                gpu.ball_input(view, input, frame_slot)?;
+            }
+            let include_person = match pass {
+                ScanPass::Both => true,
+                ScanPass::BallOnly => false,
+                ScanPass::PlayersOnly(mask) => mask.includes(expected_index),
+            };
+            if include_person && expected_index.is_multiple_of(person_stride as u64) {
+                let input = people_input.as_ref().ok_or("Missing GPU person input")?;
+                gpu.person_input(view, input, source.matrix)?;
+                let found = person_engine.detect_cuda_input(input)?;
                 for (index, candidate) in found.into_iter().enumerate() {
                     observations.push(RawDetection {
                         frame_index: expected_index,
@@ -126,12 +146,19 @@ pub(super) fn run(
             expected_index += 1;
             if frame_slot == 8 {
                 let first = expected_index - 9;
-                let outputs = ball_engine
-                    .infer_cuda_clip(&ball_input)
-                    .map_err(|error| window_error(ModelKind::Ball, first, &error))?;
-                let balls = decode_vball(&outputs, first, 0.05)?;
-                ball_writer.push(first, &balls)?;
-                person_writer.push(first, &observations)?;
+                if let Some(input) = &ball_input {
+                    let outputs = ball_engine
+                        .infer_cuda_clip(input)
+                        .map_err(|error| window_error(ModelKind::Ball, first, &error))?;
+                    let balls = decode_vball(&outputs, first, 0.05)?;
+                    ball_writer
+                        .as_deref_mut()
+                        .ok_or("Missing GPU ball evidence writer")?
+                        .push(first, &balls)?;
+                }
+                if let Some(writer) = person_writer.as_deref_mut() {
+                    writer.push(first, &observations)?;
+                }
                 if let Some(stage) = pose.borrow_mut().as_mut() {
                     stage.observe_cuda(
                         first,
@@ -149,10 +176,14 @@ pub(super) fn run(
                 observations.clear();
                 windows += 1;
                 if windows.is_multiple_of(10) {
-                    update_progress(&ball.status, windows, expected_index, estimated);
-                    update_progress(&players.status, windows, expected_index, estimated);
-                    persist(&ball.folder, &snapshot(&ball.status))?;
-                    persist(&players.folder, &snapshot(&players.status))?;
+                    if ball_writer.is_some() {
+                        update_progress(&ball.status, windows, expected_index, estimated);
+                        persist(&ball.folder, &snapshot(&ball.status))?;
+                    }
+                    if person_writer.is_some() {
+                        update_progress(&players.status, windows, expected_index, estimated);
+                        persist(&players.folder, &snapshot(&players.status))?;
+                    }
                     report((expected_index as f64 / estimated).clamp(0.0, 0.99))?;
                 }
             }

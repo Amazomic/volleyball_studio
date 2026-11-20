@@ -179,7 +179,7 @@ assert.match(elements.get("studio-comparison-differences").textContent,/поро
 assert.match(html,/id="studio-comparison-gap"[^>]*max="900"/);
 assert.match(html,/id="studio-comparison-mode"/);
 assert.match(html,/id="studio-comparison-impact-settings"[^>]*hidden/);
-assert.match(html,/id="studio-comparison-min-seconds"[^>]*value="3"/);
+assert.match(html,/id="studio-comparison-min-seconds"[^>]*value="1.5"/);
 comparison.mode.value="continuous";
 comparison.minSeconds.value="3.5";
 context.timelineRallyLayers.candidates.checked=false;
