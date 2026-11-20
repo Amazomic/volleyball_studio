@@ -199,7 +199,7 @@ assert.equal(queries.at(-1).min_trajectory_seconds,3.5);
 assert.equal(Object.hasOwn(queries.at(-1),"min_impacts"),false);
 assert.equal(Object.hasOwn(queries.at(-1),"context_frames"),false);
 assert.equal(Object.hasOwn(queries.at(-1),"max_touch_gap_frames"),false);
-assert.match(elements.get("studio-simulation-summary").textContent,/Непрерывная траектория/);
+assert.match(elements.get("studio-simulation-summary").textContent,/Устойчивая траектория/);
 assert.doesNotMatch(elements.get("studio-simulation-summary").textContent,/касаний/);
 comparison.mode.value="impacts";
 renderComparison();
@@ -208,4 +208,30 @@ assert.equal(comparison.continuousSettings.hidden,true);
 assert.equal(comparison.recalculate.textContent,"Смоделировать розыгрыши и касания");
 assert.equal(comparison.minSeconds.disabled,true);
 assert.equal(comparison.minImpacts.disabled,false);
-console.log("Training comparison: source guard, two exclusive modes, separate parameters and discrepancy navigation: OK");
+assert.ok(js.includes("await refreshComparison(true);"),
+  "Calculating trajectory touches must also refresh rally proposals");
+{
+  const first=js.indexOf("  const annotationRallySeeds=()=>");
+  const last=js.indexOf("  const annotationSavePresentation=",first);
+  assert.ok(first>0&&last>first);
+  let nextId=0;
+  const edited={data:{total_frames:300,touches:[],rallies:[]},
+    prediction:{total_frames:300,proposals:[{frame:42}]}};
+  const proposed={data:{schema:"volley-rally-training-comparison/1",
+    trajectory_status:"ready",trajectory_rallies:[{start:30,end:180}]}};
+  const {annotationFromPrediction}=runInNewContext(js.slice(first,last)+
+    "\n({annotationFromPrediction})",{
+    annotation:edited,comparison:proposed,timeline:{data:{rallies:[]}},
+    comparisonMatches:data=>data===proposed.data,
+    annotationNewId:()=>String(++nextId)
+  });
+  const prediction=annotationFromPrediction();
+  assert.equal(prediction.touches.length,1);
+  assert.equal(prediction.rallies.length,1,
+    "A zero-rally CPU run must seed the editable draft from the ball-motion result");
+  assert.equal(prediction.rallies[0].start,30);
+  edited.data.rallies=[{id:"manual",start:40,end:170}];
+  assert.equal(annotationFromPrediction().rallies[0].id,"manual",
+    "Existing manually labeled rallies must not be overwritten");
+}
+console.log("Training comparison: source guard, two exclusive modes, separate parameters, trajectory-to-draft and discrepancy navigation: OK");

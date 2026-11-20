@@ -616,7 +616,7 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         "source_touch_sha256":run.touch_sha,"source_rally_sha256":run.rally_sha,
         "trajectory_status":status,"mode":mode,
         "trajectory_detector_version":if mode == "continuous" {
-            "unbroken_vballnet_trajectory_v1"
+            "coherent_vballnet_motion_v2"
         } else { "ball_down_up_v1" },
         "trajectory_impacts":impacts,"parameters":parameters,
         "simulated_touch_candidates":simulated_touches,

@@ -1227,10 +1227,19 @@
   const annotationRallySeeds=()=>((timeline.data?.rallies)||[]).slice(0,1024)
     .filter(r=>Number.isSafeInteger(r.start_frame)&&Number.isSafeInteger(r.end_frame)&&r.start_frame<r.end_frame)
     .map(r=>({id:annotationNewId(),start:r.start_frame,end:r.end_frame}));
+  const annotationTrajectoryRallySeeds=()=>{
+    const proposed=comparison.data;
+    if(!comparisonMatches(proposed)||proposed.trajectory_status!=="ready")return annotationRallySeeds();
+    return proposed.trajectory_rallies.slice(0,1024)
+      .filter(r=>Number.isSafeInteger(r.start)&&Number.isSafeInteger(r.end)&&
+        r.start>=0&&r.start<r.end&&r.end<annotation.prediction.total_frames)
+      .map(r=>({id:annotationNewId(),start:r.start,end:r.end}));
+  };
   const annotationFromPrediction=()=>({
     ...annotation.data,total_frames:annotation.prediction.total_frames,
     touches:annotation.prediction.proposals.map(p=>({id:annotationNewId(),frame:p.frame})),
-    rallies:Array.isArray(annotation.data?.rallies)?annotation.data.rallies.map(r=>({...r})):annotationRallySeeds(),
+    rallies:Array.isArray(annotation.data?.rallies)&&annotation.data.rallies.length?
+      annotation.data.rallies.map(r=>({...r})):annotationTrajectoryRallySeeds(),
     reviewed:false,metrics:null
   });
   const annotationSavePresentation=(data,hasRun,busy)=>{
@@ -1518,7 +1527,13 @@
         throw Error("Результат расчёта не соответствует выбранному анализу");
       annotation.prediction=result;
       drawTimeline();
-      annotationNotice("Рассчитано "+result.proposals.length+" кандидатов. Жёлтые метки — прогноз, зелёные — эталон. Можно взять результат для правок.");
+      await refreshComparison(true);
+      if(epoch!==annotation.epoch||project!==s.project||run!==s.run||video!==s.video)return;
+      const rallyCount=comparisonMatches(comparison.data)&&comparison.data.trajectory_status==="ready"?
+        comparison.data.trajectory_rallies.length:null;
+      annotationNotice("Рассчитано "+result.proposals.length+" кандидатов касаний"+
+        (rallyCount===null?"":(" и "+rallyCount+" розыгрышей по мячу"))+
+        ". Жёлтые метки — прогноз, зелёные — эталон. Можно взять результат для правок.");
     }catch(error){
       if(epoch===annotation.epoch)annotationNotice("Ошибка расчёта касаний: "+error.message,true);
     }finally{
@@ -1687,7 +1702,7 @@
     const simulated=Array.isArray(data.simulated_touch_candidates)?data.simulated_touch_candidates:[];
     const unassigned=Array.isArray(data.unassigned_touch_candidates)?data.unassigned_touch_candidates:[];
     comparison.summary.textContent=comparison.simulated?
-      continuous?"Непрерывная траектория: "+data.trajectory_rallies.length+" розыгрышей":
+      continuous?"Устойчивая траектория: "+data.trajectory_rallies.length+" розыгрышей":
       "Алгоритм по мячу: "+data.trajectory_rallies.length+" розыгрышей · "+simulated.length+
       " возможных касаний внутри · "+unassigned.length+
       " перегибов вне розыгрышей":"Нажмите «Смоделировать»";
@@ -1760,7 +1775,7 @@
     if(!rows.length){
       comparison.differences.textContent=comparison.simulated&&data.trajectory_rallies.length===0?
         continuous?
-        "Не найден непрерывный трек мяча дольше выбранного порога. Попробуйте уменьшить длительность.":
+        "Не найден устойчивый движущийся трек мяча дольше выбранного порога. Попробуйте уменьшить длительность.":
         data.trajectory_impacts.length===0?
         "Перегибы мяча вниз→вверх не обнаружены в сохранённом треке. Проверьте качество исходных наблюдений мяча.":
         "Перегибы есть, но ни один не образовал розыгрыш. Уменьшите порог перегибов или увеличьте паузу между ними и смоделируйте снова.":
@@ -1856,7 +1871,7 @@
       comparison.status.textContent=data.calibration?
         "Параметры подобраны по подтверждённой разметке текущего видео. Это обучение на примере, не независимая оценка точности.":
         data.mode==="continuous"?
-        "Непрерывные участки VBallNet длиннее порога. Касания этим методом не определяются.":
+        "Устойчивое движение VBallNet с короткими пропусками; модель розыгрышей не подтверждает касания игроков.":
         data.trajectory_status==="ready"?
         simulate&&data.trajectory_impacts.length===0?
         "В сохранённом треке мяча не найдено перегибов вниз→вверх. Проверьте данные траектории.":

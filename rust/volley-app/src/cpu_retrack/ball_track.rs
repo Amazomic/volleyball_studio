@@ -37,6 +37,23 @@ pub(crate) struct PreliminaryRallyScope {
     pub intervals: Vec<(u64, u64)>,
 }
 
+fn median_ball_position(points: &[Option<[f64; 2]>], start: usize) -> Option<[f64; 2]> {
+    let mut xs = [0.0; 3];
+    let mut ys = [0.0; 3];
+    let mut count = 0;
+    for [x, y] in points.get(start..start + 3)?.iter().flatten() {
+        xs[count] = *x;
+        ys[count] = *y;
+        count += 1;
+    }
+    if count == 0 {
+        return None;
+    }
+    xs[..count].sort_by(f64::total_cmp);
+    ys[..count].sort_by(f64::total_cmp);
+    Some([xs[count / 2], ys[count / 2]])
+}
+
 pub(crate) fn continuous_ball_intervals(
     source: &Path,
     expected_sha: &str,
@@ -45,6 +62,7 @@ pub(crate) fn continuous_ball_intervals(
     min_seconds: f64,
 ) -> Result<Vec<(u64, u64)>, String> {
     if frames == 0
+        || frames > 48 * 3600 * 30
         || !min_score.is_finite()
         || !(0.01..=1.0).contains(&min_score)
         || !min_seconds.is_finite()
@@ -52,17 +70,9 @@ pub(crate) fn continuous_ball_intervals(
     {
         return Err("Invalid continuous ball trajectory settings".into());
     }
-    let minimum_frames = (min_seconds * 30.0).floor() as u64 + 1;
+    let minimum_frames = (min_seconds * 30.0).floor() as usize + 1;
     let mut reader = BoundedReader::open(source)?;
-    let mut intervals = Vec::new();
-    let mut started = None::<u64>;
-    let mut close = |end: u64, started: &mut Option<u64>| {
-        if let Some(start) = started.take() {
-            if end >= start && end - start + 1 >= minimum_frames {
-                intervals.push((start, end));
-            }
-        }
-    };
+    let mut points = Vec::with_capacity(frames as usize);
     for frame in 0..frames {
         let line = reader.line()?.ok_or("Truncated continuous ball source")?;
         let row: BallOnlyFrame =
@@ -70,26 +80,63 @@ pub(crate) fn continuous_ball_intervals(
         if row.frame_index != frame {
             return Err("Continuous ball source frames out of order".into());
         }
-        let present = row.selected_ball.as_ref().is_some_and(|ball| {
-            let bbox = &ball.detection.bbox_xyxy_norm;
-            ball.source_model == "vballnet"
+        let point = row.selected_ball.and_then(|ball| {
+            let bbox = ball.detection.bbox_xyxy_norm;
+            (ball.source_model == "vballnet"
                 && ball.detection.score.is_finite()
                 && ball.detection.score >= min_score
                 && bbox
                     .iter()
                     .all(|coord| coord.is_finite() && (0.0..=1.0).contains(coord))
                 && bbox[0] < bbox[2]
-                && bbox[1] < bbox[3]
+                && bbox[1] < bbox[3])
+                .then_some([(bbox[0] + bbox[2]) * 0.5, (bbox[1] + bbox[3]) * 0.5])
         });
-        if present {
-            started.get_or_insert(frame);
-        } else if frame > 0 {
-            close(frame - 1, &mut started);
-        }
+        points.push(point);
     }
-    close(frames - 1, &mut started);
     if reader.line()?.is_some() || reader.finish() != expected_sha {
         return Err("Continuous ball source SHA-256 mismatch".into());
+    }
+
+    let mut intervals = Vec::new();
+    let mut started = None::<usize>;
+    let mut last = 0usize;
+    let mut evidence = 0usize;
+    let mut close = |start: usize, end: usize, support: usize| {
+        let duration = end - start + 1;
+        if duration >= minimum_frames && support * 100 >= duration * 35 {
+            intervals.push((start as u64, end as u64));
+        }
+    };
+    for frame in 9..points.len().saturating_sub(9) {
+        let Some(before) = median_ball_position(&points, frame - 9) else {
+            continue;
+        };
+        let Some(after) = median_ball_position(&points, frame + 7) else {
+            continue;
+        };
+        let displacement = (after[0] - before[0]).hypot(after[1] - before[1]);
+        if !(0.025..=0.3).contains(&displacement) {
+            continue;
+        }
+        match started {
+            None => {
+                started = Some(frame);
+                evidence = 1;
+            }
+            Some(start) if frame - last > 25 => {
+                close(start, last, evidence);
+                started = Some(frame);
+                evidence = 1;
+            }
+            Some(_) => {
+                evidence += 1;
+            }
+        }
+        last = frame;
+    }
+    if let Some(start) = started {
+        close(start, last, evidence);
     }
     if intervals.len() > 4096 {
         return Err("Too many continuous ball intervals".into());
@@ -415,7 +462,7 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     #[test]
-    fn continuous_ball_requires_more_than_threshold_without_dropped_frames() {
+    fn continuous_ball_rejects_unmoving_high_confidence_detections() {
         let root = std::env::temp_dir().join(format!("continuous-ball-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         let path = root.join("tracked.jsonl");
@@ -439,16 +486,66 @@ mod tests {
         }
         fs::write(&path, &bytes).unwrap();
         let sha = format!("{:x}", Sha256::digest(&bytes));
-        assert_eq!(
-            continuous_ball_intervals(&path, &sha, 310, 0.35, 3.0).unwrap(),
-            vec![(100, 190)]
-        );
-        assert_eq!(
-            continuous_ball_intervals(&path, &sha, 310, 0.35, 1.0).unwrap(),
-            vec![(0, 89), (100, 190), (221, 259), (261, 309)]
-        );
+        assert!(continuous_ball_intervals(&path, &sha, 310, 0.35, 3.0)
+            .unwrap()
+            .is_empty());
+        assert!(continuous_ball_intervals(&path, &sha, 310, 0.35, 1.0)
+            .unwrap()
+            .is_empty());
         assert!(continuous_ball_intervals(&path, &"0".repeat(64), 310, 0.35, 1.0).is_err());
         assert!(continuous_ball_intervals(&path, &sha, 310, 0.35, f64::NAN).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn continuous_ball_joins_short_gaps_and_ignores_static_and_short_flights() {
+        let root = std::env::temp_dir().join(format!("continuous-motion-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("tracked.jsonl");
+        let mut bytes = Vec::new();
+        for frame in 0..600_u64 {
+            let flight = (70..240).contains(&frame)
+                || (305..480).contains(&frame)
+                || (510..567).contains(&frame);
+            let rel = if frame < 240 {
+                frame.saturating_sub(70)
+            } else if frame < 480 {
+                frame.saturating_sub(305)
+            } else {
+                frame.saturating_sub(510)
+            };
+            let false_detection = matches!(frame, 157 | 158 | 367 | 368);
+            let missed_detection = flight && frame % 41 == 0;
+            let (x, y) = if flight && !false_detection {
+                (0.2 + rel as f64 * 0.001, 0.15 + rel as f64 * 0.003)
+            } else {
+                (0.92 + (frame % 5) as f64 * 0.0008, 0.57)
+            };
+            bytes.extend(
+                serde_json::to_vec(&json!({
+                    "frame_index":frame,
+                    "selected_ball":if missed_detection {None} else {Some(json!({
+                        "source_model":"vballnet",
+                        "detection":{"score":0.9,
+                            "bbox_xyxy_norm":[x-0.002,y-0.002,x+0.002,y+0.002]}
+                    }))}
+                }))
+                .unwrap(),
+            );
+            bytes.push(b'\n');
+        }
+        fs::write(&path, &bytes).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let intervals = continuous_ball_intervals(&path, &sha, 600, 0.35, 3.0).unwrap();
+        assert_eq!(intervals.len(), 2, "{intervals:?}");
+        for (actual, expected) in intervals.iter().zip([(70_u64, 239_u64), (305, 479)]) {
+            assert!(actual.0.abs_diff(expected.0) <= 18, "{intervals:?}");
+            assert!(actual.1.abs_diff(expected.1) <= 18, "{intervals:?}");
+        }
+        assert!(continuous_ball_intervals(&path, &sha, 600, 0.35, 7.0)
+            .unwrap()
+            .is_empty());
         assert_eq!(fs::read(&path).unwrap(), bytes);
         fs::remove_dir_all(root).unwrap();
     }

@@ -485,9 +485,9 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Сравнение по одной версии видео, без повторного GPU-анализа	Compare one video version without rerunning GPU analysis
 Рассчитать по траектории	Calculate from trajectory
 Алгоритм розыгрышей	Rally detection algorithm
-Непрерывная траектория	Continuous trajectory
+Устойчивая траектория мяча	Coherent ball trajectory
 Перегибы траектории	Trajectory deflections
-Минимальная непрерывная траектория (секунды)	Minimum uninterrupted trajectory (seconds)
+Минимальная устойчивая траектория (секунды)	Minimum coherent trajectory (seconds)
 Смоделировать розыгрыши	Simulate rallies
 Перегибов для розыгрыша	Deflections per rally
 Запас до/после (кадры)	Padding before/after (frames)
