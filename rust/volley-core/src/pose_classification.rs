@@ -151,10 +151,9 @@ pub fn refine(e: &PoseEvidence, geometry: &ActionPrediction) -> Option<ActionPre
         }
     } else if low {
         if wrist[1] > (y1 + 0.93 * (y2 - y1)) * e.video_height {
-            ActionKind::LowTouch
-        } else {
-            ActionKind::Dig
+            return None;
         }
+        ActionKind::Dig
     } else if both_hands_near {
         ActionKind::Dig
     } else {
@@ -177,6 +176,54 @@ pub fn refine(e: &PoseEvidence, geometry: &ActionPrediction) -> Option<ActionPre
         posture_ratio: geometry.posture_ratio,
     };
     prediction.valid().then_some(prediction)
+}
+
+#[must_use]
+pub fn refine_with_motion(
+    e: &PoseEvidence,
+    geometry: &ActionPrediction,
+    before: &[[f64; 3]; 17],
+    after: &[[f64; 3]; 17],
+) -> Option<ActionPrediction> {
+    let prediction = refine(e, geometry)?;
+    let height = (e.player_bbox_norm[3] - e.player_bbox_norm[1]) * e.video_height;
+    if !height.is_finite() || height < 26.0 {
+        return None;
+    }
+    let relative = |pose: &[[f64; 3]; 17], shoulder: usize, wrist: usize| {
+        let s = pose[shoulder];
+        let w = pose[wrist];
+        if [s[0], s[1], s[2], w[0], w[1], w[2]]
+            .iter()
+            .any(|value| !value.is_finite())
+            || s[2] < 0.35
+            || w[2] < 0.35
+            || [s[0], s[1], w[0], w[1]]
+                .iter()
+                .any(|value| !(0.0..=1.0).contains(value))
+        {
+            return None;
+        }
+        Some([
+            (w[0] - s[0]) * e.video_width / height,
+            (w[1] - s[1]) * e.video_height / height,
+        ])
+    };
+    let movement = [(5, 9), (6, 10)]
+        .into_iter()
+        .filter_map(|(shoulder, wrist)| {
+            let a = relative(before, shoulder, wrist)?;
+            let b = relative(after, shoulder, wrist)?;
+            Some((a[0] - b[0]).hypot(a[1] - b[1]))
+        })
+        .fold(0.0_f64, f64::max);
+    if movement < 0.055 {
+        return None;
+    }
+    Some(ActionPrediction {
+        method: PredictionMethod::PoseKeypointsMotionV1,
+        ..prediction
+    })
 }
 
 #[cfg(test)]
@@ -238,6 +285,29 @@ mod tests {
         d.ball_x_norm = 0.97;
         assert!(refine(&d, &geom()).is_none());
     }
+
+    #[test]
+    fn motion_is_required_for_named_technique() {
+        let e = data();
+        let no_motion = e.keypoints;
+        assert!(refine_with_motion(&e, &geom(), &no_motion, &no_motion).is_none());
+        let mut before = e.keypoints;
+        let mut after = e.keypoints;
+        before[9][1] = 0.31;
+        before[10][1] = 0.31;
+        after[9][1] = 0.18;
+        after[10][1] = 0.18;
+        let predicted = refine_with_motion(&e, &geom(), &before, &after).unwrap();
+        assert_eq!(predicted.kind, ActionKind::OverheadPass);
+        assert_eq!(predicted.method, PredictionMethod::PoseKeypointsMotionV1);
+        let whole_body = before;
+        let mut whole_body_after = after;
+        for joint in [5, 6, 7, 8, 9, 10] {
+            whole_body_after[joint][1] = whole_body[joint][1] + 0.13;
+        }
+        assert!(refine_with_motion(&e, &geom(), &whole_body, &whole_body_after).is_none());
+    }
+
     #[test]
     fn low_wrist_infers_dig() {
         let mut d = data();

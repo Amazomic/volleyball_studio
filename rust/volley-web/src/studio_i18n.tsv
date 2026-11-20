@@ -268,6 +268,8 @@ CPU-параметры создают отдельную постобработ�
 Касания	Touches
 Мяч: голубой — VballNet, оранжевый — RF-DETR + RTMPose. Жёлтая рамка — вероятность касания.	Ball: cyan is VballNet, orange is RF-DETR + RTMPose. A yellow box marks touch probability.
 Виды касаний — оценка CPU	Touch types — CPU estimates
+Типы касаний — оценка CPU	Touch types — CPU estimates
+Касание	Unclassified touch
 Атака	Attack
 Блок	Block
 Подача	Serve

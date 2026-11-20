@@ -203,13 +203,13 @@
                     <button type="button" id="studio-overlay-raw" role="tab" aria-selected="false">Сырые</button>
                   </div>
                 </div>
-                <fieldset id="studio-overlay-actions" class="video-overlay-actions hidden" aria-label="Виды касаний — оценка CPU">
+                <fieldset id="studio-overlay-actions" class="video-overlay-actions hidden" aria-label="Типы касаний — оценка CPU">
+                  <label><input type="checkbox" data-overlay-action="unknown_touch" checked><span class="action-unknown-touch">●</span> Касание</label>
                   <label><input type="checkbox" data-overlay-action="attack" checked><span class="action-attack">●</span> Атака</label>
                   <label><input type="checkbox" data-overlay-action="block" checked><span class="action-block">●</span> Блок</label>
                   <label><input type="checkbox" data-overlay-action="serve" checked><span class="action-serve">●</span> Подача</label>
                   <label><input type="checkbox" data-overlay-action="overhead_pass" checked><span class="action-overhead-pass">●</span> Передача сверху</label>
                   <label><input type="checkbox" data-overlay-action="dig" checked><span class="action-dig">●</span> Приём снизу</label>
-                  <label><input type="checkbox" data-overlay-action="low_touch" checked><span class="action-low-touch">●</span> Нижнее касание</label>
                 </fieldset>
                 <div id="studio-overlay-raw-controls" class="video-overlay-raw-controls hidden" role="group" aria-label="Сохранённые GPU-данные — настройки каждой модели">
                   <fieldset class="raw-model-control">
@@ -327,7 +327,6 @@
                     <option value="serve">Подача</option>
                     <option value="overhead_pass">Передача сверху</option>
                     <option value="dig">Приём снизу</option>
-                    <option value="low_touch">Нижнее касание</option>
                   </select>
                   <button class="primary" id="studio-training-save" type="button">Сохранить пример</button>
                   <button class="secondary hidden" id="studio-training-new" type="button">Новый пример</button>
@@ -437,7 +436,7 @@
                       <option value="attack">Атаки</option><option value="block">Блоки</option>
                       <option value="serve">Подачи</option><option value="dig">Приёмы</option>
                       <option value="overhead_pass">Верхние передачи</option>
-                      <option value="low_touch">Нижние передачи</option>
+                      <option value="unknown_touch">Касание</option>
                     </select></div>
                   <div id="studio-montage-context-field"><label class="field-label" for="studio-montage-context">Контекст вокруг касания, сек.</label>
                     <select id="studio-montage-context"><option value="0.5">0,5 · быстрый</option><option value="1" selected>1 · стандартный</option><option value="1.5">1,5 · подробный</option><option value="2">2 · плавный</option></select></div>

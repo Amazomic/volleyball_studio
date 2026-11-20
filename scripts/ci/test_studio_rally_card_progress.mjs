@@ -6,10 +6,7 @@ const source=readFileSync(
   new URL("../../rust/volley-app/static/studio.js",import.meta.url),"utf8"
 );
 const colorsStart=source.indexOf("  const cpuTouchStyle={");
-const colorsEnd=source.indexOf("  };",colorsStart)+4;
-const predicateStart=source.indexOf("  const showCpuTouchType=kind=>");
-const predicateEnd=source.indexOf("  const cpuTouchesForFrame=",predicateStart);
-assert.ok(predicateStart>colorsEnd&&predicateEnd>predicateStart);
+const colorsEnd=source.indexOf("  // The timeline belongs",colorsStart);
 const start=source.indexOf("  const rallyClipFrames=item=>");
 const end=source.indexOf("  // Event pills and summary",start);
 assert.ok(colorsStart>0&&colorsEnd>colorsStart,"CPU overlay palette must exist");
@@ -43,13 +40,12 @@ const timeline={data:{
 const rallyCardProgresses=new Map();
 const video={currentTime:12.5,paused:false};
 const overlay={presentedTime:null,raw:false,flags:{touches:true},
-  actionFlags:{attack:true,block:true,serve:true,overhead_pass:true,dig:true,low_touch:true}};
+  actionFlags:{serve:true,attack:true,dig:true,block:true,unknown_touch:true}};
 const context={
   make,wipe,s:current,timeline,rallyCardProgresses,overlay,
   ui:{video},fps:()=>10,second:frame=>(frame/10).toFixed(1),
 };
 runInNewContext(source.slice(colorsStart,colorsEnd)+"\n"+
-  source.slice(predicateStart,predicateEnd)+"\n"+
   source.slice(start,end)+"\n"+
   "this.api={rallyClipFrames,refreshRallyCardTouchTicks,updateRallyCardProgress,cpuTouchStyle};",
 context);
@@ -72,19 +68,18 @@ assert.equal(markers.children[2].style.backgroundColor,"#c6bf96",
   "Untyped touches have the same color as in the video");
 assert.match(progress.attrs["aria-label"],/3 касаний/);
 assert.match(markers.children[1].title,/12.5 с/);
-overlay.actionFlags.attack=false;
+overlay.actionFlags.unknown_touch=false;
 refreshRallyCardTouchTicks();
-assert.equal(markers.children.length,1,"Partial selection removes unselected and unclassified card marks");
-assert.equal(markers.children[0].style.backgroundColor,cpuTouchStyle.dig[0]);
-overlay.actionFlags.attack=true;
+assert.equal(markers.children.length,2,"Unknown-type checkbox filters card timeline");
+overlay.actionFlags.unknown_touch=true;
 refreshRallyCardTouchTicks();
-assert.equal(markers.children.length,3,"Selecting every touch type restores unclassified marks");
+assert.equal(markers.children.length,3,"Re-enabling unknown restores card markers");
 overlay.flags.touches=false;
 refreshRallyCardTouchTicks();
-assert.equal(markers.children.length,0,"Disabling touches hides card markers");
+assert.equal(markers.children.length,0,"Hiding touches hides all card markers");
 overlay.flags.touches=true;overlay.raw=true;
 refreshRallyCardTouchTicks();
-assert.equal(markers.children.length,0,"Raw mode hides CPU touch markers");
+assert.equal(markers.children.length,0,"Raw mode never renders CPU touch marks");
 overlay.raw=false;
 refreshRallyCardTouchTicks();
 assert.equal(markers.children.length,3);

@@ -32,9 +32,9 @@ use volley_core::{
     pose_classification,
     touch_pipeline::{
         evaluate_pose_block, evaluate_rally_blocks, evaluate_tcn_peaks, exclude_ball_teleports,
-        pose_contact_at_frame, pose_contact_from_nearby_sample, reconstruct_track_gaps,
-        trajectory_features, PhysicalTouchCandidate, PoseFrame, PosePlayer, TouchAlgorithm,
-        TouchBall, TouchFrame, TouchPlayer, TouchSettings,
+        observed_pose_motion, pose_contact_at_frame, pose_contact_from_nearby_sample,
+        reconstruct_track_gaps, trajectory_features, PhysicalTouchCandidate, PoseFrame, PosePlayer,
+        TouchAlgorithm, TouchBall, TouchFrame, TouchPlayer, TouchSettings,
     },
 };
 use volley_inference::trajectory_tcn::{TrajectoryTcn, MODEL_FILENAME};
@@ -513,15 +513,14 @@ fn refine_pose_events_policy(
         event.body_contact_supported = true;
         event.contact_landmark = Some(point);
         event.contact_pose_sample_frame = sample_frame;
-        if selected_track != track_id {
-            event.action_prediction = None;
-        } else if let Some(geometry) = event.action_prediction.as_ref() {
-            if let Some(refined) = pose_classification::refine(&evidence, geometry) {
-                event.action_prediction = Some(refined);
-            } else if settings.require_pose {
-                event.action_prediction = None;
-            }
-        }
+        event.action_prediction = (selected_track == track_id)
+            .then_some(event.action_prediction.as_ref())
+            .flatten()
+            .and_then(|geometry| {
+                let (before, after) =
+                    observed_pose_motion(&poses, event.frame_index, selected_track)?;
+                pose_classification::refine_with_motion(&evidence, geometry, &before, &after)
+            });
     }
     if settings.require_pose {
         let mut index = 0;
@@ -1289,8 +1288,8 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
             "action_technique_classification_complete":false,
             "automatic_action_predictions_enabled":true,
             "automatic_action_prediction_method":if pose_requested {
-                "pose_keypoints_v1_or_unknown_touch"
-            } else { "contact_geometry_v1" },
+                "pose_keypoints_motion_v1_or_unknown_touch"
+            } else { "unknown_touch_no_pose" },
             "cpu_processing_complete":false,
         });
         let preliminary_data = json!({
@@ -1608,6 +1607,8 @@ mod tests {
                 let mut sample_points = points;
                 if frame >= 234 {
                     sample_points[9] = [0.47 + (frame - 234) as f64 / 150.0, 0.375, 0.95];
+                } else if frame == 36 {
+                    sample_points[9][1] = 0.35;
                 }
                 let bbox = if frame >= 234 {
                     [0.27, 0.15, 0.47, 0.65]
@@ -1677,7 +1678,8 @@ mod tests {
                 ![24, 30, 36].contains(&sample.frame_index),
             );
         }
-        assert_eq!(samples[7].players[0].keypoints[9], points[9]);
+        assert!(samples[7].players[0].keypoints[9][1] > 0.22);
+        assert!(samples[7].players[0].keypoints[9][1] < 0.26);
         let mut events = vec![PhysicalTouchCandidate {
             frame_index: 31,
             provisional_track_id: Some(8),
@@ -1719,7 +1721,7 @@ mod tests {
         .unwrap();
         let changed = events[0].action_prediction.as_ref().unwrap();
         assert_eq!(changed.kind, ActionKind::OverheadPass);
-        assert_eq!(changed.method, PredictionMethod::PoseKeypointsV1);
+        assert_eq!(changed.method, PredictionMethod::PoseKeypointsMotionV1);
         let mut pose_optional = vec![unconfirmed_motion];
         pose_optional[0].ball_x_px = 620.0;
         refine_pose_events(
@@ -1786,7 +1788,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             events[0].action_prediction.as_ref().unwrap().method,
-            PredictionMethod::PoseKeypointsV1
+            PredictionMethod::PoseKeypointsMotionV1
         );
         let (source_bytes, source_sha) = sample_frames(true, 240);
         let source = root.join("tracked.jsonl");

@@ -186,6 +186,14 @@ pub(crate) fn annotate(
         };
         // Original Python: above the head AND within 1.6 m of net -> block.
         if evidence.near_net
+            && matches!(
+                prediction.method,
+                PredictionMethod::PoseKeypointsMotionV1 | PredictionMethod::LearnedPoseV1
+            )
+            && matches!(
+                prediction.kind,
+                ActionKind::Attack | ActionKind::OverheadPass
+            )
             && prediction.depth_ratio < -0.05
             && frame.selected_ball.as_ref().is_none_or(|ball| {
                 let [x1, y1, x2, y2] = ball.bbox_xyxy_norm;
@@ -193,16 +201,22 @@ pub(crate) fn annotate(
             })
         {
             prediction.kind = ActionKind::Block;
-            prediction.method = PredictionMethod::CourtGeometryV1;
+            prediction.method = PredictionMethod::CourtPoseMotionV1;
         }
         // Original Python: serving zone alone is not enough to call a serve.
         // There must be preparation, source-frame reach, and acceleration.
         if (evidence.in_serve_zone || serve_origin_seen(frames, event.frame_index, track_id, court))
+            && matches!(
+                prediction.method,
+                PredictionMethod::PoseKeypointsMotionV1
+                    | PredictionMethod::LearnedPoseV1
+                    | PredictionMethod::CourtPoseMotionV1
+            )
             && event.speed_after_px_frame / event.speed_before_px_frame.max(0.1) >= 1.2
             && observed_serve_preparation(frames, event.frame_index, track_id)
         {
             prediction.kind = ActionKind::Serve;
-            prediction.method = PredictionMethod::CourtGeometryV1;
+            prediction.method = PredictionMethod::CourtPoseMotionV1;
         }
     }
 }
@@ -252,7 +266,7 @@ mod tests {
             action_prediction: Some(ActionPrediction {
                 kind: ActionKind::Attack,
                 evidence_score: 0.92,
-                method: PredictionMethod::ContactGeometryV1,
+                method: PredictionMethod::PoseKeypointsMotionV1,
                 depth_ratio: -0.1,
                 posture_ratio: 0.3,
             }),

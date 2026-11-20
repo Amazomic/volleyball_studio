@@ -12,7 +12,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use volley_core::action_prediction::{ActionKind, ActionPrediction};
+use volley_core::action_prediction::{ActionKind, ActionPrediction, PredictionMethod};
 use volley_core::event_evidence::{
     bounded_clips, interpret_motion, verify_rally_interval, Interval, MotionInput,
 };
@@ -76,9 +76,12 @@ pub(crate) fn finalize_touch(
             .provisional_track_id
             .is_some_and(|id| retain_rally_touch(last, event.frame_index, id, pose_supported));
     let kind = if attributed && pose_supported {
+        let predicted = event.predicted_kind();
         match context {
-            Some((_, _, kind)) => *kind,
-            None => event.action_prediction().map(|value| value.kind),
+            Some((_, _, kind)) => predicted
+                .and(*kind)
+                .filter(|kind| *kind != ActionKind::LowTouch),
+            None => predicted,
         }
     } else {
         None
@@ -200,8 +203,19 @@ impl NativeMotion {
     pub(crate) fn ball_occluded_at_contact(&self) -> bool {
         self.ball_occluded_at_contact
     }
-    pub(crate) fn action_prediction(&self) -> Option<&ActionPrediction> {
-        self.action_prediction.as_ref()
+    pub(crate) fn predicted_kind(&self) -> Option<ActionKind> {
+        self.action_prediction
+            .as_ref()
+            .filter(|prediction| {
+                matches!(
+                    prediction.method,
+                    PredictionMethod::PoseKeypointsMotionV1
+                        | PredictionMethod::LearnedPoseV1
+                        | PredictionMethod::CourtPoseMotionV1
+                )
+            })
+            .map(|prediction| prediction.kind)
+            .filter(|kind| *kind != ActionKind::LowTouch)
     }
     pub(crate) fn valid(&self, frames: u64, width: u32, height: u32) -> bool {
         self.frame_index < frames
@@ -805,7 +819,7 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
             let predicted_kind = final_touch.kind;
             touch_annotations.push(json!({
                 "frame_index":event.frame_index,
-                "kind":predicted_kind.map(ActionKind::as_str),
+                "kind":predicted_kind.map(ActionKind::as_str).unwrap_or("unknown_touch"),
                 "ball_position_px":[event.ball_x_px,event.ball_y_px],
                 "provisional_track_id":event.provisional_track_id,
                 "contact_landmark":event.contact_landmark,
@@ -1003,13 +1017,13 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
             let prev = row["motion_event_count"].as_u64().unwrap_or(0);
             row["motion_event_count"] = json!(prev + 1);
             let resolved_kind = if pose_verified {
+                let predicted = event.predicted_kind();
                 if let Some(ref resolved) = context {
-                    resolved["estimated_kind"].as_str()
+                    predicted
+                        .and_then(|_| resolved["estimated_kind"].as_str())
+                        .filter(|kind| *kind != "low_touch")
                 } else {
-                    event
-                        .action_prediction
-                        .as_ref()
-                        .map(|prediction| prediction.kind.as_str())
+                    predicted.map(ActionKind::as_str)
                 }
             } else {
                 None

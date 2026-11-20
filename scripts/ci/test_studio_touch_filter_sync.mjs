@@ -34,16 +34,18 @@ overlay.flags.touches=true;overlay.raw=true;toggleCtx.sync();
 assert.equal(filterHidden,true,"Raw data never shows CPU touch filters");
 
 const filterCtx={overlay};
-runInNewContext(part("  const cpuTouchStyle={","  const cpuTouchesForFrame=")+
-  "\nthis.visible=showCpuTouchType;this.cpuTouchStyle=cpuTouchStyle;",filterCtx);
+runInNewContext(part("  const cpuTouchStyle={","  // The timeline belongs")+
+  "\nthis.visible=kind=>overlay.actionFlags[cpuTouchKind(kind)]===true;this.cpuTouchStyle=cpuTouchStyle;this.cpuTouchKind=cpuTouchKind;",filterCtx);
 overlay.raw=false;
-overlay.actionFlags={attack:true,block:true,serve:true,overhead_pass:true,dig:true,low_touch:true};
+overlay.actionFlags={unknown_touch:true,attack:true,block:true,serve:true,overhead_pass:true,dig:true};
 assert.equal(filterCtx.visible("attack"),true);
 assert.equal(filterCtx.visible(null),true,"Unclassified events appear with all types selected");
 overlay.actionFlags.attack=false;
 assert.equal(filterCtx.visible("attack"),false);
 assert.equal(filterCtx.visible("serve"),true);
-assert.equal(filterCtx.visible(null),false,"A subset excludes unclassified events");
+assert.equal(filterCtx.visible(null),true,"Unknown touches have an independent checkbox");
+overlay.actionFlags.unknown_touch=false;
+assert.equal(filterCtx.visible(null),false,"Disabling unknown hides only unclassified touches");
 
 const paints=[];
 const ctx={setTransform(){},clearRect(){},fillRect(x,y,w,h){paints.push(this.fillStyle);}};
@@ -59,7 +61,7 @@ const timelineCtx={
   timeline,overlay,window:{devicePixelRatio:1},
   s:{analysisOffset:0},training:{active:false},fps:()=>10,
   timelineDuration:()=>10,updateTimelineProgress(){},
-  cpuTouchStyle:filterCtx.cpuTouchStyle,showCpuTouchType:filterCtx.visible,
+  cpuTouchStyle:filterCtx.cpuTouchStyle,cpuTouchKind:filterCtx.cpuTouchKind,
   $:()=>dummy
 };
 runInNewContext(part("  const drawTimeline=()=>{","  const clearTimeline=()=>{")+
@@ -68,8 +70,8 @@ overlay.flags.touches=true;
 paints.length=0;timelineCtx.draw();
 assert.ok(!paints.includes("#ff6b6b"),"Attack markers obey the unchecked filter");
 assert.ok(paints.includes("#f29d49"),"Selected serve remains on timeline");
-assert.ok(!paints.includes("#c6bf96"),"Unclassified markers follow the same filter");
-overlay.actionFlags.attack=true;
+assert.ok(!paints.includes("#c6bf96"),"Unclassified markers follow their own disabled filter");
+overlay.actionFlags.attack=true;overlay.actionFlags.unknown_touch=true;
 paints.length=0;timelineCtx.draw();
 assert.ok(paints.includes("#ff6b6b"));
 assert.ok(paints.includes("#c6bf96"),"All selected restores every touch type");
@@ -77,6 +79,6 @@ overlay.flags.touches=false;
 paints.length=0;timelineCtx.draw();
 assert.equal(paints.length,1,"Disabling touches removes all timeline markers");
 
-assert.match(js,/input\.addEventListener\("change",\(\)=>\{overlay\.actionFlags\[input\.dataset\.overlayAction\]=input\.checked;drawOverlay\(\);drawTimeline\(\);refreshRallyCardTouchTicks\(\);\}\)/);
-assert.ok(js.includes("if(overlay.raw||!overlay.flags.touches||!showCpuTouchType(event.kind))continue;"));
+assert.match(js,/overlay\.actionFlags\[input\.dataset\.overlayAction\]=input\.checked;\s*drawOverlay\(\);drawTimeline\(\);refreshRallyCardTouchTicks\(\);/);
+assert.ok(js.includes("validTimeline&&!overlay.raw&&overlay.flags.touches?"));
 console.log("Preview touch filter visibility and timeline/card redraw: OK");

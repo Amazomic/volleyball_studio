@@ -959,7 +959,10 @@ fn cpu_lineage_valid(
         && touches["state"] == "motion_gated_touch_proposals"
         && touches["body_trajectory_intersection_required"] == true
         && touches["settings"]["require_pose"] == true
-        && touches["automatic_action_prediction_method"] == "pose_keypoints_v1_or_unknown_touch"
+        && matches!(
+            touches["automatic_action_prediction_method"].as_str(),
+            Some("pose_keypoints_v1_or_unknown_touch" | "pose_keypoints_motion_v1_or_unknown_touch")
+        )
         && touches["preliminary_rally_scope_version"] == "ball_down_up_v1"
         && touches["preliminary_rally_settings"] == json!(request.post.rallies)
         && touches["preliminary_rally_scope_applied"].as_bool().is_some()
