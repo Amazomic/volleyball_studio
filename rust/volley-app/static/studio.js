@@ -1031,7 +1031,7 @@
     refresh:$("studio-training-refresh"),
     list:$("studio-training-list"),count:$("studio-training-count"),
     active:false,track:null,frame:null,busy:false,viewBusy:false,
-    revision:0,epoch:0,selectedId:null,editId:null
+    revision:0,epoch:0,selectedId:null,editId:null,previousRallyFilter:null
   };
   const trainingMessage=(text,error=false)=>{
     training.status.textContent=text;
@@ -1838,7 +1838,7 @@
       comparison.data=null;comparison.sourceKey="";comparison.simulated=false;
       window.VolleyballTasks?.clear("training-simulation");
       comparison.status.textContent="Выберите видео и CPU-постобработку.";
-      renderComparison();return;
+      renderComparison();cards();return;
     }
     const key=project+":"+run+":"+video;
     const sameSource=comparison.sourceKey===key;
@@ -1901,13 +1901,13 @@
         "Результат по сохранённой траектории VBallNet; возможные касания не подтверждены игроками и не классифицированы.":
         "Траекторных интервалов нет в этой CPU-версии.";
       renderComparison();
-      drawTimeline();
+      drawTimeline();cards();
     }catch(error){
       if(epoch!==comparison.epoch)return;
       comparison.data=null;
       comparison.simulated=false;
       comparison.status.textContent="Ошибка сравнения: "+error.message;
-      renderComparison();drawTimeline();
+      renderComparison();drawTimeline();cards();
     }finally{
       if(epoch===comparison.epoch)window.VolleyballTasks?.clear("training-simulation");
     }
@@ -1917,7 +1917,7 @@
     comparison.data=null;
     comparison.sourceKey="";
     comparison.simulated=false;
-    renderComparison();
+    renderComparison();cards();
     void refreshComparison(true);
   });
   updateComparisonModeSettings();
@@ -2107,7 +2107,14 @@
   if(overlay.mode){
     const selectMode=raw=>{
       if(overlay.raw===raw&&!training.active)return;
+      const restoreFilter=training.active?training.previousRallyFilter:null;
       training.active=false;training.track=null;training.frame=null;
+      training.previousRallyFilter=null;
+      if(restoreFilter&&restoreFilter!==ui.filter.value){
+        ui.filter.value=restoreFilter;
+        void loadPage().catch(failed);
+      }
+      if(s.current.startsWith("ball-"))s.current="";
       comparison.epoch++;comparison.data=null;comparison.sourceKey="";comparison.simulated=false;
       hideAnnotationContext();
       training.panel.classList.add("hidden");
@@ -2133,6 +2140,7 @@
         timeline.data.rallies.length+" розыгрышей · "+timeline.data.touch_annotations.filter(event=>event.touch_attributed===true||event.contact_verified===true).length+" касаний (CPU)";
       placeTrainingTimeline(false);
       drawTimeline();
+      cards();
       refreshRallyCardTouchTicks();
       drawOverlay();
     };
@@ -2142,6 +2150,11 @@
       if(training.active)return;
       ui.video.pause();
       overlay.raw=false;training.active=true;training.track=null;training.frame=null;
+      training.previousRallyFilter=ui.filter.value;
+      if(ui.filter.value!=="all"){
+        ui.filter.value="all";
+        void loadPage().catch(failed);
+      }
       overlay.flags.pose=true;overlay.flags.players=true;
       overlay.mode.setAttribute("aria-selected","false");
       overlay.rawMode.setAttribute("aria-selected","false");
@@ -2151,7 +2164,7 @@
       annotationFocus();
       updateOverlayToggles();
       setOverlaySource(s.run?{}:null);
-      drawTimeline();drawOverlay();
+      drawTimeline();drawOverlay();cards();
       trainingMessage("Остановите видео в момент удара и щёлкните по рамке игрока. Нужны сохранённые RTMPose и VBallNet.");
       refreshTraining();
       refreshAnnotation();
@@ -2247,6 +2260,8 @@
       [".studio-trajectory-proposal",annotation.ballLayerVisible]
     ])annotation.lane.querySelectorAll(selector).forEach(marker=>{marker.hidden=!visible;});
     drawTimeline();
+    ui.list.scrollTop=0;
+    cards();
   };
   annotation.touchLayerVisible=timelineRallyLayers.touches.checked;
   annotation.ballLayerVisible=timelineRallyLayers.ball.checked;
@@ -3196,7 +3211,10 @@
     s.stopAt=s.playbackMode==="free"?null:s.clipEnd;
     ui.viewTitle.textContent="Розыгрыш · "+clock(s.clipStart*fps())+" – "+clock(s.clipEnd*fps());
     ui.videoTime.textContent=clock(s.clipStart*fps())+" – "+clock(s.clipEnd*fps());
-    renderRallyTouches(item,start,end);
+    if(item.ballRally===true){
+      wipe(ui.events);
+      ui.viewDescription.textContent="Предварительный розыгрыш по траектории мяча. Касания и игроки не подтверждены.";
+    }else renderRallyTouches(item,start,end);
     ui.emptyVideo.classList.add("hidden");
     // Direct seeking on the card must not jump back to the rally start.
     s.seekAt=Number.isFinite(requestedTime)?
@@ -3223,9 +3241,24 @@
     const previousScroll=ui.list.scrollTop;
     rallyCardProgresses.clear();
     wipe(ui.list);
-    const visible=s.items;
+    const trainingList=typeof training!=="undefined"&&training.active;
+    const cpuItems=trainingList&&!timelineRallyLayers.touches.checked?[]:s.items;
+    const ballItems=trainingList&&timelineRallyLayers.ball.checked&&
+      comparisonMatches(comparison.data)&&comparison.data?.trajectory_status==="ready"?
+      comparison.data.trajectory_rallies:[];
+    const visible=trainingList?[
+      ...cpuItems.map(item=>({kind:"touch",item,start:Number(item.detected_start_frame)||0})),
+      ...ballItems.filter(item=>Number.isSafeInteger(item.start)&&Number.isSafeInteger(item.end)&&
+        item.start>=0&&item.end>=item.start).map(item=>({kind:"ball",item,start:item.start}))
+    ].sort((a,b)=>a.start-b.start||(a.kind==="touch"?-1:1)):
+      cpuItems.map(item=>({kind:"touch",item}));
     if(!visible.length){
-      const text=s.pageLoading?"Проверка источников и загрузка розыгрышей…":
+      const text=trainingList&&!timelineRallyLayers.touches.checked&&!timelineRallyLayers.ball.checked?
+        "Включите хотя бы один тип розыгрышей в заголовке списка.":
+        trainingList&&!timelineRallyLayers.touches.checked&&
+          !comparisonMatches(comparison.data)?
+          "Розыгрыши по мячу ещё не рассчитаны. Нажмите «Смоделировать розыгрыши».":
+        s.pageLoading?"Проверка источников и загрузка розыгрышей…":
         s.pageError?"Предпросмотр не загружен: "+s.pageError+
           " · Выбранная CPU-версия не удалена.":
         !s.run?(overlay.raw&&rawFusion()?
@@ -3240,12 +3273,49 @@
       ui.list.append(make("div","empty-state",text));
       return;
     }
-    for(const item of visible){
+    for(const entry of visible){
+      if(entry.kind==="ball"){
+        const {start,end}=entry.item;
+        const id="ball-"+start+"-"+end;
+        const candidate={ballRally:true,candidate_id:id,
+          detected_start_frame:start,detected_end_frame:end};
+        const card=make("article","rally-card training-ball"+
+          (s.current===id?" active":""));
+        card.tabIndex=0;card.setAttribute("role","button");
+        const open=()=>view(candidate);
+        card.setAttribute("aria-label","Розыгрыш по мячу · "+second(start+(Number(s.analysisOffset)||0)*fps())+
+          "–"+second(end+(Number(s.analysisOffset)||0)*fps())+" с");
+        card.addEventListener("click",event=>{
+          if(!event.target.closest("button,label,input"))open();
+        });
+        card.addEventListener("keydown",event=>{
+          if((event.key==="Enter"||event.key===" ")&&event.target===card){
+            event.preventDefault();open();
+          }
+        });
+        const top=make("div","card-top");
+        top.append(make("span","id-label","По мячу"));
+        const when=make("div","rally-card-time-range");
+        when.append(make("strong","rally-card-time-value",
+          second(start+(Number(s.analysisOffset)||0)*fps())+"–"+
+          second(end+(Number(s.analysisOffset)||0)*fps())+" с"));
+        top.append(when);
+        const foot=make("div","card-stats");
+        const duration=make("div","rally-card-duration");
+        duration.append(make("span","","Длительность"),
+          make("strong","",((end-start+1)/fps()).toFixed(1)+" с"));
+        foot.append(duration);
+        card.append(top,foot,make("div","rally-card-techniques",
+          "Предварительный интервал · касания и игроки не подтверждены"));
+        ui.list.append(card);
+        continue;
+      }
+      const item=entry.item;
       const id=item.candidate_id;
       if(!valid(id))continue;
       const gold=s.gold.has(id);
       const card=make("article","rally-card"+(gold?" gold":"")+
-        (s.current===id?" active":""));
+        (s.current===id?" active":"")+(trainingList?" training-touch":""));
       card.tabIndex=0;card.setAttribute("role","button");
       card.setAttribute("aria-label","Просмотр розыгрыша "+clock(item.detected_start_frame+(Number(s.analysisOffset)||0)*fps()));
       card.addEventListener("click",e=>{
@@ -3260,6 +3330,7 @@
       const top=make("div","card-top");
       const idLabel=make("span","id-label","ID "+id.slice(0,6));
       idLabel.title="Полный ID: "+id;
+      if(trainingList)idLabel.append(make("span","rally-source-label","По касаниям"));
       const duration=make("div","rally-card-duration");
       duration.title="Длительность: "+length(item);
       duration.append(make("span","","Длительность"),make("strong","",length(item)));
@@ -3349,7 +3420,8 @@
   };
   // Fetch next rally pages when the right-hand list is scrolled to its end.
   const loadMore=async()=>{
-    if(s.loadingMore||!s.canLoadMore||!s.project||!s.run)return;
+    if(s.loadingMore||!s.canLoadMore||!s.project||!s.run||
+       (training.active&&!timelineRallyLayers.touches.checked))return;
     s.loadingMore=true;
     const token=s.generation,project=s.project,run=s.run;
     const offset=s.items.length;

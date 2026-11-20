@@ -182,7 +182,8 @@ runInNewContext(js.slice(initStart,initEnd),{
   updateRawDetectorLabel(){},placeTrainingTimeline(){},
   drawOverlay:()=>{redraws++;},drawTimeline:()=>{timelineRedraws++;},
   refreshRallyCardTouchTicks:()=>{cardRedraws++;},updateOverlayToggles:()=>{},
-  setOverlaySource:()=>{},rawFusion:()=>({id:"f"}),s:{run:"",video:""},
+  setOverlaySource:()=>{},rawFusion:()=>({id:"f"}),s:{run:"",video:"",current:""},
+  cards:()=>{},
   timeline:{status:{textContent:""},data:null},
   ensurePreviewVideo:()=>{},prefetchOverlayAtFrame:()=>{},overlayMessage:()=>{}
 });

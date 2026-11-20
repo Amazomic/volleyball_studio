@@ -65,7 +65,7 @@ const context={
   fps:()=>30,
   seekTimeline:seconds=>{seeked=seconds;},
   training:{active:true},
-  drawTimeline:()=>{},
+  drawTimeline:()=>{},cards:()=>{},
   url:(path,query)=>({path,query}),
   request:async()=>{throw Error("Expected mocked API response");}
 };

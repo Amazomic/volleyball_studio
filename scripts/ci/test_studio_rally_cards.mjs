@@ -33,7 +33,12 @@ const s={items:[{
 }],offset:0,limit:24,filtered:1,gold:new Set(),current:"",
 selected:{has:()=>false}};
 const playbackCalls=[];
+const training={active:false};
+const timelineRallyLayers={touches:{checked:true},ball:{checked:true}};
+const comparison={data:null};
 const context={fps:()=>30,ui,s,wasmReady:true,
+  training,timelineRallyLayers,comparison,comparisonMatches:data=>Boolean(data),
+  second:frame=>(frame/30).toFixed(1).replace(".",","),
   rallyCardProgresses:new Map(),timeline:{data:null},
   make:element, wipe:el=>el.replaceChildren(),
   valid:id=>/^[a-f0-9]{24}$/.test(id),clock:n=>String(n),
@@ -107,4 +112,52 @@ ui.filter.value="all";s.total=0;
 context.render();
 assert.match(list.children[0].textContent,/нет обнаруженных розыгрышей/i,
   "Only the genuinely empty run may show the no-rallies message");
-console.log("Studio rally cards: duration, actions, players and loading/empty states: OK");
+training.active=true;
+ui.filter.value="all";
+s.run="r";s.pageLoading=false;s.pageError="";s.total=1;s.filtered=1;
+s.items=[{
+  candidate_id:"b".repeat(24),detected_start_frame:120,detected_end_frame:230,
+  motion_event_count:2,provisional_track_ids:[7],estimated_action_counts:{},unclassified_action_count:2
+}];
+comparison.data={trajectory_status:"ready",trajectory_rallies:[
+  {start:60,end:180},{start:300,end:420}
+]};
+context.render();
+assert.equal(list.children.length,3,"Both sources must appear in the shared rally list");
+assert.match(list.children[0].klass,/training-ball/);
+assert.match(list.children[1].klass,/training-touch/);
+assert.match(list.children[2].klass,/training-ball/);
+assert.match(values(list.children[0]).join(" "),/По мячу/);
+assert.match(values(list.children[1]).join(" "),/По касаниям/);
+assert.match(values(list.children[0]).join(" "),/не подтверждены/,
+  "Ball-only rallies must not claim verified player or touch metrics");
+assert.ok(!values(list.children[0]).join(" ").includes("☆"),
+  "Ball-only proposals must not be offered as CPU favorites");
+const selectedBall=list.children[0];
+playbackCalls.length=0;
+selectedBall.listeners.click({target:{closest:()=>null}});
+assert.equal(playbackCalls.length,1);
+assert.equal(playbackCalls[0][0].ballRally,true);
+assert.equal(playbackCalls[0][0].detected_start_frame,60);
+timelineRallyLayers.touches.checked=false;
+context.render();
+assert.equal(list.children.length,2);
+assert.ok(list.children.every(item=>item.klass.includes("training-ball")));
+timelineRallyLayers.ball.checked=false;
+context.render();
+assert.match(list.children[0].textContent,/Включите хотя бы один тип/);
+timelineRallyLayers.touches.checked=true;
+context.render();
+assert.equal(list.children.length,1);
+assert.match(list.children[0].klass,/training-touch/);
+timelineRallyLayers.touches.checked=false;
+timelineRallyLayers.ball.checked=true;
+comparison.data=null;
+context.render();
+assert.match(list.children[0].textContent,/ещё не рассчитаны/);
+training.active=false;
+context.render();
+assert.equal(list.children.length,1,
+  "Ordinary preview keeps CPU rally cards even when training filters are off");
+assert.equal(list.children[0].klass,"rally-card");
+console.log("Studio rally cards: CPU and ball sources, filters, colors, navigation, and standard preview: OK");

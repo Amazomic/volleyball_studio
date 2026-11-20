@@ -538,4 +538,7 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Розыгрыши по касаниям	Touch-based rallies
 Розыгрыши по траектории мяча	Ball-trajectory rallies
 Розыгрыши по мячу	Ball-based rallies
+Отображение розыгрышей в списке и на временной шкале	Rally filters for list and timeline
+По мячу	From ball trajectory
+По касаниям	From touches
 Отображение розыгрышей на временной шкале	Rally layers on the timeline

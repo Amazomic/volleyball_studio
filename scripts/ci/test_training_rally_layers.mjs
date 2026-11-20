@@ -9,8 +9,11 @@ const js=read("rust/volley-app/static/studio.js");
 for(const id of ["studio-training-rallies-by-touches","studio-training-rallies-by-trajectory"]){
   assert.equal((html.match(new RegExp('id="'+id+'"',"g"))||[]).length,1);
 }
-assert.ok(css.includes("#studio-preview-view.training-workspace .studio-training-rally-visibility{display:grid}"));
-assert.ok(css.includes("left:69%"),"Checkboxes must be inside the upper right of the video area");
+assert.ok(html.indexOf('class="studio-training-rally-visibility"')>html.indexOf('class="rallies-panel-head"'),
+  "Both filter checkboxes must live inside the rally list header");
+assert.ok(html.indexOf('class="studio-training-rally-visibility"')<html.indexOf('id="studio-rallies"'));
+assert.ok(css.includes("#studio-preview-view.training-workspace .rallies-panel-head .studio-training-rally-visibility{display:flex"));
+assert.ok(css.includes("#studio-preview-view.training-workspace .studio-rallies-sort-control{display:none}"));
 assert.ok(css.includes('.studio-trajectory-proposal)[hidden]{display:none!important}'),
   "Hidden timeline marker elements must not remain visible");
 assert.ok(js.includes('overlay.canvas.addEventListener("contextmenu"'));
@@ -51,7 +54,8 @@ const annotation={
 };
 const s={project:"p",video:"match.mp4",videoKey:"p:match.mp4",
   analysisOffset:0,seekAt:0,current:null,gold:new Set()};
-const ui={video:{duration:10,currentTime:0}};
+let renderedLists=0;
+const ui={video:{duration:10,currentTime:0},list:{scrollTop:99}};
 const start=js.indexOf("  const timeline={");
 const end=js.indexOf("  const clearTimeline=()=>",start);
 assert.ok(start>0&&end>start);
@@ -62,6 +66,7 @@ const {timeline,drawTimeline,timelineRallyLayers}=runInNewContext(
     document:{querySelector:()=>({append(){}})},
     comparisonMatches:()=>true,annotationReady:()=>true,
     annotationSourceValid:()=>true,fps:()=>30,
+    cards:()=>{renderedLists++;},
     cpuTouchKind:kind=>kind,
     cpuTouchStyle:{unknown_touch:["#f14f4f"]}
   }
@@ -81,6 +86,8 @@ const ball=rects.find(r=>r.color==="#efb15773");
 assert.ok(cpu.x<ball.x&&ball.x<cpu.x+cpu.w,"Overlapping rally layers share the same lane");
 rects.length=0;timelineRallyLayers.touches.checked=false;
 timelineRallyLayers.touches.listeners.change();
+assert.equal(renderedLists,1,"Changing a checkbox must immediately refresh the rally list");
+assert.equal(ui.list.scrollTop,0);
 assert.ok(!palette().includes("#37b9ce80"));
 for(const color of ["#00ad9470","#10deb2","#f14f4f"])
   assert.ok(!palette().includes(color),"Touch-based mark remains after disabling touch rallies: "+color);
