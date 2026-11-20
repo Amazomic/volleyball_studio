@@ -744,7 +744,9 @@
     const videos=Array.isArray(current?.videos)?
       current.videos.filter(name=>typeof name==="string"):[];
     clear(ui.video);
-    const option=make("option","","Выберите видео");option.value="";ui.video.append(option);
+    if(!videos.length){
+      const option=make("option","","Нет видео проекта");option.value="";ui.video.append(option);
+    }
     for(const name of videos){
       // Linked originals have opaque internal IDs; show the actual filename.
       const recorded=current?.source_paths?.[name];
@@ -763,7 +765,7 @@
     ui.video.value=chainVideo||(
       state.formProject===project&&videos.includes(old)?old:
       videos.includes(savedVideo)?savedVideo:
-      videos.length===1?videos[0]:"");
+      videos[0]||"");
     state.formProject=project;
     window.VolleyballEditor?.load(project,ui.video.value,true);
     updateProfile();
