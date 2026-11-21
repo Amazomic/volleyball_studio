@@ -132,7 +132,7 @@ pub(super) fn trajectory_profile(lib: &Library) -> TrajectoryProfile {
     }
     best
 }
-fn include_legacy_reviewed_labels(
+pub(super) fn include_legacy_reviewed_labels(
     lib: &mut Library,
     project_id: &str,
     video: &str,
@@ -171,7 +171,7 @@ fn inside_rally(frame: u64, intervals: &[(u64, u64)]) -> bool {
         .is_some_and(|&(start, end)| start <= frame && frame <= end)
 }
 
-fn scan_scoped_trajectory(
+pub(super) fn scan_scoped_trajectory(
     run: &ValidatedRun,
     intervals: &[(u64, u64)],
 ) -> Result<Vec<TrajectoryCandidate>, ApiError> {

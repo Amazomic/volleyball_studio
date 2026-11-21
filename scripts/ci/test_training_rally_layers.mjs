@@ -114,8 +114,16 @@ assert.equal(timelineRallyLayers.types.disabled,false,
   "Type display requires candidate detection to be enabled");
 timelineRallyLayers.types.checked=true;
 timelineRallyLayers.types.listeners.change();
-assert.match(timelineRallyLayers.typeStatus.textContent,/RTMPose/);
+assert.match(timelineRallyLayers.typeStatus.textContent,/Типы ещё не рассчитаны/);
 assert.ok(palette().includes("#ffbd55"),"Optional touch candidates follow explicit toggle");
+annotation.typePrediction={touches:[{frame:37,kind:"attack",track_id:7}],classified:1,total:1};
+rects.length=0;
+timelineRallyLayers.types.listeners.change();
+assert.match(timelineRallyLayers.typeStatus.textContent,/RTMPose/);
+assert.ok(palette().includes("#ff6b6b"),"Independent RTMPose classification colors ball candidates");
+annotation.typePrediction=null;
+rects.length=0;
+timelineRallyLayers.types.listeners.change();
 assert.ok(!palette().includes("#37b9ce80"),
   "Optional touch candidates must not restore the old rally detector");
 assert.ok(!palette().includes("#c6bf96")&&!palette().includes("#f14f4f"),
@@ -164,7 +172,7 @@ const overlayAnnotation={prediction:{
 }};
 const {drawTrainingTouchCandidate}=runInNewContext(
   js.slice(overlayStart,overlayEnd)+"\n({drawTrainingTouchCandidate})",{
-    annotation:overlayAnnotation,annotationSourceValid:()=>true,
+    annotation:overlayAnnotation,trainingNames:{attack:"Атака"},annotationSourceValid:()=>true,
     showBallCandidates:()=>detectionVisible,showBallTouchTypes:()=>typeVisible
   });
 const detectedBall={replay_sha256:digest,frames:[{frame:100,ball:[0.5,0.4]}]};
@@ -173,8 +181,12 @@ assert.ok(rendered.includes("ring"),"Video must highlight trajectory candidates 
 assert.ok(rendered.some(value=>value.includes("Касание?")));
 rendered.length=0;typeVisible=true;
 drawTrainingTouchCandidate(paint,detectedBall,100,0,0,640,360);
-assert.ok(rendered.some(value=>value.includes("Тип не определён")),
+assert.ok(rendered.some(value=>value.includes("тип не определён")),
   "Unknown type must not be supplied by the CPU postprocessing");
+rendered.length=0;
+overlayAnnotation.typePrediction={touches:[{frame:100,kind:"attack",track_id:7}]};
+drawTrainingTouchCandidate(paint,detectedBall,100,0,0,640,360);
+assert.ok(rendered.includes("Атака"),"RTMPose type appears on source-matched video frames");
 rendered.length=0;
 drawTrainingTouchCandidate(paint,{...detectedBall,replay_sha256:"a".repeat(64)},100,0,0,640,360);
 assert.equal(rendered.length,0,"A different replay must never display candidates");
