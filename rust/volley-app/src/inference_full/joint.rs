@@ -240,7 +240,7 @@ pub(crate) fn run_joint_pair(
     gpu_memory_limit_mb: u64,
     cpu_threads: usize,
     cancelled: &AtomicBool,
-    mut report: impl FnMut(f64, u64, u64) -> Result<(), String>,
+    mut report: impl FnMut(f64, u64, u64, Option<(&Value, u64)>) -> Result<(), String>,
 ) -> Result<JointPair, String> {
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
@@ -278,7 +278,7 @@ pub(crate) fn run_joint_pair(
     ball_config.verify()?;
     person_config.verify()?;
     let total_frames = (duration * 30.0).round().max(9.0) as u64;
-    report(0.0, 0, total_frames)?;
+    report(0.0, 0, total_frames, None)?;
     let mut ball_engine = Engine::load(&state.repository_root, &ball_config)?;
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
@@ -365,7 +365,7 @@ pub(crate) fn run_joint_pair(
                 person_stride,
                 duration,
                 cancelled,
-                |fraction, frames| report(0.4 * fraction, frames, total_frames),
+                |fraction, frames| report(0.4 * fraction, frames, total_frames, None),
             )?;
             PrimaryDecodeSummary {
                 decode,
@@ -400,6 +400,7 @@ pub(crate) fn run_joint_pair(
                             0.4 * (frames as f64 / estimated).clamp(0.0, 0.99),
                             frames,
                             total_frames,
+                            None,
                         )?;
                     }
                     Ok(())
@@ -410,7 +411,12 @@ pub(crate) fn run_joint_pair(
         if cancelled.load(Ordering::Acquire) {
             return Err("cancelled".into());
         }
-        report(0.399999, ball_scan.decode.decoded_frames, total_frames)?;
+        report(
+            0.399999,
+            ball_scan.decode.decoded_frames,
+            total_frames,
+            None,
+        )?;
         let mask = RallyMask::from_ball_samples(
             ball_writer.ball_samples.as_deref().unwrap_or(&[]),
             ball_scan.decode.decoded_frames,
@@ -432,10 +438,16 @@ pub(crate) fn run_joint_pair(
             }),
         )
         .map_err(|error| format!("Save primary rally mask: {error:?}"))?;
-        rally_filter = Some(mask_value);
+
         let player_total = mask.sampled_frames(person_stride);
         player_target = player_total;
-        report(0.4, 0, player_total)?;
+        report(
+            0.4,
+            0,
+            player_total,
+            Some((&mask_value, ball_scan.decode.decoded_frames)),
+        )?;
+        rally_filter = Some(mask_value);
         let mut player_samples = 0u64;
         let people_scan = if let Some(source_info) = zero_copy_codec.clone() {
             let decode = zero_copy::run(
@@ -453,7 +465,7 @@ pub(crate) fn run_joint_pair(
                 person_stride,
                 duration,
                 cancelled,
-                |fraction, samples| report(0.4 + 0.6 * fraction, samples, player_total),
+                |fraction, samples| report(0.4 + 0.6 * fraction, samples, player_total, None),
             )?;
             PrimaryDecodeSummary {
                 decode,
@@ -510,6 +522,7 @@ pub(crate) fn run_joint_pair(
                             0.4 + 0.6 * (frames as f64 / estimated).clamp(0.0, 0.99),
                             player_samples,
                             player_total,
+                            None,
                         )?;
                     }
                     Ok(())
@@ -545,7 +558,7 @@ pub(crate) fn run_joint_pair(
             person_stride,
             duration,
             cancelled,
-            |fraction, frames| report(fraction, frames, total_frames),
+            |fraction, frames| report(fraction, frames, total_frames, None),
         )?;
         PrimaryDecodeSummary {
             decode,
@@ -593,6 +606,7 @@ pub(crate) fn run_joint_pair(
                         (frames as f64 / estimated).clamp(0.0, 0.99),
                         frames,
                         total_frames,
+                        None,
                     )?;
                 }
                 Ok(())
@@ -647,7 +661,7 @@ pub(crate) fn run_joint_pair(
     } else {
         total_frames
     };
-    report(1.0, final_total, final_total)?;
+    report(1.0, final_total, final_total, None)?;
     pending.committed = true;
     Ok(JointPair {
         ball_job_id: ball.id,
