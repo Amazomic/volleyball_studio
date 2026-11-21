@@ -21,7 +21,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufWriter, Write},
     path::Path,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 use uuid::Uuid;
 use volley_core::{
@@ -293,6 +296,7 @@ fn rebuild_from_snapshots(
         court,
         ball_scope,
         None,
+        None,
     )
 }
 
@@ -313,20 +317,24 @@ fn rebuild_from_snapshots_with_scope(
     court: Option<&volley_core::court_geometry::CourtTransform>,
     ball_scope: Option<(&[u64], f64)>,
     preliminary_intervals: Option<&[(u64, u64)]>,
+    cancel: Option<&AtomicBool>,
 ) -> Result<(String, RallyTotals, OutputCounters), String> {
+    if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+        return Err("cancelled".into());
+    }
     settings.validate()?;
     if frames == 0 || frames > 48 * 3600 * 30 || expected_touches > frames {
         return Err("Native rally source frame/contact count exceeds limits".into());
     }
     let (rally_starts, tracking_score) = ball_scope.unwrap_or((&[], settings.min_ball_score));
-    let ball_mask = crate::cpu_retrack::ball_track::read(
+    let ball_mask = crate::cpu_retrack::ball_track::read_with_cancel(
         frames_file,
         replay_sha,
         frames,
-        width,
-        height,
+        (width, height),
         tracking_score,
         rally_starts,
+        cancel,
     )?;
     let accepted_ball_frames = &ball_mask.accepted;
     let mut inputs = BoundedReader::open(frames_file)?;
@@ -356,6 +364,9 @@ fn rebuild_from_snapshots_with_scope(
     let mut surface_events = std::collections::VecDeque::<SurfaceEventProposal>::new();
     let net_surface = court.and_then(|c| c.zones()).and_then(|z| z.net_surface);
     for frame_index in 0..frames {
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
+        }
         let bytes = inputs.line()?.ok_or("Tracked frame JSONL is truncated")?;
         let frame: ReplayFrame = serde_json::from_slice(&bytes)
             .map_err(|e| format!("Malformed tracked source frame: {e}"))?;
@@ -702,6 +713,29 @@ pub(crate) fn refine_leading_ball(
     settings: RallySettings,
     discovery_id: &str,
 ) -> Result<Value, ApiError> {
+    refine_leading_ball_inner(state, request, settings, discovery_id, None)
+}
+
+pub(crate) fn refine_leading_ball_with_cancel(
+    state: &AppState,
+    request: &crate::cpu_touches::TouchRequest,
+    settings: RallySettings,
+    discovery_id: &str,
+    cancel: &AtomicBool,
+) -> Result<Value, ApiError> {
+    refine_leading_ball_inner(state, request, settings, discovery_id, Some(cancel))
+}
+
+fn refine_leading_ball_inner(
+    state: &AppState,
+    request: &crate::cpu_touches::TouchRequest,
+    settings: RallySettings,
+    discovery_id: &str,
+    cancel: Option<&AtomicBool>,
+) -> Result<Value, ApiError> {
+    if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+        return Err(storage::conflict("cancelled"));
+    }
     let run =
         crate::native_rally_evidence::inspect_project(state, &request.project_id, discovery_id)?;
     if run.replay_id != request.replay_id || run.video != request.video {
@@ -719,22 +753,30 @@ pub(crate) fn refine_leading_ball(
             .map(|(start, _)| *start)
             .filter(|start| *start > 0),
     );
-    let touches = crate::cpu_touches::process_with_ball_scope_and_rally_settings(
-        state, request, &starts, settings,
-    )?;
+    let touches = if let Some(cancel) = cancel {
+        crate::cpu_touches::process_with_ball_scope_and_rally_settings_cancel(
+            state, request, &starts, settings, cancel,
+        )?
+    } else {
+        crate::cpu_touches::process_with_ball_scope_and_rally_settings(
+            state, request, &starts, settings,
+        )?
+    };
     let touch_id = touches["touch_id"]
         .as_str()
         .ok_or_else(|| storage::bad_request("Missing refined Touch ID"))?;
-    let rallies = process(
-        state,
-        &RallyRequest {
-            project_id: request.project_id.clone(),
-            video: request.video.clone(),
-            replay_id: request.replay_id.clone(),
-            touch_id: touch_id.to_owned(),
-            settings: Some(settings),
-        },
-    )?;
+    let request = RallyRequest {
+        project_id: request.project_id.clone(),
+        video: request.video.clone(),
+        replay_id: request.replay_id.clone(),
+        touch_id: touch_id.to_owned(),
+        settings: Some(settings),
+    };
+    let rallies = if let Some(cancel) = cancel {
+        process_with_cancel(state, &request, cancel)?
+    } else {
+        process(state, &request)?
+    };
     Ok(json!({"touches":touches,"rallies":rallies,
         "ball_tracking_boundary_source":{"rally_run_id":discovery_id,"sha256":run.rally_sha}}))
 }
@@ -754,6 +796,25 @@ fn record_preliminary_scope(manifest: &mut Value, contacts: &Value, applied: boo
 }
 
 pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value, ApiError> {
+    process_inner(state, request, None)
+}
+
+pub(crate) fn process_with_cancel(
+    state: &AppState,
+    request: &RallyRequest,
+    cancel: &AtomicBool,
+) -> Result<Value, ApiError> {
+    process_inner(state, request, Some(cancel))
+}
+
+fn process_inner(
+    state: &AppState,
+    request: &RallyRequest,
+    cancel: Option<&AtomicBool>,
+) -> Result<Value, ApiError> {
+    if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+        return Err(storage::conflict("cancelled"));
+    }
     if !state.writes_enabled {
         return Err(storage::conflict(
             "Rally analysis requires an isolated working directory",
@@ -900,12 +961,13 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
         .map_err(|_| storage::bad_request("Invalid continuous rally intervals"))?;
     let replay_source = safe_file(&track_dir, "tracked_frames.jsonl", MAX_EVIDENCE)
         .map_err(storage::bad_request)?;
-    let computed = crate::cpu_retrack::ball_track::continuous_ball_intervals(
+    let computed = crate::cpu_retrack::ball_track::continuous_ball_intervals_with_cancel(
         &replay_source,
         &replay_sha,
         frames,
         min_ball_score,
         crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
+        cancel,
     )
     .and_then(|segments| {
         crate::cpu_retrack::ball_track::merge_continuous_intervals(
@@ -979,9 +1041,13 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
                 .and_then(|snapshot| snapshot.transform.as_ref()),
             Some((rally_starts, tracking_score)),
             preliminary_intervals.as_deref(),
+            cancel,
         )?;
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared video changed during native rally processing".into());
+        }
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
         }
         fs::rename(part, folder.join(OUTPUT_FILE))
             .map_err(|e| format!("Publish rally candidates: {e}"))?;
@@ -1023,6 +1089,9 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
             "cpu_processing_complete":false,
         });
         record_preliminary_scope(&mut manifest, &contacts, preliminary_intervals.is_some());
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
+        }
         storage::write_json_atomic(&folder.join("manifest.json"), &manifest)
             .map_err(|e| format!("Save native rally manifest: {e:?}"))?;
         crate::native_player_tracks::prepare_rally_index(
@@ -1083,6 +1152,33 @@ pub async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_rally_scan_does_not_publish_files() {
+        let cancelled = AtomicBool::new(true);
+        let missing = std::env::temp_dir().join(format!("no-rally-source-{}", Uuid::new_v4()));
+        let output = missing.with_extension("jsonl");
+        let result = rebuild_from_snapshots_with_scope(
+            &missing,
+            &missing,
+            "no-sha",
+            "no-sha",
+            9,
+            0,
+            640,
+            360,
+            RallySettings::default(),
+            &output,
+            "replay",
+            "touch",
+            None,
+            None,
+            None,
+            Some(&cancelled),
+        );
+        assert!(matches!(result, Err(ref error) if error == "cancelled"));
+        assert!(!output.exists());
+    }
 
     #[test]
     fn preliminary_fallback_keeps_versioned_source_for_cache_reuse() {
@@ -1579,6 +1675,7 @@ mod tests {
             None,
             None,
             Some(&scope),
+            None,
         )
         .unwrap();
         assert_eq!(result.2.proposals, 2);

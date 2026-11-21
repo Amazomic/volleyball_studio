@@ -3,7 +3,10 @@ use serde::Deserialize;
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::SystemTime,
 };
 use volley_core::touch_pipeline::{flag_local_ball_artifacts, LeadingBallTracker};
@@ -162,6 +165,27 @@ pub(crate) fn continuous_ball_intervals(
     min_score: f64,
     min_seconds: f64,
 ) -> Result<Vec<(u64, u64)>, String> {
+    continuous_ball_intervals_with_cancel(
+        source,
+        expected_sha,
+        frames,
+        min_score,
+        min_seconds,
+        None,
+    )
+}
+
+pub(crate) fn continuous_ball_intervals_with_cancel(
+    source: &Path,
+    expected_sha: &str,
+    frames: u64,
+    min_score: f64,
+    min_seconds: f64,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<(u64, u64)>, String> {
+    if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+        return Err("cancelled".into());
+    }
     if frames == 0
         || frames > 48 * 3600 * 30
         || !min_score.is_finite()
@@ -174,6 +198,9 @@ pub(crate) fn continuous_ball_intervals(
     let mut reader = BoundedReader::open(source)?;
     let mut points = Vec::with_capacity(frames as usize);
     for frame in 0..frames {
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
+        }
         let line = reader.line()?.ok_or("Truncated continuous ball source")?;
         let row: BallOnlyFrame =
             serde_json::from_slice(&line).map_err(|_| "Malformed continuous ball source")?;
@@ -340,6 +367,30 @@ pub(crate) fn read(
     min_score: f64,
     rally_starts: &[u64],
 ) -> Result<Arc<BallTrackMask>, String> {
+    read_with_cancel(
+        source,
+        expected_sha,
+        frames,
+        (width, height),
+        min_score,
+        rally_starts,
+        None,
+    )
+}
+
+pub(crate) fn read_with_cancel(
+    source: &Path,
+    expected_sha: &str,
+    frames: u64,
+    dimensions: (u32, u32),
+    min_score: f64,
+    rally_starts: &[u64],
+    cancel: Option<&AtomicBool>,
+) -> Result<Arc<BallTrackMask>, String> {
+    let (width, height) = dimensions;
+    if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+        return Err("cancelled".into());
+    }
     if frames == 0
         || frames > 48 * 3600 * 30
         || width < 64
@@ -382,10 +433,10 @@ pub(crate) fn read(
         source,
         expected_sha,
         frames,
-        width,
-        height,
+        (width, height),
         min_score,
         rally_starts,
+        cancel,
     )?);
     let after = fs::symlink_metadata(source).map_err(|e| format!("Ball source changed: {e}"))?;
     if after.len() != key.bytes
@@ -418,11 +469,12 @@ fn scan(
     source: &Path,
     expected_sha: &str,
     frames: u64,
-    width: u32,
-    height: u32,
+    dimensions: (u32, u32),
     min_score: f64,
     rally_starts: &[u64],
+    cancel: Option<&AtomicBool>,
 ) -> Result<BallTrackMask, String> {
+    let (width, height) = dimensions;
     const CHUNK: usize = 240;
     const HALO: usize = 16;
     let total = frames as usize;
@@ -438,6 +490,9 @@ fn scan(
     let mut buffer = std::collections::VecDeque::<Option<[f64; 2]>>::new();
     let (mut buffer_start, mut next_read, mut core_start) = (0, 0, 0);
     while core_start < total {
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
+        }
         let core_end = (core_start + CHUNK).min(total);
         let region_start = core_start.saturating_sub(HALO);
         let region_end = (core_end + HALO).min(total);
@@ -470,6 +525,9 @@ fn scan(
             .collect::<Vec<_>>();
         let local_flags = flag_local_ball_artifacts(&points, width, height);
         for index in core_start..core_end {
+            if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+                return Err("cancelled".into());
+            }
             if rally_starts.get(next_rally) == Some(&(index as u64)) {
                 if index > 0 {
                     tracker.begin_rally();
@@ -515,6 +573,27 @@ fn scan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_ball_prescan_does_not_open_source() {
+        let cancelled = AtomicBool::new(true);
+        let missing = std::env::temp_dir().join("missing-cancelled-ball-source.jsonl");
+        assert_eq!(
+            continuous_ball_intervals_with_cancel(
+                &missing,
+                "no-sha",
+                9,
+                0.5,
+                1.5,
+                Some(&cancelled)
+            )
+            .unwrap_err(),
+            "cancelled"
+        );
+        assert!(
+            matches!(read_with_cancel(&missing, "no-sha", 9, (640, 360), 0.5, &[], Some(&cancelled)), Err(ref error) if error == "cancelled")
+        );
+    }
     use serde_json::json;
     use sha2::{Digest, Sha256};
 

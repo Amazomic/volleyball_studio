@@ -1447,10 +1447,22 @@ async fn cpu<T: Send + 'static>(
         .map_err(|e| format!("CPU worker: {e}"))?
         .map_err(reason)
 }
+async fn cpu_cancel<T: Send + 'static>(
+    app: Arc<AppState>,
+    request: T,
+    cancel: Arc<AtomicBool>,
+    handler: fn(&AppState, &T, &AtomicBool) -> Result<Value, ApiError>,
+) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || handler(&app, &request, &cancel))
+        .await
+        .map_err(|e| format!("CPU worker: {e}"))?
+        .map_err(reason)
+}
+
 async fn pipeline(
     app: &Arc<AppState>,
     request: &StartRequest,
-    cancel: &AtomicBool,
+    cancel: &Arc<AtomicBool>,
     path: &Path,
     status: &mut Value,
 ) -> Result<(), String> {
@@ -1965,7 +1977,7 @@ async fn pipeline(
         "cpu_retrack::process",
         json!({"project_id":request.project_id,"video":request.video,"fusion_id":fusion_id,"settings":request.post.tracking}),
     )?;
-    let replay = cpu(
+    let replay = cpu_cancel(
         app.clone(),
         cpu_retrack::ReplayRequest {
             project_id: request.project_id.clone(),
@@ -1975,7 +1987,8 @@ async fn pipeline(
             interpolate_pose: request.post.interpolate_pose,
             interpolate_players: request.post.interpolate_players,
         },
-        cpu_retrack::process,
+        cancel.clone(),
+        cpu_retrack::process_with_cancel,
     )
     .await?;
     let replay_id = require_id(&replay, "replay_id")?;
@@ -2004,7 +2017,7 @@ async fn pipeline(
         json!({"project_id":request.project_id,"video":request.video,"replay_id":replay_id,"settings":request.post.touches}),
     )?;
     let touches = tokio::task::block_in_place(|| {
-        cpu_touches::process_discovery_with_rally_settings_and_progress(
+        cpu_touches::process_discovery_with_rally_settings_and_progress_cancel(
             app,
             &cpu_touches::TouchRequest {
                 project_id: request.project_id.clone(),
@@ -2023,6 +2036,7 @@ async fn pipeline(
                     Some((done, total)),
                 )
             },
+            cancel,
         )
     })
     .map_err(reason)?;
@@ -2049,7 +2063,7 @@ async fn pipeline(
         "cpu_rallies::process",
         json!({"project_id":request.project_id,"video":request.video,"replay_id":replay_id,"touch_id":touch_id,"settings":request.post.rallies}),
     )?;
-    let rallies = cpu(
+    let rallies = cpu_cancel(
         app.clone(),
         cpu_rallies::RallyRequest {
             project_id: request.project_id.clone(),
@@ -2058,7 +2072,8 @@ async fn pipeline(
             touch_id,
             settings: Some(request.post.rallies),
         },
-        cpu_rallies::process,
+        cancel.clone(),
+        cpu_rallies::process_with_cancel,
     )
     .await?;
     let discovery_id = require_id(&rallies, "rally_run_id")?;
@@ -2079,7 +2094,7 @@ async fn pipeline(
         "cpu_touches::process_with_ball_scope",
         json!({"boundary_discovery_rally_run_id":discovery_id,"policy":crate::cpu_retrack::ball_track::POLICY}),
     )?;
-    let refined = cpu(
+    let refined = cpu_cancel(
         app.clone(),
         (
             cpu_touches::TouchRequest {
@@ -2092,8 +2107,15 @@ async fn pipeline(
             request.post.rallies,
             discovery_id,
         ),
-        |app, (touch_request, rally_settings, discovery_id)| {
-            cpu_rallies::refine_leading_ball(app, touch_request, *rally_settings, discovery_id)
+        cancel.clone(),
+        |app, (touch_request, rally_settings, discovery_id), cancel| {
+            cpu_rallies::refine_leading_ball_with_cancel(
+                app,
+                touch_request,
+                *rally_settings,
+                discovery_id,
+                cancel,
+            )
         },
     )
     .await?;
@@ -2193,17 +2215,22 @@ async fn pipeline(
     }
     Ok(())
 }
+fn cancelled_outcome(outcome: Result<(), String>, cancelled: bool) -> Result<(), String> {
+    if cancelled {
+        Err("cancelled".into())
+    } else {
+        outcome
+    }
+}
+
 async fn perform(
     state: Arc<AppState>,
     request: StartRequest,
     id: String,
     cancel: Arc<AtomicBool>,
     path: PathBuf,
+    mut status: Value,
 ) {
-    let mut status = match read(&path) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
     let _ = log_event(
         &path,
         request.mode.label(),
@@ -2239,6 +2266,8 @@ async fn perform(
             Err(error) => outcome = Err(format!("Timeline worker: {error}")),
         }
     }
+    let mut slot = manager().lock().await;
+    outcome = cancelled_outcome(outcome, cancel.load(Ordering::Acquire));
     match outcome {
         Ok(()) => {
             status["status"] = json!("complete");
@@ -2289,7 +2318,6 @@ async fn perform(
     status["current_gpu_job_id"] = Value::Null;
     finish_timed_stage(&mut status);
     let _ = save(&path, &status);
-    let mut slot = manager().lock().await;
     if slot.as_ref().is_some_and(|current| current.id == id) {
         *slot = None;
     }
@@ -2478,7 +2506,7 @@ pub async fn start(
         cancel: cancelled.clone(),
     });
     drop(_guard);
-    tokio::spawn(perform(state, request, id.clone(), cancelled, path));
+    tokio::spawn(perform(state, request, id.clone(), cancelled, path, status));
     Ok(Json(json!({"schema":SCHEMA,"id":id,"status":"queued"})))
 }
 // A pipeline's comparable completed runs cannot change while it is active.
@@ -2704,6 +2732,20 @@ pub async fn cancel(
 mod tests {
     use super::*;
 
+    #[test]
+    fn accepted_late_cancel_overrides_success_and_failure() {
+        assert_eq!(cancelled_outcome(Ok(()), true), Err("cancelled".into()));
+        assert_eq!(
+            cancelled_outcome(Err("cpu error".into()), true),
+            Err("cancelled".into())
+        );
+        assert_eq!(cancelled_outcome(Ok(()), false), Ok(()));
+        assert_eq!(
+            cancelled_outcome(Err("cpu error".into()), false),
+            Err("cpu error".into())
+        );
+    }
+
     #[tokio::test]
     async fn start_queues_before_source_validation_and_records_validation_failure() {
         let base = std::env::temp_dir().join(format!("studio-queue-{}", Uuid::new_v4()));
@@ -2796,9 +2838,45 @@ mod tests {
         let mut unowned = request();
         unowned.video = "unowned.mp4".into();
         unowned.client_request_id = None;
-        assert!(start(State(state), HeaderMap::new(), Json(unowned))
+        assert!(start(State(state.clone()), HeaderMap::new(), Json(unowned))
             .await
             .is_err());
+        let mut cancellation_request = request();
+        cancellation_request.client_request_id = None;
+        let Json(new_job) = start(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(cancellation_request),
+        )
+        .await
+        .unwrap();
+        let cancelled_id = new_job["id"].as_str().unwrap().to_owned();
+        let cancelled_path = base
+            .join("projects")
+            .join(project_id)
+            .join("native_studio_pipelines")
+            .join(&cancelled_id)
+            .join("status.json");
+        fs::write(&cancelled_path, b"{").unwrap();
+        let Json(ack) = cancel(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(CancelRequest {
+                project_id: project_id.into(),
+                id: cancelled_id,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ack["cancel_requested"], true);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while has_active().await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(read(&cancelled_path).unwrap()["status"], "cancelled");
         fs::remove_dir_all(base).unwrap();
     }
 

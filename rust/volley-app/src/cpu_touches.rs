@@ -21,7 +21,10 @@ use std::{
     fs::{self, OpenOptions},
     io::{BufWriter, Write},
     path::Path,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 use uuid::Uuid;
 #[cfg(test)]
@@ -640,6 +643,7 @@ pub(crate) fn detect_stream(
         &[],
         None,
         None,
+        None,
     )
 }
 
@@ -666,7 +670,11 @@ fn detect_stream_with_pose(
     rally_starts: &[u64],
     preliminary_intervals: Option<&[(u64, u64)]>,
     mut on_progress: Option<&mut dyn FnMut(u64, u64) -> Result<(), String>>,
+    cancel: Option<&AtomicBool>,
 ) -> Result<(String, u64, u64), String> {
+    if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+        return Err("cancelled".into());
+    }
     settings.validate()?;
     if preliminary_intervals.is_some_and(|intervals| {
         intervals.iter().any(|(start, end)| start > end)
@@ -957,6 +965,9 @@ fn detect_stream_with_pose(
         Ok(())
     };
     for index in 0..count {
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
+        }
         let bytes = reader.line()?.ok_or("CPU tracked frame JSONL truncated")?;
         let raw: TrackedFrame = serde_json::from_slice(&bytes)
             .map_err(|e| format!("Invalid CPU tracked frame: {e}"))?;
@@ -1057,16 +1068,42 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
         rally_starts,
         rally_settings,
         None,
+        None,
     )
 }
 
-pub(crate) fn process_discovery_with_rally_settings_and_progress(
+pub(crate) fn process_with_ball_scope_and_rally_settings_cancel(
+    state: &AppState,
+    req: &TouchRequest,
+    rally_starts: &[u64],
+    rally_settings: volley_core::rally_reconstruction::RallySettings,
+    cancel: &AtomicBool,
+) -> Result<Value, ApiError> {
+    process_with_ball_scope_and_rally_settings_report(
+        state,
+        req,
+        rally_starts,
+        rally_settings,
+        None,
+        Some(cancel),
+    )
+}
+
+pub(crate) fn process_discovery_with_rally_settings_and_progress_cancel(
     state: &AppState,
     req: &TouchRequest,
     rally_settings: volley_core::rally_reconstruction::RallySettings,
     report: &mut dyn FnMut(u64, u64) -> Result<(), String>,
+    cancel: &AtomicBool,
 ) -> Result<Value, ApiError> {
-    process_with_ball_scope_and_rally_settings_report(state, req, &[], rally_settings, Some(report))
+    process_with_ball_scope_and_rally_settings_report(
+        state,
+        req,
+        &[],
+        rally_settings,
+        Some(report),
+        Some(cancel),
+    )
 }
 
 fn process_with_ball_scope_and_rally_settings_report(
@@ -1075,7 +1112,11 @@ fn process_with_ball_scope_and_rally_settings_report(
     rally_starts: &[u64],
     rally_settings: volley_core::rally_reconstruction::RallySettings,
     mut report: Option<&mut dyn FnMut(u64, u64) -> Result<(), String>>,
+    cancel: Option<&AtomicBool>,
 ) -> Result<Value, ApiError> {
+    if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+        return Err(storage::conflict("cancelled"));
+    }
     if !state.writes_enabled {
         return Err(storage::conflict(
             "Touch recalculation requires an isolated working directory",
@@ -1217,27 +1258,43 @@ fn process_with_ball_scope_and_rally_settings_report(
         } else {
             None
         };
-        let ball_mask = crate::cpu_retrack::ball_track::read(
+        let ball_mask = crate::cpu_retrack::ball_track::read_with_cancel(
             &source,
             &sha,
             frames,
-            dimensions.width,
-            dimensions.height,
+            (dimensions.width, dimensions.height),
             settings.min_ball_score,
             rally_starts,
+            cancel,
         )?;
-        let continuous = crate::cpu_retrack::ball_track::continuous_ball_intervals(
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
+        }
+        let continuous = crate::cpu_retrack::ball_track::continuous_ball_intervals_with_cancel(
             &source,
             &sha,
             frames,
             settings.min_ball_score,
             crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
+            cancel,
         )?;
         let preliminary = crate::cpu_retrack::ball_track::merge_continuous_intervals(
             &continuous,
             crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
         )?;
         let preliminary_scope_applied = true;
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
+        }
+        let mut checked_progress = |done, total| {
+            if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+                return Err("cancelled".into());
+            }
+            if let Some(report) = report.as_deref_mut() {
+                report(done, total)?;
+            }
+            Ok(())
+        };
         let (digest, events, raw) = detect_stream_with_pose(
             tcn.as_mut(),
             &source,
@@ -1261,7 +1318,8 @@ fn process_with_ball_scope_and_rally_settings_report(
             Some(&ball_mask),
             rally_starts,
             preliminary_scope_applied.then_some(preliminary.as_slice()),
-            report,
+            Some(&mut checked_progress),
+            cancel,
         )?;
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared source changed during CPU Touch replay".into());
@@ -1270,6 +1328,9 @@ fn process_with_ball_scope_and_rally_settings_report(
             && native_preview_pose::source_info(&project_dir, &fusion_id)? != pose_info
         {
             return Err("Pose evidence changed during CPU Touch replay".into());
+        }
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
         }
         fs::rename(part, folder.join(OUTPUT_FILE))
             .map_err(|e| format!("Publish motion-gated Touch events: {e}"))?;
@@ -1345,6 +1406,9 @@ fn process_with_ball_scope_and_rally_settings_report(
             .as_array()
             .unwrap()
             .len());
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
+        }
         storage::write_json_atomic(&folder.join("manifest.json"), &record)
             .map_err(|e| format!("Save native Touch manifest: {e:?}"))?;
         Ok(record)
@@ -1420,6 +1484,35 @@ mod tests {
 
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn cancelled_touch_scan_does_not_open_source_or_publish_files() {
+        let cancelled = AtomicBool::new(true);
+        let missing = std::env::temp_dir().join(format!("no-touch-source-{}", Uuid::new_v4()));
+        let output = missing.with_extension("jsonl");
+        let result = detect_stream_with_pose(
+            None,
+            &missing,
+            &output,
+            "no-sha",
+            9,
+            640,
+            360,
+            TouchSettings::default(),
+            true,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &[],
+            None,
+            None,
+            Some(&cancelled),
+        );
+        assert_eq!(result.unwrap_err(), "cancelled");
+        assert!(!output.exists());
+    }
 
     fn recorded_rebound_and_departure(frame: u64) -> [PhysicalTouchCandidate; 2] {
         let impact = PhysicalTouchCandidate {
@@ -1836,6 +1929,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(count, 1);
@@ -1860,6 +1954,7 @@ mod tests {
                 &[],
                 None,
                 &[240],
+                None,
                 None,
                 None,
             )
@@ -2075,6 +2170,7 @@ mod local_tuning_diagnostic {
             &[],
             None,
             &[],
+            None,
             None,
             None,
         )

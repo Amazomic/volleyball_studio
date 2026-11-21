@@ -21,7 +21,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufWriter, Write},
     path::Path,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 use uuid::Uuid;
 use volley_core::{
@@ -121,7 +124,23 @@ fn replay_frames_with_pose(
     expected_sha: &str,
     pose: Option<&pose_source::Snapshot>,
 ) -> Result<(String, ReplayTotals, u64), String> {
-    replay_frames_with_pose_options(source, output, count, config, expected_sha, pose, true)
+    replay_frames_with_pose_options(
+        source,
+        output,
+        count,
+        config,
+        expected_sha,
+        pose,
+        ReplayOptions {
+            interpolate_players: true,
+            cancel: None,
+        },
+    )
+}
+
+struct ReplayOptions<'a> {
+    interpolate_players: bool,
+    cancel: Option<&'a AtomicBool>,
 }
 
 fn replay_frames_with_pose_options(
@@ -131,7 +150,7 @@ fn replay_frames_with_pose_options(
     config: TrackingOptions,
     expected_sha: &str,
     pose: Option<&pose_source::Snapshot>,
-    interpolate_players: bool,
+    options: ReplayOptions<'_>,
 ) -> Result<(String, ReplayTotals, u64), String> {
     if !(1..=48 * 3600 * 30).contains(&count) {
         return Err("Invalid fused CPU frame count".into());
@@ -145,7 +164,7 @@ fn replay_frames_with_pose_options(
         config,
         expected_sha,
         pose,
-        interpolate_players,
+        options,
     );
     // This intermediate output is never exposed as a CPU run, including errors.
     let _ = fs::remove_file(tentative);
@@ -160,6 +179,7 @@ fn fill_confirmed_track_gaps(
     source: &Path,
     expected_sha: &str,
     frame_count: u64,
+    cancel: Option<&AtomicBool>,
 ) -> Result<(String, u64), String> {
     use std::collections::{BTreeMap, VecDeque};
 
@@ -193,6 +213,9 @@ fn fill_confirmed_track_gaps(
         dx * dy / (s(a) + s(b) - dx * dy).max(1e-9)
     };
     for current in 0..frame_count {
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
+        }
         let bytes = input.line()?.ok_or("Confirmed tracking is truncated")?;
         let row: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         if row["frame_index"].as_u64() != Some(current) {
@@ -316,6 +339,9 @@ fn fill_confirmed_track_gaps(
     output.get_ref().sync_all().map_err(|e| e.to_string())?;
     drop(output);
     // Atomic on the repository's existing filesystem.
+    if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+        return Err("cancelled".into());
+    }
     fs::rename(&tmp, source).map_err(|e| format!("Commit confirmed tracking: {e}"))?;
     Ok((format!("{:x}", digest.finalize()), inferred))
 }
@@ -327,8 +353,15 @@ fn replay_frames_verified(
     config: TrackingOptions,
     expected_sha: &str,
     pose: Option<&pose_source::Snapshot>,
-    interpolate_players: bool,
+    options: ReplayOptions<'_>,
 ) -> Result<(String, ReplayTotals, u64), String> {
+    let ReplayOptions {
+        interpolate_players,
+        cancel,
+    } = options;
+    if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+        return Err("cancelled".into());
+    }
     let (tentative, output) = outputs;
     let mut reader = BoundedReader::open(source)?;
     let mut pose_rows = pose.map(pose_source::PoseRows::open).transpose()?;
@@ -343,6 +376,9 @@ fn replay_frames_verified(
     let mut confirmations = TrackConfirmation::default();
     let mut totals = ReplayTotals::default();
     for expected_frame in 0..count {
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
+        }
         let line = reader.line()?.ok_or("Fused frames truncated")?;
         let frame: FusedFrame =
             serde_json::from_slice(&line).map_err(|e| format!("Invalid fused frame JSON: {e}"))?;
@@ -453,6 +489,9 @@ fn replay_frames_verified(
     let mut retained = 0_u64;
     let mut discarded = 0_u64;
     for expected_frame in 0..count {
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
+        }
         let line = tentative_reader
             .line()?
             .ok_or("Unconfirmed tracking truncated")?;
@@ -515,7 +554,7 @@ fn replay_frames_verified(
     totals.identity_handoff_splits = 0;
     let turnover_sha = observed_sha;
     let (continuous_sha, _inferred_positions) = if interpolate_players {
-        fill_confirmed_track_gaps(output, &turnover_sha, count)?
+        fill_confirmed_track_gaps(output, &turnover_sha, count, cancel)?
     } else {
         (turnover_sha, 0)
     };
@@ -537,6 +576,25 @@ fn confirmation_threshold(requested: u64, sample_period: Option<u64>) -> u64 {
 }
 
 pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, ApiError> {
+    process_inner(state, req, None)
+}
+
+pub(crate) fn process_with_cancel(
+    state: &AppState,
+    req: &ReplayRequest,
+    cancel: &AtomicBool,
+) -> Result<Value, ApiError> {
+    process_inner(state, req, Some(cancel))
+}
+
+fn process_inner(
+    state: &AppState,
+    req: &ReplayRequest,
+    cancel: Option<&AtomicBool>,
+) -> Result<Value, ApiError> {
+    if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+        return Err(storage::conflict("cancelled"));
+    }
     if !state.writes_enabled {
         return Err(storage::conflict(
             "CPU replay requires isolated VOLLEY_RUST_DATA_ROOT",
@@ -657,10 +715,16 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
             settings,
             expected,
             pose_source.as_ref(),
-            req.interpolate_players,
+            ReplayOptions {
+                interpolate_players: req.interpolate_players,
+                cancel,
+            },
         )?;
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared video changed during CPU replay".into());
+        }
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
         }
         fs::rename(part, directory.join(OUTPUT_FILE))
             .map_err(|e| format!("Publish CPU replay output: {e}"))?;
@@ -717,6 +781,9 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
         } else {
             "detector_boxes_only"
         });
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
+        }
         storage::write_json_atomic(&directory.join("manifest.json"), &record)
             .map_err(|e| format!("Persist CPU tracking manifest: {e:?}"))?;
         crate::native_player_tracks::prepare_replay_index(
@@ -783,6 +850,27 @@ pub async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_tracking_does_not_open_or_publish_files() {
+        let cancelled = AtomicBool::new(true);
+        let missing = std::env::temp_dir().join(format!("no-cpu-source-{}", Uuid::new_v4()));
+        let output = missing.with_extension("jsonl");
+        let result = replay_frames_with_pose_options(
+            &missing,
+            &output,
+            9,
+            TrackingOptions::default(),
+            "no-sha",
+            None,
+            ReplayOptions {
+                interpolate_players: false,
+                cancel: Some(&cancelled),
+            },
+        );
+        assert!(matches!(result, Err(ref error) if error == "cancelled"));
+        assert!(!output.exists());
+    }
 
     #[test]
     fn sparse_confirmation_uses_real_samples_without_loosening_custom_limits() {
@@ -905,7 +993,7 @@ mod tests {
         }
         fs::write(&source, &bytes).unwrap();
         let sha = format!("{:x}", Sha256::digest(&bytes));
-        let (_, inferred) = fill_confirmed_track_gaps(&source, &sha, 21).unwrap();
+        let (_, inferred) = fill_confirmed_track_gaps(&source, &sha, 21, None).unwrap();
         assert_eq!(inferred, 18);
         let rows = fs::read_to_string(&source).unwrap();
         for line in rows.lines() {
@@ -949,7 +1037,7 @@ mod tests {
         }
         fs::write(&source, &bytes).unwrap();
         let sha = format!("{:x}", Sha256::digest(&bytes));
-        let (written, inferred) = fill_confirmed_track_gaps(&source, &sha, 6).unwrap();
+        let (written, inferred) = fill_confirmed_track_gaps(&source, &sha, 6, None).unwrap();
         assert_eq!(inferred, 0);
         assert_eq!(
             written,
@@ -1050,7 +1138,7 @@ mod tests {
         }
         fs::write(&file, &bytes).unwrap();
         let sha = format!("{:x}", Sha256::digest(&bytes));
-        let (after, inferred) = fill_confirmed_track_gaps(&file, &sha, 71).unwrap();
+        let (after, inferred) = fill_confirmed_track_gaps(&file, &sha, 71, None).unwrap();
         assert!(
             inferred > 0,
             "legitimate gaps in ID 792 remain interpolated"
@@ -1496,7 +1584,10 @@ mod tests {
             },
             &fusion_sha,
             Some(&snapshot),
-            false,
+            ReplayOptions {
+                interpolate_players: false,
+                cancel: None,
+            },
         )
         .unwrap();
         let disabled_bytes = fs::read(&without_gaps).unwrap();
