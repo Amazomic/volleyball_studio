@@ -906,9 +906,12 @@ pub async fn create_project(
     // The project record is already durably committed: a preparation queue
     // failure must not trigger an HTTP retry that creates another project.
     if let Some(id) = project["id"].as_str() {
-        if let Err(error) = crate::preparation::enqueue_project(state, id, false).await {
-            eprintln!("Project created, but preparation queue failed: {error:?}");
-        }
+        let id = id.to_owned();
+        tokio::spawn(async move {
+            if let Err(error) = crate::preparation::enqueue_project(state, &id, false).await {
+                eprintln!("Project created, but preparation queue failed: {error:?}");
+            }
+        });
     }
     Ok(Json(json!({"project": project})))
 }

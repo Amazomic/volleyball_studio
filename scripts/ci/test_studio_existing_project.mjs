@@ -68,8 +68,8 @@ const formContext={
   ui:{
     createForm:{addEventListener:(event,fn)=>{assert.equal(event,"submit");onSubmit=fn;}},
     projectName:{value:"LATEST"},projectCancel:{disabled:false},
-    projectClose:{disabled:false},projectCreateError:{textContent:""},
-    projectDialog:{close:()=>{closed++;}}
+    projectClose:{disabled:false},projectCreateError:{textContent:""},projectCreateStatus:{textContent:""},
+    projectDialog:{open:true,close(){closed++;this.open=false;}}
   },
   creating:false,uploading:false,dialogEpoch:1,
   selectedVideos:()=>["match.mp4"],selectedPlayers:()=>[],

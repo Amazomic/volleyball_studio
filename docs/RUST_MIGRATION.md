@@ -2920,3 +2920,10 @@ Studio показывает кнопку перехода между debug и re
 - Профиль CPU-постобработки теперь принимает `auto_assign_threshold_percent` (1–99, по умолчанию 75%), передаёт его в автоматический ReID и сохраняет с результатом. UI и ручной ползунок синхронизированы с дефолтом 75%; проверка по трём наблюдениям, защита ручных назначений и несовместимых одновременных треков сохранены. Добавлен RU/EN перевод.
 - PASS: `scripts/check-all.ps1` с `RUST_TEST_THREADS=1` (WASM build, fmt, Clippy `-D warnings`, Rust workspace tests, 92 Node gates), регрессионные Rust/Node-тесты для порога и большого числа Track ID, `git diff --check`.
 - NOT TESTED: фактическое повторное распознавание более 1024 ID и точность ReID на исходном матче; работающий процесс Studio PID 8951 принадлежит отдельному checkout `AppData/Local/SentinelX/workspace/volley-live-develop-20261121`, поэтому его не останавливали и новую сборку не применяли.
+
+### 2026-11-21 — Создание проекта без ожидания подготовки исходников
+
+- База: `develop` `96ddd275`. Владельцы: `rust/volley-app/src/projects.rs`, `rust/volley-app/static/{studio.html,studio.js}`; регрессии `scripts/ci/test_studio_{project_create_ui,existing_project}.mjs`.
+- После сохранения проекта ответ `/api/project-create` больше не ожидает подготовку исходных видео (включая повторные FFprobe и SHA-проверки): очередь запускается отдельной задачей, сбой очереди не повторяет создание. Форма показывает этап создания, закрывается после ответа и сообщает об ошибке открытия уже сохранённого проекта отдельно.
+- PASS: `scripts/check-all.ps1` (WASM, fmt, Clippy, Rust workspace, Node UI), `cargo test -p volley-app api_http_tests --offline --locked` (17/17), `node scripts/ci/test_studio_project_create_ui.mjs`, `node scripts/ci/test_studio_existing_project.mjs`, `node scripts/ci/test_studio_dom_ids.mjs`, `git diff --check`.
+- NOT TESTED: замер времени создания на большом пользовательском видео и реальная GPU-подготовка; исходные видео и рабочие проекты не изменялись.

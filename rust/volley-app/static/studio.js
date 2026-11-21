@@ -13,6 +13,7 @@
     createForm:$("studio-project-create-form"),projectName:$("studio-project-name"),
     projectVideos:$("studio-project-videos"),projectSubmit:$("studio-project-submit"),
     projectCreateError:$("studio-project-create-error"),
+    projectCreateStatus:$("studio-project-create-status"),
     projectCancel:$("studio-project-cancel"),projectClose:$("studio-project-close"),
 
     list:$("studio-rallies"),filter:$("studio-filter"),
@@ -3775,6 +3776,7 @@
       const count=selectedVideos().length;
       ui.projectSubmit.disabled=creating||uploading||!ui.projectName.value.trim()||
         count<1||count>30;
+      ui.projectSubmit.textContent=creating?"Создаём…":"Создать проект";
       ui.projectDrop.setAttribute("aria-busy",String(uploading));
       ui.projectDrop.classList.toggle("uploading",uploading);
     };
@@ -3840,6 +3842,7 @@
       ui.createForm.reset();
       playerRevision="absent"; linkedFiles.clear();
       ui.projectCreateError.textContent="";
+      ui.projectCreateStatus.textContent="";
       ui.projectUploadStatus.textContent="";
       renderLinkedFiles();
       ui.projectPlayers.replaceChildren(make("p","panel-note","Загрузка игроков…"));
@@ -3942,12 +3945,14 @@
       creating=true;updateSubmit();
       ui.projectCancel.disabled=true;ui.projectClose.disabled=true;
       ui.projectCreateError.textContent="";
+      ui.projectCreateStatus.textContent="Создаём проект…";
       try{
         const videos=selectedVideos();
         const created=await post("/api/project-create",{name,videos,player_ids});
         const id=created.project?.id;
         if(typeof id!=="string"||!id)
           throw Error("Проект создан, но его ID не получен. Обновите список.");
+        ui.projectCreateStatus.textContent="Проект создан. Открываем…";
         ui.projectDialog.close();
         dialogEpoch++;
         invalidateCatalog();
@@ -3955,6 +3960,11 @@
         document.getElementById("studio-nav-analysis").click();
         message("Проект «"+name+"» создан и выбран.","ok");
       }catch(error){
+        if(!ui.projectDialog.open){
+          message("Проект создан, но не удалось выбрать его автоматически: "+
+            String(error?.message||error),"error");
+          return;
+        }
         if(error.message==="Проект с таким названием уже существует"){
           try{
             invalidateCatalog();
@@ -3978,6 +3988,7 @@
       }finally{
         creating=false;uploading=false;
         ui.projectCancel.disabled=false;ui.projectClose.disabled=false;
+        ui.projectCreateStatus.textContent="";
         updateSubmit();
       }
     });

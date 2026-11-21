@@ -15,6 +15,7 @@ assert.ok(!css.includes("max-height:min(80vh,680px)"));
 assert.ok(html.includes('id="studio-project-drop"'));
 assert.ok(html.includes('id="studio-project-file-input"'));
 assert.ok(html.includes('id="studio-project-players"'));
+assert.ok(html.includes('id="studio-project-create-status"'));
 assert.ok(html.includes('id="studio-project-add-player"'));
 assert.ok(html.indexOf('id="studio-project-new"')<html.indexOf('id="studio-project"'));
 
@@ -48,7 +49,7 @@ class Elem {
 }
 const make=(tag,klass,text)=>{const el=new Elem(tag,text);el.className=klass;return el;};
 const keys=["projectNew","projectDialog","createForm","projectName","projectVideos",
-  "projectSubmit","projectCreateError","projectCancel","projectClose","projectDrop",
+  "projectSubmit","projectCreateError","projectCreateStatus","projectCancel","projectClose","projectDrop",
   "projectFiles","projectUploadStatus","projectPlayers","projectPlayerName","projectAddPlayer"];
 const ui=Object.fromEntries(keys.map(k=>[k,new Elem()]));
 ui.createForm.reset=()=>{ui.projectName.value="";ui.projectPlayerName.value="";};
@@ -56,6 +57,7 @@ const tick=async()=>{for(let i=0;i<12;i++)await new Promise(resolve=>setImmediat
 const videoName="match--"+("a".repeat(32))+".mp4";
 const athleteId="b".repeat(12),projectId="c".repeat(12);
 let nativePicks=0,createdPayload=null,selectedProject=null,playerList=[];
+let holdCreate=false,releaseCreate;const pendingCreate=new Promise(resolve=>{releaseCreate=resolve;});
 const request=async path=>{
   assert.notEqual(path,"/api/videos","Global video catalog must not be loaded");
   throw Error("Unexpected request: "+path);
@@ -75,6 +77,7 @@ const post=async(path,payload)=>{
   }
   assert.equal(path,"/api/project-create");
   createdPayload=payload;
+  if(holdCreate)await pendingCreate;
   return {project:{id:projectId}};
 };
 class FormData {
@@ -133,11 +136,21 @@ assert.equal(ui.projectVideos.children[0].children[0].textContent,"match.mp4");
 ui.projectName.value="Тестовый матч";
 ui.projectName.dispatch("input");
 assert.equal(ui.projectSubmit.disabled,false);
-await ui.createForm.dispatch("submit");
+holdCreate=true;
+const submission=ui.createForm.dispatch("submit");
+await tick();
+assert.equal(ui.projectDialog.open,true);
+assert.equal(ui.projectSubmit.disabled,true);
+assert.equal(ui.projectSubmit.textContent,"Создаём…");
+assert.match(ui.projectCreateStatus.textContent,/Создаём проект/);
+releaseCreate();
+await submission;
 assert.deepEqual(JSON.parse(JSON.stringify(createdPayload)),{
   name:"Тестовый матч",videos:[videoName],player_ids:[athleteId]
 });
 assert.equal(selectedProject,projectId);
 assert.equal(ui.projectDialog.open,false);
+assert.equal(ui.projectCreateStatus.textContent,"");
+assert.equal(ui.projectSubmit.disabled,false);
 assert.ok(wEvents.includes("volley:player-library-updated"));
 console.log("Rust Studio new project: drop/chooser upload, athlete create/select, project linkage passed");
