@@ -41,7 +41,7 @@ Manual action review and athlete identity are not inferred from this field.
 | Wide/crouched posture suppresses overhead pass | `python_wide_posture_changes_head_level_pass_to_dig` |
 | Missing/invalid player evidence has no confident type | `invalid_or_unattached_geometry_is_not_an_action` |
 | Court-relative serve/block only when court/rally context is supplied | `serve_and_block_require_verified_context` |
-| Preserve unreviewed Touch source while emitting predictions | `touch_pipeline::tests::changing_ball_motion_plus_ravel_peaks_and_reach_proposes_contact` |
+| Preserve unreviewed Touch source while emitting predictions | `touch_pipeline::tests::changing_ball_motion_plus_unsupported_peaks_and_reach_proposes_contact` |
 | Preview remains source-SHA verified | `native_rally_preview::tests::paged_preview_has_safe_original_clips_and_evidence_labels` |
 
 ## Deliberate differences and remaining limitations

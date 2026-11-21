@@ -954,7 +954,7 @@ mod tests {
     }
     #[test]
     fn nearby_track_can_support_motion_but_not_claim_missing_source_frame() {
-        // The strongest smoothed peak is frame 30, but deprecated has no player
+        // The strongest smoothed peak is frame 30, but the old hint has no player
         // detection there. The +/-2 frame associator sees player 1 on 29/31.
         // The playerless peak must not become a published Touch.
         let mut frames = scenario(true, true, false);
