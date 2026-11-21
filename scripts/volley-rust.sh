@@ -18,6 +18,21 @@ fi
 repo="$(cd "$repo" && pwd -P)"
 [[ -f "$repo/rust/Cargo.toml" && -f "$repo/rust/volley-app/Cargo.toml" ]] ||
   { echo "Volleyball Studio Cargo workspace missing" >&2;exit 2; }
+require_develop_checkout(){
+  local branch head published
+  branch="$(git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
+    { echo "Studio launch denied: checkout must be a readable develop branch (no detached HEAD/worktree)" >&2;return 3; }
+  [[ "$branch" == develop ]] ||
+    { echo "Studio launch denied: branch $branch; only develop is allowed" >&2;return 3; }
+  head="$(git -C "$repo" rev-parse --verify HEAD 2>/dev/null)" ||return 3
+  published="$(git -C "$repo" rev-parse --verify refs/remotes/origin/develop 2>/dev/null)" ||
+    { echo "Studio launch denied: origin/develop is unavailable" >&2;return 3; }
+  [[ "$head" == "$published" ]] ||
+    { echo "Studio launch denied: local develop differs from origin/develop" >&2;return 3; }
+}
+case "$action" in
+  start|detach|restart) require_develop_checkout;;
+esac
 cd "$repo/rust"
 if [[ -f "$HOME/.cargo/env" ]];then source "$HOME/.cargo/env";fi
 url="http://$bind/internal/rewrite-status"
