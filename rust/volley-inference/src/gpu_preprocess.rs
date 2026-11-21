@@ -1,12 +1,13 @@
 use mini_cuda::{
     driver::{try_init_driver, DriverApi},
     nvrtc::{nvrtcProgram, nvrtcResult, try_init_nvrtc},
-    CUfunction, CUmodule, CUresult,
+    CUevent, CUfunction, CUmodule, CUresult, CUstream,
 };
 use ort::value::Tensor;
 use std::{
     ffi::{c_void, CString},
     ptr,
+    sync::{Mutex, OnceLock},
 };
 
 const MAX_NVRTC_LOG_BYTES: usize = 1024 * 1024;
@@ -64,6 +65,14 @@ fn ensure() -> Result<&'static DriverApi, String> {
 }
 
 fn compile_ptx() -> Result<Vec<u8>, String> {
+    static COMPILED_PTX: OnceLock<Mutex<Option<Vec<u8>>>> = OnceLock::new();
+    let mut cached = COMPILED_PTX
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "NVRTC PTX cache was poisoned")?;
+    if let Some(ptx) = cached.as_ref() {
+        return Ok(ptx.clone());
+    }
     let api = try_init_nvrtc().ok_or("CUDA NVRTC compiler is unavailable")?;
     let source = CString::new(include_str!("gpu_preprocess.cu"))
         .map_err(|error| format!("CUDA preprocessing source: {error}"))?;
@@ -127,6 +136,9 @@ fn compile_ptx() -> Result<Vec<u8>, String> {
         Ok(bytes)
     })();
     let _ = unsafe { (api.nvrtcDestroyProgram)(&mut prog) };
+    if let Ok(ptx) = &outcome {
+        *cached = Some(ptx.clone());
+    }
     outcome
 }
 
@@ -137,6 +149,10 @@ pub struct GpuPreprocessor {
     person: CUfunction,
     pose: CUfunction,
     canonical: CUfunction,
+    stream: CUstream,
+    ready: CUevent,
+    rgb_scratch: GpuBuffer,
+    pose_scratch: GpuBuffer,
 }
 
 impl GpuPreprocessor {
@@ -158,14 +174,38 @@ impl GpuPreprocessor {
             Ok(function)
         };
         let result = (|| {
-            Ok(Self {
-                module,
-                ball: load("ball_gray")?,
-                rgb: load("rgb_640")?,
-                person: load("rfdetr_image")?,
-                pose: load("pose_crop")?,
-                canonical: load("canonical_nv12")?,
-            })
+            let mut stream = ptr::null_mut();
+            cuda(
+                unsafe { (driver.cuStreamCreate)(&mut stream, 1) },
+                "Create CUDA preprocessing stream",
+            )?;
+            let mut ready = ptr::null_mut();
+            if let Err(error) = cuda(
+                unsafe { (driver.cuEventCreate)(&mut ready, 2) },
+                "Create CUDA preprocessing event",
+            ) {
+                let _ = unsafe { (driver.cuStreamDestroy_v2)(stream) };
+                return Err(error);
+            }
+            let assembled = (|| {
+                Ok(Self {
+                    module,
+                    ball: load("ball_gray")?,
+                    rgb: load("rgb_640")?,
+                    person: load("rfdetr_image")?,
+                    pose: load("pose_crop")?,
+                    canonical: load("canonical_nv12")?,
+                    stream,
+                    ready,
+                    rgb_scratch: GpuBuffer::allocate(640 * 360 * 3)?,
+                    pose_scratch: GpuBuffer::allocate(8 * 4 * std::mem::size_of::<f32>())?,
+                })
+            })();
+            if assembled.is_err() {
+                let _ = unsafe { (driver.cuEventDestroy_v2)(ready) };
+                let _ = unsafe { (driver.cuStreamDestroy_v2)(stream) };
+            }
+            assembled
         })();
         if result.is_err() {
             let _ = unsafe { (driver.cuModuleUnload)(module) };
@@ -193,16 +233,24 @@ impl GpuPreprocessor {
                     16,
                     1,
                     0,
-                    ptr::null_mut(),
+                    self.stream,
                     args.as_mut_ptr(),
                     ptr::null_mut(),
                 )
             },
             "Launch CUDA preprocessing",
+        )
+    }
+
+    pub fn finish(&self) -> Result<(), String> {
+        let driver = ensure()?;
+        cuda(
+            unsafe { (driver.cuEventRecord)(self.ready, self.stream) },
+            "Record CUDA preprocessing completion",
         )?;
         cuda(
-            unsafe { (driver.cuCtxSynchronize)() },
-            "Synchronize CUDA preprocessing",
+            unsafe { (driver.cuEventSynchronize)(self.ready) },
+            "Wait for CUDA preprocessing before consuming or unmapping NVDEC pixels",
         )
     }
 
@@ -261,6 +309,7 @@ impl GpuPreprocessor {
             (&mut range as *mut i32).cast(),
         ];
         self.launch(self.canonical, ow as u32, oh as u32, 1, &mut args)?;
+        self.finish()?;
         Ok((output, ow, oh))
     }
 
@@ -303,7 +352,7 @@ impl GpuPreprocessor {
         if tensor.dtype().tensor_shape().map(|v| v.as_ref()) != Some(&[1, 3, 576, 576][..]) {
             return Err("RF-DETR CUDA input shape is invalid".into());
         }
-        let rgb = GpuBuffer::allocate(640 * 360 * 3)?;
+        let rgb = &self.rgb_scratch;
         let mut src = frame.ptr;
         let mut pitch = frame.pitch as i32;
         let mut width = frame.width as i32;
@@ -344,7 +393,7 @@ impl GpuPreprocessor {
         }
         let rectangles = crate::pose::cuda_crop_geometry(boxes, frame.width, frame.height)?;
         let values: Vec<f32> = rectangles.into_iter().flatten().collect();
-        let coords = GpuBuffer::allocate(values.len() * std::mem::size_of::<f32>())?;
+        let coords = &self.pose_scratch;
         let driver = ensure()?;
         cuda(
             unsafe {
@@ -372,13 +421,16 @@ impl GpuPreprocessor {
             (&mut output as *mut u64).cast(),
             (&mut matrix as *mut i32).cast(),
         ];
-        self.launch(self.pose, 192, 256, boxes.len() as u32, &mut args)
+        self.launch(self.pose, 192, 256, boxes.len() as u32, &mut args)?;
+        self.finish()
     }
 }
 
 impl Drop for GpuPreprocessor {
     fn drop(&mut self) {
         if let Ok(driver) = ensure() {
+            let _ = unsafe { (driver.cuEventDestroy_v2)(self.ready) };
+            let _ = unsafe { (driver.cuStreamDestroy_v2)(self.stream) };
             let _ = unsafe { (driver.cuModuleUnload)(self.module) };
         }
     }
@@ -624,6 +676,7 @@ mod tests {
         converter
             .launch(converter.ball, 512, 288, 1, &mut args)
             .unwrap();
+        converter.finish().unwrap();
         let mut sample = [0f32; 8];
         cuda(
             unsafe {
@@ -772,6 +825,7 @@ mod ffmpeg_parity_tests {
             processing
                 .launch(processing.rgb, 640, 360, 1, &mut params)
                 .unwrap();
+            processing.finish().unwrap();
             let mut rgb_actual = vec![0u8; rgb_ref.len()];
             cuda(
                 unsafe {
@@ -811,6 +865,7 @@ mod ffmpeg_parity_tests {
             processing
                 .launch(processing.ball, 512, 288, 1, &mut params)
                 .unwrap();
+            processing.finish().unwrap();
             let mut actual_gray = vec![0f32; 512 * 288];
             cuda(
                 unsafe {
@@ -859,6 +914,7 @@ mod ffmpeg_parity_tests {
             processing
                 .launch(processing.pose, 192, 256, 1, &mut params)
                 .unwrap();
+            processing.finish().unwrap();
             let mut pose_actual = vec![0f32; 3 * 256 * 192];
             cuda(
                 unsafe {

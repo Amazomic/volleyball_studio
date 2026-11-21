@@ -162,6 +162,8 @@ struct DecoderState<F> {
     bit_depth: u8,
     chroma: u8,
     callback: F,
+    map_ranges: Option<Vec<(u64, u64)>>,
+    callback_synchronized: bool,
     failure: Option<String>,
 }
 
@@ -277,6 +279,17 @@ where
         if self.decoder.is_null() {
             return Err("NVDEC display arrived without an initialized decoder".into());
         }
+        let frame_index = self.frames;
+        self.frames += 1;
+        if let Some(ranges) = self.map_ranges.as_deref() {
+            let next = ranges.partition_point(|&(_, last)| last < frame_index);
+            if !ranges
+                .get(next)
+                .is_some_and(|&(first, _)| first <= frame_index)
+            {
+                return Ok(());
+            }
+        }
         let mut ptr = 0_u64;
         let mut pitch = 0_u32;
         let mut params: CUVIDPROCPARAMS = unsafe { std::mem::zeroed() };
@@ -296,7 +309,7 @@ where
         }
         let outcome = guarded_gpu_callback(|| {
             (self.callback)(GpuNv12Frame {
-                frame_index: self.frames,
+                frame_index,
                 device_ptr: ptr,
                 pitch: pitch as usize,
                 width: self.width,
@@ -309,10 +322,16 @@ where
         let completion = try_init_driver()
             .ok_or_else(|| "CUDA driver disappeared during NVDEC output".to_owned())
             .and_then(|driver| {
-                let status = unsafe { (driver.cuCtxSynchronize)() };
+                let status = if self.callback_synchronized {
+                    unsafe { (driver.cuStreamSynchronize)(ptr::null_mut()) }
+                } else {
+                    unsafe { (driver.cuCtxSynchronize)() }
+                };
                 (status == CUresult::CUDA_SUCCESS)
                     .then_some(())
-                    .ok_or_else(|| format!("Synchronize NVDEC consumer before unmap: {status:?}"))
+                    .ok_or_else(|| {
+                        format!("Synchronize default stream before NVDEC unmap: {status:?}")
+                    })
             });
         let unmap = unsafe { (self.api.cuvidUnmapVideoFrame64)(self.decoder, ptr) };
         if unmap != CUresult::CUDA_SUCCESS {
@@ -320,7 +339,6 @@ where
         }
         outcome?;
         completion?;
-        self.frames += 1;
         Ok(())
     }
 }
@@ -408,7 +426,7 @@ impl<F> Drop for DecodeRun<F> {
 }
 
 pub fn decode_annex_b<R: Read, F>(
-    mut source: R,
+    source: R,
     codec: NvdecCodec,
     cancelled: &AtomicBool,
     on_frame: F,
@@ -416,6 +434,27 @@ pub fn decode_annex_b<R: Read, F>(
 where
     F: for<'frame> FnMut(GpuNv12Frame<'frame>) -> Result<(), String>,
 {
+    decode_annex_b_ranges(source, codec, None, false, cancelled, on_frame)
+}
+
+fn decode_annex_b_ranges<R: Read, F>(
+    mut source: R,
+    codec: NvdecCodec,
+    map_ranges: Option<Vec<(u64, u64)>>,
+    callback_synchronized: bool,
+    cancelled: &AtomicBool,
+    on_frame: F,
+) -> Result<NvdecReceipt, String>
+where
+    F: for<'frame> FnMut(GpuNv12Frame<'frame>) -> Result<(), String>,
+{
+    if let Some(ranges) = map_ranges.as_ref() {
+        if ranges.iter().any(|&(first, last)| first > last)
+            || ranges.windows(2).any(|pair| pair[0].1 >= pair[1].0)
+        {
+            return Err("NVDEC mapped display ranges must be strictly ordered".into());
+        }
+    }
     mini_cuda::bind_primary_ctx_for_device(0)
         .map_err(|error| format!("NVDEC CUDA primary context: {error}"))?;
     let api = try_init_cuvid().ok_or("NVIDIA NVDEC driver library is unavailable")?;
@@ -431,6 +470,8 @@ where
         bit_depth: 0,
         chroma: 0,
         callback: on_frame,
+        map_ranges,
+        callback_synchronized,
         failure: None,
     });
     let mut params: CUVIDPARSERPARAMS = unsafe { std::mem::zeroed() };
@@ -739,6 +780,35 @@ pub fn decode_video_file_window<F>(
 where
     F: for<'frame> FnMut(GpuNv12Frame<'frame>) -> Result<(), String>,
 {
+    decode_video_file_window_impl(source, codec, window, None, false, cancelled, on_frame)
+}
+
+pub fn decode_video_file_window_with_map_ranges<F>(
+    source: &std::path::Path,
+    codec: NvdecCodec,
+    window: Option<NvdecDecodeWindow>,
+    map_ranges: Option<Vec<(u64, u64)>>,
+    cancelled: &AtomicBool,
+    on_frame: F,
+) -> Result<NvdecReceipt, String>
+where
+    F: for<'frame> FnMut(GpuNv12Frame<'frame>) -> Result<(), String>,
+{
+    decode_video_file_window_impl(source, codec, window, map_ranges, true, cancelled, on_frame)
+}
+
+fn decode_video_file_window_impl<F>(
+    source: &std::path::Path,
+    codec: NvdecCodec,
+    window: Option<NvdecDecodeWindow>,
+    map_ranges: Option<Vec<(u64, u64)>>,
+    callback_synchronized: bool,
+    cancelled: &AtomicBool,
+    on_frame: F,
+) -> Result<NvdecReceipt, String>
+where
+    F: for<'frame> FnMut(GpuNv12Frame<'frame>) -> Result<(), String>,
+{
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
@@ -813,7 +883,14 @@ where
         pending: Vec::new(),
         offset: 0,
     };
-    let result = decode_annex_b(decoder, codec, cancelled, on_frame);
+    let result = decode_annex_b_ranges(
+        decoder,
+        codec,
+        map_ranges,
+        callback_synchronized,
+        cancelled,
+        on_frame,
+    );
     if result.is_err() || cancelled.load(Ordering::Acquire) {
         let _ = process.kill();
     }
@@ -921,6 +998,21 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+        let mut mapped = Vec::new();
+        let selective = decode_video_file_window_with_map_ranges(
+            &source,
+            NvdecCodec::H264,
+            Some(window),
+            Some(vec![(45, 75)]),
+            &cancel,
+            |frame| {
+                mapped.push(frame.frame_index);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(selective.frames, partial.frames);
+        assert_eq!(mapped, (45..=75).collect::<Vec<_>>());
         let _ = fs::remove_file(&source);
         assert_eq!(full.frames, 540);
         assert_eq!(timeline.timestamps.len(), 540);
@@ -935,6 +1027,22 @@ mod tests {
                 window.first_frame + offset as u64,
             );
         }
+    }
+
+    #[test]
+    fn invalid_map_ranges_are_rejected_before_gpu_setup() {
+        let result = decode_annex_b_ranges(
+            Cursor::new(Vec::<u8>::new()),
+            NvdecCodec::H264,
+            Some(vec![(5, 8), (8, 10)]),
+            true,
+            &AtomicBool::new(false),
+            |_| Ok(()),
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            "NVDEC mapped display ranges must be strictly ordered"
+        );
     }
 
     #[test]

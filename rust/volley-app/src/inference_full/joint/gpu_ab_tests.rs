@@ -850,8 +850,21 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
         &abort,
         |_, _, _, _| Ok(()),
     )?;
-    if std::env::var("VOLLEY_ZERO_COPY_PRIMARY").as_deref() == Ok("1") && !pair.zero_copy {
-        return Err("Zero-copy was requested but primary scan fell back".into());
+    if std::env::var("VOLLEY_ZERO_COPY_PRIMARY").as_deref() == Ok("1") {
+        if !pair.zero_copy || pair.backend != DecodeBackend::Nvdec {
+            return Err(format!(
+                "Zero-copy was requested but primary scan fell back: {:?}",
+                pair.fallback_reason
+            ));
+        }
+        for job in [&pair.ball_job_id, &pair.player_job_id] {
+            let evidence = manifest(&app.data_root, "native_gpu_runs", job)?;
+            if evidence["decode_backend"] != "nvdec_zero_copy"
+                || evidence["decode_pipeline"] != "gpu_resident_nvdec_primary_v1"
+            {
+                return Err("Primary GPU evidence was not produced by CUDA zero-copy".into());
+            }
+        }
     }
     let prefilter = !matches!(
         std::env::var("VOLLEY_PRIMARY_RALLY_PREFILTER")

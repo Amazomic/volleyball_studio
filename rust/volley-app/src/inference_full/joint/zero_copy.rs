@@ -2,7 +2,8 @@ use super::*;
 use std::sync::Arc;
 use volley_inference::gpu_preprocess::{GpuBuffer, GpuPreprocessor, Nv12View};
 use volley_media::nvdec::{
-    closest_display_frame, decode_video_file_window, keyframe_window, NvdecDecodeWindow,
+    closest_display_frame, decode_video_file_window_with_map_ranges, keyframe_window,
+    NvdecDecodeWindow,
 };
 
 #[derive(Clone, Copy)]
@@ -10,6 +11,19 @@ pub(super) enum ScanPass<'a> {
     Both,
     BallOnly,
     PlayersOnly(&'a rally_mask::RallyMask),
+}
+
+struct GpuFrameCompletion<'a> {
+    gpu: &'a GpuPreprocessor,
+    complete: bool,
+}
+
+impl Drop for GpuFrameCompletion<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            let _ = self.gpu.finish();
+        }
+    }
 }
 
 fn plan_decode_windows(
@@ -39,6 +53,42 @@ fn plan_decode_windows(
         decode_windows.push(Some(window));
     }
     Ok(decode_windows)
+}
+
+fn planned_map_ranges(
+    timeline: &volley_media::nvdec::DisplayTimeline,
+    window: Option<NvdecDecodeWindow>,
+    selection: &[(u64, u64)],
+    start: f64,
+) -> Result<Option<Vec<(u64, u64)>>, String> {
+    let Some(window) = window else {
+        return Ok(None);
+    };
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    for &(first, last) in selection {
+        let left = closest_display_frame(&timeline.timestamps, start + first as f64 / 30.0)
+            .ok_or("Cannot map first NVDEC rally frame")?
+            .saturating_sub(1);
+        let right = closest_display_frame(&timeline.timestamps, start + (last + 1) as f64 / 30.0)
+            .ok_or("Cannot map last NVDEC rally frame")?
+            .saturating_add(1);
+        if right < window.first_frame || timeline.timestamps[left as usize] >= window.end_sec {
+            continue;
+        }
+        let left = left.max(window.first_frame) - window.first_frame;
+        let right = right - window.first_frame;
+        if let Some(previous) = ranges.last_mut() {
+            if left <= previous.1.saturating_add(1) {
+                previous.1 = previous.1.max(right);
+                continue;
+            }
+        }
+        ranges.push((left, right));
+    }
+    if ranges.is_empty() {
+        return Err("NVDEC seek window has no mapped frames for selected rallies".into());
+    }
+    Ok(Some(ranges))
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -100,6 +150,7 @@ pub(super) fn run(
                              height: usize|
      -> Result<(), String> {
         let frame_slot = (frame_index % 9) as usize;
+        let mut needs_finish = view.is_some();
         if let Some(input) = &ball_input {
             let source = view.ok_or("Missing selected NVDEC ball frame")?;
             gpu.ball_input(source, input, frame_slot)?;
@@ -113,6 +164,8 @@ pub(super) fn run(
             let model_view = view.ok_or("Missing selected NVDEC player frame")?;
             let input = people_input.as_ref().ok_or("Missing GPU person input")?;
             gpu.person_input(model_view, input, source.matrix)?;
+            gpu.finish()?;
+            needs_finish = false;
             let found = person_engine.detect_cuda_input(input)?;
             player_samples += 1;
             for (index, candidate) in found.into_iter().enumerate() {
@@ -132,6 +185,9 @@ pub(super) fn run(
             sampled_frames.push(Some(Arc::new(GpuBuffer::copy_frame(source)?)));
         } else {
             sampled_frames.push(None);
+        }
+        if needs_finish {
+            gpu.finish()?;
         }
         let next_index = frame_index + 1;
         if frame_slot == 8 {
@@ -191,21 +247,26 @@ pub(super) fn run(
         if cancelled.load(Ordering::Acquire) {
             return Err("cancelled".into());
         }
-        let mut native_index = 0u64;
-        let receipt = decode_video_file_window(
+        let mut last_mapped = None;
+        let map_ranges = planned_map_ranges(&source.timeline, window, &selection, start)?;
+        let receipt = decode_video_file_window_with_map_ranges(
             original,
             source.codec,
             window,
+            map_ranges,
             cancelled,
             |frame| {
-                if frame.frame_index != native_index {
-                    return Err(
-                        "NVDEC display frames are not contiguous within the seek window".into(),
-                    );
+                let mut completion = GpuFrameCompletion {
+                    gpu: &gpu,
+                    complete: false,
+                };
+                if last_mapped.is_some_and(|previous| frame.frame_index <= previous) {
+                    return Err("NVDEC mapped source frames are out of presentation order".into());
                 }
-                native_index += 1;
+                last_mapped = Some(frame.frame_index);
                 let source_index = window.map_or(0, |item| item.first_frame) + frame.frame_index;
                 if expected_index >= target_frames {
+                    completion.complete = true;
                     return Ok(());
                 }
                 let geometry = (frame.width, frame.height, frame.pitch, frame.bit_depth);
@@ -220,6 +281,7 @@ pub(super) fn run(
                     closest_display_frame(timestamps, start + expected_index as f64 / 30.0)
                         .ok_or("Cannot align NVDEC source presentation time")?;
                 if needed > source_index {
+                    completion.complete = true;
                     return Ok(());
                 }
                 let input = Nv12View {
@@ -278,11 +340,12 @@ pub(super) fn run(
                         expected_index += 1;
                     }
                 }
+                completion.complete = true;
                 Ok(())
             },
         )?;
-        if receipt.frames != native_index {
-            return Err("NVDEC seek window frame count differs from decoder output".into());
+        if last_mapped.is_some_and(|index| index >= receipt.frames) {
+            return Err("NVDEC mapped frame lies outside the decoder output".into());
         }
     }
     if let Some((pitch, width, height)) = last_shape {
@@ -343,6 +406,21 @@ mod bounded_tests {
             vec![None]
         );
         assert!(plan_decode_windows(&timeline, 0.0, 3600, &[(4000, 4100)], false).is_err());
+    }
+
+    #[test]
+    fn mapped_frames_skip_gop_prelude_and_keep_rally_indices() {
+        let timeline = volley_media::nvdec::DisplayTimeline {
+            timestamps: (0..900).map(|index| index as f64 / 30.0).collect(),
+            keyframes: vec![0, 150, 300, 450, 600, 750],
+        };
+        let windows = plan_decode_windows(&timeline, 0.0, 900, &[(170, 220)], false).unwrap();
+        let ranges = planned_map_ranges(&timeline, windows[0], &[(170, 220)], 0.0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], (19, 72));
+        assert!(ranges[0].0 > 0);
     }
 
     #[test]

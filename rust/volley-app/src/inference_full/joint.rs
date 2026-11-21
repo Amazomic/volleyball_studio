@@ -6,6 +6,7 @@ mod zero_copy;
 use crate::pose_inference::{PendingPose, PoseStream};
 use rally_mask::RallyMask;
 use std::cell::RefCell;
+use std::sync::OnceLock;
 use volley_media::nvdec::NvdecCodec;
 use volley_media::raw_decoder::{DecodeBackend, DecodePreference, PrimaryDecodeSummary};
 
@@ -14,8 +15,16 @@ struct ZeroCopySource {
     codec: NvdecCodec,
     matrix: u8,
     full_range: bool,
+    bit_depth: u8,
+    chroma: u8,
     rotation: i32,
     timeline: volley_media::nvdec::DisplayTimeline,
+}
+
+struct CachedNvdecSource {
+    path: PathBuf,
+    stamp: (u64, u128),
+    source: ZeroCopySource,
 }
 
 fn zero_copy_color_matrix(space: Option<&str>, range: Option<&str>) -> Option<(u8, bool)> {
@@ -69,46 +78,83 @@ fn source_color_matrix(source: &Path) -> Option<(u8, bool, u8, u8)> {
     };
     Some((matrix, full_range, bit_depth, chroma))
 }
-fn zero_copy_codec(original: &Path, cancelled: &AtomicBool) -> Option<ZeroCopySource> {
+fn zero_copy_codec(original: &Path, cancelled: &AtomicBool) -> Result<ZeroCopySource, String> {
     if !matches!(
         std::env::var("VOLLEY_ZERO_COPY_PRIMARY").ok().as_deref(),
         None | Some("1") | Some("true")
-    ) || cancelled.load(Ordering::Acquire)
-    {
-        return None;
+    ) {
+        return Err("CUDA zero-copy disabled by VOLLEY_ZERO_COPY_PRIMARY".into());
     }
-    let info = volley_media::probe(original).ok()?;
-    let rotation = info.rotation.rem_euclid(360);
-    if !matches!(rotation, 0 | 90 | 180 | 270) {
-        return None;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("cancelled".into());
     }
-    let codec = match info.codec.as_str() {
-        "h264" => NvdecCodec::H264,
-        "hevc" => NvdecCodec::Hevc,
-        "vp8" => NvdecCodec::Vp8,
-        "vp9" => NvdecCodec::Vp9,
-        "av1" => NvdecCodec::Av1,
-        "mpeg1video" => NvdecCodec::Mpeg1,
-        "mpeg2video" => NvdecCodec::Mpeg2,
-        "mpeg4" => NvdecCodec::Mpeg4,
-        "vc1" => NvdecCodec::Vc1,
-        "mjpeg" => NvdecCodec::Mjpeg,
-        _ => return None,
+
+    static SOURCE_CACHE: OnceLock<StdMutex<Vec<CachedNvdecSource>>> = OnceLock::new();
+    let stamp = inference_stream::source_stamp(original)?;
+    let cache = SOURCE_CACHE.get_or_init(|| StdMutex::new(Vec::new()));
+    let cached = cache
+        .lock()
+        .map_err(|_| "NVDEC source metadata cache was poisoned")?
+        .iter()
+        .find(|entry| entry.path == original && entry.stamp == stamp)
+        .map(|entry| entry.source.clone());
+    let source = if let Some(source) = cached {
+        source
+    } else {
+        let info = volley_media::probe(original)
+            .map_err(|error| format!("NVDEC source metadata probe: {error}"))?;
+        let rotation = info.rotation.rem_euclid(360);
+        if !matches!(rotation, 0 | 90 | 180 | 270) {
+            return Err(format!("NVDEC rotation {rotation} is unsupported"));
+        }
+        let codec = match info.codec.as_str() {
+            "h264" => NvdecCodec::H264,
+            "hevc" => NvdecCodec::Hevc,
+            "vp8" => NvdecCodec::Vp8,
+            "vp9" => NvdecCodec::Vp9,
+            "av1" => NvdecCodec::Av1,
+            "mpeg1video" => NvdecCodec::Mpeg1,
+            "mpeg2video" => NvdecCodec::Mpeg2,
+            "mpeg4" => NvdecCodec::Mpeg4,
+            "vc1" => NvdecCodec::Vc1,
+            "mjpeg" => NvdecCodec::Mjpeg,
+            other => return Err(format!("NVDEC unsupported video codec: {other}")),
+        };
+        let (matrix, full_range, bit_depth, chroma) = source_color_matrix(original)
+            .ok_or("NVDEC unsupported source pixel format or color matrix")?;
+        let timeline = volley_media::nvdec::display_timeline(original)
+            .map_err(|error| format!("NVDEC display timeline: {error}"))?;
+        let source = ZeroCopySource {
+            codec,
+            matrix,
+            full_range,
+            bit_depth,
+            chroma,
+            rotation,
+            timeline,
+        };
+        let mut entries = cache
+            .lock()
+            .map_err(|_| "NVDEC source metadata cache was poisoned")?;
+        entries.retain(|entry| entry.path != original);
+        if entries.len() == 4 {
+            entries.remove(0);
+        }
+        entries.push(CachedNvdecSource {
+            path: original.to_path_buf(),
+            stamp,
+            source: source.clone(),
+        });
+        source
     };
-    let (matrix, full_range, bit_depth, chroma) = source_color_matrix(original)?;
-    if !volley_media::nvdec::codec_supported_format(codec, bit_depth, chroma)
-        || volley_inference::gpu_preprocess::GpuPreprocessor::new().is_err()
-    {
-        return None;
+    if !volley_media::nvdec::codec_supported_format(source.codec, source.bit_depth, source.chroma) {
+        return Err(
+            "NVDEC hardware does not support this codec/bit-depth/chroma combination".into(),
+        );
     }
-    let timeline = volley_media::nvdec::display_timeline(original).ok()?;
-    Some(ZeroCopySource {
-        codec,
-        matrix,
-        full_range,
-        rotation,
-        timeline,
-    })
+    volley_inference::gpu_preprocess::GpuPreprocessor::new()
+        .map_err(|error| format!("NVDEC zero-copy CUDA preprocessing unavailable: {error}"))?;
+    Ok(source)
 }
 
 #[derive(Debug)]
@@ -335,7 +381,11 @@ pub(crate) fn run_joint_pair(
     };
     let pose = RefCell::new(pose);
     let estimated = (duration * 30.0).max(9.0);
-    let zero_copy_codec = zero_copy_codec(original, cancelled);
+    let (zero_copy_codec, zero_copy_unavailable) = match zero_copy_codec(original, cancelled) {
+        Ok(source) => (Some(source), None),
+        Err(error) if error == "cancelled" => return Err(error),
+        Err(error) => (None, Some(error)),
+    };
     let zero_copy = zero_copy_codec.is_some();
     let mut rally_filter = None;
     let mut player_target = total_frames;
@@ -668,7 +718,7 @@ pub(crate) fn run_joint_pair(
         player_job_id: players.id,
         backend: summary.backend,
         zero_copy,
-        fallback_reason: summary.fallback_reason,
+        fallback_reason: zero_copy_unavailable.or(summary.fallback_reason),
         windows: summary.decode.windows,
         decoded_frames: summary.decode.decoded_frames,
         pending_pose,
@@ -710,6 +760,43 @@ mod tests {
         );
         assert_eq!(zero_copy_color_matrix(Some("reserved"), Some("tv")), None);
     }
+    #[test]
+    #[ignore = "requires NVIDIA CUDA and FFmpeg"]
+    fn zero_copy_hevc_preflight_proves_gpu_backend_ready() {
+        let source = std::env::temp_dir().join(format!(
+            "volley-nvdec-smoke-{}.mp4",
+            Uuid::new_v4().simple()
+        ));
+        let encoded = std::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=30:duration=4",
+                "-c:v",
+                "libx265",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(encoded.success());
+        let result = zero_copy_codec(&source, &AtomicBool::new(false));
+        let _ = fs::remove_file(source);
+        let detected = result.expect("NVDEC CUDA preflight must support HEVC 8-bit");
+        assert_eq!(detected.codec, NvdecCodec::Hevc);
+        assert_eq!(detected.bit_depth, 8);
+        assert_eq!(detected.chroma, 1);
+        assert!(detected.timeline.timestamps.len() >= 100);
+    }
+
     #[test]
     fn pose_provenance_does_not_swap_original_content_and_file_stamp() {
         let original = json!({"sha256":"a".repeat(64),"size_bytes":262927597u64});
