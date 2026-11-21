@@ -851,6 +851,13 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
         if mask["schema"] != "volley-primary-rally-mask/1" {
             return Err("Primary GPU mask schema mismatch".into());
         }
+        println!(
+            "RALLY MASK: ball_frames={} detected={} uncertain={} fallback={}",
+            mask["observed_ball_frames"],
+            mask["detected"].as_array().map_or(0, Vec::len),
+            mask["uncertain"].as_array().map_or(0, Vec::len),
+            mask["fallback_reason"]
+        );
         mask["selected_frames"]
             .as_u64()
             .ok_or("Primary GPU mask has no selected frame count")?
@@ -868,6 +875,13 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
         "PRIMARY GPU MASK: prefilter={} zero_copy={} person_stride={} frames={} selected={} windows={} elapsed={elapsed:.3}s",
         prefilter, pair.zero_copy, person_stride, pair.decoded_frames, selected, pair.windows
     );
+    let ball_sha = model_hash(&app.data_root, &pair.ball_job_id)?;
+    println!("PRIMARY GPU BALL SHA256: {ball_sha}");
+    if let Ok(expected) = std::env::var("VOLLEY_AB_EXPECT_BALL_SHA256") {
+        if ball_sha != expected {
+            return Err("Filtered VBallNet evidence differs from the reference run".into());
+        }
+    }
     let fusion = fusion_pair(&app, video, &pair.ball_job_id, &pair.player_job_id)?;
     let pose = pair
         .pending_pose

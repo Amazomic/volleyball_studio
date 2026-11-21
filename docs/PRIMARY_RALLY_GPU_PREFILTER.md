@@ -94,3 +94,37 @@ sampling period; custom larger strides may not benefit. The GPU pass is
 experimental until real-match precision, GPU input parity and matched A/B
 measurements are accepted. The Studio process on 127.0.0.1:8875 was not
 running during this audit and no user's active jobs were interrupted.
+## 60 FPS / Full HD acceptance and startup crash diagnostic
+
+The failed existing Studio launches were not slow-running GPU jobs: three
+persisted pipeline statuses stopped at 8% and the Linux kernel independently
+recorded repeated volley-app tokio-worker SIGSEGV signals at the same invalid
+code address. The affected 58.17-second source is 1920x1080 H.264 60 FPS.
+The deployed binary was older than this PR; its crash is consistent with
+the CUDA ONNX Runtime tensor/allocator lifetime defect fixed in this branch.
+
+An isolated, consistent single-encoder H.264 1920x1080/60 FPS 20-second
+test contains a stationary background and a volleyball scene:
+- Both NVDEC CUDA zero-copy variants complete their GPU, fusion, RTMPose,
+  CPU replay, Touch discovery and rally pipeline without SIGSEGV.
+- VBallNet observed the ball on 298 of the 600 canonical 30 FPS frames;
+  the mask detected 2 motion intervals and selected 312/600 frames
+  (52% of the total) without a full-analysis fallback.
+- On the same file, pose_stride/person_stride=1 and one GPU: 38.515 s
+  for the original one-pass mode versus 31.212 s for the filtered
+  two-pass mode (18.96% faster). VBallNet evidence SHA-256 was exactly
+  identical between the two runs.
+- The full-frame pass returned 3612 RF-DETR candidates and 3606 pose
+  crops; filtered pass returned 3288 candidates and 3284 pose crops.
+  These intentionally different counts do NOT establish that all
+  out-of-rally player observations are irrelevant. Independent labeled
+  match-level precision/recall remains NOT TESTED.
+- A deliberately concatenated H.264 fixture with incompatible encoder
+  sequence parameters failed NVDEC format validation; replacing it with
+  a single-encoder fixture resolved that separate test-input issue.
+
+The CUDA FFmpeg-vs-GPU image-preprocessing evidence SHA mismatch in the
+older strict legacy-to-shared A/B test is still an open, independent
+numerical parity issue. Do not relabel byte-level differences as parity.
+This branch provides a documented opt-out using
+VOLLEY_PRIMARY_RALLY_PREFILTER=0 and does not change published master.
