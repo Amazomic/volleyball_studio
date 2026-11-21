@@ -328,7 +328,9 @@ RTMPose · шаг кадров (1–9)	RTMPose · frame stride (1–9)
 Нажмите, чтобы открыть проводник Windows. Перетаскивание тоже откроет выбор файлов.	Click to open Windows Explorer. Dropping files also opens the file picker.
 Выберите исходные видео через проводник. Сохраняются только ссылки на оригиналы: без копирования и SHA-256.	Choose source videos in Explorer. Selection stores only references: no copies or SHA-256 calculation.
 ▱ Поле и сетка	▱ Court and net
-Дообучение	Training
+Дебаг	Debug
+Параметры дебага	Debug settings
+⚙ Настройки и сохранение	⚙ Settings and saving
 RTMPose-M · плавные точки (между измерениями — интерполяция)	RTMPose-M · smooth joints (interpolated between observations)
 Точные измерения раз в несколько кадров; между ними только визуальная интерполяция. Без Track ID.	Measured every few frames; visual interpolation between observations. No Track ID.
 Обучение на движениях игрока	Learn from player movement
@@ -542,7 +544,7 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 По мячу	From ball trajectory
 По касаниям	From touches
 Отображение розыгрышей на временной шкале	Rally layers on the timeline
-Сравнение алгоритмов · дообучение	Algorithm comparison · training
+Тестирование алгоритмов в плеере	Test algorithms in the player
 По касаниям · CPU	From touches · CPU
 По траектории мяча	From ball trajectory
 Нет данных	No data
@@ -551,7 +553,7 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Кандидаты касаний по мячу	Ball-based touch candidates
 Определение касания	Touch detection
 Розыгрыш по мячу не выбран	No ball-trajectory rally selected
-Выберите розыгрыш по траектории. CPU-касания в дообучении не отображаются.	Select a ball-trajectory rally. CPU contacts are hidden in training.
+Выберите розыгрыш по траектории. CPU-касания в дебаге не отображаются.	Select a ball-trajectory rally. CPU contacts are hidden in debug.
 Определение типа касания	Touch type classification
 Рассчитать розыгрыши	Calculate rallies
 Рассчитать касания	Calculate touches
