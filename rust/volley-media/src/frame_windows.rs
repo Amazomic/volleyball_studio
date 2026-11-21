@@ -9,7 +9,8 @@ use std::{
 pub const CLIP_FRAMES: usize = 9;
 /// Pose inference may sample still frames up to one second apart.
 pub const MAX_FULL_VIDEO_STRIDE: usize = 30;
-pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
+const MAX_MODEL_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_FRAMES: u64 = 48 * 3600 * 30;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,7 +160,7 @@ pub fn normalized_model_window(
     let total = each
         .checked_mul(channels)
         .and_then(|n| n.checked_mul(CLIP_FRAMES))
-        .filter(|n| *n <= MAX_FRAME_BYTES * CLIP_FRAMES)
+        .filter(|n| *n <= MAX_MODEL_FRAME_BYTES * CLIP_FRAMES)
         .ok_or("Model tensor exceeds input limit")?;
     if raw.len() != total {
         return Err(format!(
@@ -213,6 +214,17 @@ mod tests {
         assert!(short.next_window().unwrap().is_none());
         assert!(FrameWindows::new(Cursor::new(vec![0u8; 8]), 0, 1).is_err());
         assert!(FrameWindows::new(Cursor::new(vec![0u8; 8]), 1, 31).is_err());
+    }
+
+    #[test]
+    fn four_k_original_rgb_frames_can_form_nine_frame_windows() {
+        let rgb4k_frame_bytes = 3840 * 2160 * 3;
+        let source = Cursor::new(Vec::<u8>::new());
+        assert!(FrameWindows::new(source, rgb4k_frame_bytes, 9).is_ok());
+        assert!(FrameWindows::new(Cursor::new(Vec::<u8>::new()), MAX_FRAME_BYTES + 1, 9).is_err());
+        assert!(normalized_model_window(&[], 3840, 2160, 3)
+            .unwrap_err()
+            .contains("Model tensor exceeds input limit"));
     }
 
     #[test]

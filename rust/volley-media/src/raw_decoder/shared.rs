@@ -31,7 +31,7 @@ use std::os::unix::{
 const POLL: Duration = Duration::from_millis(100);
 const INIT_LIMIT: Duration = Duration::from_secs(30);
 const IDLE_LIMIT: Duration = Duration::from_secs(120);
-pub const MAX_NATIVE_RGB_FRAME_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_NATIVE_RGB_FRAME_BYTES: usize = crate::frame_windows::MAX_FRAME_BYTES;
 
 /// A synchronized 30-FPS window; both inputs use the canonical FFmpeg CPU
 /// scaling/format filters and have identical source-frame indices.
