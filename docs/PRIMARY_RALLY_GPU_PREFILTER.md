@@ -36,9 +36,14 @@ The Studio Full/Post pipeline uses the saved primary VBallNet GPU mask as
 the sole source of rally start/end frames. It reads the primary source file
 from native_gpu_runs/<ball_job_id>/rally_mask.json and checks video
 provenance, analysis range, ball-job ID and mask SHA-256. The merged primary
-intervals scope CPU Touch processing and are materialized into a versioned
-CPU rally event/timeline record, without running a second rally boundary
-detector. Primary intervals are clipped only for the 0–8 trailing frames
+intervals scope CPU Touch processing. A lightweight adapter publishes the
+same primary boundaries as a versioned rally timeline with already-computed
+Touch references and stable candidate IDs. It reads the Touch JSONL once;
+there is no additional replay-frame pass for rally events, rally segmenter,
+court/surface event calculation, or dedicated postprocessing stage. The eager
+Track ID index scan is no longer invoked by the GPU rally adapter: ReID may
+construct the same verified index later as part of player assignment.
+Legacy rally snapshots remain readable. Primary intervals are clipped only for the 0–8 trailing frames
 not represented by complete nine-frame GPU fusion/replay windows. The
 original GPU boundaries remain saved.
 
@@ -49,8 +54,14 @@ confidence threshold and bounded local artifact rejection only, with the
 versioned vballnet_local_artifacts_v1 policy and no leading-ball Track IDs.
 Preview continues limited per-rally short-gap interpolation without a leading
 tracker. Quick Reel no longer performs a second leading-ball refinement pass.
-The CPU rally event record remains necessary for touch references, player
-linking, previews and montage. GPU runs without a saved primary mask cannot
+The lightweight snapshot retains rally_run_id, Touch lineage and existing
+preview/montage references. It uses materialization_version =
+primary_gpu_intervals_direct_v1; ground/net and court event context are
+explicitly marked not computed. Per-rally ball-coverage statistics are not
+recalculated: the legacy numeric fields remain zero for schema compatibility
+and ball_coverage_not_recomputed=true distinguishes unknown coverage from
+an observed absence of the ball. Timeline boundaries always reflect the GPU
+mask, even when no Touch was found. GPU runs without a saved primary mask cannot
 enter the Studio postprocessing path; rerun a compatible primary analysis.
 Old saved rally runs keep their original policy. Independent manual/training
 CPU endpoints retain their existing snapshot-specific behavior.

@@ -617,7 +617,10 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
             || !(0.0..=1.0).contains(&item.max_touch_probability)
             || item.ball_observations > end - start + 1
             || (item.motion_supported_touch_proposals == 0
-                && item.method.as_deref() != Some("coherent_vballnet_motion_v2"))
+                && !matches!(
+                    item.method.as_deref(),
+                    Some("coherent_vballnet_motion_v2" | "primary_gpu_rally_mask_v1")
+                ))
             || item.first_touch_frame < start
             || item.last_touch_frame > end
             || item.first_touch_frame > item.last_touch_frame

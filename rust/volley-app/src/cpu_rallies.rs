@@ -232,6 +232,9 @@ fn write_proposal(
     let unique = format!("{:x}", Sha256::digest(key.as_bytes()));
     value["candidate_id"] = json!(&unique[..24]);
     value["reviewed"] = json!(false);
+    if proposal.method == "primary_gpu_rally_mask_v1" {
+        value["ball_coverage_not_recomputed"] = json!(true);
+    }
     let mut data =
         serde_json::to_vec(&value).map_err(|e| format!("Encode rally candidate: {e}"))?;
     data.push(b'\n');
@@ -707,6 +710,125 @@ fn rebuild_from_snapshots_with_scope(
     Ok((format!("{:x}", digest.finalize()), diagnostics, totals))
 }
 
+#[expect(clippy::too_many_arguments)]
+fn publish_primary_from_touches(
+    touch_file: &Path,
+    touch_sha: &str,
+    expected_touches: u64,
+    frames: u64,
+    width: u32,
+    height: u32,
+    intervals: &[(u64, u64)],
+    settings: RallySettings,
+    output: &Path,
+    replay_id: &str,
+    touch_id: &str,
+    cancel: Option<&AtomicBool>,
+) -> Result<(String, RallyTotals, OutputCounters), String> {
+    if intervals
+        .iter()
+        .any(|&(start, end)| start > end || end >= frames)
+        || intervals.windows(2).any(|pair| pair[0].1 >= pair[1].0)
+    {
+        return Err("Invalid primary GPU rally boundaries".into());
+    }
+    if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+        return Err("cancelled".into());
+    }
+    let mut source = BoundedReader::open(touch_file)?;
+    let output_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)
+        .map_err(|e| format!("Create primary rally snapshot: {e}"))?;
+    let mut writer = BufWriter::new(output_file);
+    let mut digest = Sha256::new();
+    let mut counters = OutputCounters::default();
+    let history = CourtHistory::default();
+    let surface_events = std::collections::VecDeque::new();
+    let mut next = next_contact(&mut source)?;
+    let mut previous = None;
+    for &(start, end) in intervals {
+        let mut first = None;
+        let mut last = None;
+        let mut maximum: f64 = 0.0;
+        let mut ids = std::collections::BTreeSet::new();
+        let mut unidentified = 0;
+        let mut count = 0;
+        while next.as_ref().is_some_and(|item| item.frame_index <= end) {
+            if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+                return Err("cancelled".into());
+            }
+            let item = next.take().expect("checked");
+            if item.frame_index < start || previous.is_some_and(|p| item.frame_index <= p) {
+                return Err("Touch is outside primary GPU rally intervals or out of order".into());
+            }
+            item.verify(frames, width, height)?;
+            previous = Some(item.frame_index);
+            first.get_or_insert(item.frame_index);
+            last = Some(item.frame_index);
+            maximum = maximum.max(item.probability);
+            count += 1;
+            counters.ingested_touch_candidates += 1;
+            if let Some(track_id) = item.provisional_track_id {
+                ids.insert(track_id);
+            } else {
+                unidentified += 1;
+            }
+            next = next_contact(&mut source)?;
+        }
+        let proposal = RallyProposal {
+            detected_start_frame: start,
+            detected_end_frame: end,
+            duration_sec: ((end - start + 1) as f64 / 30.0 * 10000.0).round() / 10000.0,
+            ball_observations: 0,
+            ball_coverage: 0.0,
+            motion_supported_touch_proposals: count,
+            first_touch_frame: first.unwrap_or(start),
+            last_touch_frame: last.unwrap_or(end),
+            max_touch_probability: maximum,
+            provisional_track_ids: ids.into_iter().collect(),
+            unidentified_contacts: unidentified,
+            classification: "provisional_rally",
+            method: "primary_gpu_rally_mask_v1",
+            authoritative_rally: false,
+            athlete_identities_verified: false,
+            serve_verified: false,
+            suggested_context_before_frames: settings.suggested_context_frames,
+            suggested_context_after_frames: settings.suggested_context_frames,
+            end_reason: "primary_gpu_ball_trajectory",
+        };
+        write_proposal(
+            &mut writer,
+            &mut digest,
+            proposal,
+            &history,
+            &surface_events,
+            (replay_id, touch_id),
+            &mut counters,
+        )?;
+    }
+    if next.is_some()
+        || source.line()?.is_some()
+        || source.finish() != touch_sha
+        || counters.ingested_touch_candidates != expected_touches
+    {
+        return Err("Primary rally Touch source count, scope or SHA differs".into());
+    }
+    writer
+        .flush()
+        .map_err(|e| format!("Flush primary rally snapshot: {e}"))?;
+    writer
+        .get_ref()
+        .sync_all()
+        .map_err(|e| format!("Sync primary rally snapshot: {e}"))?;
+    let stats = RallyTotals {
+        accepted_proposals: counters.proposals,
+        ..RallyTotals::default()
+    };
+    Ok((format!("{:x}", digest.finalize()), stats, counters))
+}
+
 fn record_preliminary_scope(manifest: &mut Value, contacts: &Value, applied: bool) {
     if contacts["preliminary_rally_scope_version"] == "coherent_vballnet_motion_v2" {
         for key in [
@@ -734,21 +856,22 @@ fn record_preliminary_scope(manifest: &mut Value, contacts: &Value, applied: boo
 }
 
 pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value, ApiError> {
-    process_inner(state, request, None)
+    process_inner(state, request, None, false)
 }
 
-pub(crate) fn process_with_cancel(
+pub(crate) fn publish_primary_with_cancel(
     state: &AppState,
     request: &RallyRequest,
     cancel: &AtomicBool,
 ) -> Result<Value, ApiError> {
-    process_inner(state, request, Some(cancel))
+    process_inner(state, request, Some(cancel), true)
 }
 
 fn process_inner(
     state: &AppState,
     request: &RallyRequest,
     cancel: Option<&AtomicBool>,
+    primary_only: bool,
 ) -> Result<Value, ApiError> {
     if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
         return Err(storage::conflict("cancelled"));
@@ -858,6 +981,11 @@ fn process_inner(
         .filter(|n| *n <= frames)
         .ok_or_else(|| storage::bad_request("Unbounded or missing motion Touch count"))?;
     let primary = contacts["preliminary_rally_scope_version"] == "primary_gpu_rally_mask_v1";
+    if primary_only && !primary {
+        return Err(storage::bad_request(
+            "Primary VBallNet rally evidence is required",
+        ));
+    }
     if !primary && contacts["preliminary_rally_scope_version"] != "coherent_vballnet_motion_v2"
         || contacts["preliminary_rally_settings"] != json!(settings)
         || contacts["preliminary_rally_file"] != "preliminary_rallies.json"
@@ -1019,26 +1147,45 @@ fn process_inner(
             .as_ref()
             .map(|(starts, score)| (starts.as_slice(), *score))
             .unwrap_or((&[], settings.min_ball_score));
-        let (output_sha, stats, output) = rebuild_from_snapshots_with_scope(
-            &tracked_file,
-            &touch_file,
-            &replay_sha,
-            &touch_sha,
-            frames,
-            expected_touches,
-            dimensions.width,
-            dimensions.height,
-            settings,
-            &part,
-            &request.replay_id,
-            &request.touch_id,
-            court
-                .as_ref()
-                .and_then(|snapshot| snapshot.transform.as_ref()),
-            Some((rally_starts, tracking_score)),
-            preliminary_intervals.as_deref(),
-            cancel,
-        )?;
+        let (output_sha, stats, output) = if primary_only {
+            publish_primary_from_touches(
+                &touch_file,
+                &touch_sha,
+                expected_touches,
+                frames,
+                dimensions.width,
+                dimensions.height,
+                preliminary_intervals
+                    .as_deref()
+                    .ok_or("No primary intervals")?,
+                settings,
+                &part,
+                &request.replay_id,
+                &request.touch_id,
+                cancel,
+            )?
+        } else {
+            rebuild_from_snapshots_with_scope(
+                &tracked_file,
+                &touch_file,
+                &replay_sha,
+                &touch_sha,
+                frames,
+                expected_touches,
+                dimensions.width,
+                dimensions.height,
+                settings,
+                &part,
+                &request.replay_id,
+                &request.touch_id,
+                court
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.transform.as_ref()),
+                Some((rally_starts, tracking_score)),
+                preliminary_intervals.as_deref(),
+                cancel,
+            )?
+        };
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared video changed during native rally processing".into());
         }
@@ -1068,8 +1215,21 @@ fn process_inner(
             "leading_ball_min_score":contacts["leading_ball_min_score"],
             "court_revision":contacts["court_revision"],
             "court_context_enabled":contacts["court_context_enabled"],
-            "court_contact_context_version":"python_serve_toss_possession_v2",
-            "ground_boundary_version":"trajectory_court_surface_v3",
+            "court_contact_context_version":if primary_only {
+                "not_computed_primary_gpu_v1"
+            } else {
+                "python_serve_toss_possession_v2"
+            },
+            "ground_boundary_version":if primary_only {
+                "not_computed_primary_gpu_v1"
+            } else {
+                "trajectory_court_surface_v3"
+            },
+            "materialization_version": if primary_only {
+                "primary_gpu_intervals_direct_v1"
+            } else {
+                "cpu_rally_frame_reconstruction_v1"
+            },
             "touch_candidates_ingested":output.ingested_touch_candidates,
             "physical_touch_player_gate":"same_frame_verified_cpu_track",
             "physical_touch_ball_gate":"same_frame_selected_ball",
@@ -1090,13 +1250,15 @@ fn process_inner(
         }
         storage::write_json_atomic(&folder.join("manifest.json"), &manifest)
             .map_err(|e| format!("Save native rally manifest: {e:?}"))?;
-        crate::native_player_tracks::prepare_rally_index(
-            state,
-            &request.project_id,
-            &request.video,
-            &request.replay_id,
-            &run_id,
-        )?;
+        if !primary_only {
+            crate::native_player_tracks::prepare_rally_index(
+                state,
+                &request.project_id,
+                &request.video,
+                &request.replay_id,
+                &run_id,
+            )?;
+        }
         Ok(manifest)
     })();
     match result {
@@ -1148,6 +1310,87 @@ pub async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_gpu_rallies_are_published_without_replaying_video_frames() {
+        let root = std::env::temp_dir().join(format!("primary-rallies-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let touches = root.join("touches.jsonl");
+        let output = root.join("rallies.jsonl");
+        let contact = json!({
+            "frame_index":28,
+            "provisional_track_id":7,
+            "probability":0.85,
+            "ball_x_px":310.0,
+            "ball_y_px":140.0,
+            "motion_frame_index":28,
+            "direction_change_deg":42.0,
+            "speed_before_px_frame":8.0,
+            "speed_after_px_frame":7.0,
+            "velocity_residual_px_frame":3.0,
+            "technique":"unknown_touch",
+            "physical_motion_supported":true,
+            "athlete_identity_verified":false
+        });
+        let mut bytes = serde_json::to_vec(&contact).unwrap();
+        bytes.push(b'\n');
+        fs::write(&touches, &bytes).unwrap();
+        let touch_sha = format!("{:x}", Sha256::digest(&bytes));
+        let (sha, stats, output_counts) = publish_primary_from_touches(
+            &touches,
+            &touch_sha,
+            1,
+            90,
+            640,
+            360,
+            &[(12, 33), (50, 78)],
+            RallySettings::default(),
+            &output,
+            "replay-primary",
+            "touch-primary",
+            None,
+        )
+        .unwrap();
+        let saved = fs::read(&output).unwrap();
+        assert_eq!(sha, format!("{:x}", Sha256::digest(&saved)));
+        assert_eq!(stats.accepted_proposals, 2);
+        assert_eq!(output_counts.ingested_touch_candidates, 1);
+        let rows: Vec<Value> = saved
+            .split(|byte| *byte == b'\n')
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| serde_json::from_slice(bytes).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["detected_start_frame"], 12);
+        assert_eq!(rows[0]["detected_end_frame"], 33);
+        assert_eq!(rows[0]["provisional_track_ids"], json!([7]));
+        assert_eq!(rows[0]["motion_supported_touch_proposals"], 1);
+        assert_eq!(rows[1]["detected_start_frame"], 50);
+        assert_eq!(rows[1]["detected_end_frame"], 78);
+        assert_eq!(rows[1]["motion_supported_touch_proposals"], 0);
+        assert_eq!(rows[1]["method"], "primary_gpu_rally_mask_v1");
+        assert_eq!(rows[1]["ball_coverage_not_recomputed"], true);
+        assert!(rows[1]["surface_event_candidates"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(publish_primary_from_touches(
+            &touches,
+            &touch_sha,
+            1,
+            90,
+            640,
+            360,
+            &[(50, 78)],
+            RallySettings::default(),
+            &root.join("outside.jsonl"),
+            "replay-primary",
+            "touch-primary",
+            None,
+        )
+        .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn cancelled_rally_scan_does_not_publish_files() {

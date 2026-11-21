@@ -1122,8 +1122,9 @@ fn cpu_lineage_valid(
         })
         && rallies["schema"] == "volley-native-cpu-rally-proposals/1"
         && rallies["state"] == "provisional_rally_segments"
-        && rallies["court_contact_context_version"] == "python_serve_toss_possession_v2"
-        && rallies["ground_boundary_version"] == "trajectory_court_surface_v3"
+        && rallies["court_contact_context_version"] == "not_computed_primary_gpu_v1"
+        && rallies["ground_boundary_version"] == "not_computed_primary_gpu_v1"
+        && rallies["materialization_version"] == "primary_gpu_intervals_direct_v1"
         && touches["ball_tracking_policy"] == crate::cpu_retrack::ball_track::LOCAL_POLICY
         && rallies["ball_tracking_policy"] == crate::cpu_retrack::ball_track::LOCAL_POLICY
         && touches["leading_ball_rally_starts"] == json!([])
@@ -2149,17 +2150,11 @@ async fn pipeline(
         return Err("cancelled".into());
     }
 
-    progress(
-        path,
-        status,
-        "Постобработка · события первичных розыгрышей",
-        96.0,
-    )?;
     log_native(
         path,
-        "Розыгрыши",
-        "cpu_rallies::process",
-        json!({"project_id":request.project_id,"video":request.video,"replay_id":replay_id,"touch_id":touch_id,"settings":request.post.rallies}),
+        "Первичные розыгрыши",
+        "cpu_rallies::publish_primary_with_cancel",
+        json!({"project_id":request.project_id,"video":request.video,"primary_ball_job_id":primary.ball_job_id,"touch_id":touch_id}),
     )?;
     let rallies = cpu_cancel(
         app.clone(),
@@ -2171,7 +2166,7 @@ async fn pipeline(
             settings: Some(request.post.rallies),
         },
         cancel.clone(),
-        cpu_rallies::process_with_cancel,
+        cpu_rallies::publish_primary_with_cancel,
     )
     .await?;
     let rally_id = require_id(&rallies, "rally_run_id")?;
@@ -2180,9 +2175,9 @@ async fn pipeline(
     save(path, status)?;
     log_event(
         path,
-        "Розыгрыши",
+        "Первичные розыгрыши",
         "success",
-        &format!("Разметка сохранённых первичных розыгрышей: rally_run_id={rally_id}"),
+        &format!("Розыгрыши VBallNet доступны в предпросмотре: rally_run_id={rally_id}"),
     )?;
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
@@ -3163,7 +3158,7 @@ mod tests {
             {"status":"complete","mode":"post","video":"match.mp4","gpu_reused":true,
              "stages":[{"name":"Постобработка · Track ID","duration_ms":30000},
                 {"name":"Постобработка · физические касания","duration_ms":80000},
-                {"name":"Постобработка · события первичных розыгрышей","duration_ms":10000}]},
+                {"name":"Постобработка · автоматическая привязка игроков","duration_ms":10000}]},
             {"status":"complete","mode":"gpu","video":"match.mp4","gpu_reused":false,
              "stages":[{"name":"Постобработка · физические касания","duration_ms":500}]}
         ]});
@@ -3566,8 +3561,9 @@ mod branching_tests {
             "rally_candidates.jsonl",
             &json!({
                 "schema":"volley-native-cpu-rally-proposals/1","state":"provisional_rally_segments","rally_run_id":rally,
-                "court_contact_context_version":"python_serve_toss_possession_v2",
-                "ground_boundary_version":"trajectory_court_surface_v3",
+                "court_contact_context_version":"not_computed_primary_gpu_v1",
+                "ground_boundary_version":"not_computed_primary_gpu_v1",
+                "materialization_version":"primary_gpu_intervals_direct_v1",
                 "preliminary_rally_scope_version":"primary_gpu_rally_mask_v1",
                 "preliminary_rally_scope_applied":false,
                 "primary_ball_job_id":gpu_ball,"primary_rally_mask_sha256":sha,

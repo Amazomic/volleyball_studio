@@ -192,6 +192,47 @@ fn fixture() -> (ValidatedRun, PathBuf) {
     (run, root)
 }
 #[test]
+fn primary_gpu_rallies_are_visible_in_preview_even_without_cpu_touch_events() {
+    let (mut run, root) = fixture();
+    let mut rows = fs::read_to_string(&run.rally_file)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    for row in &mut rows {
+        row["method"] = json!("primary_gpu_rally_mask_v1");
+        row["motion_supported_touch_proposals"] = json!(0);
+        row["ball_observations"] = json!(0);
+        row["ball_coverage"] = json!(0.0);
+        row["ball_coverage_not_recomputed"] = json!(true);
+        row["max_touch_probability"] = json!(0.0);
+        row["first_touch_frame"] = row["detected_start_frame"].clone();
+        row["last_touch_frame"] = row["detected_end_frame"].clone();
+    }
+    let bytes = rows
+        .iter()
+        .map(|row| format!("{}\n", serde_json::to_string(row).unwrap()))
+        .collect::<String>();
+    fs::write(&run.rally_file, &bytes).unwrap();
+    fs::write(&run.touch_file, b"").unwrap();
+    run.rally_sha = format!("{:x}", Sha256::digest(bytes.as_bytes()));
+    run.touch_sha = format!("{:x}", Sha256::digest(b""));
+    run.expected_touches = 0;
+    let timeline = generate(&run, Choice::Timeline).unwrap().value;
+    let visible = timeline["rallies"].as_array().unwrap();
+    assert_eq!(visible.len(), 3);
+    assert_eq!(visible[0]["start_frame"], 30);
+    assert_eq!(visible[0]["end_frame"], 80);
+    assert_eq!(visible[1]["start_frame"], 95);
+    assert_eq!(visible[1]["end_frame"], 155);
+    assert!(timeline["surface_contact_candidates"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn verified_timeline_accepts_only_versioned_ball_rallies_without_touches() {
     let (mut run, root) = fixture();
     let saved = fs::read_to_string(&run.rally_file).unwrap();
