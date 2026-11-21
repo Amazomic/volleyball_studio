@@ -40,6 +40,49 @@ const VIDEO_LIBRARY_SCRIPT: &str = include_str!("../static/studio_video_library.
 const QUICK_REEL_SCRIPT: &str = include_str!("../static/studio_quick_reel.js");
 const SELECTION_WASM: &[u8] = include_bytes!("../static/volley_web.wasm");
 const HTML: &str = include_str!("../static/studio.html");
+const BUILD_GIT_SHA: Option<&str> = option_env!("VOLLEY_BUILD_GIT_SHA");
+const BUILD_GIT_ROOT: Option<&str> = option_env!("VOLLEY_BUILD_GIT_ROOT");
+
+fn build_commit_markup(
+    sha: Option<&str>,
+    root: Option<&str>,
+    executable: &std::path::Path,
+) -> String {
+    let (Some(sha), Some(root)) = (sha, root) else {
+        return String::new();
+    };
+    if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return String::new();
+    }
+    let root = std::path::Path::new(root);
+    let (Ok(root), Ok(executable)) = (root.canonicalize(), executable.canonicalize()) else {
+        return String::new();
+    };
+    if !root.join(".git").exists() || !executable.starts_with(&root) {
+        return String::new();
+    }
+    format!(
+        "<small class=\"studio-build-commit\" title=\"Коммит сборки: {sha}\">Коммит · <code>{}</code></small>",
+        &sha[..8]
+    )
+}
+
+fn studio_asset_response(mime: &'static str, filename: &str, contents: &str) -> Response {
+    if filename == "studio.html" {
+        let commit = std::env::current_exe()
+            .ok()
+            .map(|exe| build_commit_markup(BUILD_GIT_SHA, BUILD_GIT_ROOT, &exe))
+            .unwrap_or_default();
+        return web_asset(
+            mime,
+            &contents.replace(
+                r#"<template id="studio-build-commit-slot"></template>"#,
+                &commit,
+            ),
+        );
+    }
+    web_asset(mime, contents)
+}
 
 fn web_asset(mime: &'static str, contents: &str) -> Response {
     let mut response = contents.to_owned().into_response();
@@ -76,14 +119,14 @@ fn studio_asset_from(
 ) -> Response {
     match root {
         Some(root) => match development_asset(root, filename) {
-            Ok(contents) => web_asset(mime, &contents),
+            Ok(contents) => studio_asset_response(mime, filename, &contents),
             Err(()) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Development UI unavailable or incompatible; rebuild and restart Studio",
             )
                 .into_response(),
         },
-        None => web_asset(mime, embedded),
+        None => studio_asset_response(mime, filename, embedded),
     }
 }
 fn studio_asset(mime: &'static str, filename: &'static str, embedded: &'static str) -> Response {
@@ -473,6 +516,42 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    #[test]
+    fn sidebar_commit_is_only_visible_for_a_github_checkout_binary() {
+        let root =
+            std::env::temp_dir().join(format!("volley-studio-build-{}", uuid::Uuid::new_v4()));
+        let exe = root
+            .join("rust")
+            .join("target")
+            .join("debug")
+            .join("volley-app.exe");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, b"binary").unwrap();
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let root_str = root.to_str().unwrap();
+        assert_eq!(build_commit_markup(Some(sha), Some(root_str), &exe), "");
+
+        fs::create_dir(root.join(".git")).unwrap();
+        let visible = build_commit_markup(Some(sha), Some(root_str), &exe);
+        assert!(visible.contains("01234567"));
+        assert!(visible.contains(sha));
+        assert!(visible.contains("studio-build-commit"));
+        assert_eq!(build_commit_markup(None, Some(root_str), &exe), "");
+        assert_eq!(build_commit_markup(Some(sha), None, &exe), "");
+        assert_eq!(
+            build_commit_markup(Some("invalid"), Some(root_str), &exe),
+            ""
+        );
+        assert_eq!(
+            build_commit_markup(Some(sha), Some(root_str), &root.join("missing.exe")),
+            ""
+        );
+        assert_eq!(
+            build_commit_markup(Some(sha), Some(root_str), &std::env::current_exe().unwrap()),
+            ""
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn axum_serves_standalone_rust_ui_assets_over_http() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -512,6 +591,15 @@ mod tests {
         });
         let html = get(addr, "/studio").await;
         assert!(html.starts_with("HTTP/1.1 200 OK"));
+        assert!(!html.contains("studio-build-commit-slot"));
+        let expected_commit = build_commit_markup(
+            BUILD_GIT_SHA,
+            BUILD_GIT_ROOT,
+            &std::env::current_exe().unwrap(),
+        );
+        if !expected_commit.is_empty() {
+            assert!(html.contains(&expected_commit));
+        }
         let home = get(addr, "/").await;
         assert!(home.starts_with("HTTP/1.1 307 Temporary Redirect"));
         assert!(home.to_lowercase().contains("location: /studio"));

@@ -492,8 +492,11 @@ body[data-ui-theme="light"] .studio-sidebar-task-stage{color:#536985}
 .studio-sidebar-restart-icon{font-size:21px;line-height:1;color:#edbb66;flex:0 0 auto}
 .studio-sidebar-restart-status{display:block;font-size:10px;line-height:1.4;color:#b6c9e2;overflow-wrap:anywhere;max-height:76px;overflow:auto}
 .studio-sidebar-restart-status.is-error{color:#ffaaa7}
+.studio-build-commit{font-size:10px;line-height:1.3;text-align:center;color:#889bb5;white-space:nowrap;font-variant-numeric:tabular-nums}
+.studio-build-commit code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:inherit}
 body[data-ui-theme="light"] .studio-sidebar-restart{background:#e3eefc;color:#1c3552;border-color:#bacce2}
 body[data-ui-theme="light"] .studio-sidebar-restart-status{color:#395672}
+body[data-ui-theme="light"] .studio-build-commit{color:#566b82}
 @media(max-width:650px){.sidebar>.studio-sidebar-bottom{grid-column:1/-1;padding-top:1px;max-width:100%}}
 
 /* Full Studio pipeline: one source profile and one replayable CPU profile. */
