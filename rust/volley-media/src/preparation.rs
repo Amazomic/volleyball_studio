@@ -119,6 +119,13 @@ pub fn prepared_file_sha256(path: &Path) -> io::Result<(u64, String)> {
 type SourceProof = (u64, SystemTime, (u64, u64, i64, i64), Value);
 static SOURCES: OnceLock<Mutex<HashMap<PathBuf, SourceProof>>> = OnceLock::new();
 
+fn canonical_source_proof(value: Value) -> Result<Value, String> {
+    let stored = serde_json::to_vec(&value)
+        .map_err(|error| format!("Serialize original source proof: {error}"))?;
+    serde_json::from_slice(&stored)
+        .map_err(|error| format!("Normalize original source proof: {error}"))
+}
+
 pub fn source_provenance(path: &Path) -> Result<Value, String> {
     let meta = fs::symlink_metadata(path).map_err(|e| format!("Original metadata: {e}"))?;
     if !meta.is_file() || meta.file_type().is_symlink() {
@@ -151,13 +158,13 @@ pub fn source_provenance(path: &Path) -> Result<Value, String> {
         .as_array()
         .and_then(|rows| rows.iter().find(|row| row["codec_type"] == "video"))
         .ok_or("Missing original video stream")?;
-    let proof = serde_json::json!({
+    let proof = canonical_source_proof(serde_json::json!({
         "schema":"volley-original-source/1","sha256":hash,"size_bytes":size,
         "video":info,"native_avg_frame_rate":video["avg_frame_rate"],
         "native_time_base":video["time_base"],"native_start_time":video["start_time"],
         "timeline":{"analysis_fps":30,"origin":"original_relative_seconds",
             "frame_time":"frame_index / 30","source_offset_sec":0.0}
-    });
+    }))?;
     if let Some(stamp) = change {
         let mut entries = cache.lock().map_err(|_| "Original proof lock poisoned")?;
         if entries.len() >= 32 {
@@ -710,6 +717,26 @@ impl PreparationPlan {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fractional_fps_provenance_survives_json_evidence_serialization() {
+        let fps = 91250.0f64 / 3041.0;
+        let proof = serde_json::json!({
+            "schema":"volley-original-source/1",
+            "sha256":"abc",
+            "size_bytes":123,
+            "video":{"fps":fps,"duration_sec":4.004},
+        });
+        let normalized = super::canonical_source_proof(proof).unwrap();
+        let saved = serde_json::to_vec(&normalized).unwrap();
+        let restored: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(normalized, restored);
+        assert_eq!(
+            super::canonical_source_proof(restored.clone()).unwrap(),
+            restored
+        );
+        assert!((restored["video"]["fps"].as_f64().unwrap() - fps).abs() < 32.0 * f64::EPSILON);
+    }
+
     #[test]
     fn original_provenance_hashes_content_and_maps_analysis_to_relative_time() {
         let root = std::env::temp_dir().join(format!("volley-provenance-{}", std::process::id()));

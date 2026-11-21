@@ -581,7 +581,7 @@ fn real_uu_match_gpu_ab_legacy_vs_shared() -> Result<(), String> {
     Ok(())
 }
 
-type PoseBenchmarkRun = (f64, u64, Value, String, String, Vec<Value>);
+type PoseBenchmarkRun = (f64, u64, Value, String, String, Vec<Value>, Vec<Value>);
 
 #[test]
 #[ignore = "requires CUDA models, isolated sample and explicit benchmark inputs"]
@@ -597,10 +597,17 @@ fn original_pose_single_decode_benchmark() -> Result<(), String> {
     fs::create_dir_all(data.join("projects/012345abcdef")).map_err(|e| e.to_string())?;
     let video = "bench.mp4";
     let source = uploads.join(video);
+    let sample_start = std::env::var("VOLLEY_AB_SAMPLE_START_SEC").unwrap_or_else(|_| "28".into());
+    let sample_duration =
+        std::env::var("VOLLEY_AB_SAMPLE_DURATION_SEC").unwrap_or_else(|_| "4".into());
     let status = Command::new("ffmpeg")
-        .args(["-v", "error", "-ss", "28", "-i"])
+        .args(["-v", "error", "-ss"])
+        .arg(&sample_start)
+        .arg("-i")
         .arg(&original)
-        .args(["-t", "4", "-map", "0:v:0", "-an", "-c:v", "copy", "-y"])
+        .arg("-t")
+        .arg(&sample_duration)
+        .args(["-map", "0:v:0", "-an", "-c:v", "copy", "-y"])
         .arg(&source)
         .status()
         .map_err(|e| e.to_string())?;
@@ -632,8 +639,29 @@ fn original_pose_single_decode_benchmark() -> Result<(), String> {
             |_, _, _, _| Ok(()),
         )?;
         let gpu_sec = started.elapsed().as_secs_f64();
+        if std::env::var("VOLLEY_ZERO_COPY_PRIMARY").as_deref() == Ok("1") && !pair.zero_copy {
+            return Err(format!(
+                "GPU A/B requires nvdec_zero_copy, fallback={:?}",
+                pair.fallback_reason
+            ));
+        }
         let ball_sha = model_hash(&app.data_root, &pair.ball_job_id)?;
         let person_sha = model_hash(&app.data_root, &pair.player_job_id)?;
+        let resolved = crate::projects::canonical_source(&app, video)
+            .map_err(|error| format!("Benchmark video lookup: {error:?}"))?;
+        let recorded = manifest(&app.data_root, "native_gpu_runs", &pair.ball_job_id)?
+            ["original_source"]
+            .clone();
+        let canonical_proof = volley_media::preparation::source_provenance(&resolved)?;
+        if recorded != canonical_proof {
+            return Err(format!(
+                "GPU A/B original differs: requested={} resolved={} recorded={} actual={}",
+                source.display(),
+                resolved.display(),
+                recorded,
+                canonical_proof
+            ));
+        }
         let fusion = fusion_pair(&app, video, &pair.ball_job_id, &pair.player_job_id)?;
         let pose = if shared_pose {
             pair.pending_pose
@@ -663,9 +691,20 @@ fn original_pose_single_decode_benchmark() -> Result<(), String> {
             .lines()
             .map(|line| serde_json::from_str(line).map_err(|e| e.to_string()))
             .collect::<Result<Vec<Value>, String>>()?;
-        println!("POSE_BENCH {} frames={} gpu_seconds={gpu_sec:.3} total_seconds={elapsed:.3} poses={} samples={} pose_sha={}",
+        let ball_rows = fs::read_to_string(
+            app.data_root
+                .join("projects/012345abcdef/native_gpu_runs")
+                .join(&pair.ball_job_id)
+                .join("detections.jsonl"),
+        )
+        .map_err(|e| e.to_string())?
+        .lines()
+        .map(|line| serde_json::from_str(line).map_err(|e| e.to_string()))
+        .collect::<Result<Vec<Value>, String>>()?;
+        println!("POSE_BENCH {} parallel={} frames={} gpu_seconds={gpu_sec:.3} total_seconds={elapsed:.3} poses={} samples={} pose_sha={} ball_sha={} person_sha={}",
             if shared_pose {"single"} else {"baseline"},
-            pair.decoded_frames,pose["player_poses"],pose["sampled_frames"],pose["sha256"]);
+            std::env::var("VOLLEY_PARALLEL_POSE").unwrap_or_else(|_| "default".into()),
+            pair.decoded_frames,pose["player_poses"],pose["sampled_frames"],pose["sha256"],ball_sha,person_sha);
         Ok((
             elapsed,
             pair.decoded_frames,
@@ -673,20 +712,93 @@ fn original_pose_single_decode_benchmark() -> Result<(), String> {
             ball_sha,
             person_sha,
             rows,
+            ball_rows,
         ))
     };
     match std::env::var("VOLLEY_AB_VARIANT").as_deref() {
-        Ok("compare") | Ok("reverse") => {
-            let (baseline, shared) =
-                if std::env::var("VOLLEY_AB_VARIANT").as_deref() == Ok("reverse") {
+        Ok(
+            "compare"
+            | "reverse"
+            | "pipeline"
+            | "pipeline_reverse"
+            | "pipeline_repeat_inline"
+            | "pipeline_warmed"
+            | "pipeline_warmed_reverse",
+        ) => {
+            let (baseline, shared) = match std::env::var("VOLLEY_AB_VARIANT").as_deref() {
+                Ok("pipeline_warmed") | Ok("pipeline_warmed_reverse") => {
+                    let reverse = std::env::var("VOLLEY_AB_VARIANT").as_deref()
+                        == Ok("pipeline_warmed_reverse");
+                    std::env::set_var("VOLLEY_PARALLEL_POSE", "0");
+                    let _ = run(true)?;
+                    std::env::set_var("VOLLEY_PARALLEL_POSE", "1");
+                    let _ = run(true)?;
+                    if reverse {
+                        std::env::set_var("VOLLEY_PARALLEL_POSE", "1");
+                        let shared = run(true)?;
+                        std::env::set_var("VOLLEY_PARALLEL_POSE", "0");
+                        (run(true)?, shared)
+                    } else {
+                        std::env::set_var("VOLLEY_PARALLEL_POSE", "0");
+                        let baseline = run(true)?;
+                        std::env::set_var("VOLLEY_PARALLEL_POSE", "1");
+                        (baseline, run(true)?)
+                    }
+                }
+                Ok("pipeline_repeat_inline") => {
+                    std::env::set_var("VOLLEY_PARALLEL_POSE", "0");
+                    (run(true)?, run(true)?)
+                }
+                Ok("pipeline") => {
+                    std::env::set_var("VOLLEY_PARALLEL_POSE", "0");
+                    let baseline = run(true)?;
+                    std::env::set_var("VOLLEY_PARALLEL_POSE", "1");
+                    (baseline, run(true)?)
+                }
+                Ok("pipeline_reverse") => {
+                    std::env::set_var("VOLLEY_PARALLEL_POSE", "1");
                     let shared = run(true)?;
-                    let baseline = run(false)?;
-                    (baseline, shared)
-                } else {
-                    (run(false)?, run(true)?)
-                };
+                    std::env::set_var("VOLLEY_PARALLEL_POSE", "0");
+                    (run(true)?, shared)
+                }
+                Ok("reverse") => {
+                    let shared = run(true)?;
+                    (run(false)?, shared)
+                }
+                _ => (run(false)?, run(true)?),
+            };
+            if baseline.3 != shared.3 {
+                let first = baseline
+                    .6
+                    .iter()
+                    .zip(&shared.6)
+                    .enumerate()
+                    .find(|(_, (old, new))| old != new);
+                let changed = baseline
+                    .6
+                    .iter()
+                    .zip(&shared.6)
+                    .filter(|(old, new)| old != new)
+                    .count();
+                eprintln!(
+                    "BALL_AB mismatch: rows_old={} rows_new={} changed={} first={:?}",
+                    baseline.6.len(),
+                    shared.6.len(),
+                    changed,
+                    first.map(|(index, (old, new))| (index, old, new))
+                );
+            }
             if baseline.1 != shared.1 || baseline.3 != shared.3 || baseline.4 != shared.4 {
                 return Err("GPU detection frame counts or SHA changed with native pose".into());
+            }
+            if matches!(
+                std::env::var("VOLLEY_AB_VARIANT").as_deref(),
+                Ok("pipeline" | "pipeline_reverse" | "pipeline_warmed" | "pipeline_warmed_reverse")
+            ) && baseline.2["player_poses"].as_u64().unwrap_or(0) == 0
+            {
+                return Err(
+                    "Parallel pose comparison requires actual players and pose crops".into(),
+                );
             }
             if baseline.2["sampled_frames"] != shared.2["sampled_frames"]
                 || baseline.2["player_poses"] != shared.2["player_poses"]

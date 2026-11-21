@@ -98,7 +98,7 @@ pub(super) fn run(
     range: Option<volley_media::raw_decoder::AnalysisRange>,
     ball_engine: &mut Engine,
     person_engine: &mut PersonEngine,
-    pose: &RefCell<Option<PoseStream>>,
+    pose: Option<&GpuPoseStage>,
     mut ball_writer: Option<&mut EvidenceWriter>,
     mut person_writer: Option<&mut EvidenceWriter>,
     pass: ScanPass<'_>,
@@ -130,7 +130,7 @@ pub(super) fn run(
     let target_frames = (duration * 30.0).round().max(0.0) as u64;
     let start = range.map_or(0.0, |r| r.start_sec);
     let timestamps = &source.timeline.timestamps;
-    let keep_pose = pose.borrow().is_some() && !matches!(pass, ScanPass::BallOnly);
+    let keep_pose = pose.is_some() && !matches!(pass, ScanPass::BallOnly);
     let selection = match pass {
         ScanPass::PlayersOnly(mask) => mask.selected.clone(),
         ScanPass::Both | ScanPass::BallOnly => vec![(0, target_frames.saturating_sub(1))],
@@ -206,9 +206,7 @@ pub(super) fn run(
                 writer.push(first, &observations)?;
             }
             if keep_pose {
-                let mut active_pose = pose.borrow_mut();
-                let stage = active_pose.as_mut().ok_or("Missing primary pose stage")?;
-                stage.observe_cuda(
+                pose.ok_or("Missing primary pose stage")?.observe_cuda(
                     first,
                     std::mem::take(&mut sampled_frames),
                     pitch,
@@ -367,9 +365,8 @@ pub(super) fn run(
         return Err("NVDEC video does not contain a complete model window".into());
     }
     if keep_pose {
-        let mut active_pose = pose.borrow_mut();
-        let stage = active_pose.as_mut().ok_or("Missing primary pose stage")?;
-        stage.tail_cuda(expected_index, cancelled)?;
+        pose.ok_or("Missing primary pose stage")?
+            .tail_cuda(expected_index, cancelled)?;
     }
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());

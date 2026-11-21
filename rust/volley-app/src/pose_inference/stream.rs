@@ -2,7 +2,15 @@
 //! and the detector. Nothing becomes a reusable pose run until fusion SHA
 //! and frame/source identities are verified.
 use super::*;
-use std::{collections::VecDeque, io::BufWriter, path::PathBuf, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    io::BufWriter,
+    path::{Path, PathBuf},
+    sync::{atomic::Ordering, mpsc, Arc},
+    thread,
+    time::Duration,
+};
 use volley_inference::gpu_preprocess::{GpuBuffer, GpuPreprocessor};
 use volley_media::raw_decoder::{PrimaryFrameBatch, MAX_NATIVE_RGB_FRAME_BYTES};
 
@@ -103,6 +111,315 @@ pub(crate) struct PendingPose {
     video: String,
 }
 
+enum PoseTask {
+    Observe {
+        first_frame: u64,
+        frames: Vec<Option<Arc<GpuBuffer>>>,
+        pitch: usize,
+        matrix: u8,
+        width: usize,
+        height: usize,
+        detected: Vec<RawDetection>,
+        allow_skipped_frames: bool,
+    },
+    Tail(u64),
+    Finish {
+        decoded_frames: u64,
+        windows: usize,
+    },
+}
+
+pub(crate) struct PoseWorker {
+    sender: Option<mpsc::SyncSender<PoseTask>>,
+    handle: Option<thread::JoinHandle<Result<PendingPose, String>>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl PoseWorker {
+    #[expect(clippy::too_many_arguments)]
+    fn start(
+        app: &AppState,
+        project_id: &str,
+        video: &str,
+        original_source: Value,
+        source_identity: Value,
+        sample_stride: usize,
+        gpu_memory_mb: u64,
+        cpu_threads: usize,
+    ) -> Result<Self, String> {
+        let repository = app.repository_root.clone();
+        let project_root = projects::project_root(app);
+        let writes_enabled = app.writes_enabled;
+        let project_id = project_id.to_owned();
+        let video = video.to_owned();
+        let (sender, receiver) = mpsc::sync_channel::<PoseTask>(2);
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let handle = thread::Builder::new()
+            .name("volley-rtmpose".into())
+            .spawn(move || {
+                volley_inference::gpu_preprocess::bind_cuda_thread()?;
+                let stage = PoseStream::new_at(
+                    &repository,
+                    &project_root,
+                    writes_enabled,
+                    &project_id,
+                    &video,
+                    original_source,
+                    source_identity,
+                    sample_stride,
+                    gpu_memory_mb,
+                    cpu_threads,
+                );
+                let _ = ready_sender.send(stage.as_ref().map(|_| ()).map_err(Clone::clone));
+                let mut stage = stage?;
+                while let Ok(task) = receiver.recv() {
+                    if worker_cancelled.load(Ordering::Acquire) {
+                        return Err("cancelled".into());
+                    }
+                    match task {
+                        PoseTask::Observe {
+                            first_frame,
+                            frames,
+                            pitch,
+                            matrix,
+                            width,
+                            height,
+                            detected,
+                            allow_skipped_frames,
+                        } => stage.observe_cuda(
+                            first_frame,
+                            frames,
+                            pitch,
+                            matrix,
+                            width,
+                            height,
+                            &detected,
+                            allow_skipped_frames,
+                            &worker_cancelled,
+                        )?,
+                        PoseTask::Tail(frames) => stage.tail_cuda(frames, &worker_cancelled)?,
+                        PoseTask::Finish {
+                            decoded_frames,
+                            windows,
+                        } => {
+                            return stage.finish(decoded_frames, windows, &worker_cancelled);
+                        }
+                    }
+                }
+                Err("RTMPose pipeline closed without a finish message".into())
+            })
+            .map_err(|error| format!("Spawn parallel RTMPose worker: {error}"))?;
+        match ready_receiver.recv() {
+            Ok(Ok(())) => Ok(Self {
+                sender: Some(sender),
+                handle: Some(handle),
+                cancelled,
+            }),
+            result => {
+                cancelled.store(true, Ordering::Release);
+                drop(sender);
+                let joined = handle.join();
+                let reason = match result {
+                    Ok(Err(error)) => error,
+                    _ => match joined {
+                        Ok(Err(error)) => error,
+                        Ok(Ok(_)) => "RTMPose worker exited during startup".into(),
+                        Err(_) => "RTMPose worker panicked during startup".into(),
+                    },
+                };
+                Err(reason)
+            }
+        }
+    }
+
+    fn worker_error(&mut self) -> String {
+        self.sender.take();
+        match self.handle.take() {
+            Some(handle) => match handle.join() {
+                Ok(Err(reason)) => reason,
+                Ok(Ok(_)) => "RTMPose pipeline closed unexpectedly".into(),
+                Err(_) => "RTMPose worker panicked".into(),
+            },
+            None => "RTMPose pipeline is unavailable".into(),
+        }
+    }
+
+    fn send(&mut self, task: PoseTask, cancel: &AtomicBool) -> Result<(), String> {
+        if cancel.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        let mut task = task;
+        loop {
+            if cancel.load(Ordering::Acquire) {
+                return Err("cancelled".into());
+            }
+            let sender = self
+                .sender
+                .as_ref()
+                .ok_or("RTMPose pipeline is already finished")?;
+            match sender.try_send(task) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::TrySendError::Disconnected(_)) => return Err(self.worker_error()),
+                Err(mpsc::TrySendError::Full(pending)) => {
+                    task = pending;
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+    }
+
+    fn finish(
+        mut self,
+        decoded_frames: u64,
+        windows: usize,
+        cancel: &AtomicBool,
+    ) -> Result<PendingPose, String> {
+        self.send(
+            PoseTask::Finish {
+                decoded_frames,
+                windows,
+            },
+            cancel,
+        )?;
+        self.sender.take();
+        let handle = self.handle.take().ok_or("Missing RTMPose worker thread")?;
+        match handle.join() {
+            Ok(result) => result,
+            Err(_) => Err("RTMPose worker panicked before completing the evidence".into()),
+        }
+    }
+}
+
+impl Drop for PoseWorker {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.sender.take();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+pub(crate) enum GpuPoseStage {
+    Inline(Box<RefCell<PoseStream>>),
+    Pipelined(RefCell<PoseWorker>),
+}
+
+impl GpuPoseStage {
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        app: &AppState,
+        project_id: &str,
+        video: &str,
+        original_source: Value,
+        source_identity: Value,
+        sample_stride: usize,
+        gpu_memory_mb: u64,
+        cpu_threads: usize,
+    ) -> Result<Self, String> {
+        if !matches!(
+            std::env::var("VOLLEY_PARALLEL_POSE").ok().as_deref(),
+            Some("1" | "true"),
+        ) {
+            Ok(Self::Inline(Box::new(RefCell::new(PoseStream::new(
+                app,
+                project_id,
+                video,
+                original_source,
+                source_identity,
+                sample_stride,
+                gpu_memory_mb,
+                cpu_threads,
+            )?))))
+        } else {
+            Ok(Self::Pipelined(RefCell::new(PoseWorker::start(
+                app,
+                project_id,
+                video,
+                original_source,
+                source_identity,
+                sample_stride,
+                gpu_memory_mb,
+                cpu_threads,
+            )?)))
+        }
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) fn observe_cuda(
+        &self,
+        first_frame: u64,
+        frames: Vec<Option<Arc<GpuBuffer>>>,
+        pitch: usize,
+        matrix: u8,
+        width: usize,
+        height: usize,
+        detected: &[RawDetection],
+        allow_skipped_frames: bool,
+        cancelled: &AtomicBool,
+    ) -> Result<(), String> {
+        match self {
+            Self::Inline(stage) => stage.borrow_mut().observe_cuda(
+                first_frame,
+                frames,
+                pitch,
+                matrix,
+                width,
+                height,
+                detected,
+                allow_skipped_frames,
+                cancelled,
+            ),
+            Self::Pipelined(worker) => worker.borrow_mut().send(
+                PoseTask::Observe {
+                    first_frame,
+                    frames,
+                    pitch,
+                    matrix,
+                    width,
+                    height,
+                    detected: detected.to_vec(),
+                    allow_skipped_frames,
+                },
+                cancelled,
+            ),
+        }
+    }
+
+    pub(crate) fn tail_cuda(
+        &self,
+        decoded_frames: u64,
+        cancelled: &AtomicBool,
+    ) -> Result<(), String> {
+        match self {
+            Self::Inline(stage) => stage.borrow_mut().tail_cuda(decoded_frames, cancelled),
+            Self::Pipelined(worker) => worker
+                .borrow_mut()
+                .send(PoseTask::Tail(decoded_frames), cancelled),
+        }
+    }
+
+    pub(crate) fn finish(
+        self,
+        decoded_frames: u64,
+        windows: usize,
+        cancelled: &AtomicBool,
+    ) -> Result<PendingPose, String> {
+        match self {
+            Self::Inline(stage) => stage
+                .into_inner()
+                .finish(decoded_frames, windows, cancelled),
+            Self::Pipelined(worker) => {
+                worker
+                    .into_inner()
+                    .finish(decoded_frames, windows, cancelled)
+            }
+        }
+    }
+}
+
 impl PoseStream {
     #[expect(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -115,24 +432,44 @@ impl PoseStream {
         gpu_memory_mb: u64,
         cpu_threads: usize,
     ) -> Result<Self, String> {
-        if !(1..=30).contains(&sample_stride) || !app.writes_enabled {
+        Self::new_at(
+            &app.repository_root,
+            &projects::project_root(app),
+            app.writes_enabled,
+            project_id,
+            video,
+            original_source,
+            source_identity,
+            sample_stride,
+            gpu_memory_mb,
+            cpu_threads,
+        )
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn new_at(
+        repository: &Path,
+        project_root: &Path,
+        writes_enabled: bool,
+        project_id: &str,
+        video: &str,
+        original_source: Value,
+        source_identity: Value,
+        sample_stride: usize,
+        gpu_memory_mb: u64,
+        cpu_threads: usize,
+    ) -> Result<Self, String> {
+        if !(1..=30).contains(&sample_stride) || !writes_enabled {
             return Err("Invalid shared pose stream configuration".into());
         }
-        let model = app.repository_root.join("models").join(MODEL_FILE);
+        let model = repository.join("models").join(MODEL_FILE);
         safe_file(&model, 256 * 1024 * 1024)?;
         let model_sha = file_hash(&model)?;
         if model_sha != MODEL_SHA256 {
             return Err("RTMPose model fingerprint does not match the official ONNX".into());
         }
-        let engine = PoseEngine::load(
-            &app.repository_root,
-            Device::Cuda,
-            cpu_threads,
-            gpu_memory_mb,
-        )?;
-        let runs = projects::project_root(app)
-            .join(project_id)
-            .join("native_gpu_pose_runs");
+        let engine = PoseEngine::load(repository, Device::Cuda, cpu_threads, gpu_memory_mb)?;
+        let runs = project_root.join(project_id).join("native_gpu_pose_runs");
         fs::create_dir_all(&runs).map_err(|error| format!("Create pose runs: {error}"))?;
         let run_id = Uuid::new_v4().simple().to_string();
         let folder = runs.join(&run_id);

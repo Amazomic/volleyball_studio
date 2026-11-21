@@ -58,6 +58,11 @@ fn cuda(result: CUresult, operation: &str) -> Result<(), String> {
     }
 }
 
+pub fn bind_cuda_thread() -> Result<(), String> {
+    mini_cuda::bind_primary_ctx_for_device(0)
+        .map_err(|error| format!("Bind CUDA pose worker context: {error}"))
+}
+
 fn ensure() -> Result<&'static DriverApi, String> {
     mini_cuda::bind_primary_ctx_for_device(0)
         .map_err(|error| format!("Bind CUDA preprocessing context: {error}"))?;

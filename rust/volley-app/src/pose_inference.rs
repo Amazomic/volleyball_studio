@@ -14,7 +14,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 #[cfg(any(unix, windows))]
-pub(crate) use stream::{PendingPose, PoseStream};
+pub(crate) use stream::{GpuPoseStage, PendingPose, PoseStream};
 use uuid::Uuid;
 #[cfg(any(test, unix, windows))]
 use volley_inference::decode::RawDetection;

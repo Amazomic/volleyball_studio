@@ -3,7 +3,7 @@
 use super::*;
 mod rally_mask;
 mod zero_copy;
-use crate::pose_inference::{PendingPose, PoseStream};
+use crate::pose_inference::{GpuPoseStage, PendingPose, PoseStream};
 use rally_mask::RallyMask;
 use std::cell::RefCell;
 use std::sync::OnceLock;
@@ -364,22 +364,6 @@ pub(crate) fn run_joint_pair(
 
     let mut ball_writer = EvidenceWriter::create(&ball.folder)?;
     let mut person_writer = EvidenceWriter::create(&players.folder)?;
-    let pose = if pose_enabled {
-        let (pose_original, pose_source) = pose_manifest_identities(&original_provenance, before);
-        Some(PoseStream::new(
-            state,
-            project_id,
-            video,
-            pose_original,
-            pose_source,
-            person_stride,
-            session_memory,
-            cpu_threads,
-        )?)
-    } else {
-        None
-    };
-    let pose = RefCell::new(pose);
     let estimated = (duration * 30.0).max(9.0);
     let (zero_copy_codec, zero_copy_unavailable) = match zero_copy_codec(original, cancelled) {
         Ok(source) => (Some(source), None),
@@ -387,6 +371,22 @@ pub(crate) fn run_joint_pair(
         Err(error) => (None, Some(error)),
     };
     let zero_copy = zero_copy_codec.is_some();
+    let (pose_original, pose_source) = pose_manifest_identities(&original_provenance, before);
+    let pose = RefCell::new(if pose_enabled && !zero_copy {
+        Some(PoseStream::new(
+            state,
+            project_id,
+            video,
+            pose_original.clone(),
+            pose_source.clone(),
+            person_stride,
+            session_memory,
+            cpu_threads,
+        )?)
+    } else {
+        None
+    });
+    let mut gpu_pose = None;
     let mut rally_filter = None;
     let mut player_target = total_frames;
     let prefilter = !matches!(
@@ -406,7 +406,7 @@ pub(crate) fn run_joint_pair(
                 range,
                 &mut ball_engine,
                 &mut person_engine,
-                &pose,
+                gpu_pose.as_ref(),
                 Some(&mut ball_writer),
                 None,
                 zero_copy::ScanPass::BallOnly,
@@ -499,6 +499,18 @@ pub(crate) fn run_joint_pair(
         )?;
         rally_filter = Some(mask_value);
         let mut player_samples = 0u64;
+        if zero_copy && pose_enabled {
+            gpu_pose = Some(GpuPoseStage::new(
+                state,
+                project_id,
+                video,
+                pose_original.clone(),
+                pose_source.clone(),
+                person_stride,
+                session_memory,
+                cpu_threads,
+            )?);
+        }
         let people_scan = if let Some(source_info) = zero_copy_codec.clone() {
             let decode = zero_copy::run(
                 original,
@@ -506,7 +518,7 @@ pub(crate) fn run_joint_pair(
                 range,
                 &mut ball_engine,
                 &mut person_engine,
-                &pose,
+                gpu_pose.as_ref(),
                 None,
                 Some(&mut person_writer),
                 zero_copy::ScanPass::PlayersOnly(&mask),
@@ -593,13 +605,25 @@ pub(crate) fn run_joint_pair(
         }
         people_scan
     } else if let Some(source_info) = zero_copy_codec {
+        if pose_enabled {
+            gpu_pose = Some(GpuPoseStage::new(
+                state,
+                project_id,
+                video,
+                pose_original,
+                pose_source,
+                person_stride,
+                session_memory,
+                cpu_threads,
+            )?);
+        }
         let decode = zero_copy::run(
             original,
             source_info,
             range,
             &mut ball_engine,
             &mut person_engine,
-            &pose,
+            gpu_pose.as_ref(),
             Some(&mut ball_writer),
             Some(&mut person_writer),
             zero_copy::ScanPass::Both,
@@ -693,16 +717,23 @@ pub(crate) fn run_joint_pair(
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
-    let pending_pose = pose
-        .into_inner()
-        .map(|stage| {
-            stage.finish(
-                summary.decode.decoded_frames,
-                summary.decode.windows,
-                cancelled,
-            )
-        })
-        .transpose()?;
+    let pending_pose = if let Some(stage) = gpu_pose {
+        Some(stage.finish(
+            summary.decode.decoded_frames,
+            summary.decode.windows,
+            cancelled,
+        )?)
+    } else {
+        pose.into_inner()
+            .map(|stage| {
+                stage.finish(
+                    summary.decode.decoded_frames,
+                    summary.decode.windows,
+                    cancelled,
+                )
+            })
+            .transpose()?
+    };
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }

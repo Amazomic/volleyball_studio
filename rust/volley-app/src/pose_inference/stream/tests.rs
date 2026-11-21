@@ -181,3 +181,113 @@ fn incomplete_pose_folder_never_survives_cancellation_or_failed_fusion() {
     drop(artifact);
     assert!(!root.exists());
 }
+
+#[test]
+fn parallel_pose_queue_retains_order_and_waits_for_final_artifact() {
+    let (pending, _) = fake_pending();
+    let (sender, receiver) = mpsc::sync_channel::<PoseTask>(2);
+    let handle = thread::spawn(move || {
+        let mut seen = Vec::new();
+        loop {
+            match receiver.recv().unwrap() {
+                PoseTask::Tail(frame) => seen.push(frame),
+                PoseTask::Finish {
+                    decoded_frames,
+                    windows,
+                } => {
+                    assert_eq!(seen, vec![18, 36]);
+                    assert_eq!((decoded_frames, windows), (36, 4));
+                    return Ok(pending);
+                }
+                PoseTask::Observe { .. } => return Err("Unexpected test frame".into()),
+            }
+        }
+    });
+    let mut worker = PoseWorker {
+        sender: Some(sender),
+        handle: Some(handle),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    };
+    let cancel = AtomicBool::new(false);
+    worker.send(PoseTask::Tail(18), &cancel).unwrap();
+    worker.send(PoseTask::Tail(36), &cancel).unwrap();
+    let finished = worker.finish(36, 4, &cancel).unwrap();
+    assert_eq!(finished.run_id.len(), 32);
+}
+
+#[test]
+fn parallel_pose_worker_propagates_failure_and_never_publishes() {
+    let (sender, receiver) = mpsc::sync_channel(2);
+    let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+    let handle = thread::spawn(move || {
+        drop(receiver);
+        ready_sender.send(()).unwrap();
+        Err("RTMPose inference rejected the batch".to_owned())
+    });
+    ready_receiver.recv().unwrap();
+    let mut worker = PoseWorker {
+        sender: Some(sender),
+        handle: Some(handle),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    };
+    assert_eq!(
+        worker.send(PoseTask::Tail(18), &AtomicBool::new(false)),
+        Err("RTMPose inference rejected the batch".into())
+    );
+}
+
+#[test]
+fn parallel_pose_worker_drop_closes_queue_and_joins() {
+    let exited = Arc::new(AtomicBool::new(false));
+    let finished = Arc::clone(&exited);
+    let (sender, receiver) = mpsc::sync_channel::<PoseTask>(2);
+    let handle = thread::spawn(move || {
+        while receiver.recv().is_ok() {}
+        finished.store(true, Ordering::Release);
+        Err("RTMPose worker stopped".to_owned())
+    });
+    {
+        let _worker = PoseWorker {
+            sender: Some(sender),
+            handle: Some(handle),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+    }
+    assert!(exited.load(Ordering::Acquire));
+}
+
+#[test]
+fn parallel_pose_cancel_while_queue_full() {
+    let (sender, receiver) = mpsc::sync_channel(2);
+    let (release_sender, release_receiver) = mpsc::channel::<()>();
+    let (started_sender, started_receiver) = mpsc::channel::<()>();
+    let handle = thread::spawn(move || {
+        started_sender.send(()).unwrap();
+        release_receiver.recv().unwrap();
+        drop(receiver);
+        Err("cancelled".to_owned())
+    });
+    started_receiver.recv().unwrap();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut worker = PoseWorker {
+        sender: Some(sender),
+        handle: Some(handle),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    };
+    worker.send(PoseTask::Tail(1), &cancelled).unwrap();
+    worker.send(PoseTask::Tail(2), &cancelled).unwrap();
+    let stopper = Arc::clone(&cancelled);
+    let cancel_task = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(25));
+        stopper.store(true, Ordering::Release);
+    });
+    let started = std::time::Instant::now();
+    assert_eq!(
+        worker.send(PoseTask::Tail(3), &cancelled),
+        Err("cancelled".into())
+    );
+    assert!(started.elapsed() < Duration::from_millis(250));
+    release_sender.send(()).unwrap();
+    cancel_task.join().unwrap();
+    drop(worker);
+}
