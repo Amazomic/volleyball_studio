@@ -58,6 +58,9 @@ fn photo_candidate(track: &Aggregate, index: usize) -> (u64, [f64; 4]) {
         _ => (track.best_frame, track.best_box),
     }
 }
+fn photo_filter([x, y, width, height]: [u32; 4]) -> String {
+    format!("crop={width}:{height}:{x}:{y},setsar=1")
+}
 pub async fn photo(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PhotoQuery>,
@@ -103,7 +106,7 @@ pub async fn photo(
     .map_err(|e| storage::internal(format!("Player photo verification task: {e}")))??;
     let (prepared, frame, [x, y, width, height], stamp, analysis_offset) = photo_plan;
     let time = format!("{:.4}", analysis_offset + frame as f64 / 30.0);
-    let vf = format!("crop={width}:{height}:{x}:{y},scale=240:-2,setsar=1");
+    let vf = photo_filter([x, y, width, height]);
     let mut cmd = tokio::process::Command::new("ffmpeg");
     cmd.args([
         "-nostdin",
@@ -161,6 +164,13 @@ pub async fn photo(
 mod tests {
     use super::*;
 
+    #[test]
+    fn track_photo_filter_preserves_source_crop_resolution() {
+        assert_eq!(
+            photo_filter([40, 20, 398, 738]),
+            "crop=398:738:40:20,setsar=1"
+        );
+    }
     #[test]
     fn photo_candidates_advance_and_wrap_with_their_own_boxes() {
         let track = Aggregate {
