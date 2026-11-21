@@ -68,10 +68,14 @@ Before sending SIGTERM, the WSL controller verifies the returned PID,
 the expected Rust executable path and checkout working directory using
 /proc, and GET /internal/rewrite-status must report shutdown_safe=true
 and active_jobs=[]. GPU inference, FFmpeg montage, CPU processing, video
-preparation, and Quick Reel jobs block restart. SIGINT and SIGTERM both
-use native Tokio graceful shutdown; no force kill, Python process kill,
-or generic port-based termination is present. Full shutdown race fault
-injection is deferred to stage83.
+preparation, Quick Reel jobs and in-flight HTTP response bodies block restart.
+In particular, an open Range video/audio stream remains active until its
+response body finishes or the client disconnects. While another response
+is open, status reports shutdown_safe=false and active_jobs includes
+http_responses. Close active browser playback and retry the guarded restart;
+do not escalate from a refusal to SIGKILL. SIGINT and SIGTERM both use native
+Tokio graceful shutdown; no force kill, Python process kill,
+or generic port-based termination is present.
 
 ## Native offline Linux source build
 
@@ -188,9 +192,11 @@ The test only starts its own disposable non-root container with
 ## Historical stage83 security and fault-injection acceptance
 
 An Axum lifecycle barrier closes the status-to-SIGTERM race: after
- confirming zero in-flight requests and active native tasks, incoming
- requests are denied. SIGTERM during HTTP/GPU/CPU/FFmpeg work is
- refused and audited, never force-killed. The global request gate
+ confirming zero in-flight handlers, unfinished response bodies and active
+ native tasks, incoming requests are denied. The guard owns the response
+ body rather than only the handler future; incomplete streaming downloads
+ and Range responses cannot cause a false-safe shutdown. SIGTERM during
+ HTTP/GPU/CPU/FFmpeg work is refused, never force-killed. The global request gate
  rejects foreign Host, Origin and Sec-Fetch-Site headers on all routes.
 
 Prepared MP4 cache reuse now requires a SHA-256 and byte-size manifest

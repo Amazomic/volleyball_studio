@@ -1081,6 +1081,7 @@ dependencies = [
  "chrono",
  "fs2",
  "half",
+ "http-body-util",
  "percent-encoding",
  "serde",
  "serde_json",

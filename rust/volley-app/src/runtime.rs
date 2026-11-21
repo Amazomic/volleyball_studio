@@ -104,6 +104,13 @@ impl ShutdownGate {
             .unwrap_or_else(|e| e.into_inner())
             .draining = false;
     }
+
+    fn inflight(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .inflight
+    }
     #[cfg(test)]
     fn is_draining(&self) -> bool {
         self.state
@@ -155,10 +162,30 @@ pub(crate) async fn guard_request(
     if let Err(status) = validate_local_request(request.headers()) {
         return status.into_response();
     }
-    let Some(_hold) = gate.enter() else {
+    let Some(hold) = gate.enter() else {
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    next.run(request).await
+    let response = next.run(request).await;
+    if axum::body::HttpBody::size_hint(response.body())
+        .exact()
+        .is_some()
+    {
+        return response;
+    }
+    hold_until_body_finishes(response, hold)
+}
+
+fn hold_until_body_finishes(
+    response: axum::response::Response,
+    hold: RequestHold,
+) -> axum::response::Response {
+    use http_body_util::BodyExt;
+    let (parts, body) = response.into_parts();
+    let wrapped = body.map_frame(move |frame| {
+        let _ = &hold;
+        frame
+    });
+    axum::response::Response::from_parts(parts, axum::body::Body::new(wrapped))
 }
 pub(crate) async fn try_shutdown(state: &AppState, gate: &ShutdownGate) -> bool {
     if !gate.begin_shutdown() {
@@ -245,8 +272,12 @@ pub(crate) async fn active_job_types(state: &AppState) -> Vec<&'static str> {
 }
 pub(crate) async fn rewrite_status(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::Extension(gate): axum::Extension<Arc<ShutdownGate>>,
 ) -> Json<RewriteStatus> {
-    let active_jobs = active_job_types(&state).await;
+    let mut active_jobs = active_job_types(&state).await;
+    if gate.inflight() > 1 {
+        active_jobs.push("http_responses");
+    }
     Json(RewriteStatus {
         name: "Volleyball Studio - development instance",
         migration_complete: false,
@@ -384,10 +415,14 @@ mod tests {
             super::active_job_types(&state).await,
             vec!["statistics_processing"]
         );
-        let axum::Json(status) = super::rewrite_status(axum::extract::State(state.clone())).await;
+        let gate = std::sync::Arc::new(ShutdownGate::default());
+        let axum::Json(status) = super::rewrite_status(
+            axum::extract::State(state.clone()),
+            axum::Extension(gate.clone()),
+        )
+        .await;
         assert!(!status.shutdown_safe);
         assert_eq!(status.active_jobs, vec!["statistics_processing"]);
-        let gate = std::sync::Arc::new(ShutdownGate::default());
         let request = gate.enter().unwrap();
         assert!(
             !try_shutdown(&state, &gate).await,
@@ -406,9 +441,94 @@ mod tests {
             "Shutdown barrier rejects new requests after safe confirmation"
         );
         gate.cancel_shutdown();
+        let stream_hold = gate.enter().unwrap();
+        let status_hold = gate.enter().unwrap();
+        let axum::Json(status) = super::rewrite_status(
+            axum::extract::State(state.clone()),
+            axum::Extension(gate.clone()),
+        )
+        .await;
+        assert!(!status.shutdown_safe);
+        assert_eq!(status.active_jobs, vec!["http_responses"]);
+        drop(status_hold);
+        drop(stream_hold);
+        let status_hold = gate.enter().unwrap();
+        let axum::Json(status) =
+            super::rewrite_status(axum::extract::State(state), axum::Extension(gate.clone())).await;
+        assert!(status.shutdown_safe);
+        drop(status_hold);
         assert!(gate.enter().is_some());
         fs::remove_dir_all(root).unwrap();
     }
+    #[tokio::test]
+    async fn streaming_http_body_prevents_shutdown_after_handler_returns() {
+        use axum::{body::Body, routing::get, Router};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let gate = Arc::new(ShutdownGate::default());
+        let (reader, mut writer) = tokio::io::duplex(1024);
+        let pending_reader = Arc::new(std::sync::Mutex::new(Some(reader)));
+        let routed_reader = pending_reader.clone();
+        let app = Router::new()
+            .route(
+                "/stream",
+                get(move || {
+                    let reader = routed_reader.clone();
+                    async move {
+                        let source = reader.lock().unwrap().take().unwrap();
+                        axum::response::Response::new(Body::from_stream(
+                            tokio_util::io::ReaderStream::new(source),
+                        ))
+                    }
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                gate.clone(),
+                guard_request,
+            ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        socket
+            .write_all(
+                format!(
+                    "GET /stream HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\n\r\n",
+                    address
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        writer.write_all(b"sample").await.unwrap();
+        let mut buffer = [0_u8; 4096];
+        let bytes =
+            tokio::time::timeout(std::time::Duration::from_secs(3), socket.read(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(String::from_utf8_lossy(&buffer[..bytes]).contains("200 OK"));
+        assert!(
+            !gate.begin_shutdown(),
+            "Streaming response must keep the request alive after handler return"
+        );
+        drop(writer);
+        drop(socket);
+        for _ in 0..40 {
+            if gate.inflight() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            gate.begin_shutdown(),
+            "Finished stream must release request gate"
+        );
+        server.abort();
+    }
+
     #[test]
     fn localhost_host_origin_and_fetch_site_gate_prevents_dns_rebinding_and_csrf() {
         use axum::http::{header, HeaderMap, HeaderValue, StatusCode};

@@ -420,6 +420,7 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
             post(preparation::cancel_preparation),
         )
         .with_state(state)
+        .layer(axum::Extension(gate.clone()))
         .layer(axum::middleware::from_fn_with_state(
             gate,
             runtime::guard_request,
