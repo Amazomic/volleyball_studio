@@ -815,6 +815,22 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
     let app = state(repository, data);
     let abort = AtomicBool::new(false);
     let info = volley_media::probe(&source)?;
+    let analysis_range = std::env::var("VOLLEY_AB_ANALYSIS_TRIM_START")
+        .ok()
+        .map(|value| {
+            let start_sec = value
+                .parse::<f64>()
+                .map_err(|_| "Invalid GPU smoke trim start")?;
+            let interval = volley_media::raw_decoder::AnalysisRange {
+                start_sec,
+                end_sec: info.duration_sec,
+            };
+            interval.validate(info.duration_sec)?;
+            Ok::<_, String>(interval)
+        })
+        .transpose()?;
+    let analysis_duration =
+        analysis_range.map_or(info.duration_sec, |value| value.end_sec - value.start_sec);
     let person_stride = std::env::var("VOLLEY_AB_PERSON_STRIDE")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -825,8 +841,8 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
         "012345abcdef",
         video,
         &source,
-        info.duration_sec,
-        None,
+        analysis_duration,
+        analysis_range,
         person_stride,
         true,
         0,
@@ -869,6 +885,15 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
     };
     if selected == 0 || selected > pair.decoded_frames {
         return Err("Primary GPU mask selected-frame count is out of bounds".into());
+    }
+    if std::env::var("VOLLEY_AB_EXPECT_SPARSE").as_deref() == Ok("1") {
+        let mask = pair
+            .rally_filter
+            .as_ref()
+            .ok_or("Sparse GPU check requires a rally filter")?;
+        if selected >= pair.decoded_frames || mask["selected"].as_array().map_or(0, Vec::len) < 2 {
+            return Err("GPU did not skip separate non-game intervals".into());
+        }
     }
     let elapsed = started.elapsed().as_secs_f64();
     println!(

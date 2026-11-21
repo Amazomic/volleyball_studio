@@ -13,11 +13,15 @@ video's own saved analysis range:
    outside confirmed intervals are retained as **uncertain** scan candidates,
    not confirmed rallies. When the ball is absent or no reliable interval
    exists, retain the entire allowed video interval.
-5. Decode the allowed range a second time and run RF-DETR only for sampled
-   frames in the selected mask. RTMPose only retains source pixels inside selected intervals (other sampled frames remain empty and time-aligned); it still receives original-resolution
-   video pixels; confirmed touches are not manufactured from the ball mask.
-   Saved model evidence keeps the original 9-frame window layout for fusion
-   and existing CPU ByteTrack replay.
+5. On the native NVDEC path, seek to the preceding keyframe and demux only
+   the selected analysis range for the VBallNet pass. For RF-DETR/RTMPose,
+   seek to the preceding keyframes of each padded gameplay interval and stop
+   demux after the interval (merging overlapping GOPs). Non-game gaps do not
+   enter the hardware decoder; empty evidence windows still preserve the
+   continuous original analysis timeline. RTMPose retains only sampled source
+   pixels inside selected intervals, uses original-resolution video pixels
+   and does not invent touches from the ball mask. The existing nine-frame
+   evidence and CPU ByteTrack replay contracts remain unchanged.
 
 Saved `native_gpu_jobs/<ball_job_id>/rally_mask.json` contains source identity,
 analysis range, detected/merged/uncertain/scanning intervals and selected-frame
@@ -39,8 +43,13 @@ motion to limit missed gameplay.
 - The primary source contract still normalizes to 30 FPS; native frame PTS/VFR
   end-to-end correspondence and the zero-copy timeline require independent
   real-media validation.
-- Ball and people decode separately. The mask is saved but checkpoint-driven
-  restart from an already completed ball pass has **not** been implemented.
+- Ball and people decode separately. NVDEC GOP preroll is still required,
+  but the selected video trim and long pauses between rallies no longer
+  incur hardware decoding outside their keyframe-aligned segments.
+  Source PTS/keyframe metadata are still scanned once before decoding.
+  The FFmpeg RGB fallback retains full-range decoding with an inference
+  mask; its sparse demux is a separate optimization. Checkpoint-driven
+  restart after an already completed ball pass is not implemented.
 - Explicit GPU-stage tuning controls and per-video resource statistics in the
   UI are not complete; the environment toggle supports A/B diagnostics.
 - The CUDA primary input allocation now keeps its ONNX Runtime Allocator
@@ -128,3 +137,28 @@ older strict legacy-to-shared A/B test is still an open, independent
 numerical parity issue. Do not relabel byte-level differences as parity.
 This branch provides a documented opt-out using
 VOLLEY_PRIMARY_RALLY_PREFILTER=0 and does not change published master.
+
+## NVDEC bounded demux acceptance (2026-11-21)
+
+- NVDEC now uses FFmpeg input `-ss` and bounded `-t` stream copy. Keyframe
+  PTS maps independently decoded GOPs back to original source-frame indices.
+  Gaps remain empty evidence windows; RTMPose and nine-frame fusion alignment
+  are preserved.
+- Windows CUDA NV12 test: decoded cropped frames match every corresponding
+  frame of the full-source GPU decode; bounded demux emits fewer frames.
+  Rust unit tests cover keyframe selection and disjoint/coalesced GOP plans.
+- Linux GPU/ORT 1.22 test: actual models and nonzero analysis trim from 2 s
+  successfully run VBallNet, RF-DETR, RTMPose, fusion and CPU replay.
+  On isolated 33.97 s black/game/black/game/black test media trimmed at 1 s,
+  VBallNet found 2 moving-ball intervals; **588 of 989** source timeline
+  frames were selected for player inference (two separate windows), with
+  576 player proposals, 546 poses and successful CPU replay.
+- The same short A/B source measured 17.368 s with two-pass filtering and
+  17.692 s with one-pass GPU. This does not establish a significant speedup
+  on full matches. VBallNet raw evidence SHA was identical in both runs.
+- Full Windows check-all passed fmt, clippy, Rust tests and 92 Node gates.
+  Windows native model test could not start with outdated ORT DLL 1.17.1;
+  model integration succeeded under Linux with ORT 1.22.
+- Remaining limits: long-match timing and independent event accuracy are
+  not measured; FFmpeg RGB fallback is not yet GOP-sparse; uncommon codec
+  timestamp layouts may require that safe fallback.

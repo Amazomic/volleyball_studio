@@ -91,6 +91,49 @@ pub struct NvdecReceipt {
     pub height: usize,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisplayTimeline {
+    pub timestamps: Vec<f64>,
+    pub keyframes: Vec<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NvdecDecodeWindow {
+    pub seek_sec: f64,
+    pub end_sec: f64,
+    pub first_frame: u64,
+}
+
+pub fn keyframe_window(
+    timeline: &DisplayTimeline,
+    start_sec: f64,
+    end_sec: f64,
+) -> Result<NvdecDecodeWindow, String> {
+    if !start_sec.is_finite()
+        || !end_sec.is_finite()
+        || start_sec < 0.0
+        || start_sec >= end_sec
+        || timeline.timestamps.is_empty()
+    {
+        return Err("Invalid bounded NVDEC source interval".into());
+    }
+    let first_needed = closest_display_frame(&timeline.timestamps, start_sec)
+        .ok_or("Missing NVDEC interval start")?;
+    let seek_index = timeline
+        .keyframes
+        .iter()
+        .copied()
+        .take_while(|index| *index <= first_needed)
+        .last()
+        .ok_or("No keyframe before NVDEC interval")?;
+    let seek_sec = timeline.timestamps[seek_index as usize];
+    Ok(NvdecDecodeWindow {
+        seek_sec,
+        end_sec: end_sec.max(seek_sec + 0.1),
+        first_frame: seek_index,
+    })
+}
+
 pub struct GpuNv12Frame<'a> {
     pub frame_index: u64,
     pub device_ptr: u64,
@@ -488,7 +531,7 @@ where
     })
 }
 
-pub fn display_timestamps(source: &std::path::Path) -> Result<Vec<f64>, String> {
+pub fn display_timeline(source: &std::path::Path) -> Result<DisplayTimeline, String> {
     use std::io::Read;
     let mut child = std::process::Command::new("ffprobe")
         .args([
@@ -497,7 +540,7 @@ pub fn display_timestamps(source: &std::path::Path) -> Result<Vec<f64>, String> 
             "-select_streams",
             "v:0",
             "-show_entries",
-            "packet=pts_time",
+            "packet=pts_time,flags",
             "-of",
             "csv=p=0",
         ])
@@ -552,6 +595,7 @@ pub fn display_timestamps(source: &std::path::Path) -> Result<Vec<f64>, String> 
         return Err("NVDEC timestamp probe failed".into());
     }
     let mut times = Vec::new();
+    let mut key_pts = Vec::new();
     for line in bytes.split(|&byte| byte == b'\n') {
         let trimmed = std::str::from_utf8(line)
             .map_err(|_| "Invalid timestamp encoding")?
@@ -559,23 +603,48 @@ pub fn display_timestamps(source: &std::path::Path) -> Result<Vec<f64>, String> 
         if trimmed.is_empty() {
             continue;
         }
-        let time = trimmed
+        let (pts, flags) = trimmed
+            .split_once(',')
+            .ok_or("NVDEC packet flags missing")?;
+        let time = pts
             .parse::<f64>()
             .map_err(|_| "NVDEC packet has no presentation timestamp")?;
         if !time.is_finite() || time < -3600.0 || time > 48.0 * 3600.0 + 3600.0 {
             return Err("NVDEC presentation time outside media bounds".into());
         }
         times.push(time);
+        if flags.contains('K') {
+            key_pts.push(time);
+        }
     }
     if times.is_empty() {
         return Err("NVDEC source has no display timestamps".into());
     }
     times.sort_by(|a, b| a.total_cmp(b));
     let first = times[0];
+    let keyframes = key_pts
+        .into_iter()
+        .map(|time| {
+            times
+                .binary_search_by(|t| t.total_cmp(&time))
+                .map(|index| index as u64)
+                .map_err(|_| "NVDEC keyframe is missing from source timeline".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if keyframes.first().copied() != Some(0) {
+        return Err("NVDEC source does not start with a keyframe".into());
+    }
     for timestamp in &mut times {
         *timestamp -= first;
     }
-    Ok(times)
+    Ok(DisplayTimeline {
+        timestamps: times,
+        keyframes,
+    })
+}
+
+pub fn display_timestamps(source: &std::path::Path) -> Result<Vec<f64>, String> {
+    Ok(display_timeline(source)?.timestamps)
 }
 
 pub fn closest_display_frame(times: &[f64], time_sec: f64) -> Option<u64> {
@@ -650,11 +719,33 @@ pub fn decode_video_file<F>(
 where
     F: for<'frame> FnMut(GpuNv12Frame<'frame>) -> Result<(), String>,
 {
+    decode_video_file_window(source, codec, None, cancelled, on_frame)
+}
+
+pub fn decode_video_file_window<F>(
+    source: &std::path::Path,
+    codec: NvdecCodec,
+    window: Option<NvdecDecodeWindow>,
+    cancelled: &AtomicBool,
+    on_frame: F,
+) -> Result<NvdecReceipt, String>
+where
+    F: for<'frame> FnMut(GpuNv12Frame<'frame>) -> Result<(), String>,
+{
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
     if !source.is_file() {
         return Err("NVDEC input source must exist".into());
+    }
+    if let Some(window) = window {
+        if !window.seek_sec.is_finite()
+            || !window.end_sec.is_finite()
+            || window.seek_sec < 0.0
+            || window.seek_sec >= window.end_sec
+        {
+            return Err("Invalid bounded NVDEC demux interval".into());
+        }
     }
     let (filter, format) = match codec {
         NvdecCodec::H264 => (Some("h264_mp4toannexb"), "h264"),
@@ -667,10 +758,15 @@ where
         NvdecCodec::Mjpeg => (None, "mjpeg"),
     };
     let mut command = std::process::Command::new("ffmpeg");
-    command
-        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
-        .arg(source)
-        .args(["-map", "0:v:0", "-an", "-sn", "-dn", "-c:v", "copy"]);
+    command.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
+    if let Some(window) = window {
+        command.args(["-ss", &format!("{:.6}", window.seek_sec)]);
+    }
+    command.arg("-i").arg(source);
+    if let Some(window) = window {
+        command.args(["-t", &format!("{:.6}", window.end_sec - window.seek_sec)]);
+    }
+    command.args(["-map", "0:v:0", "-an", "-sn", "-dn", "-c:v", "copy"]);
     if let Some(filter) = filter {
         command.args(["-bsf:v", filter]);
     }
@@ -734,6 +830,105 @@ mod tests {
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn bounded_window_seeks_to_the_previous_keyframe() {
+        let timeline = DisplayTimeline {
+            timestamps: (0..360).map(|index| index as f64 / 30.0).collect(),
+            keyframes: vec![0, 90, 180, 270],
+        };
+        let window = keyframe_window(&timeline, 5.5, 6.5).unwrap();
+        assert_eq!(window.first_frame, 90);
+        assert!((window.seek_sec - 3.0).abs() < 0.001);
+        assert_eq!(window.end_sec, 6.5);
+        assert!(keyframe_window(&timeline, -1.0, 2.0).is_err());
+        assert!(keyframe_window(&timeline, 3.0, 3.0).is_err());
+    }
+
+    #[test]
+    fn bounded_nvdec_demux_preserves_original_frame_pixels() {
+        if !codec_supported(NvdecCodec::H264, 8) {
+            return;
+        }
+        let source = std::env::temp_dir().join(format!(
+            "volley-nvdec-bounded-{}-{}.mp4",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let encoded = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=30:duration=18",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "90",
+                "-bf",
+                "2",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            encoded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&encoded.stderr)
+        );
+        let timeline = display_timeline(&source).unwrap();
+        let driver = try_init_driver().unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut complete = Vec::new();
+        let full = decode_video_file(&source, NvdecCodec::H264, &cancel, |frame| {
+            let mut bytes = [0u8; 16];
+            let ptr = frame.device_ptr + (frame.height / 2 * frame.pitch + frame.width / 2) as u64;
+            let status = unsafe { (driver.cuMemcpyDtoH_v2)(bytes.as_mut_ptr().cast(), ptr, 16) };
+            assert_eq!(status, CUresult::CUDA_SUCCESS);
+            complete.push(bytes);
+            Ok(())
+        })
+        .unwrap();
+        let window = keyframe_window(&timeline, 8.17, 11.25).unwrap();
+        let mut trimmed = Vec::new();
+        let partial =
+            decode_video_file_window(&source, NvdecCodec::H264, Some(window), &cancel, |frame| {
+                let mut bytes = [0u8; 16];
+                let ptr =
+                    frame.device_ptr + (frame.height / 2 * frame.pitch + frame.width / 2) as u64;
+                let status =
+                    unsafe { (driver.cuMemcpyDtoH_v2)(bytes.as_mut_ptr().cast(), ptr, 16) };
+                assert_eq!(status, CUresult::CUDA_SUCCESS);
+                trimmed.push(bytes);
+                Ok(())
+            })
+            .unwrap();
+        let _ = fs::remove_file(&source);
+        assert_eq!(full.frames, 540);
+        assert_eq!(timeline.timestamps.len(), 540);
+        assert_eq!(timeline.keyframes, vec![0, 90, 180, 270, 360, 450]);
+        assert!(partial.frames < full.frames / 2);
+        assert_eq!(trimmed.len() as u64, partial.frames);
+        for (offset, sample) in trimmed.iter().enumerate() {
+            assert_eq!(
+                sample,
+                &complete[window.first_frame as usize + offset],
+                "NVDEC seek changed source frame {}",
+                window.first_frame + offset as u64,
+            );
+        }
+    }
 
     #[test]
     fn hevc_10bit_nvdec_delivers_p016_gpu_surfaces() {

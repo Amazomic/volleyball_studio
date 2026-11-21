@@ -15,7 +15,7 @@ struct ZeroCopySource {
     matrix: u8,
     full_range: bool,
     rotation: i32,
-    timestamps: Vec<f64>,
+    timeline: volley_media::nvdec::DisplayTimeline,
 }
 
 fn zero_copy_color_matrix(space: Option<&str>, range: Option<&str>) -> Option<(u8, bool)> {
@@ -101,13 +101,13 @@ fn zero_copy_codec(original: &Path, cancelled: &AtomicBool) -> Option<ZeroCopySo
     {
         return None;
     }
-    let timestamps = volley_media::nvdec::display_timestamps(original).ok()?;
+    let timeline = volley_media::nvdec::display_timeline(original).ok()?;
     Some(ZeroCopySource {
         codec,
         matrix,
         full_range,
         rotation,
-        timestamps,
+        timeline,
     })
 }
 
