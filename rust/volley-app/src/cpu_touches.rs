@@ -114,6 +114,37 @@ pub struct TouchRequest {
     pub(crate) pose_classification: bool,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PrimaryRallyScope {
+    pub intervals: Vec<(u64, u64)>,
+    pub source_frames: u64,
+    pub ball_job_id: String,
+    pub sha256: String,
+}
+
+pub(crate) fn align_primary_intervals(
+    intervals: &[(u64, u64)],
+    source_frames: u64,
+    replay_frames: u64,
+) -> Result<Vec<(u64, u64)>, String> {
+    if replay_frames == 0
+        || !replay_frames.is_multiple_of(9)
+        || source_frames < replay_frames
+        || source_frames > replay_frames + 8
+        || intervals
+            .iter()
+            .any(|&(start, end)| start > end || end >= source_frames)
+        || intervals.windows(2).any(|pair| pair[0].1 >= pair[1].0)
+    {
+        return Err("Primary GPU rally intervals do not match the CPU replay timeline".into());
+    }
+    Ok(intervals
+        .iter()
+        .filter(|&&(start, _)| start < replay_frames)
+        .map(|&(start, end)| (start, end.min(replay_frames - 1)))
+        .collect())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TouchQuery {
     project_id: String,
@@ -1069,6 +1100,7 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
         rally_settings,
         None,
         None,
+        None,
     )
 }
 
@@ -1085,14 +1117,16 @@ pub(crate) fn process_with_ball_scope_and_rally_settings_cancel(
         rally_starts,
         rally_settings,
         None,
+        None,
         Some(cancel),
     )
 }
 
-pub(crate) fn process_discovery_with_rally_settings_and_progress_cancel(
+pub(crate) fn process_primary_with_progress_cancel(
     state: &AppState,
     req: &TouchRequest,
     rally_settings: volley_core::rally_reconstruction::RallySettings,
+    scope: &PrimaryRallyScope,
     report: &mut dyn FnMut(u64, u64) -> Result<(), String>,
     cancel: &AtomicBool,
 ) -> Result<Value, ApiError> {
@@ -1101,6 +1135,7 @@ pub(crate) fn process_discovery_with_rally_settings_and_progress_cancel(
         req,
         &[],
         rally_settings,
+        Some(scope),
         Some(report),
         Some(cancel),
     )
@@ -1111,6 +1146,7 @@ fn process_with_ball_scope_and_rally_settings_report(
     req: &TouchRequest,
     rally_starts: &[u64],
     rally_settings: volley_core::rally_reconstruction::RallySettings,
+    primary_scope: Option<&PrimaryRallyScope>,
     mut report: Option<&mut dyn FnMut(u64, u64) -> Result<(), String>>,
     cancel: Option<&AtomicBool>,
 ) -> Result<Value, ApiError> {
@@ -1206,6 +1242,19 @@ fn process_with_ball_scope_and_rally_settings_report(
         .as_u64()
         .filter(|n| *n > 0 && *n <= 48 * 3600 * 30)
         .ok_or_else(|| storage::bad_request("Invalid CPU tracked frame count"))?;
+    let primary_intervals = primary_scope
+        .map(|scope| align_primary_intervals(&scope.intervals, scope.source_frames, frames))
+        .transpose()
+        .map_err(storage::bad_request)?;
+    let mut primary_starts = vec![0];
+    if let Some(intervals) = &primary_intervals {
+        primary_starts.extend(intervals.iter().map(|(start, _)| *start).filter(|v| *v > 0));
+    }
+    let rally_starts = if primary_scope.is_some() {
+        primary_starts.as_slice()
+    } else {
+        rally_starts
+    };
     if let Some(update) = report.as_deref_mut() {
         update(0, frames).map_err(storage::internal)?;
     }
@@ -1270,18 +1319,22 @@ fn process_with_ball_scope_and_rally_settings_report(
         if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
             return Err("cancelled".into());
         }
-        let continuous = crate::cpu_retrack::ball_track::continuous_ball_intervals_with_cancel(
-            &source,
-            &sha,
-            frames,
-            settings.min_ball_score,
-            crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
-            cancel,
-        )?;
-        let preliminary = crate::cpu_retrack::ball_track::merge_continuous_intervals(
-            &continuous,
-            crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
-        )?;
+        let preliminary = if let Some(intervals) = &primary_intervals {
+            intervals.clone()
+        } else {
+            let continuous = crate::cpu_retrack::ball_track::continuous_ball_intervals_with_cancel(
+                &source,
+                &sha,
+                frames,
+                settings.min_ball_score,
+                crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
+                cancel,
+            )?;
+            crate::cpu_retrack::ball_track::merge_continuous_intervals(
+                &continuous,
+                crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
+            )?
+        };
         let preliminary_scope_applied = true;
         if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
             return Err("cancelled".into());
@@ -1391,12 +1444,23 @@ fn process_with_ball_scope_and_rally_settings_report(
             "min_trajectory_seconds":crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
             "merge_gap_seconds":crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
             "rally_intervals":preliminary,
+            "primary_ball_job_id":primary_scope.map(|scope| scope.ball_job_id.as_str()),
+            "primary_rally_mask_sha256":primary_scope.map(|scope| scope.sha256.as_str()),
+            "primary_source_frames":primary_scope.map(|scope| scope.source_frames),
         });
         storage::write_json_atomic(&folder.join("preliminary_rallies.json"), &preliminary_data)
             .map_err(|e| format!("Save preliminary ball-only gameplay: {e:?}"))?;
         let preliminary_bytes = fs::read(folder.join("preliminary_rallies.json"))
             .map_err(|e| format!("Read preliminary gameplay checksum: {e}"))?;
-        record["preliminary_rally_scope_version"] = json!("coherent_vballnet_motion_v2");
+        record["preliminary_rally_scope_version"] = json!(if primary_scope.is_some() {
+            "primary_gpu_rally_mask_v1"
+        } else {
+            "coherent_vballnet_motion_v2"
+        });
+        record["primary_ball_job_id"] =
+            json!(primary_scope.map(|scope| scope.ball_job_id.as_str()));
+        record["primary_rally_mask_sha256"] =
+            json!(primary_scope.map(|scope| scope.sha256.as_str()));
         record["preliminary_rally_scope_applied"] = json!(preliminary_scope_applied);
         record["preliminary_rally_settings"] = json!(rally_settings);
         record["preliminary_rally_file"] = json!("preliminary_rallies.json");

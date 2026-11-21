@@ -716,16 +716,6 @@ pub(crate) fn refine_leading_ball(
     refine_leading_ball_inner(state, request, settings, discovery_id, None)
 }
 
-pub(crate) fn refine_leading_ball_with_cancel(
-    state: &AppState,
-    request: &crate::cpu_touches::TouchRequest,
-    settings: RallySettings,
-    discovery_id: &str,
-    cancel: &AtomicBool,
-) -> Result<Value, ApiError> {
-    refine_leading_ball_inner(state, request, settings, discovery_id, Some(cancel))
-}
-
 fn refine_leading_ball_inner(
     state: &AppState,
     request: &crate::cpu_touches::TouchRequest,
@@ -788,6 +778,18 @@ fn record_preliminary_scope(manifest: &mut Value, contacts: &Value, applied: boo
             "preliminary_rally_file",
             "preliminary_rally_sha256",
             "preliminary_rally_interval_count",
+        ] {
+            manifest[key] = contacts[key].clone();
+        }
+        manifest["preliminary_rally_scope_applied"] = json!(applied);
+    } else if contacts["preliminary_rally_scope_version"] == "primary_gpu_rally_mask_v1" {
+        for key in [
+            "preliminary_rally_scope_version",
+            "preliminary_rally_file",
+            "preliminary_rally_sha256",
+            "preliminary_rally_interval_count",
+            "primary_ball_job_id",
+            "primary_rally_mask_sha256",
         ] {
             manifest[key] = contacts[key].clone();
         }
@@ -919,7 +921,8 @@ fn process_inner(
         .as_u64()
         .filter(|n| *n <= frames)
         .ok_or_else(|| storage::bad_request("Unbounded or missing motion Touch count"))?;
-    if contacts["preliminary_rally_scope_version"] != "coherent_vballnet_motion_v2"
+    let primary = contacts["preliminary_rally_scope_version"] == "primary_gpu_rally_mask_v1";
+    if !primary && contacts["preliminary_rally_scope_version"] != "coherent_vballnet_motion_v2"
         || contacts["preliminary_rally_settings"] != json!(settings)
         || contacts["preliminary_rally_file"] != "preliminary_rallies.json"
         || contacts["preliminary_rally_scope_applied"] != true
@@ -959,32 +962,89 @@ fn process_inner(
     }
     let intervals: Vec<(u64, u64)> = serde_json::from_value(data["rally_intervals"].clone())
         .map_err(|_| storage::bad_request("Invalid continuous rally intervals"))?;
-    let replay_source = safe_file(&track_dir, "tracked_frames.jsonl", MAX_EVIDENCE)
-        .map_err(storage::bad_request)?;
-    let computed = crate::cpu_retrack::ball_track::continuous_ball_intervals_with_cancel(
-        &replay_source,
-        &replay_sha,
-        frames,
-        min_ball_score,
-        crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
-        cancel,
-    )
-    .and_then(|segments| {
-        crate::cpu_retrack::ball_track::merge_continuous_intervals(
-            &segments,
-            crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
-        )
-    })
-    .map_err(storage::bad_request)?;
-    if intervals != computed
-        || intervals.len() as u64
-            != contacts["preliminary_rally_interval_count"]
-                .as_u64()
-                .unwrap_or(u64::MAX)
+    if intervals.len() as u64
+        != contacts["preliminary_rally_interval_count"]
+            .as_u64()
+            .unwrap_or(u64::MAX)
+        || intervals
+            .iter()
+            .any(|&(start, end)| start > end || end >= frames)
+        || intervals.windows(2).any(|pair| pair[0].1 >= pair[1].0)
     {
-        return Err(storage::bad_request(
-            "Continuous rally intervals differ from saved trajectory",
-        ));
+        return Err(storage::bad_request("Invalid saved rally intervals"));
+    }
+    if primary {
+        let ball_id = contacts["primary_ball_job_id"]
+            .as_str()
+            .filter(|id| opaque_id(id))
+            .ok_or_else(|| storage::bad_request("Primary GPU ball job ID missing"))?;
+        let primary_sha =
+            sha(&contacts["primary_rally_mask_sha256"]).map_err(storage::bad_request)?;
+        let fusion_id = tracked["source_fusion_id"]
+            .as_str()
+            .filter(|id| opaque_id(id))
+            .ok_or_else(|| storage::bad_request("Missing source GPU fusion"))?;
+        let fusion_dir = project_dir.join("native_gpu_fusions").join(fusion_id);
+        let fusion = source_manifest(&fusion_dir, "GPU fusion").map_err(storage::bad_request)?;
+        if fusion["sources"]["vballnet"]["job_id"] != ball_id {
+            return Err(storage::bad_request(
+                "Primary rally source is not the replay ball job",
+            ));
+        }
+        let primary_dir = project_dir.join("native_gpu_runs").join(ball_id);
+        let primary_file = safe_file(&primary_dir, "rally_mask.json", 64 * 1024 * 1024)
+            .map_err(storage::bad_request)?;
+        let primary_bytes = fs::read(primary_file)
+            .map_err(|e| storage::bad_request(format!("Read primary GPU rallies: {e}")))?;
+        if format!("{:x}", Sha256::digest(&primary_bytes)) != primary_sha {
+            return Err(storage::bad_request("Primary GPU rally checksum changed"));
+        }
+        let evidence: Value = serde_json::from_slice(&primary_bytes)
+            .map_err(|_| storage::bad_request("Malformed primary GPU rally evidence"))?;
+        let raw: Vec<(u64, u64)> = serde_json::from_value(evidence["mask"]["merged"].clone())
+            .map_err(|_| storage::bad_request("Invalid primary GPU rally bounds"))?;
+        let source_frames = evidence["mask"]["source_frame_count"]
+            .as_u64()
+            .ok_or_else(|| storage::bad_request("Primary GPU frame count missing"))?;
+        let expected = crate::cpu_touches::align_primary_intervals(&raw, source_frames, frames)
+            .map_err(storage::bad_request)?;
+        if data["primary_ball_job_id"] != ball_id
+            || data["primary_rally_mask_sha256"] != primary_sha
+            || data["primary_source_frames"] != source_frames
+            || evidence["schema"] != "volley-primary-rally-mask-evidence/1"
+            || evidence["ball_job_id"] != ball_id
+            || evidence["original_source"] != tracked["original_source"]
+            || evidence["analysis_range"] != tracked["analysis_range"]
+            || evidence["mask"]["schema"] != "volley-primary-rally-mask/1"
+            || expected != intervals
+        {
+            return Err(storage::bad_request(
+                "Primary GPU rally source does not match saved replay",
+            ));
+        }
+    } else {
+        let replay_source = safe_file(&track_dir, "tracked_frames.jsonl", MAX_EVIDENCE)
+            .map_err(storage::bad_request)?;
+        let computed = crate::cpu_retrack::ball_track::continuous_ball_intervals_with_cancel(
+            &replay_source,
+            &replay_sha,
+            frames,
+            min_ball_score,
+            crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
+            cancel,
+        )
+        .and_then(|segments| {
+            crate::cpu_retrack::ball_track::merge_continuous_intervals(
+                &segments,
+                crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
+            )
+        })
+        .map_err(storage::bad_request)?;
+        if intervals != computed {
+            return Err(storage::bad_request(
+                "Continuous rally intervals differ from saved trajectory",
+            ));
+        }
     }
     let preliminary_intervals = Some(intervals);
     let replay_sha = sha(&tracked["sha256"]).map_err(storage::bad_request)?;
@@ -1204,6 +1264,23 @@ mod tests {
         let mut active = json!({});
         record_preliminary_scope(&mut active, &contacts, true);
         assert_eq!(active["preliminary_rally_scope_applied"], true);
+        let mut primary = json!({});
+        let source = json!({
+            "preliminary_rally_scope_version":"primary_gpu_rally_mask_v1",
+            "preliminary_rally_file":"preliminary_rallies.json",
+            "preliminary_rally_sha256":"b".repeat(64),
+            "preliminary_rally_interval_count":2,
+            "primary_ball_job_id":"ball-123",
+            "primary_rally_mask_sha256":"a".repeat(64)
+        });
+        record_preliminary_scope(&mut primary, &source, true);
+        assert_eq!(
+            primary["preliminary_rally_scope_version"],
+            "primary_gpu_rally_mask_v1"
+        );
+        assert_eq!(primary["primary_ball_job_id"], "ball-123");
+        assert_eq!(primary["primary_rally_mask_sha256"], "a".repeat(64));
+        assert_eq!(primary["preliminary_rally_scope_applied"], true);
         let mut legacy = json!({});
         record_preliminary_scope(&mut legacy, &json!({}), false);
         assert!(legacy["preliminary_rally_scope_version"].is_null());

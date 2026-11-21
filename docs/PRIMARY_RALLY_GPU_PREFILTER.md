@@ -23,12 +23,32 @@ video's own saved analysis range:
    and does not invent touches from the ball mask. The existing nine-frame
    evidence and CPU ByteTrack replay contracts remain unchanged.
 
-Saved `native_gpu_jobs/<ball_job_id>/rally_mask.json` contains source identity,
+Saved `native_gpu_runs/<ball_job_id>/rally_mask.json` contains source identity,
 analysis range, detected/merged/uncertain/scanning intervals and selected-frame
 count. Pipeline progress identifies the ball scan and the person/pose scan;
 pipeline status includes `gpu_rally_mask`. The standalone CPU training preview
 still lets the user change the 1.5 s threshold and <4 s merge gap without
 rerunning VBallNet; custom values take precedence over defaults.
+
+## Postprocessing boundary owner (2026-11-22)
+
+The Studio Full/Post pipeline uses the saved primary VBallNet GPU mask as
+the sole source of rally start/end frames. It reads the primary source file
+from native_gpu_runs/<ball_job_id>/rally_mask.json and checks video
+provenance, analysis range, ball-job ID and mask SHA-256. The merged primary
+intervals scope CPU Touch processing and are materialized into a versioned
+CPU rally event/timeline record, without running a second rally boundary
+detector. Primary intervals are clipped only for the 0–8 trailing frames
+not represented by complete nine-frame GPU fusion/replay windows. The
+original GPU boundaries remain saved.
+
+Leading-ball tracking receives primary interval starts on the first CPU Touch
+pass. Studio no longer runs the former discovery-rallies -> refined touches ->
+discovery-rallies cycle. The CPU rally event record remains necessary for
+touch references, player linking, previews and montage. GPU runs without
+a saved primary mask cannot enter the Studio postprocessing path; rerun a
+compatible primary analysis. Independent manual/training CPU endpoints
+retain their existing snapshot-specific behavior.
 
 ## Control / safety
 

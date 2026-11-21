@@ -13,6 +13,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs,
@@ -815,6 +816,63 @@ fn publish_primary_rally_mask(
         ),
     )
 }
+fn parse_primary_rally_scope(
+    bytes: &[u8],
+    ball_id: &str,
+    status: &Value,
+) -> Result<(cpu_touches::PrimaryRallyScope, Value), String> {
+    let evidence: Value = serde_json::from_slice(bytes)
+        .map_err(|_| "Повреждена сохранённая маска розыгрышей первичного анализа")?;
+    let mask = &evidence["mask"];
+    let frames = mask["source_frame_count"]
+        .as_u64()
+        .filter(|frames| *frames > 0 && *frames <= 48 * 3600 * 30)
+        .ok_or("Некорректная длина первичного анализа розыгрышей")?;
+    let intervals: Vec<(u64, u64)> = serde_json::from_value(mask["merged"].clone())
+        .map_err(|_| "Некорректные границы первичных розыгрышей")?;
+    if intervals
+        .iter()
+        .any(|&(start, end)| start > end || end >= frames)
+        || intervals.windows(2).any(|pair| pair[0].1 >= pair[1].0)
+        || evidence["schema"] != "volley-primary-rally-mask-evidence/1"
+        || evidence["ball_job_id"] != ball_id
+        || evidence["original_source"] != status["original_source"]
+        || evidence["analysis_range"] != status["analysis_range"]
+        || evidence["selected_frames"] != mask["selected_frames"]
+        || mask["schema"] != "volley-primary-rally-mask/1"
+    {
+        return Err("Первичные розыгрыши не соответствуют сохранённому GPU-анализу".into());
+    }
+    Ok((
+        cpu_touches::PrimaryRallyScope {
+            intervals,
+            source_frames: frames,
+            ball_job_id: ball_id.to_owned(),
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+        },
+        mask.clone(),
+    ))
+}
+
+fn load_primary_rally_scope(
+    app: &AppState,
+    project_id: &str,
+    status: &Value,
+) -> Result<(cpu_touches::PrimaryRallyScope, Value), String> {
+    let ball_id = status["gpu_jobs"]["ball"]
+        .as_str()
+        .filter(|id| valid_id(id))
+        .ok_or("Сохранённый первичный анализ не содержит VBallNet ID")?;
+    let root = projects::project_root(app)
+        .join(project_id)
+        .join("native_gpu_runs")
+        .join(ball_id);
+    let file = storage::safe_file(&root, "rally_mask.json", 64 * 1024 * 1024)
+        .map_err(|_| "Для этого GPU-анализа нет первичных розыгрышей: повторите первичный анализ с включённым поиском по мячу")?;
+    let bytes = fs::read(file).map_err(|e| format!("Чтение первичных розыгрышей: {e}"))?;
+    parse_primary_rally_scope(&bytes, ball_id, status)
+}
+
 fn require_id(response: &Value, field: &str) -> Result<String, String> {
     response[field]
         .as_str()
@@ -867,6 +925,11 @@ fn gpu_lineage_valid(
     let Some(ball_id) = saved["gpu_jobs"]["ball"].as_str().filter(|id| valid_id(id)) else {
         return false;
     };
+    if request.mode == PipelineMode::Full
+        && saved["gpu_rally_mask"]["schema"] != "volley-primary-rally-mask/1"
+    {
+        return false;
+    }
     let Some(players_id) = saved["gpu_jobs"]["players"]
         .as_str()
         .filter(|id| valid_id(id))
@@ -1034,10 +1097,14 @@ fn cpu_lineage_valid(
             touches["automatic_action_prediction_method"].as_str(),
             Some("pose_keypoints_v1_or_unknown_touch" | "pose_keypoints_motion_v1_or_unknown_touch")
         )
-        && touches["preliminary_rally_scope_version"] == "coherent_vballnet_motion_v2"
+        && touches["preliminary_rally_scope_version"] == "primary_gpu_rally_mask_v1"
+        && touches["primary_ball_job_id"] == saved["gpu_jobs"]["ball"]
+        && touches["primary_rally_mask_sha256"] == saved["gpu_rally_mask_sha256"]
         && touches["preliminary_rally_settings"] == json!(request.post.rallies)
         && touches["preliminary_rally_scope_applied"].as_bool().is_some()
-        && rallies["preliminary_rally_scope_version"] == "coherent_vballnet_motion_v2"
+        && rallies["preliminary_rally_scope_version"] == "primary_gpu_rally_mask_v1"
+        && rallies["primary_ball_job_id"] == touches["primary_ball_job_id"]
+        && rallies["primary_rally_mask_sha256"] == touches["primary_rally_mask_sha256"]
         && rallies["preliminary_rally_scope_applied"] == touches["preliminary_rally_scope_applied"]
         && touches["touch_id"] == touch
         && touches["source_replay_id"] == replay
@@ -1604,6 +1671,8 @@ async fn pipeline(
     }) {
         status["analysis_id"] = existing["analysis_id"].clone();
         status["gpu_jobs"] = existing["gpu_jobs"].clone();
+        status["gpu_rally_mask"] = existing["gpu_rally_mask"].clone();
+        status["gpu_rally_mask_sha256"] = existing["gpu_rally_mask_sha256"].clone();
         status["cpu_runs"] = existing["cpu_runs"].clone();
         status["postprocessing_id"] = existing["postprocessing_id"].clone();
         status["gpu_reused"] = json!(true);
@@ -1630,6 +1699,8 @@ async fn pipeline(
         if let Some(existing) = reusable.gpu {
             status["analysis_id"] = existing["analysis_id"].clone();
             status["gpu_jobs"] = existing["gpu_jobs"].clone();
+            status["gpu_rally_mask"] = existing["gpu_rally_mask"].clone();
+            status["gpu_rally_mask_sha256"] = existing["gpu_rally_mask_sha256"].clone();
             status["gpu_reused"] = json!(true);
             status["reused_from_id"] = existing["id"].clone();
             log_event(
@@ -1978,6 +2049,12 @@ async fn pipeline(
         progress(path, status, "Первичный GPU-анализ завершён", 99.9)?;
         return Ok(());
     }
+    let (primary, primary_mask) = load_primary_rally_scope(app, &request.project_id, status)?;
+    status["gpu_rally_mask"] = primary_mask;
+    status["gpu_rally_mask_sha256"] = json!(primary.sha256);
+    status["ball_tracking_boundary_source"] =
+        json!({"ball_job_id":primary.ball_job_id,"sha256":primary.sha256});
+    save(path, status)?;
     let fusion_id = require_id(status, "analysis_id")?;
     progress(path, status, "Постобработка · Track ID", 86.0)?;
     log_native(
@@ -2018,15 +2095,20 @@ async fn pipeline(
         return Err("cancelled".into());
     }
 
-    progress(path, status, "Постобработка · физические касания", 91.0)?;
+    progress(
+        path,
+        status,
+        "Постобработка · касания в первичных розыгрышах",
+        91.0,
+    )?;
     log_native(
         path,
         "Касания",
-        "cpu_touches::process",
-        json!({"project_id":request.project_id,"video":request.video,"replay_id":replay_id,"settings":request.post.touches}),
+        "cpu_touches::process_primary_with_progress_cancel",
+        json!({"project_id":request.project_id,"video":request.video,"replay_id":replay_id,"settings":request.post.touches,"primary_ball_job_id":primary.ball_job_id}),
     )?;
     let touches = tokio::task::block_in_place(|| {
-        cpu_touches::process_discovery_with_rally_settings_and_progress_cancel(
+        cpu_touches::process_primary_with_progress_cancel(
             app,
             &cpu_touches::TouchRequest {
                 project_id: request.project_id.clone(),
@@ -2036,11 +2118,12 @@ async fn pipeline(
                 pose_classification: request.post.pose_classification,
             },
             request.post.rallies,
+            &primary,
             &mut |done, total| {
                 progress_with_frames(
                     path,
                     status,
-                    "Постобработка · физические касания",
+                    "Постобработка · касания в первичных розыгрышах",
                     91.0 + 4.0 * done as f64 / total.max(1) as f64,
                     Some((done, total)),
                 )
@@ -2065,7 +2148,12 @@ async fn pipeline(
         return Err("cancelled".into());
     }
 
-    progress(path, status, "Постобработка · розыгрыши", 96.0)?;
+    progress(
+        path,
+        status,
+        "Постобработка · события первичных розыгрышей",
+        96.0,
+    )?;
     log_native(
         path,
         "Розыгрыши",
@@ -2085,56 +2173,7 @@ async fn pipeline(
         cpu_rallies::process_with_cancel,
     )
     .await?;
-    let discovery_id = require_id(&rallies, "rally_run_id")?;
-    if cancel.load(Ordering::Acquire) {
-        return Err("cancelled".into());
-    }
-    progress(
-        path,
-        status,
-        "Постобработка · сопровождение ведущего мяча",
-        97.0,
-    )?;
-    status["ball_tracking_boundary_source"] =
-        json!({"rally_run_id":discovery_id,"sha256":rallies["sha256"]});
-    log_native(
-        path,
-        "Ведущий мяч",
-        "cpu_touches::process_with_ball_scope",
-        json!({"boundary_discovery_rally_run_id":discovery_id,"policy":crate::cpu_retrack::ball_track::POLICY}),
-    )?;
-    let refined = cpu_cancel(
-        app.clone(),
-        (
-            cpu_touches::TouchRequest {
-                project_id: request.project_id.clone(),
-                video: request.video.clone(),
-                replay_id: replay_id.clone(),
-                settings: Some(request.post.touches),
-                pose_classification: request.post.pose_classification,
-            },
-            request.post.rallies,
-            discovery_id,
-        ),
-        cancel.clone(),
-        |app, (touch_request, rally_settings, discovery_id), cancel| {
-            cpu_rallies::refine_leading_ball_with_cancel(
-                app,
-                touch_request,
-                *rally_settings,
-                discovery_id,
-                cancel,
-            )
-        },
-    )
-    .await?;
-    let touches = &refined["touches"];
-    let rallies = &refined["rallies"];
-    if touches["court_revision"] != status["court_revision"] {
-        return Err("Court calibration changed during leading-ball refinement".into());
-    }
-    status["cpu_runs"]["touches"] = json!(require_id(touches, "touch_id")?);
-    let rally_id = require_id(rallies, "rally_run_id")?;
+    let rally_id = require_id(&rallies, "rally_run_id")?;
     status["cpu_runs"]["rallies"] = json!(rally_id);
     status["postprocessing_id"] = json!(rally_id);
     save(path, status)?;
@@ -2142,7 +2181,7 @@ async fn pipeline(
         path,
         "Розыгрыши",
         "success",
-        &format!("CPU-постобработка завершена: rally_run_id={rally_id}"),
+        &format!("Разметка сохранённых первичных розыгрышей: rally_run_id={rally_id}"),
     )?;
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
@@ -2490,6 +2529,7 @@ pub async fn start(
         "gpu_model_stack":requested_gpu_model_stack(),
         "zero_copy_request":zero_copy_requested(),"zero_copy_active":false,
         "gpu_jobs":{},"cpu_runs":{},"analysis_id":null,
+        "gpu_rally_mask":null,"gpu_rally_mask_sha256":null,
         "postprocessing_id":null,"current_gpu_job_id":null,
         "source_identity":null,"gpu_reused":false,"result_reused":false,
         "reused_from_id":null,"pipeline_complete":false,"error":null
@@ -2998,6 +3038,50 @@ mod tests {
     }
 
     #[test]
+    fn saved_primary_rallies_keep_gpu_boundaries_and_reject_other_sources() {
+        let status = json!({"original_source":{"sha256":"original"},
+            "analysis_range":null});
+        let evidence = json!({
+            "schema":"volley-primary-rally-mask-evidence/1",
+            "ball_job_id":"ball-job-123",
+            "original_source":{"sha256":"original"},
+            "analysis_range":null,
+            "selected_frames":92,
+            "mask":{
+                "schema":"volley-primary-rally-mask/1",
+                "source_frame_count":100,
+                "merged":[[12,33],[50,78]],
+                "selected_frames":92,
+                "fallback_reason":null
+            }
+        });
+        let bytes = serde_json::to_vec(&evidence).unwrap();
+        let (scope, mask) = parse_primary_rally_scope(&bytes, "ball-job-123", &status).unwrap();
+        assert_eq!(scope.intervals, vec![(12, 33), (50, 78)]);
+        assert_eq!(scope.source_frames, 100);
+        assert_eq!(
+            cpu_touches::align_primary_intervals(&[(12, 33), (90, 99)], 100, 99).unwrap(),
+            [(12, 33), (90, 98)]
+        );
+        assert!(cpu_touches::align_primary_intervals(&[(12, 33)], 120, 99).is_err());
+        assert_eq!(scope.ball_job_id, "ball-job-123");
+        assert_eq!(scope.sha256, format!("{:x}", Sha256::digest(&bytes)));
+        assert_eq!(mask["merged"], json!([[12, 33], [50, 78]]));
+        assert!(parse_primary_rally_scope(&bytes, "other-job", &status).is_err());
+        let mut altered = evidence.clone();
+        altered["mask"]["merged"] = json!([[50, 78], [12, 33]]);
+        assert!(parse_primary_rally_scope(
+            &serde_json::to_vec(&altered).unwrap(),
+            "ball-job-123",
+            &status
+        )
+        .is_err());
+        let mut foreign = status.clone();
+        foreign["original_source"] = json!({"sha256":"different"});
+        assert!(parse_primary_rally_scope(&bytes, "ball-job-123", &foreign).is_err());
+    }
+
+    #[test]
     fn primary_rally_mask_is_logged_before_person_inference() {
         let dir = std::env::temp_dir().join(format!("studio-rally-log-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
@@ -3078,7 +3162,7 @@ mod tests {
             {"status":"complete","mode":"post","video":"match.mp4","gpu_reused":true,
              "stages":[{"name":"Постобработка · Track ID","duration_ms":30000},
                 {"name":"Постобработка · физические касания","duration_ms":80000},
-                {"name":"Постобработка · розыгрыши","duration_ms":10000}]},
+                {"name":"Постобработка · события первичных розыгрышей","duration_ms":10000}]},
             {"status":"complete","mode":"gpu","video":"match.mp4","gpu_reused":false,
              "stages":[{"name":"Постобработка · физические касания","duration_ms":500}]}
         ]});
@@ -3466,8 +3550,9 @@ mod branching_tests {
                 "body_trajectory_intersection_required":true,
                 "settings":{"require_pose":true},
                 "automatic_action_prediction_method":"pose_keypoints_v1_or_unknown_touch",
-                "preliminary_rally_scope_version":"coherent_vballnet_motion_v2",
+                "preliminary_rally_scope_version":"primary_gpu_rally_mask_v1",
                 "preliminary_rally_settings":request.post.rallies,
+                "primary_ball_job_id":gpu_ball,"primary_rally_mask_sha256":sha,
                 "preliminary_rally_scope_applied":false,
                 "ball_tracking_policy":crate::cpu_retrack::ball_track::POLICY,
                 "leading_ball_rally_starts":true,"leading_ball_min_score":0.28
@@ -3482,8 +3567,9 @@ mod branching_tests {
                 "schema":"volley-native-cpu-rally-proposals/1","state":"provisional_rally_segments","rally_run_id":rally,
                 "court_contact_context_version":"python_serve_toss_possession_v2",
                 "ground_boundary_version":"trajectory_court_surface_v3",
-                "preliminary_rally_scope_version":"coherent_vballnet_motion_v2",
+                "preliminary_rally_scope_version":"primary_gpu_rally_mask_v1",
                 "preliminary_rally_scope_applied":false,
+                "primary_ball_job_id":gpu_ball,"primary_rally_mask_sha256":sha,
                 "ball_tracking_policy":crate::cpu_retrack::ball_track::POLICY,
                 "project_id":request.project_id,"video":request.video,
                 "source_replay_id":replay,"source_touch_id":touch,"sha256":sha,
@@ -3497,6 +3583,8 @@ mod branching_tests {
             "gpu_model_stack":requested_gpu_model_stack(),
             "profile":{"gpu":request.gpu,"post":request.post},
             "gpu_jobs":{"ball":gpu_ball,"players":gpu_players},
+            "gpu_rally_mask":{"schema":"volley-primary-rally-mask/1"},
+            "gpu_rally_mask_sha256":sha,
             "analysis_id":analysis,"cpu_runs":{"tracking":replay,"touches":touch,"rallies":rally},
             "postprocessing_id":rally
         });
