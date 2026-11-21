@@ -58,6 +58,7 @@ const nodes=new Map([["studio-sidebar-tasks",container],
 const listeners=new Map();
 for(const el of nodes.values())el.addEventListener=(name,fn)=>listeners.set(name,fn);
 let gpu={schema:"volley-native-active-gpu/1",project_id:"project-a",active:false};
+let pipeline={schema:"volley-studio-pipeline/1",project_id:"project-a",status:"idle"};
 let reel={status:"idle"};
 let montage={state:"idle"};
 let failMontage=false;
@@ -71,6 +72,9 @@ const doc={hidden:false,getElementById:id=>nodes.get(id),createElement:()=>new N
 const win={addEventListener:(name,fn)=>listeners.set(name,fn),VolleyballStudioActivity:{
   async fetch(url){
     hits.push(url);
+    if(url.startsWith("/api/studio/pipeline/status")){
+      return {ok:true,json:async()=>pipeline};
+    }
     if(url==="/api/montage/native/status"){
       if(failMontage)throw Error("network");
       return {ok:true,json:async()=>montage};
@@ -177,4 +181,19 @@ await polling;
 await new Promise(resolve=>setImmediate(resolve));
 assert.ok(hits.some(url=>url.startsWith("/api/project-preparation?")&&url.includes("project_id=new-project")),
   "project created during a poll must be observed even after immediate project switch");
-console.log("PASS: sidebar statuses for GPU, Quick Reel and montage; indeterminate stages, reload, failures and cleanup");
+project.value="project-a";
+pipeline={schema:"volley-studio-pipeline/1",project_id:"project-a",status:"running",
+  stage:"GPU · VBallNet",progress_percent:21.3,
+  stages:[{name:"GPU · VBallNet",frames_processed:120,frames_total:900}]};
+await win.VolleyballTasks.refresh();
+assert.equal(list.children.length,1);
+assert.match(list.children[0].children[1].textContent,/120\/900 кадров \(13\.3%\)/);
+assert.equal(list.children[0].children[0].children[1].textContent,"21%");
+pipeline.stages[0].frames_processed=450;
+pipeline.progress_percent=32;
+await win.VolleyballTasks.refresh();
+assert.match(list.children[0].children[1].textContent,/450\/900 кадров \(50\.0%\)/);
+pipeline.status="complete";
+await win.VolleyballTasks.refresh();
+assert.equal(list.children.length,0);
+console.log("PASS: sidebar frame progress for analysis stages, GPU, Quick Reel and montage");

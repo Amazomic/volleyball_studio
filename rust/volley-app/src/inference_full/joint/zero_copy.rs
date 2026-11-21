@@ -57,7 +57,7 @@ pub(super) fn run(
     person_stride: usize,
     duration: f64,
     cancelled: &AtomicBool,
-    mut report: impl FnMut(f64) -> Result<(), String>,
+    mut report: impl FnMut(f64, u64) -> Result<(), String>,
 ) -> Result<DecodeSummary, String> {
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
@@ -73,6 +73,7 @@ pub(super) fn run(
     let mut sampled_frames: Vec<Option<Arc<GpuBuffer>>> = Vec::with_capacity(9);
     let mut expected_index = 0u64;
     let mut windows = 0usize;
+    let mut player_samples = 0u64;
     let mut last_geometry: Option<(usize, usize, usize, u8)> = None;
     let mut last_shape: Option<(usize, usize, usize)> = None;
     let estimated = (duration * 30.0).max(9.0);
@@ -113,6 +114,7 @@ pub(super) fn run(
             let input = people_input.as_ref().ok_or("Missing GPU person input")?;
             gpu.person_input(model_view, input, source.matrix)?;
             let found = person_engine.detect_cuda_input(input)?;
+            player_samples += 1;
             for (index, candidate) in found.into_iter().enumerate() {
                 observations.push(RawDetection {
                     frame_index,
@@ -175,7 +177,12 @@ pub(super) fn run(
                     update_progress(&players.status, windows, next_index, estimated);
                     persist(&players.folder, &snapshot(&players.status))?;
                 }
-                report((next_index as f64 / estimated).clamp(0.0, 0.99))?;
+                let done = if matches!(pass, ScanPass::PlayersOnly(_)) {
+                    player_samples
+                } else {
+                    next_index
+                };
+                report((next_index as f64 / estimated).clamp(0.0, 0.99), done)?;
             }
         }
         Ok(())

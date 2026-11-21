@@ -1514,7 +1514,10 @@ button.report-player-avatar::after{content:"↻";position:absolute;right:2px;bot
 .analysis-history-stage-mark{color:#7ed6ac;text-align:center}
 .analysis-history-stage.is-running{background:rgba(59,129,210,.13);border-color:#5683b6}
 .analysis-history-stage.is-running .analysis-history-stage-mark{color:#77b9ff}
-.analysis-history-stage-name{min-width:0;overflow-wrap:anywhere}
+.analysis-history-stage-name{min-width:0;overflow-wrap:anywhere;display:flex;flex-direction:column;gap:3px}
+.analysis-history-stage-frames{color:#a9cce8;font-size:11px;font-variant-numeric:tabular-nums}
+.analysis-history-stage-rail{display:block;width:min(100%,310px);height:4px;border-radius:4px;overflow:hidden;background:#294563}
+.analysis-history-stage-fill{display:block;height:100%;background:#75baff;transition:width .25s ease}
 .analysis-history-stage-state{font-size:11px;color:#9db4c9}
 .analysis-history-stage-duration{text-align:right;font-variant-numeric:tabular-nums;font-weight:700;white-space:nowrap}
 .analysis-history-eta{font-weight:700;color:#abd1ff!important;font-variant-numeric:tabular-nums}

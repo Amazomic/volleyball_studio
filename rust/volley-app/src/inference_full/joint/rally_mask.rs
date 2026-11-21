@@ -146,6 +146,14 @@ impl RallyMask {
         index > 0 && frame <= self.selected[index - 1].1
     }
 
+    pub fn sampled_frames(&self, stride: usize) -> u64 {
+        let period = stride as u64;
+        self.selected
+            .iter()
+            .map(|&(first, last)| (last / period + 1) - (first.saturating_add(period - 1) / period))
+            .sum()
+    }
+
     pub fn included_frames(&self) -> u64 {
         self.selected
             .iter()
@@ -210,6 +218,10 @@ mod tests {
         assert!(mask.includes(500));
         assert!(!mask.includes(300));
         assert!(mask.included_frames() < 400);
+        let sampled = (0..900)
+            .filter(|frame| frame % 3 == 0 && mask.includes(*frame))
+            .count() as u64;
+        assert_eq!(mask.sampled_frames(3), sampled);
         assert_eq!(mask.context_seconds, 1.0);
     }
 

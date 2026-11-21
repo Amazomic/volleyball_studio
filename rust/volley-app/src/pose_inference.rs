@@ -267,7 +267,7 @@ pub fn process(
     memory_mb: u64,
     threads: usize,
     cancel: &AtomicBool,
-    mut on_progress: impl FnMut(&'static str, f64) -> Result<(), String>,
+    mut on_progress: impl FnMut(&'static str, f64, u64, u64) -> Result<(), String>,
 ) -> Result<Value, String> {
     if !app.writes_enabled {
         return Err("Pose analysis requires writable isolated studio storage".into());
@@ -334,7 +334,8 @@ pub fn process(
             .as_u64()
             .filter(|n| *n > 0 && *n <= 48 * 3600 * 30)
             .ok_or("Fusion does not declare a valid number of frames")?;
-        on_progress("pose", 0.0)?;
+        let expected_samples = frames_expected.div_ceil(stride as u64);
+        on_progress("pose", 0.0, 0, expected_samples)?;
         let mut box_window = FusionBoxWindow::open(&frames_file, frames_expected, stride)?;
         let mut engine = PoseEngine::load(&app.repository_root, Device::Cuda, threads, memory_mb)?;
         let file = File::create(output.join("poses.jsonl.partial"))
@@ -406,7 +407,12 @@ pub fn process(
                     .map_err(|e| format!("Write pose evidence: {e}"))?;
                 checksum.update(&row);
                 if samples.is_multiple_of(40) {
-                    on_progress("pose", (index as f64 / estimated as f64).clamp(0.0, 1.0))?;
+                    on_progress(
+                        "pose",
+                        (index as f64 / estimated as f64).clamp(0.0, 1.0),
+                        samples,
+                        expected_samples,
+                    )?;
                 }
                 Ok(())
             },
@@ -414,7 +420,6 @@ pub fn process(
         if cancel.load(Ordering::Acquire) {
             return Err("cancelled".into());
         }
-        let expected_samples = frames_expected.div_ceil(stride as u64);
         if samples != expected_samples {
             return Err("RTMPose sample timeline differs from RF-DETR".into());
         }
@@ -461,7 +466,7 @@ pub fn process(
         });
         crate::storage::write_json_atomic(&output.join("manifest.json"), &pose_manifest)
             .map_err(|e| format!("Write pose manifest: {e:?}"))?;
-        on_progress("pose", 1.0)?;
+        on_progress("pose", 1.0, samples, expected_samples)?;
         Ok(pose_manifest)
     })();
     if result.is_err() {

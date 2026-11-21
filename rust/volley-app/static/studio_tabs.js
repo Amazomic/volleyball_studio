@@ -496,8 +496,27 @@
         entry.duration_ms==null?null:Number(entry.duration_ms);
       const stateLabel=live?"В процессе":entry.duration_ms==null?"Без времени":"Готово";
       const line=make("div","analysis-history-stage"+(live?" is-running":""));
+      const name=make("span","analysis-history-stage-name",String(entry.name||"Стадия"));
+      const done=entry.frames_processed==null?NaN:Number(entry.frames_processed);
+      const total=entry.frames_total==null?NaN:Number(entry.frames_total);
+      if(Number.isSafeInteger(done)&&Number.isSafeInteger(total)&&total>0&&done>=0){
+        const amount=Math.max(0,Math.min(100,100*done/total));
+        name.append(make("small","analysis-history-stage-frames",
+          done.toLocaleString("ru-RU")+" / "+total.toLocaleString("ru-RU")+
+          " кадров · "+amount.toFixed(1)+"%"));
+        const rail=make("span","analysis-history-stage-rail");
+        const fill=make("span","analysis-history-stage-fill");
+        fill.style.width=amount+"%";
+        rail.setAttribute("role","progressbar");
+        rail.setAttribute("aria-label","Прогресс стадии "+String(entry.name||""));
+        rail.setAttribute("aria-valuemin","0");
+        rail.setAttribute("aria-valuemax","100");
+        rail.setAttribute("aria-valuenow",String(amount));
+        rail.append(fill);
+        name.append(rail);
+      }
       line.append(make("span","analysis-history-stage-mark",live?"●":"✓"),
-        make("span","analysis-history-stage-name",String(entry.name||"Стадия")),
+        name,
         make("span","analysis-history-stage-state",stateLabel),
         make("span","analysis-history-stage-duration",historyDuration(elapsed)));
       target.append(line);

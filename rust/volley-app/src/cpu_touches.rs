@@ -645,6 +645,7 @@ pub(crate) fn detect_stream(
         None,
         &[],
         None,
+        None,
     )
 }
 
@@ -670,6 +671,7 @@ fn detect_stream_with_pose(
     ball_mask: Option<&crate::cpu_retrack::ball_track::BallTrackMask>,
     rally_starts: &[u64],
     preliminary_intervals: Option<&[(u64, u64)]>,
+    mut on_progress: Option<&mut dyn FnMut(u64, u64) -> Result<(), String>>,
 ) -> Result<(String, u64, u64), String> {
     settings.validate()?;
     if preliminary_intervals.is_some_and(|intervals| {
@@ -969,6 +971,9 @@ fn detect_stream_with_pose(
             let end = next_emit + CHUNK as u64;
             process_block(next_emit, end, &buffer)?;
             next_emit = end;
+            if let Some(report) = on_progress.as_deref_mut() {
+                report(next_emit, count)?;
+            }
             while buffer
                 .front()
                 .is_some_and(|row| row.frame_index < next_emit.saturating_sub(HALO as u64))
@@ -981,6 +986,9 @@ fn detect_stream_with_pose(
         let end = (next_emit + CHUNK as u64).min(count);
         process_block(next_emit, end, &buffer)?;
         next_emit = end;
+        if let Some(report) = on_progress.as_deref_mut() {
+            report(next_emit, count)?;
+        }
         while buffer
             .front()
             .is_some_and(|row| row.frame_index < next_emit.saturating_sub(HALO as u64))
@@ -1048,6 +1056,31 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
     req: &TouchRequest,
     rally_starts: &[u64],
     rally_settings: volley_core::rally_reconstruction::RallySettings,
+) -> Result<Value, ApiError> {
+    process_with_ball_scope_and_rally_settings_report(
+        state,
+        req,
+        rally_starts,
+        rally_settings,
+        None,
+    )
+}
+
+pub(crate) fn process_discovery_with_rally_settings_and_progress(
+    state: &AppState,
+    req: &TouchRequest,
+    rally_settings: volley_core::rally_reconstruction::RallySettings,
+    report: &mut dyn FnMut(u64, u64) -> Result<(), String>,
+) -> Result<Value, ApiError> {
+    process_with_ball_scope_and_rally_settings_report(state, req, &[], rally_settings, Some(report))
+}
+
+fn process_with_ball_scope_and_rally_settings_report(
+    state: &AppState,
+    req: &TouchRequest,
+    rally_starts: &[u64],
+    rally_settings: volley_core::rally_reconstruction::RallySettings,
+    mut report: Option<&mut dyn FnMut(u64, u64) -> Result<(), String>>,
 ) -> Result<Value, ApiError> {
     if !state.writes_enabled {
         return Err(storage::conflict(
@@ -1138,6 +1171,9 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
         .as_u64()
         .filter(|n| *n > 0 && *n <= 48 * 3600 * 30)
         .ok_or_else(|| storage::bad_request("Invalid CPU tracked frame count"))?;
+    if let Some(update) = report.as_deref_mut() {
+        update(0, frames).map_err(storage::internal)?;
+    }
     let sha = manifest["sha256"]
         .as_str()
         .filter(|s| {
@@ -1231,6 +1267,7 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
             Some(&ball_mask),
             rally_starts,
             preliminary_scope_applied.then_some(preliminary.as_slice()),
+            report,
         )?;
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared source changed during CPU Touch replay".into());
@@ -1807,6 +1844,7 @@ mod tests {
             None,
             &[],
             None,
+            None,
         )
         .unwrap();
         assert_eq!(count, 1);
@@ -1831,6 +1869,7 @@ mod tests {
                 &[],
                 None,
                 &[240],
+                None,
                 None,
             )
             .unwrap();
@@ -2045,6 +2084,7 @@ mod local_tuning_diagnostic {
             &[],
             None,
             &[],
+            None,
             None,
         )
         .unwrap();

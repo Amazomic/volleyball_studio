@@ -12,6 +12,7 @@ class Node{
   constructor(tag,klass="",text=""){
     this.tag=tag;this.className=klass;this._text=String(text);
     this.children=[];this.parent=null;this.dataset={};this.open=false;this.events={};
+    this.style={};this.attributes={};
   }
   get textContent(){return this._text+this.children.map(c=>c.textContent).join("");}
   set textContent(value){
@@ -36,6 +37,7 @@ class Node{
     }
     return null;
   }
+  setAttribute(name,value){this.attributes[name]=String(value);}
   addEventListener(name,callback){this.events[name]=callback;}
 }
 const host=new Node("div"),progress=new Node("progress"),logPanel=new Node("details");
@@ -44,7 +46,8 @@ const ui={historyList:new Node("div"),progress,logPanel};
 const id="a".repeat(32),now=Date.now();
 const stages=[
   {name:"GPU · VballNet",started_ms:now-90000,finished_ms:now-40000,duration_ms:50000},
-  {name:"GPU · RF-DETR Medium + RTMPose",started_ms:now-40000,finished_ms:null,duration_ms:null}
+  {name:"GPU · RF-DETR Medium + RTMPose",started_ms:now-40000,finished_ms:null,duration_ms:null,
+    frames_processed:120,frames_total:400,progress_percent:30}
 ];
 const current={
   schema:"volley-studio-pipeline/1",project_id:"project",id,
@@ -64,6 +67,10 @@ const run=ui.historyList.children[0];
 assert.equal(run.querySelector(".analysis-history-stages").children.length,2);
 assert.match(run.querySelector(".analysis-history-stages").textContent,/GPU · VballNet.*50 с/);
 assert.match(run.querySelector(".analysis-history-stages").textContent,/В процессе/);
+assert.match(run.querySelector(".analysis-history-stages").textContent,/120 \/ 400 кадров · 30.0%/);
+const rail=run.querySelector(".analysis-history-stage-rail");
+assert.equal(rail?.attributes["aria-valuenow"],"30");
+assert.equal(rail?.children[0].style.width,"30%");
 assert.match(run.querySelector(".analysis-history-eta").textContent,/Осталось ≈ 10[5-9] с|Осталось ≈ 110 с/);
 assert.match(run.querySelector(".analysis-history-runtime").textContent,/Выполняется · 91 с/);
 assert.equal(progress.parent,logPanel.parent);

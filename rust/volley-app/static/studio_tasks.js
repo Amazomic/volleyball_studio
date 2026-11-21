@@ -162,8 +162,15 @@
       if(project===trackedAnalysisProject)trackedAnalysisProject="";
       clear("analysis");return;
     }
+    const currentStage=Array.isArray(data.stages)?data.stages.at(-1):null;
+    const done=Number(currentStage?.frames_processed);
+    const total=Number(currentStage?.frames_total);
+    const hasFrames=currentStage?.frames_processed!=null&&currentStage?.frames_total!=null&&
+      Number.isSafeInteger(done)&&Number.isSafeInteger(total)&&done>=0&&total>0;
+    const detail=hasFrames?" · "+done.toLocaleString("ru-RU")+"/"+total.toLocaleString("ru-RU")+
+      " кадров ("+(100*done/total).toFixed(1)+"%)":"";
     set("analysis",{projectId:project,label:"Анализ и постобработка",
-      stage:String(data.stage||"Обработка"),
+      stage:String(data.stage||"Обработка")+detail,
       progress:Number.isFinite(data.progress_percent)?data.progress_percent:null});
   }
   async function readPreparation(){

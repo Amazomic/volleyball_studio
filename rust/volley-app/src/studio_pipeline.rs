@@ -333,6 +333,11 @@ fn history_rows(state: &AppState, project_id: &str, offset: usize) -> Result<Val
                         &status["status"].as_str().unwrap_or(""))})
             })
             .collect();
+        let stages = status["stages"]
+            .as_array()
+            .filter(|items| !items.is_empty())
+            .cloned()
+            .unwrap_or(stages);
         rows.push(json!({"id":id,"video":status["video"],"mode":status["mode"],
             "status":status["status"],"stage":status["stage"],"error":status["error"],
             "started_ms":started,"duration_ms":started.zip(finished).and_then(|(a,b)| b.checked_sub(a)),
@@ -691,6 +696,16 @@ fn finish_timed_stage(status: &mut Value) {
 }
 
 fn progress(path: &Path, status: &mut Value, stage: &str, percent: f64) -> Result<(), String> {
+    progress_with_frames(path, status, stage, percent, None)
+}
+
+fn progress_with_frames(
+    path: &Path,
+    status: &mut Value,
+    stage: &str,
+    percent: f64,
+    frames: Option<(u64, u64)>,
+) -> Result<(), String> {
     let stage_name = stage.split_once(": ").map_or(stage, |(name, _)| name);
     let previous = status["stage"].as_str().unwrap_or("");
     let previous_name = previous.split_once(": ").map_or(previous, |(name, _)| name);
@@ -741,6 +756,16 @@ fn progress(path: &Path, status: &mut Value, stage: &str, percent: f64) -> Resul
     status["status"] = json!("running");
     status["stage"] = json!(stage);
     status["progress_percent"] = json!(percent.clamp(0.0, 99.9));
+    if let Some((processed, total)) = frames.filter(|(_, total)| *total > 0) {
+        if let Some(last) = status["stages"]
+            .as_array_mut()
+            .and_then(|stages| stages.last_mut())
+        {
+            last["frames_processed"] = json!(processed.min(total));
+            last["frames_total"] = json!(total);
+            last["progress_percent"] = json!(100.0 * processed.min(total) as f64 / total as f64);
+        }
+    }
     save(path, status)
 }
 fn require_id(response: &Value, field: &str) -> Result<String, String> {
@@ -1297,7 +1322,14 @@ async fn gpu(
     } else {
         person_detector_label()
     };
-    progress(path, status, &format!("GPU · {model_name}"), from)?;
+    let total = status["gpu_total_frames"].as_u64().unwrap_or(0);
+    progress_with_frames(
+        path,
+        status,
+        &format!("GPU · {model_name}"),
+        from,
+        Some((0, total)),
+    )?;
     log_event(
         path,
         &format!("GPU · {model_name}"),
@@ -1353,11 +1385,14 @@ async fn gpu(
             if phase == "complete" {
                 status["current_gpu_job_id"] = Value::Null;
             }
-            progress(
+            let done = gpu_status["decoded_frames"].as_u64().unwrap_or(0);
+            let total = status["gpu_total_frames"].as_u64().unwrap_or(done).max(1);
+            progress_with_frames(
                 path,
                 status,
                 &format!("GPU · {model_name}: {phase}"),
                 from + share * pct.clamp(0.0, 100.0) / 100.0,
+                Some((done, total)),
             )
         },
     )
@@ -1421,6 +1456,12 @@ async fn pipeline(
             "Источник проверен; первичный анализ читает оригинал без промежуточного MP4"
         },
     )?;
+    status["gpu_total_frames"] = json!((request
+        .analysis_range
+        .map_or(ready.duration_sec, |range| range.end_sec - range.start_sec)
+        * 30.0)
+        .round()
+        .max(0.0) as u64);
     progress(path, status, "Проверка исходного видео", 8.0)?;
     let (bytes, mtime_ns) = crate::inference_stream::source_stamp(&prepared)?;
     let identity = json!({"bytes":bytes,"mtime_ns":mtime_ns});
@@ -1647,7 +1688,8 @@ async fn pipeline(
                         .as_deref(),
                     Some("0" | "false")
                 );
-                progress(
+                let total = status["gpu_total_frames"].as_u64().unwrap_or(0);
+                progress_with_frames(
                     path,
                     status,
                     if primary_prefilter {
@@ -1656,6 +1698,7 @@ async fn pipeline(
                         gpu_label
                     },
                     8.0,
+                    Some((0, total)),
                 )?;
                 let result = tokio::task::block_in_place(|| {
                     inference_full::run_joint_pair(
@@ -1672,17 +1715,23 @@ async fn pipeline(
                         request.gpu.gpu_memory_limit_mb,
                         request.gpu.cpu_threads,
                         cancel,
-                        |fraction| {
+                        |fraction, processed, total| {
                             let label = if !primary_prefilter {
                                 gpu_label
-                            } else if fraction <= 0.4 {
+                            } else if fraction < 0.4 {
                                 "GPU · VBallNet: траектория мяча и розыгрыши"
                             } else if full_resolution_pose {
                                 "GPU · RF-DETR + RTMPose: игровые интервалы"
                             } else {
                                 "GPU · RF-DETR: игровые интервалы"
                             };
-                            progress(path, status, label, 8.0 + 72.0 * fraction)
+                            progress_with_frames(
+                                path,
+                                status,
+                                label,
+                                8.0 + 72.0 * fraction,
+                                Some((processed, total)),
+                            )
                         },
                     )
                 })?;
@@ -1864,12 +1913,13 @@ async fn pipeline(
                 request.gpu.gpu_memory_limit_mb,
                 request.gpu.cpu_threads,
                 cancel,
-                |_, p| {
-                    progress(
+                |_, p, done, total| {
+                    progress_with_frames(
                         path,
                         status,
                         "GPU · RTMPose-M: позы игроков",
                         82.0 + p * 2.5,
+                        Some((done, total)),
                     )
                 },
             )
@@ -1936,10 +1986,10 @@ async fn pipeline(
         "cpu_touches::process",
         json!({"project_id":request.project_id,"video":request.video,"replay_id":replay_id,"settings":request.post.touches}),
     )?;
-    let touches = cpu(
-        app.clone(),
-        (
-            cpu_touches::TouchRequest {
+    let touches = tokio::task::block_in_place(|| {
+        cpu_touches::process_discovery_with_rally_settings_and_progress(
+            app,
+            &cpu_touches::TouchRequest {
                 project_id: request.project_id.clone(),
                 video: request.video.clone(),
                 replay_id: replay_id.clone(),
@@ -1947,12 +1997,18 @@ async fn pipeline(
                 pose_classification: request.post.pose_classification,
             },
             request.post.rallies,
-        ),
-        |app, (touch_request, rally_settings)| {
-            cpu_touches::process_discovery_with_rally_settings(app, touch_request, *rally_settings)
-        },
-    )
-    .await?;
+            &mut |done, total| {
+                progress_with_frames(
+                    path,
+                    status,
+                    "Постобработка · физические касания",
+                    91.0 + 4.0 * done as f64 / total.max(1) as f64,
+                    Some((done, total)),
+                )
+            },
+        )
+    })
+    .map_err(reason)?;
     let touch_id = require_id(&touches, "touch_id")?;
     if touches["court_revision"] != status["court_revision"] {
         return Err("Court calibration changed during CPU processing".into());
@@ -3038,6 +3094,25 @@ mod tests {
         assert_eq!(photos.pose_mode.effective_stride(photos.pose_stride), 10);
         assert!(serde_json::from_value::<GpuProfile>(json!({"pose_mode":"unknown"})).is_err());
         assert_eq!(serde_json::to_value(video).unwrap()["pose_mode"], "video");
+    }
+
+    #[test]
+    fn stage_frame_metrics_preserve_previous_stage_and_cap_counts() {
+        let root = std::env::temp_dir().join(format!("volley-stage-frames-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("status.json");
+        let mut status = json!({"stage":"В очереди","stages":[]});
+        progress_with_frames(&path, &mut status, "GPU · VBallNet", 9.0, Some((25, 100))).unwrap();
+        progress_with_frames(&path, &mut status, "GPU · VBallNet", 12.0, Some((140, 100))).unwrap();
+        progress_with_frames(&path, &mut status, "GPU · RF-DETR", 50.0, Some((3, 20))).unwrap();
+        assert_eq!(status["stages"][0]["frames_processed"], 100);
+        assert_eq!(status["stages"][0]["frames_total"], 100);
+        assert_eq!(status["stages"][0]["progress_percent"], 100.0);
+        assert_eq!(status["stages"][1]["frames_processed"], 3);
+        assert_eq!(status["stages"][1]["frames_total"], 20);
+        assert_eq!(status["stages"][1]["progress_percent"], 15.0);
+        assert_eq!(read(&path).unwrap()["stages"], status["stages"]);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
