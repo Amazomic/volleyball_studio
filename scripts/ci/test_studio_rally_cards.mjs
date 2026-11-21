@@ -133,12 +133,10 @@ comparison.data={trajectory_status:"ready",trajectory_rallies:[
   {start:60,end:180},{start:300,end:420}
 ]};
 context.render();
-assert.equal(list.children.length,3,"Both sources must appear in the shared rally list");
-assert.match(list.children[0].klass,/training-ball/);
-assert.match(list.children[1].klass,/training-touch/);
-assert.match(list.children[2].klass,/training-ball/);
+assert.equal(list.children.length,2,"Only ball-trajectory rallies appear in training");
+assert.ok(list.children.every(item=>item.klass.includes("training-ball")),
+  "Old touch-based rally cards must never be shown");
 assert.match(values(list.children[0]).join(" "),/По мячу/);
-assert.match(values(list.children[1]).join(" "),/По касаниям/);
 assert.match(values(list.children[0]).join(" "),/не подтверждены/,
   "Ball-only rallies must not claim verified player or touch metrics");
 assert.ok(!values(list.children[0]).join(" ").includes("☆"),
@@ -152,15 +150,13 @@ assert.equal(playbackCalls[0][0].detected_start_frame,60);
 timelineRallyLayers.touches.checked=false;
 context.render();
 assert.equal(list.children.length,2);
-assert.ok(list.children.every(item=>item.klass.includes("training-ball")));
-timelineRallyLayers.ball.checked=false;
-context.render();
-assert.match(list.children[0].textContent,/Включите хотя бы один тип/);
 timelineRallyLayers.touches.checked=true;
 context.render();
+assert.equal(list.children.length,2,"Legacy touch toggle cannot enable other rally cards");
+timelineRallyLayers.ball.checked=false;
+context.render();
+assert.match(list.children[0].textContent,/Включите розыгрыши по траектории/);
 assert.equal(list.children.length,1);
-assert.match(list.children[0].klass,/training-touch/);
-timelineRallyLayers.touches.checked=false;
 timelineRallyLayers.ball.checked=true;
 comparison.data=null;
 context.render();
@@ -170,4 +166,4 @@ context.render();
 assert.equal(list.children.length,1,
   "Ordinary preview keeps CPU rally cards even when training filters are off");
 assert.equal(list.children[0].klass,"rally-card");
-console.log("Studio rally cards: CPU and ball sources, filters, colors, navigation, and standard preview: OK");
+console.log("Studio rally cards: trajectory-only training, seek, and existing standard preview: OK");

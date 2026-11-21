@@ -1,24 +1,15 @@
 use super::super::RawDetection;
 use serde::Serialize;
 
-const MIN_TRAJECTORY_SECONDS: f64 = 1.5;
-const MERGE_GAP_FRAMES: u64 = 120;
 const CONTEXT_FRAMES: u64 = 30;
 const MIN_DETECTIONS: usize = 45;
 
 fn merge_rally_intervals(intervals: &[(u64, u64)]) -> Vec<(u64, u64)> {
-    let mut merged = Vec::<(u64, u64)>::new();
-    for &(start, end) in intervals {
-        if let Some(last) = merged.last_mut() {
-            let gap = start.saturating_sub(last.1.saturating_add(1));
-            if start <= last.1 || gap < MERGE_GAP_FRAMES {
-                last.1 = last.1.max(end);
-                continue;
-            }
-        }
-        merged.push((start, end));
-    }
-    merged
+    crate::cpu_retrack::ball_track::merge_continuous_intervals(
+        intervals,
+        crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
+    )
+    .expect("validated continuous rally merge gap")
 }
 
 #[derive(Debug, Serialize)]
@@ -69,7 +60,7 @@ impl RallyMask {
         let observed_ball_frames = points.iter().filter(|point| point.is_some()).count();
         let detected = crate::cpu_retrack::ball_track::continuous_intervals_from_positions(
             &points,
-            MIN_TRAJECTORY_SECONDS,
+            crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
         )?;
         let merged = merge_rally_intervals(&detected);
         let mut selected = Vec::<(u64, u64)>::new();
@@ -138,8 +129,8 @@ impl RallyMask {
         Ok(Self {
             schema: "volley-primary-rally-mask/1",
             source_frame_count: frames,
-            min_trajectory_seconds: MIN_TRAJECTORY_SECONDS,
-            merge_gap_seconds: MERGE_GAP_FRAMES as f64 / 30.0,
+            min_trajectory_seconds: crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
+            merge_gap_seconds: crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
             context_seconds: CONTEXT_FRAMES as f64 / 30.0,
             observed_ball_frames,
             detected,

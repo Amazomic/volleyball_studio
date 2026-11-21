@@ -963,10 +963,10 @@ fn cpu_lineage_valid(
             touches["automatic_action_prediction_method"].as_str(),
             Some("pose_keypoints_v1_or_unknown_touch" | "pose_keypoints_motion_v1_or_unknown_touch")
         )
-        && touches["preliminary_rally_scope_version"] == "ball_down_up_v1"
+        && touches["preliminary_rally_scope_version"] == "coherent_vballnet_motion_v2"
         && touches["preliminary_rally_settings"] == json!(request.post.rallies)
         && touches["preliminary_rally_scope_applied"].as_bool().is_some()
-        && rallies["preliminary_rally_scope_version"] == "ball_down_up_v1"
+        && rallies["preliminary_rally_scope_version"] == "coherent_vballnet_motion_v2"
         && rallies["preliminary_rally_scope_applied"] == touches["preliminary_rally_scope_applied"]
         && touches["touch_id"] == touch
         && touches["source_replay_id"] == replay
@@ -3189,7 +3189,7 @@ mod branching_tests {
                 "body_trajectory_intersection_required":true,
                 "settings":{"require_pose":true},
                 "automatic_action_prediction_method":"pose_keypoints_v1_or_unknown_touch",
-                "preliminary_rally_scope_version":"ball_down_up_v1",
+                "preliminary_rally_scope_version":"coherent_vballnet_motion_v2",
                 "preliminary_rally_settings":request.post.rallies,
                 "preliminary_rally_scope_applied":false,
                 "ball_tracking_policy":crate::cpu_retrack::ball_track::POLICY,
@@ -3205,7 +3205,7 @@ mod branching_tests {
                 "schema":"volley-native-cpu-rally-proposals/1","state":"provisional_rally_segments","rally_run_id":rally,
                 "court_contact_context_version":"python_serve_toss_possession_v2",
                 "ground_boundary_version":"trajectory_court_surface_v3",
-                "preliminary_rally_scope_version":"ball_down_up_v1",
+                "preliminary_rally_scope_version":"coherent_vballnet_motion_v2",
                 "preliminary_rally_scope_applied":false,
                 "ball_tracking_policy":crate::cpu_retrack::ball_track::POLICY,
                 "project_id":request.project_id,"video":request.video,

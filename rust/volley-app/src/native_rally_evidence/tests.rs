@@ -192,6 +192,53 @@ fn fixture() -> (ValidatedRun, PathBuf) {
     (run, root)
 }
 #[test]
+fn verified_timeline_accepts_only_versioned_ball_rallies_without_touches() {
+    let (mut run, root) = fixture();
+    let saved = fs::read_to_string(&run.rally_file).unwrap();
+    let mut rows = saved
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    rows[0]["motion_supported_touch_proposals"] = json!(0);
+    rows[0]["max_touch_probability"] = json!(0.0);
+    rows[0]["first_touch_frame"] = json!(30);
+    rows[0]["last_touch_frame"] = json!(30);
+    let original_touches = fs::read_to_string(&run.touch_file).unwrap();
+    let remaining_touches = original_touches
+        .lines()
+        .filter(|line| {
+            let frame: Value = serde_json::from_str(line).unwrap();
+            frame["frame_index"].as_u64().unwrap() >= 95
+        })
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+    fs::write(&run.touch_file, &remaining_touches).unwrap();
+    run.touch_sha = format!("{:x}", Sha256::digest(remaining_touches.as_bytes()));
+    run.expected_touches = 4;
+    let store = |rows: &[Value], run: &mut ValidatedRun| {
+        let bytes = rows
+            .iter()
+            .map(|row| format!("{}\n", serde_json::to_string(row).unwrap()))
+            .collect::<String>();
+        fs::write(&run.rally_file, &bytes).unwrap();
+        run.rally_sha = format!("{:x}", Sha256::digest(bytes.as_bytes()));
+    };
+    store(&rows, &mut run);
+    assert!(
+        generate(&run, Choice::Timeline).is_err(),
+        "Legacy rally proposals still require at least one motion-supported touch"
+    );
+    rows[0]["method"] = json!("coherent_vballnet_motion_v2");
+    store(&rows, &mut run);
+    let result = generate(&run, Choice::Timeline).unwrap();
+    let verified = result.value["rallies"].as_array().unwrap();
+    assert_eq!(verified.len(), 3);
+    assert_eq!(verified[0]["start_frame"], 30);
+    assert_eq!(verified[0]["end_frame"], 80);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn predicted_action_does_not_bypass_source_track_or_score_validation() {
     let (run, root) = fixture();
     let saved = fs::read_to_string(&run.touch_file).expect("touch fixture");

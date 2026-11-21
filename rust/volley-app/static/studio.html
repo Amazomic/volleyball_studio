@@ -269,14 +269,14 @@
                     <button type="button" class="secondary" id="studio-annotation-review" disabled>Завершить проверку видео</button>
                   </div>
                 </div>
-                <section class="studio-training-comparison" aria-label="Сравнение двух алгоритмов разметки розыгрышей">
+                <section class="studio-training-comparison" aria-label="Детекция розыгрышей по траектории мяча">
                   <div class="studio-training-compare-title">
-                    <div><strong>Розыгрыши: CPU против траектории мяча</strong><small>Сравнение по одной версии видео, без повторного GPU-анализа</small></div>
+                    <div><strong>Розыгрыши по непрерывной траектории мяча</strong><small>Используется во всех этапах анализа, без повторного GPU-инференса</small></div>
                     <small>Нажмите кнопку моделирования над видео, затем выберите касание или границу кликом.</small>
                   </div>
                   <div class="studio-training-compare-controls" role="group" aria-label="Параметры поиска розыгрышей по мячу">
                     <label>Алгоритм розыгрышей
-                      <select id="studio-comparison-mode"><option value="continuous" selected>Устойчивая траектория мяча</option><option value="impacts">Перегибы траектории</option></select>
+                      <select id="studio-comparison-mode"><option value="continuous" selected>Устойчивая траектория мяча</option></select>
                     </label>
                     <div id="studio-comparison-continuous-settings" class="studio-training-compare-mode-settings">
                       <label>Минимальная устойчивая траектория (секунды)
@@ -294,7 +294,7 @@
                   <p id="studio-comparison-status" role="status" aria-live="polite">Выберите видео и CPU-постобработку.</p>
                   <div id="studio-comparison-metrics" class="studio-training-compare-metrics" aria-live="polite"></div>
                   <div id="studio-comparison-touches" class="studio-training-simulated-touches" aria-live="polite"></div>
-                  <div class="studio-training-compare-review">
+                  <div class="studio-training-compare-review" hidden>
                     <strong>Проверка расхождений</strong>
                     <label>Показать
                       <select id="studio-comparison-filter">
@@ -307,8 +307,8 @@
                       </select>
                     </label>
                   </div>
-                  <div id="studio-comparison-differences" class="studio-training-compare-differences" aria-live="polite"></div>
-                  <div class="studio-training-compare-legend">
+                  <div id="studio-comparison-differences" class="studio-training-compare-differences" hidden aria-live="polite"></div>
+                  <div class="studio-training-compare-legend" hidden>
                     <span><i class="studio-compare-cpu"></i> CPU</span>
                     <span><i class="studio-compare-ball"></i> Траектория мяча</span>
                     <span><i class="studio-compare-manual"></i> Ручной эталон</span>
@@ -381,12 +381,12 @@
                   </select>
                 </div>
                 <div class="studio-training-rally-visibility" role="group" aria-label="Отображение тестовых розыгрышей">
-                  <label class="studio-training-source studio-training-source-cpu">
-                    <input type="checkbox" id="studio-training-rallies-by-touches" checked>
-                    <span class="studio-training-source-details"><strong>По касаниям · CPU</strong><small id="studio-training-cpu-summary">Нет данных</small></span>
+                  <label class="studio-training-source studio-training-source-cpu" hidden>
+                    <input type="checkbox" id="studio-training-rallies-by-touches">
+                    <span class="studio-training-source-details"><strong>Архивный CPU-источник (не используется)</strong><small id="studio-training-cpu-summary">Нет данных</small></span>
                   </label>
                   <label class="studio-training-source studio-training-source-ball">
-                    <input type="checkbox" id="studio-training-rallies-by-trajectory" checked>
+                    <input type="checkbox" id="studio-training-rallies-by-trajectory" checked hidden>
                     <span class="studio-training-source-details"><strong>По траектории мяча</strong><small id="studio-training-ball-summary">Нет расчёта</small></span>
                   </label>
                   <label class="studio-training-merge-gap">Объединять при паузе меньше
@@ -418,7 +418,7 @@
                   <span>00:00</span><span id="studio-timeline-middle">—</span><span id="studio-timeline-end">—</span>
                 </div>
                 <div class="video-timeline-legend">
-                  <span id="studio-timeline-rally-key"><i class="rally-key"></i> Розыгрыши по касаниям</span>
+                  <span id="studio-timeline-rally-key" hidden><i class="rally-key"></i> Архивные розыгрыши</span>
                   <span id="studio-timeline-ball-key" hidden><i class="trajectory-rally-key"></i> Розыгрыши по мячу</span>
                   <span id="studio-timeline-touch-key"><i class="touch-key"></i> Касания CPU (автоматические)</span>
                   <span id="studio-timeline-manual-key" hidden><i class="manual-touch-key"></i> Ручная разметка</span>

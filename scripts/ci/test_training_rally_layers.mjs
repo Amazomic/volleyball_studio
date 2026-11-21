@@ -84,59 +84,50 @@ timeline.data={
   touch_annotations:[{frame_index:32,kind:"unknown_touch",touch_attributed:true}]
 };
 const palette=()=>rects.map(r=>r.color);
+timelineRallyLayers.touches.checked=false;
+timelineRallyLayers.ball.checked=true;
 timelineRallyLayers.candidates.checked=false;
 timelineRallyLayers.gap.value="4";
 drawTimeline();
-assert.ok(palette().includes("#37b9ce80"),"CPU rallies must be translucent cyan");
-assert.ok(palette().includes("#efb15773"),"Ball rallies must be translucent amber");
-assert.equal(rects.filter(row=>row.color==="#37b9ce80").length,1,
-  "Two CPU rallies separated by less than 4 seconds must share one band");
+assert.ok(!palette().includes("#37b9ce80"),
+  "Old CPU touch-based rally intervals must never render in training");
 assert.equal(rects.filter(row=>row.color==="#efb15773").length,1,
-  "Two trajectory rallies separated by less than 4 seconds must share one band");
-assert.ok(!palette().includes("#f8ce87"),
-  "Raw direction changes are not automatically attributed to trajectory touch candidates");
-rects.length=0;timelineRallyLayers.gap.value="0";
+  "Ball trajectory intervals separated by less than four seconds merge");
+rects.length=0;
+timelineRallyLayers.gap.value="0";
 timelineRallyLayers.gap.listeners.input();
-assert.equal(rects.filter(row=>row.color==="#37b9ce80").length,2,
-  "Zero gap restores distinct CPU intervals");
 assert.equal(rects.filter(row=>row.color==="#efb15773").length,2,
-  "Zero gap restores distinct ball intervals");
-rects.length=0;timelineRallyLayers.gap.value="4";
+  "Zero gap restores independent ball trajectory intervals");
+rects.length=0;
+timelineRallyLayers.gap.value="4";
 timelineRallyLayers.gap.listeners.change();
-for(const color of ["#00ad9470","#10deb2","#f14f4f"])
-  assert.ok(palette().includes(color),"Initial manual/CPU marker missing: "+color);
-assert.ok(!palette().includes("#ffbd55"),
-  "Unverified ball touch candidates must be hidden by default");
-rects.length=0;timelineRallyLayers.candidates.checked=true;
+assert.equal(rects.filter(row=>row.color==="#efb15773").length,1);
+assert.ok(!palette().includes("#ffbd55"),"Ball touch candidates default hidden");
+rects.length=0;
+timelineRallyLayers.candidates.checked=true;
 timelineRallyLayers.candidates.listeners.change();
-assert.ok(palette().includes("#ffbd55"),"Explicitly enabled candidate markers are shown");
-const cpu=rects.find(r=>r.color==="#37b9ce80");
-const ball=rects.find(r=>r.color==="#efb15773");
-assert.ok(cpu.x<ball.x&&ball.x<cpu.x+cpu.w,"Overlapping rally layers share the same lane");
-rects.length=0;timelineRallyLayers.touches.checked=false;
+assert.ok(palette().includes("#ffbd55"),"Optional touch candidates follow explicit toggle");
+assert.ok(!palette().includes("#37b9ce80"),
+  "Optional touch candidates must not restore the old rally detector");
+rects.length=0;
+timelineRallyLayers.touches.checked=true;
 timelineRallyLayers.touches.listeners.change();
-assert.equal(renderedLists,4,"Changing the gap and checkboxes immediately refreshes the rally list");
-assert.equal(ui.list.scrollTop,0);
-assert.ok(!palette().includes("#37b9ce80"));
-for(const color of ["#00ad9470","#10deb2","#f14f4f"])
-  assert.ok(!palette().includes(color),"Touch-based mark remains after disabling touch rallies: "+color);
-assert.equal(marks[".studio-annotation-tick"][0].hidden,true,
-  "Manual touch marker must be hidden with touch-rally layer");
-assert.equal($("studio-timeline-touch-key").hidden,true,
-  "The CPU touch legend must also disappear with its marks");
-assert.equal(marks[".studio-trajectory-proposal"][0].hidden,false);
-assert.ok(palette().includes("#efb15773"));
-rects.length=0;timelineRallyLayers.ball.checked=false;
+assert.ok(!palette().includes("#37b9ce80"),
+  "Even an outdated saved checkbox cannot reactivate touch-based rallies");
+rects.length=0;
+timelineRallyLayers.ball.checked=false;
 timelineRallyLayers.ball.listeners.change();
-assert.ok(!palette().includes("#37b9ce80")&&!palette().includes("#efb15773"));
-assert.ok(!palette().includes("#ffbd55"),"Trajectory proposal markers must obey ball checkbox");
+assert.ok(!palette().includes("#efb15773"),
+  "Turning off the only rally layer hides its intervals");
+assert.ok(!palette().includes("#ffbd55"),
+  "Ball candidate markers must obey the trajectory layer");
 assert.equal(marks[".studio-trajectory-proposal"][0].hidden,true);
-rects.length=0;timelineRallyLayers.touches.checked=true;
-timelineRallyLayers.touches.listeners.change();
-assert.ok(palette().includes("#37b9ce80")&&!palette().includes("#efb15773"));
-assert.ok(palette().includes("#00ad9470")&&palette().includes("#f14f4f"));
-assert.equal(marks[".studio-annotation-tick"][0].hidden,false);
-assert.equal($("studio-timeline-touch-key").hidden,false);
-rects.length=0;training.active=false;drawTimeline();
-assert.ok(!palette().includes("#37b9ce80"),"Outside training, the existing rally toggle still controls the lane");
-console.log("Training rally visibility: both checkboxes hide associated canvas AND DOM marks, preserving non-training behavior: OK");
+assert.equal(ui.list.scrollTop,0);
+assert.ok(renderedLists>=5,"Changing trajectory settings refreshes the rally list");
+assert.match(css,/#studio-preview-view\.training-workspace :is\(\.studio-training-source-cpu/);
+assert.match(css,/\[hidden\]\{display:none!important\}/);
+assert.match(html,/class="studio-training-source studio-training-source-cpu" hidden/);
+assert.match(html,/id="studio-training-rallies-by-touches">/);
+assert.match(html,/id="studio-training-rallies-by-trajectory" checked hidden/);
+
+console.log("Training rally visibility: single continuous-ball source, merge gap and optional touch candidates: OK");

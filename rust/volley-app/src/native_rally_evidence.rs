@@ -145,6 +145,8 @@ struct NativeRally {
     ball_observations: u64,
     ball_coverage: f64,
     motion_supported_touch_proposals: u64,
+    #[serde(default)]
+    method: Option<String>,
     first_touch_frame: u64,
     last_touch_frame: u64,
     max_touch_probability: f64,
@@ -614,7 +616,8 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
             || !item.max_touch_probability.is_finite()
             || !(0.0..=1.0).contains(&item.max_touch_probability)
             || item.ball_observations > end - start + 1
-            || item.motion_supported_touch_proposals < 1
+            || (item.motion_supported_touch_proposals == 0
+                && item.method.as_deref() != Some("coherent_vballnet_motion_v2"))
             || item.first_touch_frame < start
             || item.last_touch_frame > end
             || item.first_touch_frame > item.last_touch_frame

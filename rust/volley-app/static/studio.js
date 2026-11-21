@@ -1225,15 +1225,12 @@
       const n=Math.floor(Math.random()*16);return (c==="x"?n:(n&3|8)).toString(16);
     });
   const annotationCurrentData=()=>annotation.data&&annotationSourceValid();
-  const annotationRallySeeds=()=>((timeline.data?.rallies)||[]).slice(0,1024)
-    .filter(r=>Number.isSafeInteger(r.start_frame)&&Number.isSafeInteger(r.end_frame)&&r.start_frame<r.end_frame)
-    .map(r=>({id:annotationNewId(),start:r.start_frame,end:r.end_frame}));
   const annotationTrajectoryRallySeeds=()=>{
     const proposed=comparison.data;
-    if(!comparisonMatches(proposed)||proposed.trajectory_status!=="ready")return annotationRallySeeds();
+    if(!comparisonMatches(proposed)||proposed.trajectory_status!=="ready")return [];
     return proposed.trajectory_rallies.slice(0,1024)
       .filter(r=>Number.isSafeInteger(r.start)&&Number.isSafeInteger(r.end)&&
-        r.start>=0&&r.start<r.end&&r.end<annotation.prediction.total_frames)
+        r.start>=0&&r.start<r.end&&r.end<(annotation.prediction?.total_frames||annotation.data?.total_frames||0))
       .map(r=>({id:annotationNewId(),start:r.start,end:r.end}));
   };
   const annotationFromPrediction=()=>({
@@ -1626,7 +1623,7 @@
     if(annotationReady()&&!window.confirm("Взять текущие CPU-метки за основу черновика?"))return;
     const touches=[...new Set((timeline.data.touch_frames||[]).filter(n=>Number.isSafeInteger(n)&&n>=0))]
       .slice(0,4096).map(frame=>({id:annotationNewId(),frame}));
-    annotation.data={...annotation.data,touches,rallies:annotationRallySeeds(),reviewed:false,metrics:null};
+    annotation.data={...annotation.data,touches,rallies:annotationTrajectoryRallySeeds(),reviewed:false,metrics:null};
     annotation.dirty=true;annotation.touchId=null;annotation.rallyId=null;
     drawAnnotation();drawTimeline();annotationNotice("CPU-метки скопированы в черновик. Исправьте и сохраните данные.");
   });
@@ -1751,8 +1748,8 @@
     }
     if(!ready){
       comparison.summary.textContent="Нажмите «Смоделировать» для расчёта по сохранённому треку мяча";
-      comparison.metrics.textContent=data.cpu_rallies.length+" розыгрышей CPU";
-      comparison.differences.textContent="Перегибы не сохранены в этой CPU-версии. Кнопка над видео рассчитает розыгрыши и касания из сохранённого трека мяча без повторного GPU-инференса.";
+      comparison.metrics.textContent="Розыгрыши по траектории ещё не рассчитаны.";
+      comparison.differences.textContent="Непрерывная траектория будет рассчитана из сохранённого трека мяча без повторного GPU-инференса.";
       return;
     }
     const addMetric=(title,body)=>{
@@ -1762,31 +1759,30 @@
       const value=document.createElement("strong");value.textContent=body;
       card.append(label,value);comparison.metrics.append(card);
     };
-    const cpu=data.metrics.cpu_trajectory;
+
     const continuous=data.mode==="continuous";
     const simulated=Array.isArray(data.simulated_touch_candidates)?data.simulated_touch_candidates:[];
     const unassigned=Array.isArray(data.unassigned_touch_candidates)?data.unassigned_touch_candidates:[];
     comparison.summary.textContent=comparison.simulated?
-      continuous?"Устойчивая траектория: сравнение до объединения · итог после объединения справа":
+      continuous?"Устойчивая траектория: "+data.trajectory_rallies.length+" отрезков до объединения":
       "Алгоритм по мячу: "+simulated.length+
       " возможных касаний внутри · "+unassigned.length+
       " перегибов вне розыгрышей":"Нажмите «Смоделировать»";
-    addMetric("Розыгрыши CPU до объединения",String(data.cpu_rallies.length));
+
     addMetric("По мячу до объединения",String(data.trajectory_rallies.length));
     if(!continuous){
       addMetric("Кандидаты внутри розыгрышей",String(simulated.length));
       addMetric("Перегибы вне розыгрышей",String(unassigned.length));
     }
-    addMetric("Совпали (IoU ≥ 0,5)",String(cpu.matched));
-    addMetric("Только CPU / только мяч",cpu.missed+" / "+cpu.extra);
-    addMetric("F1 между детекторами",(cpu.f1*100).toFixed(1)+"%");
+
+
+
     if(data.calibration){
       const before=data.calibration.baseline.f1*100;
       const after=data.calibration.fitted.f1*100;
       addMetric("Подбор по этому видео · F1",before.toFixed(1)+"% → "+after.toFixed(1)+"%");
     }
-    if(data.reference_reviewed&&data.metrics.cpu_reference&&data.metrics.trajectory_reference){
-      addMetric("CPU против эталона · F1",(data.metrics.cpu_reference.f1*100).toFixed(1)+"%");
+    if(data.reference_reviewed&&data.metrics.trajectory_reference){
       addMetric("Мяч против эталона · F1",(data.metrics.trajectory_reference.f1*100).toFixed(1)+"%");
     }else{
       addMetric("Ручной эталон",data.reference_rallies===null?"Нет разметки":
@@ -1887,11 +1883,11 @@
     }
     const key=project+":"+run+":"+video;
     const sameSource=comparison.sourceKey===key;
-    const selectedMode=comparison.mode.value||"impacts";
+    const selectedMode="continuous";
     const simulate=useControls||calibrate||selectedMode==="continuous"||
       (sameSource&&comparison.simulated);
     if(!sameSource)comparison.simulated=false;
-    comparison.status.textContent="Сравниваем выбранную CPU-версию и сохранённую траекторию мяча…";
+    comparison.status.textContent="Рассчитываем розыгрыши по сохранённой траектории мяча…";
     comparison.recalculate.disabled=true;
     comparison.calibrate.disabled=true;
     const options={project_id:project,rally_run_id:run};
@@ -2310,14 +2306,6 @@
     Number.isFinite(Number(timelineRallyLayers.gap.value))?
       Number(timelineRallyLayers.gap.value):4));
   const trainingRallyGroups=()=>{
-    const data=timeline.data;
-    const cpu=data?.project_id===s.project&&data?.rally_run_id===s.run?
-      data.rallies:s.items;
-    const cpuIntervals=cpu.map(item=>({
-      start:Number(item.start_frame??item.detected_start_frame),
-      end:Number(item.end_frame??item.detected_end_frame),
-      members:[item]
-    }));
     const ball=comparisonMatches(comparison.data)&&
       comparison.data?.trajectory_status==="ready"?
       comparison.data.trajectory_rallies:[];
@@ -2326,7 +2314,7 @@
     }));
     const gapFrames=trainingGapSeconds()*fps();
     return {
-      touches:mergeTrainingIntervals(cpuIntervals,gapFrames),
+      touches:[],
       ball:mergeTrainingIntervals(ballIntervals,gapFrames)
     };
   };
@@ -2344,10 +2332,7 @@
     return clockText+":"+String(seconds%60).padStart(2,"0");
   };
   const updateTrainingSummaries=groups=>{
-    timelineRallyLayers.cpuSummary.textContent=timeline.data||s.items.length?
-      groups.touches.length+" "+trainingRallyNoun(groups.touches.length)+" · "+
-        durationTrainingGroups(groups.touches):
-      "Нет загруженного CPU-индекса";
+    timelineRallyLayers.cpuSummary.textContent="Устаревший способ отключён";
     timelineRallyLayers.ballSummary.textContent=comparisonMatches(comparison.data)&&
       comparison.data?.trajectory_status==="ready"?
       groups.ball.length+" "+trainingRallyNoun(groups.ball.length)+" · "+
@@ -2359,8 +2344,8 @@
       comparison.data?.mode==="impacts"?
       comparison.data.simulated_touch_candidates:null;
     if(training.active&&timeline.data)timeline.status.textContent=
-      "После объединения · CPU: "+groups.touches.length+
-      " · мяч: "+groups.ball.length+" · пауза < "+trainingGapSeconds()+" с";
+      "Розыгрыши по мячу: "+groups.ball.length+
+      " · пауза < "+trainingGapSeconds()+" с";
     timelineRallyLayers.provenance.textContent=prediction?
       prediction.length+" кандидатов · в "+annotation.prediction.rally_count+" розыгрышах VBallNet":
       simulated?simulated.length+" кандидатов · перегибы мяча":
@@ -3396,29 +3381,21 @@
     rallyCardProgresses.clear();
     wipe(ui.list);
     const trainingList=typeof training!=="undefined"&&training.active;
-    const cpuItems=trainingList&&!timelineRallyLayers.touches.checked?[]:s.items;
+    const cpuItems=trainingList?[]:s.items;
     const ballItems=trainingList&&timelineRallyLayers.ball.checked&&
       comparisonMatches(comparison.data)&&comparison.data?.trajectory_status==="ready"?
       comparison.data.trajectory_rallies:[];
     const groups=trainingList?trainingRallyGroups():null;
     if(groups)updateTrainingSummaries(groups);
-    const cpuSource=new Map(s.items.map(item=>[item.candidate_id,item]));
-    const visible=trainingList?[
-      ...(timelineRallyLayers.touches.checked?groups.touches:[]).map(group=>{
-        const original=group.members.length===1?
-          cpuSource.get(group.members[0].candidate_id):null;
-        return {kind:original?"touch":"merged",item:original||group,start:group.start};
-      }),
-      ...(timelineRallyLayers.ball.checked?groups.ball:[]).map(group=>({
+    const visible=trainingList?
+      (timelineRallyLayers.ball.checked?groups.ball:[]).map(group=>({
         kind:"ball",item:group,start:group.start
-      }))
-    ].sort((a,b)=>a.start-b.start||(a.kind==="touch"?-1:1)):
+      })):
       cpuItems.map(item=>({kind:"touch",item}));
     if(!visible.length){
-      const text=trainingList&&!timelineRallyLayers.touches.checked&&!timelineRallyLayers.ball.checked?
-        "Включите хотя бы один тип розыгрышей в заголовке списка.":
-        trainingList&&!timelineRallyLayers.touches.checked&&
-          !comparisonMatches(comparison.data)?
+      const text=trainingList&&!timelineRallyLayers.ball.checked?
+        "Включите розыгрыши по траектории мяча.":
+        trainingList&&!comparisonMatches(comparison.data)?
           "Розыгрыши по мячу ещё не рассчитаны. Нажмите «Смоделировать розыгрыши».":
         s.pageLoading?"Проверка источников и загрузка розыгрышей…":
         s.pageError?"Предпросмотр не загружен: "+s.pageError+

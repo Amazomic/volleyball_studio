@@ -463,9 +463,11 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         .transpose()?;
     let reviewed = truth.as_ref().is_some_and(|(_, _, reviewed)| *reviewed);
     let calibration_requested = query.calibrate.unwrap_or(false);
-    let mode = query.mode.as_deref().unwrap_or("impacts");
-    if !matches!(mode, "impacts" | "continuous") {
-        return Err(storage::bad_request("Unknown training rally algorithm"));
+    let mode = query.mode.as_deref().unwrap_or("continuous");
+    if mode != "continuous" {
+        return Err(storage::bad_request(
+            "Only continuous-ball rally detection is supported",
+        ));
     }
     if (mode == "continuous"
         && (calibration_requested

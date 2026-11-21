@@ -63,25 +63,24 @@ const helpers=runInNewContext(js.slice(p,q)+
   "\n({trainingRallyGroups,trainingGapSeconds,updateTrainingSummaries,showBallCandidates})",
   context);
 let groups=JSON.parse(JSON.stringify(helpers.trainingRallyGroups()));
-assert.equal(groups.touches.length,2,"Use the full CPU index, not its paginated preview");
-assert.equal(groups.ball.length,1);
-assert.equal(groups.touches[0].start,0);
-assert.equal(groups.touches[0].end,209);
+assert.equal(groups.touches.length,0,"Legacy CPU rally groups are unavailable in training");
+assert.equal(groups.ball.length,1,"Adjacent ball intervals merge with a four-second gap");
+assert.equal(groups.ball[0].start,30);
+assert.equal(groups.ball[0].end,220);
 helpers.updateTrainingSummaries(groups);
-assert.equal(layers.cpuSummary.textContent,"2 розыгрыша · 0:09");
+assert.equal(layers.cpuSummary.textContent,"Устаревший способ отключён");
 assert.equal(layers.ballSummary.textContent,"1 розыгрыш · 0:06");
 assert.match(layers.provenance.textContent,/непрерывная траектория определяет только розыгрыши/);
 assert.equal(helpers.showBallCandidates(),false);
 layers.candidates.checked=true;
 assert.equal(helpers.showBallCandidates(),true);
 layers.ball.checked=false;
-assert.equal(helpers.showBallCandidates(),false,"Touch candidates require the ball-rally layer");
+assert.equal(helpers.showBallCandidates(),false,"Optional touches require the ball-rally layer");
 layers.ball.checked=true;
-layers.gap.value="5";
+layers.gap.value="0";
 groups=JSON.parse(JSON.stringify(helpers.trainingRallyGroups()));
-assert.equal(groups.touches.length,1);
-helpers.updateTrainingSummaries(groups);
-assert.equal(layers.cpuSummary.textContent,"1 розыгрыш · 0:13");
+assert.equal(groups.touches.length,0);
+assert.equal(groups.ball.length,2,"No merge gap shows both ball trajectory intervals");
 layers.gap.value="4";
 comparison.data=null;
 groups=JSON.parse(JSON.stringify(helpers.trainingRallyGroups()));
@@ -94,16 +93,15 @@ comparison.data={trajectory_status:"ready",mode:"continuous",trajectory_rallies:
 const {rallyAtTimelineTime}=runInNewContext(js.slice(selectStart,selectEnd)+
   "\n({rallyAtTimelineTime})",{s,training:{active:true},fps:()=>30,
     timeline,trainingRallyGroups:helpers.trainingRallyGroups,timelineRallyLayers:layers});
-const insideCpuGap=rallyAtTimelineTime(120/30);
-assert.equal(insideCpuGap.start_frame,0);
-assert.equal(insideCpuGap.end_frame,209,
-  "The full-width timeline must select the merged interval, including its gap");
-layers.touches.checked=false;
 const insideBallGap=rallyAtTimelineTime(130/30);
 assert.equal(insideBallGap.start_frame,30);
 assert.equal(insideBallGap.end_frame,220,
-  "Ball and CPU layers must use independent merged boundaries");
+  "Full-width timeline must select the merged ball interval");
+layers.touches.checked=true;
+const stillBall=rallyAtTimelineTime(130/30);
+assert.equal(stillBall.start_frame,30,
+  "Legacy touch toggle never replaces the trajectory-based source");
 layers.ball.checked=false;
 assert.equal(rallyAtTimelineTime(130/30),null,
-  "Hidden training sources must not be chosen on timeline hover");
-console.log("Training-only merging: exact 4-second threshold, full index, independent sources, totals, timeline selection, candidate provenance: OK");
+  "Disabling the only training rally layer prevents timeline selection");
+console.log("Training-only merging: exact four-second trajectory gap, single source, timeline selection and optional candidates: OK");

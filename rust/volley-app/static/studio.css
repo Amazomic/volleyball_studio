@@ -1790,6 +1790,8 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 .studio-training-compare-row.shifted strong{color:#f3b07f}
 .studio-training-compare-row.both_missed strong{color:#f0a2d6}
 .studio-training-compare-row.agreed strong{color:#91d4b6}
+#studio-preview-view.training-workspace :is(.studio-training-source-cpu,.studio-training-compare-review,.studio-training-compare-differences,.studio-training-compare-legend)[hidden]{display:none!important}
+#studio-preview-view.training-workspace .studio-training-rally-visibility input[hidden]{display:none!important}
 .studio-training-compare-legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap;color:#a9c1d9;font-size:11px}
 .studio-training-compare-legend span{display:inline-flex;align-items:center;gap:6px}
 .studio-training-compare-legend i{display:inline-block;width:13px;height:8px;border-radius:2px}

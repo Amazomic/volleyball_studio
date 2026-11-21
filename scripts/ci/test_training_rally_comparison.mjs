@@ -74,151 +74,72 @@ const context={
 const finish=js.indexOf("  comparison.recalculate.addEventListener",end);
 const {comparison,renderComparison,refreshComparison}=runInNewContext(js.slice(start,finish)+
   "\n({comparison,renderComparison,refreshComparison})",context);
-comparison.filter.value="disagreement";
-comparison.data={
+comparison.mode.value="continuous";
+comparison.filter.value="all";
+comparison.minSeconds.value="1.5";
+const ready={
   schema:"volley-rally-training-comparison/1",
   project_id:"p",rally_run_id:"r",video:"source.mp4",trajectory_status:"ready",
-  cpu_rallies:[{start:10,end:30},{start:90,end:150}],
-  trajectory_rallies:[{start:12,end:31},{start:220,end:260}],
-  trajectory_impacts:[12,220],
-  reference_rallies:[],
-  reference_reviewed:false,
-  metrics:{cpu_trajectory:{matched:1,missed:1,extra:1,f1:0.5},
+  mode:"continuous",
+  cpu_rallies:[{start:10,end:30}],
+  trajectory_rallies:[{start:30,end:180}],
+  trajectory_impacts:[],
+  reference_rallies:null,reference_reviewed:false,
+  metrics:{cpu_trajectory:{matched:0,missed:1,extra:1,f1:0},
     cpu_reference:null,trajectory_reference:null},
-  differences:[
-    {kind:"agreed",cpu:{start:10,end:30},trajectory:{start:12,end:31},iou:0.85,seek_frame:10},
-    {kind:"cpu_only",cpu:{start:90,end:150},trajectory:null,iou:null,seek_frame:90},
-    {kind:"trajectory_only",cpu:null,trajectory:{start:220,end:260},iou:null,seek_frame:220},
-    {kind:"both_missed",cpu:null,trajectory:null,reference:{start:340,end:380},iou:null,seek_frame:340}
-  ]
+  differences:[],
+  simulated_touch_candidates:[],unassigned_touch_candidates:[]
 };
-renderComparison();
-const rows=elements.get("studio-comparison-differences").children.filter(
-  row=>row.className?.includes("studio-training-compare-row"));
-assert.equal(rows.length,3,"disagreements should exclude agreed rallies");
-rows[1].click();
-assert.equal(seeked,220/30);
-assert.equal(paused,true);
-assert.equal(elements.get("studio-comparison-metrics").children.length,8);
-comparison.filter.value="all";
-renderComparison();
-assert.equal(elements.get("studio-comparison-differences").children.filter(
-  row=>row.className?.includes("studio-training-compare-row")).length,4);
-s.run="another";
-renderComparison();
-assert.match(elements.get("studio-comparison-differences").textContent,/Выберите CPU-анализ/);
-assert.equal(comparison.recalculate.disabled,true);
-let release;
-context.request=()=>new Promise(resolve=>{release=resolve;});
-const pending=refreshComparison();
-s.run="newer";
-release(comparison.data);
-await pending;
-assert.equal(comparison.sourceKey,"","An old request must not claim the newer run");
-assert.equal(comparison.epoch,1);
-const saved=comparison.data;
-s.run="r";
-comparison.data={...saved,trajectory_status:"unavailable"};
-renderComparison();
-assert.equal(comparison.recalculate.disabled,false,
-  "Older CPU versions must offer simulation from their saved replay");
-const queries=[];
-context.request=async (_request)=> {
-  queries.push(_request.query);
-  return {...saved,trajectory_status:"ready",
-    simulated_touch_candidates:[12,220],
-    parameters:{min_impacts:2,context_frames:45,min_duration_frames:45,max_touch_gap_frames:120}};
-};
-comparison.sourceKey="p:r:source.mp4";
-await refreshComparison(true);
-assert.equal(queries.at(-1).simulate,true);
-assert.equal(comparison.simulated,true);
-assert.equal(elements.get("studio-comparison-touches").children.length,0,
-  "Unverified candidates are hidden until explicitly enabled");
-context.timelineRallyLayers.candidates.checked=true;
-renderComparison();
-assert.equal(elements.get("studio-comparison-touches").children.length,2);
-assert.equal(comparison.calibrate.disabled,true,"Unreviewed labels cannot calibrate");
-assert.match(elements.get("studio-simulation-summary").textContent,/возможных касаний/);
-await refreshComparison();
-assert.equal(queries.at(-1).simulate,true,
-  "Manual edits must preserve the current simulation and its parameters");
-const beforeCalibration=queries.length;
-context.request=async requestValue=>{
-  queries.push(requestValue.query);
-  return {...saved,reference_reviewed:true,reference_rallies:[{start:10,end:30}],
-    trajectory_status:"ready",simulated_touch_candidates:[12],
-    calibration:{in_sample_only:true,training_videos:1,baseline:{f1:0.4},fitted:{f1:0.8}},
-    parameters:{min_impacts:1,context_frames:0,min_duration_frames:30,max_touch_gap_frames:105}};
-};
-await refreshComparison(true,true);
-assert.equal(queries.length,beforeCalibration+1);
-assert.equal(queries.at(-1).simulate,true);
-assert.equal(queries.at(-1).calibrate,true);
-assert.ok(sidebar.some(item=>item.type==="set"&&item.key==="training-simulation"&&
-  item.details.stage.includes("Подбор параметров")));
-assert.equal(sidebar.at(-1).type,"clear");
-assert.equal(comparison.calibrate.disabled,false);
-assert.equal(comparison.minImpacts.value,1);
-assert.equal(comparison.context.value,0);
-assert.equal(comparison.gap.value,105);
-assert.ok(elements.get("studio-comparison-metrics").children.some(
-  row=>row.children[0]?.textContent.includes("Подбор по этому видео")),
-  "Calibration must be marked in-sample rather than general validation");
-comparison.data={...saved,
-  trajectory_status:"ready",trajectory_rallies:[],trajectory_impacts:[25,170],
-  simulated_touch_candidates:[],unassigned_touch_candidates:[25,170],
-  metrics:{cpu_trajectory:{matched:0,missed:2,extra:0,f1:0},
-    cpu_reference:null,trajectory_reference:null},differences:[]};
+comparison.data=ready;
 comparison.simulated=true;
 renderComparison();
-assert.match(elements.get("studio-simulation-summary").textContent,/2 перегибов вне розыгрышей/);
-assert.equal(elements.get("studio-comparison-touches").children.filter(row=>
-  row.className==="studio-simulated-touch").length,2,
-"Raw trajectory impacts outside accepted rallies must remain inspectable");
-assert.match(elements.get("studio-comparison-differences").textContent,/порог/);
-assert.match(html,/id="studio-comparison-gap"[^>]*max="900"/);
-assert.match(html,/id="studio-comparison-mode"/);
-assert.match(html,/id="studio-comparison-impact-settings"[^>]*hidden/);
-assert.match(html,/id="studio-comparison-min-seconds"[^>]*value="1\.5"/);
-comparison.mode.value="continuous";
-comparison.minSeconds.value="3.5";
-context.timelineRallyLayers.candidates.checked=false;
+assert.equal(elements.get("studio-comparison-metrics").children.length,2,
+  "Only trajectory result and manual reference status are presented");
+assert.ok(elements.get("studio-comparison-metrics").children.every(
+  metric=>!metric.children[0]?.textContent.includes("CPU")));
+assert.match(elements.get("studio-simulation-summary").textContent,/Устойчивая траектория/);
+assert.equal(comparison.calibrate.disabled,true,"Legacy impact calibration must remain disabled");
+s.run="another";
 renderComparison();
-assert.equal(comparison.impactSettings.hidden,true);
-assert.equal(comparison.continuousSettings.hidden,false);
-assert.equal(comparison.recalculate.textContent,"Смоделировать розыгрыши");
-assert.equal(comparison.calibrate.disabled,true);
-assert.equal(comparison.minImpacts.disabled,true);
-assert.equal(comparison.minSeconds.disabled,false);
-context.request=async value=>{
-  queries.push(value.query);
-  return {...saved,mode:"continuous",trajectory_status:"ready",
-    trajectory_rallies:[{start:100,end:191}],trajectory_impacts:[],
-    simulated_touch_candidates:[],unassigned_touch_candidates:[],
-    metrics:{cpu_trajectory:{matched:0,missed:2,extra:1,f1:0},
-      cpu_reference:null,trajectory_reference:null},
-    parameters:{min_trajectory_seconds:3.5}};
+assert.equal(comparison.recalculate.disabled,true,"Stale source cannot simulate");
+assert.match(elements.get("studio-comparison-differences").textContent,/Выберите CPU-анализ/);
+let release;
+context.request=()=>new Promise(resolve=>{release=resolve;});
+const pending=refreshComparison(true);
+s.run="newer";
+release(ready);
+await pending;
+assert.equal(comparison.sourceKey,"","Stale request must not claim a different run");
+s.run="r";
+const queries=[];
+context.request=async query=>{
+  queries.push(query.query);
+  return {...ready,parameters:{min_trajectory_seconds:3.5}};
 };
+comparison.minSeconds.value="3.5";
 await refreshComparison(true);
 assert.equal(queries.at(-1).mode,"continuous");
 assert.equal(queries.at(-1).min_trajectory_seconds,3.5);
-assert.equal(Object.hasOwn(queries.at(-1),"min_impacts"),false);
-assert.equal(Object.hasOwn(queries.at(-1),"context_frames"),false);
-assert.equal(Object.hasOwn(queries.at(-1),"max_touch_gap_frames"),false);
+for(const obsolete of ["min_impacts","context_frames","min_duration_frames","max_touch_gap_frames"])
+  assert.equal(Object.hasOwn(queries.at(-1),obsolete),false,
+    "Legacy impact detection setting must not reach server: "+obsolete);
+assert.equal(comparison.simulated,true);
 assert.match(elements.get("studio-simulation-summary").textContent,/Устойчивая траектория/);
-assert.doesNotMatch(elements.get("studio-simulation-summary").textContent,/касаний/);
-comparison.mode.value="impacts";
-renderComparison();
-assert.equal(comparison.impactSettings.hidden,false);
-assert.equal(comparison.continuousSettings.hidden,true);
-assert.equal(comparison.recalculate.textContent,"Смоделировать розыгрыши и касания");
-assert.equal(comparison.minSeconds.disabled,true);
-assert.equal(comparison.minImpacts.disabled,false);
-assert.ok(js.includes("await refreshComparison(true);"),
-  "Calculating trajectory touches must also refresh rally proposals");
+assert.equal(comparison.calibrate.disabled,true);
+assert.equal(comparison.impactSettings.hidden,true);
+assert.equal(comparison.continuousSettings.hidden,false);
+assert.equal(comparison.recalculate.textContent,"Смоделировать розыгрыши");
+assert.equal(comparison.minSeconds.disabled,false);
+assert.equal(comparison.minImpacts.disabled,true);
+assert.equal(comparison.minSeconds.value,3.5);
+assert.match(html,/id="studio-comparison-mode"><option value="continuous" selected>/);
+assert.doesNotMatch(html,/<option value="impacts">/);
+assert.match(html,/class="studio-training-compare-review" hidden/);
+assert.match(html,/id="studio-comparison-min-seconds"[^>]*value="1\.5"/);
+assert.match(rust,/Only continuous-ball rally detection is supported/);
+assert.ok(js.includes("await refreshComparison(true);"));
 {
-  const first=js.indexOf("  const annotationRallySeeds=()=>");
+  const first=js.indexOf("  const annotationTrajectoryRallySeeds=()=>");
   const last=js.indexOf("  const annotationSavePresentation=",first);
   assert.ok(first>0&&last>first);
   let nextId=0;
@@ -241,4 +162,4 @@ assert.ok(js.includes("await refreshComparison(true);"),
   assert.equal(annotationFromPrediction().rallies[0].id,"manual",
     "Existing manually labeled rallies must not be overwritten");
 }
-console.log("Training comparison: source guard, two exclusive modes, separate parameters, trajectory-to-draft and discrepancy navigation: OK");
+console.log("Training comparison: single continuous mode, stale-source guard, trajectory-only request and editing: OK");

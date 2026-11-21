@@ -340,6 +340,15 @@ fn rebuild_from_snapshots_with_scope(
     let mut digest = Sha256::new();
     let mut totals = OutputCounters::default();
     let mut segmenter = RallySegmenter::new(settings, width, height)?;
+    let mut continuous =
+        preliminary_intervals.map(|intervals| intervals.iter().copied().peekable());
+    let mut continuity_ball_frames = 0u64;
+    let mut continuity_touch_count = 0u64;
+    let mut continuity_first_touch = None::<u64>;
+    let mut continuity_last_touch = None::<u64>;
+    let mut continuity_max_probability = 0.0f64;
+    let mut continuity_track_ids = std::collections::BTreeSet::<u64>::new();
+    let mut continuity_unknown = 0u64;
     let mut history = CourtHistory::default();
     let mut next = next_contact(&mut touches)?;
     let mut previous_contact: Option<u64> = None;
@@ -491,6 +500,17 @@ fn rebuild_from_snapshots_with_scope(
                 speed_after_px_frame: item.speed_after_px_frame,
                 velocity_residual_px_frame: item.velocity_residual_px_frame,
             });
+            if continuous.is_some() {
+                continuity_touch_count += 1;
+                continuity_first_touch.get_or_insert(item.frame_index);
+                continuity_last_touch = Some(item.frame_index);
+                continuity_max_probability = continuity_max_probability.max(item.probability);
+                if let Some(id) = item.provisional_track_id {
+                    continuity_track_ids.insert(id);
+                } else {
+                    continuity_unknown += 1;
+                }
+            }
             events.push(ContactFrame {
                 probability: item.probability,
                 provisional_track_id: item.provisional_track_id,
@@ -500,16 +520,20 @@ fn rebuild_from_snapshots_with_scope(
         if next.as_ref().is_some_and(|t| t.frame_index < frame_index) {
             return Err("Out-of-order native Touch frame index".into());
         }
-        if let Some(proposal) = segmenter.push(frame_index, reliable_ball, &events)? {
-            write_proposal(
-                &mut writer,
-                &mut digest,
-                proposal,
-                &history,
-                &surface_events,
-                (replay_id, touch_id),
-                &mut totals,
-            )?;
+        if continuous.is_none() {
+            if let Some(proposal) = segmenter.push(frame_index, reliable_ball, &events)? {
+                write_proposal(
+                    &mut writer,
+                    &mut digest,
+                    proposal,
+                    &history,
+                    &surface_events,
+                    (replay_id, touch_id),
+                    &mut totals,
+                )?;
+            }
+        } else if in_preliminary_rally && reliable_ball.is_some() {
+            continuity_ball_frames += 1;
         }
         // A bounce outside the sidelines is still a candidate for ending a rally.
         // The observed ball centre is projected onto the floor ONLY after
@@ -554,7 +578,11 @@ fn rebuild_from_snapshots_with_scope(
                             provisional: true,
                         });
                     }
-                    if let Some(proposal) = segmenter.finish_at_possible_ground_bounce(center.0) {
+                    if let Some(proposal) = continuous
+                        .is_none()
+                        .then(|| segmenter.finish_at_possible_ground_bounce(center.0))
+                        .flatten()
+                    {
                         write_proposal(
                             &mut writer,
                             &mut digest,
@@ -593,6 +621,53 @@ fn rebuild_from_snapshots_with_scope(
         {
             surface_events.pop_front();
         }
+        if let Some(intervals) = continuous.as_mut() {
+            if let Some(&(start, end)) = intervals.peek() {
+                if frame_index == end {
+                    let count = end - start + 1;
+                    let proposal = RallyProposal {
+                        detected_start_frame: start,
+                        detected_end_frame: end,
+                        duration_sec: (count as f64 / 30.0 * 10000.0).round() / 10000.0,
+                        ball_observations: continuity_ball_frames,
+                        ball_coverage: (continuity_ball_frames as f64 / count as f64 * 10000.0)
+                            .round()
+                            / 10000.0,
+                        motion_supported_touch_proposals: continuity_touch_count,
+                        first_touch_frame: continuity_first_touch.unwrap_or(start),
+                        last_touch_frame: continuity_last_touch.unwrap_or(end),
+                        max_touch_probability: continuity_max_probability,
+                        provisional_track_ids: continuity_track_ids.iter().copied().collect(),
+                        unidentified_contacts: continuity_unknown,
+                        classification: "provisional_rally",
+                        method: "coherent_vballnet_motion_v2",
+                        authoritative_rally: false,
+                        athlete_identities_verified: false,
+                        serve_verified: false,
+                        suggested_context_before_frames: settings.suggested_context_frames,
+                        suggested_context_after_frames: settings.suggested_context_frames,
+                        end_reason: "continuous_ball_trajectory",
+                    };
+                    write_proposal(
+                        &mut writer,
+                        &mut digest,
+                        proposal,
+                        &history,
+                        &surface_events,
+                        (replay_id, touch_id),
+                        &mut totals,
+                    )?;
+                    intervals.next();
+                    continuity_ball_frames = 0;
+                    continuity_touch_count = 0;
+                    continuity_first_touch = None;
+                    continuity_last_touch = None;
+                    continuity_max_probability = 0.0;
+                    continuity_track_ids.clear();
+                    continuity_unknown = 0;
+                }
+            }
+        }
         history.trim(frame_index);
     }
     if next.is_some() || inputs.line()?.is_some() || touches.line()?.is_some() {
@@ -604,16 +679,22 @@ fn rebuild_from_snapshots_with_scope(
     if inputs.finish() != replay_sha || touches.finish() != touch_sha {
         return Err("Native rally source SHA-256 mismatch".into());
     }
-    if let Some(proposal) = segmenter.finish() {
-        write_proposal(
-            &mut writer,
-            &mut digest,
-            proposal,
-            &history,
-            &surface_events,
-            (replay_id, touch_id),
-            &mut totals,
-        )?;
+    if continuous.is_none() {
+        if let Some(proposal) = segmenter.finish() {
+            write_proposal(
+                &mut writer,
+                &mut digest,
+                proposal,
+                &history,
+                &surface_events,
+                (replay_id, touch_id),
+                &mut totals,
+            )?;
+        }
+    }
+    let mut diagnostics = segmenter.totals().clone();
+    if continuous.is_some() {
+        diagnostics.accepted_proposals = totals.proposals;
     }
     writer
         .flush()
@@ -622,11 +703,7 @@ fn rebuild_from_snapshots_with_scope(
         .get_ref()
         .sync_all()
         .map_err(|e| format!("Sync rally snapshot: {e}"))?;
-    Ok((
-        format!("{:x}", digest.finalize()),
-        segmenter.totals().clone(),
-        totals,
-    ))
+    Ok((format!("{:x}", digest.finalize()), diagnostics, totals))
 }
 
 pub(crate) fn refine_leading_ball(
@@ -673,12 +750,11 @@ pub(crate) fn refine_leading_ball(
 }
 
 fn record_preliminary_scope(manifest: &mut Value, contacts: &Value, applied: bool) {
-    if contacts["preliminary_rally_scope_version"] == "ball_down_up_v1" {
+    if contacts["preliminary_rally_scope_version"] == "coherent_vballnet_motion_v2" {
         for key in [
             "preliminary_rally_scope_version",
             "preliminary_rally_file",
             "preliminary_rally_sha256",
-            "preliminary_trajectory_impact_count",
             "preliminary_rally_interval_count",
         ] {
             manifest[key] = contacts[key].clone();
@@ -792,84 +868,73 @@ pub(crate) fn process(state: &AppState, request: &RallyRequest) -> Result<Value,
         .as_u64()
         .filter(|n| *n <= frames)
         .ok_or_else(|| storage::bad_request("Unbounded or missing motion Touch count"))?;
-    let preliminary_intervals: Option<Vec<(u64, u64)>> =
-        match contacts["preliminary_rally_scope_version"].as_str() {
-            Some("ball_down_up_v1") => {
-                if contacts["preliminary_rally_settings"] != json!(settings)
-                    || contacts["preliminary_rally_file"] != "preliminary_rallies.json"
-                {
-                    return Err(storage::bad_request(
-                        "Preliminary rally settings or source filename differ",
-                    ));
-                }
-                let source = safe_file(&touch_dir, "preliminary_rallies.json", 64 * 1024 * 1024)
-                    .map_err(storage::bad_request)?;
-                let data_bytes = fs::read(source)
-                    .map_err(|e| storage::bad_request(format!("Read preliminary gameplay: {e}")))?;
-                let expected_sha =
-                    sha(&contacts["preliminary_rally_sha256"]).map_err(storage::bad_request)?;
-                if format!("{:x}", Sha256::digest(&data_bytes)) != expected_sha {
-                    return Err(storage::bad_request(
-                        "Preliminary ball-only gameplay checksum changed",
-                    ));
-                }
-                let data: Value = serde_json::from_slice(&data_bytes)
-                    .map_err(|_| storage::bad_request("Malformed preliminary gameplay evidence"))?;
-                if data["schema"] != "volley-native-preliminary-ball-rallies/1"
-                    || data["source_replay_id"] != request.replay_id
-                    || data["source_replay_sha256"] != tracked["sha256"]
-                    || data["frames"] != frames
-                    || data["settings"] != json!(settings)
-                {
-                    return Err(storage::bad_request(
-                        "Preliminary gameplay provenance differs",
-                    ));
-                }
-                let impacts: Vec<u64> = serde_json::from_value(data["trajectory_impacts"].clone())
-                    .map_err(|_| storage::bad_request("Invalid preliminary trajectory impacts"))?;
-                let intervals: Vec<(u64, u64)> =
-                    serde_json::from_value(data["rally_intervals"].clone())
-                        .map_err(|_| storage::bad_request("Invalid preliminary rally intervals"))?;
-                if impacts.len() as u64
-                    != contacts["preliminary_trajectory_impact_count"]
-                        .as_u64()
-                        .unwrap_or(u64::MAX)
-                    || intervals.len() as u64
-                        != contacts["preliminary_rally_interval_count"]
-                            .as_u64()
-                            .unwrap_or(u64::MAX)
-                    || intervals
-                        != volley_core::rally_reconstruction::preliminary_rally_intervals(
-                            &impacts, frames, settings,
-                        )
-                {
-                    return Err(storage::bad_request(
-                        "Preliminary gameplay intervals do not match trajectory impacts",
-                    ));
-                }
-                let should_apply =
-                    volley_core::rally_reconstruction::preliminary_rally_scope_usable(
-                        impacts.len(),
-                        &intervals,
-                        frames,
-                    );
-                if contacts["preliminary_rally_scope_applied"]
-                    .as_bool()
-                    .is_some_and(|applied| applied != should_apply)
-                {
-                    return Err(storage::bad_request(
-                        "Preliminary gameplay applicability differs from saved evidence",
-                    ));
-                }
-                should_apply.then_some(intervals)
-            }
-            None => None,
-            _ => {
-                return Err(storage::bad_request(
-                    "Unknown preliminary rally detector version",
-                ))
-            }
-        };
+    if contacts["preliminary_rally_scope_version"] != "coherent_vballnet_motion_v2"
+        || contacts["preliminary_rally_settings"] != json!(settings)
+        || contacts["preliminary_rally_file"] != "preliminary_rallies.json"
+        || contacts["preliminary_rally_scope_applied"] != true
+    {
+        return Err(storage::bad_request(
+            "Recalculate CPU touches with the continuous-ball rally detector",
+        ));
+    }
+    let preliminary_file = safe_file(&touch_dir, "preliminary_rallies.json", 64 * 1024 * 1024)
+        .map_err(storage::bad_request)?;
+    let bytes = fs::read(preliminary_file)
+        .map_err(|e| storage::bad_request(format!("Read continuous rally scope: {e}")))?;
+    let expected_sha = sha(&contacts["preliminary_rally_sha256"]).map_err(storage::bad_request)?;
+    if format!("{:x}", Sha256::digest(&bytes)) != expected_sha {
+        return Err(storage::bad_request(
+            "Continuous rally scope checksum changed",
+        ));
+    }
+    let data: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| storage::bad_request("Malformed continuous rally scope"))?;
+    let replay_sha = sha(&tracked["sha256"]).map_err(storage::bad_request)?;
+    let min_ball_score = contacts["settings"]["min_ball_score"]
+        .as_f64()
+        .ok_or_else(|| storage::bad_request("Missing continuous-ball confidence threshold"))?;
+    if data["schema"] != "volley-native-preliminary-continuous-rallies/1"
+        || data["source_replay_id"] != request.replay_id
+        || data["source_replay_sha256"] != replay_sha
+        || data["frames"] != frames
+        || data["settings"] != json!(settings)
+        || data["min_ball_score"] != min_ball_score
+        || data["min_trajectory_seconds"] != crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS
+        || data["merge_gap_seconds"] != crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS
+    {
+        return Err(storage::bad_request(
+            "Continuous rally scope provenance changed",
+        ));
+    }
+    let intervals: Vec<(u64, u64)> = serde_json::from_value(data["rally_intervals"].clone())
+        .map_err(|_| storage::bad_request("Invalid continuous rally intervals"))?;
+    let replay_source = safe_file(&track_dir, "tracked_frames.jsonl", MAX_EVIDENCE)
+        .map_err(storage::bad_request)?;
+    let computed = crate::cpu_retrack::ball_track::continuous_ball_intervals(
+        &replay_source,
+        &replay_sha,
+        frames,
+        min_ball_score,
+        crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
+    )
+    .and_then(|segments| {
+        crate::cpu_retrack::ball_track::merge_continuous_intervals(
+            &segments,
+            crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
+        )
+    })
+    .map_err(storage::bad_request)?;
+    if intervals != computed
+        || intervals.len() as u64
+            != contacts["preliminary_rally_interval_count"]
+                .as_u64()
+                .unwrap_or(u64::MAX)
+    {
+        return Err(storage::bad_request(
+            "Continuous rally intervals differ from saved trajectory",
+        ));
+    }
+    let preliminary_intervals = Some(intervals);
     let replay_sha = sha(&tracked["sha256"]).map_err(storage::bad_request)?;
     let touch_sha = sha(&contacts["sha256"]).map_err(storage::bad_request)?;
     if contacts["source_replay_sha256"].as_str() != Some(replay_sha.as_str()) {
@@ -1032,20 +1097,20 @@ mod tests {
     #[test]
     fn preliminary_fallback_keeps_versioned_source_for_cache_reuse() {
         let contacts = json!({
-            "preliminary_rally_scope_version":"ball_down_up_v1",
+            "preliminary_rally_scope_version":"coherent_vballnet_motion_v2",
             "preliminary_rally_file":"preliminary_rallies.json",
             "preliminary_rally_sha256":"a".repeat(64),
-            "preliminary_trajectory_impact_count":7,
+
             "preliminary_rally_interval_count":0
         });
         let mut fallback = json!({});
         record_preliminary_scope(&mut fallback, &contacts, false);
         assert_eq!(
             fallback["preliminary_rally_scope_version"],
-            "ball_down_up_v1"
+            "coherent_vballnet_motion_v2"
         );
         assert_eq!(fallback["preliminary_rally_scope_applied"], false);
-        assert_eq!(fallback["preliminary_trajectory_impact_count"], 7);
+        assert!(fallback["preliminary_trajectory_impact_count"].is_null());
         assert_eq!(
             fallback["preliminary_rally_sha256"],
             contacts["preliminary_rally_sha256"]
@@ -1496,6 +1561,54 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
         response
     }
+    #[test]
+    fn continuous_ball_rally_is_kept_without_any_touch_candidates() {
+        let (tracks, touches, track_sha, touch_sha) = fixture(180, None, &[]);
+        let root = std::env::temp_dir().join(format!("continuous-rally-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let frames_file = root.join("tracked.jsonl");
+        let touches_file = root.join("contacts.jsonl");
+        let output = root.join("out.jsonl");
+        fs::write(&frames_file, &tracks).unwrap();
+        fs::write(&touches_file, &touches).unwrap();
+        let settings = RallySettings::default();
+        let scope = [(20, 109), (150, 179)];
+        let result = rebuild_from_snapshots_with_scope(
+            &frames_file,
+            &touches_file,
+            &track_sha,
+            &touch_sha,
+            180,
+            0,
+            640,
+            360,
+            settings,
+            &output,
+            "0123456789abcdef0123456789abcdef",
+            "abcdef0123456789abcdef0123456789",
+            None,
+            None,
+            Some(&scope),
+        )
+        .unwrap();
+        assert_eq!(result.2.proposals, 2);
+        assert_eq!(result.2.ingested_touch_candidates, 0);
+        let rows = fs::read_to_string(&output).unwrap();
+        let proposals: Vec<Value> = rows
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(proposals.len(), 2);
+        for (proposal, expected) in proposals.iter().zip(scope) {
+            assert_eq!(proposal["detected_start_frame"], expected.0);
+            assert_eq!(proposal["detected_end_frame"], expected.1);
+            assert_eq!(proposal["motion_supported_touch_proposals"], 0);
+            assert_eq!(proposal["method"], "coherent_vballnet_motion_v2");
+            assert_eq!(proposal["authoritative_rally"], false);
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn two_ball_segments_and_two_pairs_of_motion_touches_make_two_proposals() {
         let (frames, touches, fh, th) = fixture(450, Some((160, 289)), &[30, 80, 310, 370]);

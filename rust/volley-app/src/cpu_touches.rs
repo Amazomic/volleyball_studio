@@ -1196,21 +1196,18 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
             settings.min_ball_score,
             rally_starts,
         )?;
-        let preliminary = crate::cpu_retrack::ball_track::preliminary_rally_scope(
+        let continuous = crate::cpu_retrack::ball_track::continuous_ball_intervals(
             &source,
             &sha,
             frames,
-            (dimensions.width, dimensions.height),
             settings.min_ball_score,
-            &ball_mask.accepted,
-            rally_settings,
+            crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
         )?;
-        let preliminary_scope_applied =
-            volley_core::rally_reconstruction::preliminary_rally_scope_usable(
-                preliminary.impacts.len(),
-                &preliminary.intervals,
-                frames,
-            );
+        let preliminary = crate::cpu_retrack::ball_track::merge_continuous_intervals(
+            &continuous,
+            crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
+        )?;
+        let preliminary_scope_applied = true;
         let (digest, events, raw) = detect_stream_with_pose(
             tcn.as_mut(),
             &source,
@@ -1233,7 +1230,7 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
             &training_examples,
             Some(&ball_mask),
             rally_starts,
-            preliminary_scope_applied.then_some(preliminary.intervals.as_slice()),
+            preliminary_scope_applied.then_some(preliminary.as_slice()),
         )?;
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared source changed during CPU Touch replay".into());
@@ -1293,29 +1290,26 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
             "cpu_processing_complete":false,
         });
         let preliminary_data = json!({
-            "schema":"volley-native-preliminary-ball-rallies/1",
+            "schema":"volley-native-preliminary-continuous-rallies/1",
             "source_replay_id":req.replay_id,
             "source_replay_sha256":sha,
             "frames":frames,
             "settings":rally_settings,
-            "trajectory_impacts":preliminary.impacts,
-            "rally_intervals":preliminary.intervals,
+            "min_ball_score":settings.min_ball_score,
+            "min_trajectory_seconds":crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
+            "merge_gap_seconds":crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
+            "rally_intervals":preliminary,
         });
         storage::write_json_atomic(&folder.join("preliminary_rallies.json"), &preliminary_data)
             .map_err(|e| format!("Save preliminary ball-only gameplay: {e:?}"))?;
         let preliminary_bytes = fs::read(folder.join("preliminary_rallies.json"))
             .map_err(|e| format!("Read preliminary gameplay checksum: {e}"))?;
-        record["preliminary_rally_scope_version"] = json!("ball_down_up_v1");
+        record["preliminary_rally_scope_version"] = json!("coherent_vballnet_motion_v2");
         record["preliminary_rally_scope_applied"] = json!(preliminary_scope_applied);
         record["preliminary_rally_settings"] = json!(rally_settings);
         record["preliminary_rally_file"] = json!("preliminary_rallies.json");
         record["preliminary_rally_sha256"] =
             json!(format!("{:x}", Sha256::digest(&preliminary_bytes)));
-        record["preliminary_trajectory_impact_count"] = json!(preliminary_data
-            ["trajectory_impacts"]
-            .as_array()
-            .unwrap()
-            .len());
         record["preliminary_rally_interval_count"] = json!(preliminary_data["rally_intervals"]
             .as_array()
             .unwrap()

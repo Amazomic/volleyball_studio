@@ -56,8 +56,9 @@ const timeline={data:{
 const ui={video:{currentTime:3.333,addEventListener(){}}};
 let drawn=0;
 const context={
-  $,s,timeline,ui,comparison:{data:null,mode:{value:"continuous"},
-    minSeconds:{value:"1.5"}},comparisonMatches:()=>false,
+  $,s,timeline,ui,comparison:{data:{trajectory_status:"ready",trajectory_rallies:[{start:95,end:150}]},
+    mode:{value:"continuous"},minSeconds:{value:"1.5"}},
+  comparisonMatches:data=>data?.trajectory_status==="ready",
   trainingGapSeconds:()=>4,
   document:{createElement:()=>new Element()},
   window:{crypto:{randomUUID:()=>`00000000-0000-4000-8000-${String(++uuid).padStart(12,"0")}`},

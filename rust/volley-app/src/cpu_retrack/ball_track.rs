@@ -9,6 +9,34 @@ use std::{
 use volley_core::touch_pipeline::{flag_local_ball_artifacts, LeadingBallTracker};
 
 pub(crate) const POLICY: &str = "vballnet_leading_ball_rally_v1";
+pub(crate) const CONTINUOUS_MIN_SECONDS: f64 = 1.5;
+pub(crate) const CONTINUOUS_MERGE_SECONDS: f64 = 4.0;
+
+pub(crate) fn merge_continuous_intervals(
+    intervals: &[(u64, u64)],
+    gap_seconds: f64,
+) -> Result<Vec<(u64, u64)>, String> {
+    if !gap_seconds.is_finite() || !(0.0..=60.0).contains(&gap_seconds) {
+        return Err("Invalid continuous rally merge gap".into());
+    }
+    let gap_frames = gap_seconds * 30.0;
+    let mut sorted = intervals.to_vec();
+    sorted.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (start, end) in sorted {
+        if start > end {
+            return Err("Invalid continuous rally interval".into());
+        }
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1.saturating_add(1) || ((start - last.1 - 1) as f64) < gap_frames {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    Ok(merged)
+}
 
 pub(crate) fn saved_scope(manifest: &serde_json::Value) -> Result<Option<(Vec<u64>, f64)>, String> {
     if manifest["ball_tracking_policy"] != POLICY {
@@ -34,6 +62,7 @@ pub(crate) fn saved_scope(manifest: &serde_json::Value) -> Result<Option<(Vec<u6
 
 pub(crate) struct PreliminaryRallyScope {
     pub impacts: Vec<u64>,
+    #[cfg_attr(not(test), expect(dead_code))]
     pub intervals: Vec<(u64, u64)>,
 }
 
@@ -737,5 +766,26 @@ mod tests {
             mask.rejected.iter().filter(|flag| **flag).count()
         );
         assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[cfg(test)]
+mod continuous_rally_tests {
+    use super::*;
+
+    #[test]
+    fn shared_merging_preserves_strict_four_second_boundary() {
+        assert_eq!(
+            merge_continuous_intervals(&[(221, 300), (30, 100)], 4.0).unwrap(),
+            vec![(30, 100), (221, 300)]
+        );
+        assert_eq!(
+            merge_continuous_intervals(&[(30, 100), (219, 300)], 4.0).unwrap(),
+            vec![(30, 300)]
+        );
+        assert!(merge_continuous_intervals(&[], CONTINUOUS_MERGE_SECONDS)
+            .unwrap()
+            .is_empty());
+        assert!(merge_continuous_intervals(&[(5, 3)], 4.0).is_err());
     }
 }

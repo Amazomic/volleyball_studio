@@ -557,3 +557,9 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Кандидаты по мячу (не подтверждены)	Ball touch candidates (unverified)
 Не подтверждены игроками. Дополнительная функция расчёта по траектории.	Not verified against players. Optional trajectory-based touch detection.
 с	sec
+
+Розыгрыши по непрерывной траектории мяча	Rallies from continuous ball motion
+Используется во всех этапах анализа, без повторного GPU-инференса	Used throughout analysis without repeating GPU inference
+Архивный CPU-источник (не используется)	Legacy CPU source (disabled)
+Архивные розыгрыши	Archived rallies
+Детекция розыгрышей по траектории мяча	Ball trajectory rally detection
