@@ -11,8 +11,8 @@ use std::{
 };
 use volley_inference::reid_openvino::{DIMENSIONS, MODEL_NAME, PREPROCESS};
 
-const MAX_BYTES: u64 = 12 * 1024 * 1024;
-const MAX_FEATURES: usize = 1024;
+const MAX_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_FEATURES: usize = crate::native_player_tracks::MAX_TRACKS;
 const SCHEMA: &str = "volley-native-reid-embeddings/1";
 
 #[derive(Clone, Debug)]
@@ -345,6 +345,46 @@ mod tests {
         assert!(read(&root, &src).is_err());
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn reid_cache_preserves_more_than_1024_measured_track_vectors() {
+        let root = folder();
+        let src = source();
+        let file = checked_path(&root, &src, true).unwrap();
+        let doc = CacheDocument {
+            schema: SCHEMA.into(),
+            project_id: src.project_id.clone(),
+            video: src.video.clone(),
+            replay_id: src.replay_id.clone(),
+            source_replay_sha256: src.replay_sha256.clone(),
+            model: MODEL_NAME.into(),
+            model_fingerprint: src.model_fingerprint.clone(),
+            preprocessing: PREPROCESS.into(),
+            dimensions: DIMENSIONS,
+            features: (1..=1024_u64).map(|id| (id, vector(0))).collect(),
+            crop_provenance: BTreeMap::new(),
+        };
+        versioned_store::write_json_checked(
+            file.parent().unwrap(),
+            &file,
+            &serde_json::to_value(doc).unwrap(),
+            MAX_BYTES,
+        )
+        .unwrap();
+        let crop = CropProvenance {
+            frame: 512,
+            crop: [8, 4, 64, 128],
+        };
+        let provenance = BTreeMap::from([(1025_u64, crop.clone())]);
+        assert_eq!(
+            merge_with_crops(&root, &src, &[(1025, vector(1))], &provenance).unwrap(),
+            1025
+        );
+        let after = read(&root, &src).unwrap();
+        assert_eq!(after.vectors.len(), 1025);
+        assert_eq!(after.provenance.get(&1025), Some(&crop));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlink_cache_folder_is_rejected() {

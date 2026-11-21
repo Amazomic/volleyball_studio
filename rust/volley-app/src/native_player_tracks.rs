@@ -35,10 +35,10 @@ use volley_core::{
     reid::{self, Feature, FeatureMode, TrackInfo},
 };
 
-const MAX_TRACKS: usize = 20_000;
+pub(crate) const MAX_TRACKS: usize = 20_000;
 const MAX_MANIFEST: u64 = 16 * 1024;
 const MAX_EVIDENCE: u64 = 64 * 1024 * 1024 * 1024;
-const MAX_LINKS: u64 = 2 * 1024 * 1024;
+const MAX_LINKS: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

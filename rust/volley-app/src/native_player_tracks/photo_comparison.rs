@@ -203,7 +203,7 @@ pub(super) fn snapshot(state: &AppState, req: &ReidReviewRequest) -> Result<Snap
             }
             if photos.len() >= MAX_COMPARISON_REFERENCE_PHOTOS {
                 return Err(storage::bad_request(
-                    "Too many reference photos for one comparison (maximum 1024)",
+                    "Too many reference photos for one comparison (maximum 4096)",
                 ));
             }
             let id = row["id"]

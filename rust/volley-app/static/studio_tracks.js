@@ -1233,11 +1233,11 @@
     galleryStatus.textContent="Автопривязка с порогом "+threshold+"% запущена в фоне. Можно продолжать работу.";
     autoAssignMessage("Обрабатываем совпадения · порог "+threshold+"%");
     window.VolleyballTasks?.set("auto-reid",{
-      label:"Автопривязка ID",stage:"Проверка сохранённых совпадений",progress:null
+      label:"Автопривязка ID",stage:"Поиск совпадений по фотографиям",progress:null
     });
     try{
       const result=await post("/api/players/native/reid-review",{
-        ...scope,action:"auto_assign",auto_threshold_percent:threshold
+        ...scope,action:"postprocess_auto_assign",auto_threshold_percent:threshold
       });
       if(token!==state.token||scope.replay_id!==state.replay)return;
       if(!Number.isSafeInteger(result.automatic_count)||result.automatic_count<0 ||
@@ -1272,7 +1272,6 @@
   };
   const refreshPhotoMatches=async(scope,token)=>{
     const ids=[...state.comparisonIds];
-    if(ids.length>1024)throw Error("Для сравнения доступно не более 1024 Track ID одной обработки.");
     // Keep the last valid scores visible until the replacement is verified.
     const result=await post("/api/players/native/reid-review",{
       ...scope,action:state.writable?"refresh_matches":"compare_photos"

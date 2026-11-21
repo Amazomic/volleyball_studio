@@ -45,7 +45,7 @@ runInNewContext(source.slice(start,end)+"\nthis.run=autoAssignSimilar;",context)
 await context.run();
 assert.equal(requests.length,1);
 assert.equal(requests[0].url,"/api/players/native/reid-review");
-assert.equal(requests[0].body.action,"auto_assign");
+assert.equal(requests[0].body.action,"postprocess_auto_assign");
 assert.equal(requests[0].body.auto_threshold_percent,92);
 assert.equal(state.busy,false);
 assert.match(status.textContent,/92%/);

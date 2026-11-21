@@ -2393,3 +2393,38 @@ fn manual_photo_enrollment_keeps_automatic_links_and_unassigned_counter_stable()
         &different_roster
     ));
 }
+
+#[test]
+fn large_reid_match_evidence_fits_native_assignment_sidecar() {
+    let root = std::env::temp_dir().join(format!("large-reid-sidecar-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let file = root.join("links.json");
+    let matches = (1..=2086_u64)
+        .map(|track| {
+            let candidates = (0..8_u64)
+                .map(|player| {
+                    json!({
+                        "player_id":format!("{player:012x}"),
+                        "name":format!("Игрок {player}"),
+                        "cosine_similarity":0.813456789123_f64,
+                        "sample_similarities":[0.811123456789,0.812123456789,0.817123456789],
+                        "samples_used":3,
+                        "reference_track_id":track + 4000,
+                        "reference_kind":"saved_photo"
+                    })
+                })
+                .collect::<Vec<_>>();
+            (track.to_string(), json!(candidates))
+        })
+        .collect::<serde_json::Map<String, Value>>();
+    let doc = json!({"automatic_identity_evidence":{"matches":matches}});
+    let bytes = serde_json::to_vec(&doc).unwrap();
+    assert!(bytes.len() > 2 * 1024 * 1024);
+    assert!(bytes.len() < MAX_LINKS as usize);
+    versioned_store::write_json_checked(&root, &file, &doc, MAX_LINKS).unwrap();
+    let loaded = versioned_store::read_optional_bounded(&file, MAX_LINKS)
+        .unwrap()
+        .unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&loaded).unwrap(), doc);
+    fs::remove_dir_all(root).unwrap();
+}

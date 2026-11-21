@@ -23,4 +23,9 @@ assert.ok("1" in state.playerMatches);
 assert.equal(state.busy,false);
 assert.equal(state.similarityStatus,"calculated");
 assert.deepEqual(calls.map(call=>call.body.action),["refresh_matches"]);
-console.log("Photo similarity only refreshes on explicit action: OK");
+state.comparisonIds=new Set(Array.from({length:2086},(_,i)=>i+1));
+await context.repeat();
+assert.deepEqual(calls.map(call=>call.body.action),["refresh_matches","refresh_matches"],
+  "Large rally scope must reach the Rust photo matcher rather than a stale 1024-ID UI cap");
+assert.equal(state.similarityStatus,"calculated");
+console.log("Photo similarity refresh also supports more than 1024 Track IDs: OK");
