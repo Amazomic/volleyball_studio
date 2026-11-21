@@ -3,7 +3,7 @@ use serde::Serialize;
 
 const MIN_TRAJECTORY_SECONDS: f64 = 1.5;
 const MERGE_GAP_FRAMES: u64 = 120;
-const CONTEXT_FRAMES: u64 = 90;
+const CONTEXT_FRAMES: u64 = 30;
 const MIN_DETECTIONS: usize = 45;
 
 fn merge_rally_intervals(intervals: &[(u64, u64)]) -> Vec<(u64, u64)> {
@@ -203,8 +203,23 @@ mod tests {
         assert!(start >= 80 && end <= 180);
         assert!(mask.includes(start));
         assert!(mask.includes(end));
-        assert!(mask.includes(start.saturating_sub(75)));
+        assert!(mask.includes(start.saturating_sub(20)));
         assert!(!mask.includes(899));
+        assert!(!mask.includes(start.saturating_sub(70)));
+    }
+
+    #[test]
+    fn separate_play_intervals_leave_long_pauses_outside_gpu_person_scope() {
+        let mut samples = moving_samples(60, 150);
+        samples.extend(moving_samples(450, 540));
+        let mask = RallyMask::from_ball_samples(&samples, 900).unwrap();
+        assert_eq!(mask.detected.len(), 2);
+        assert_eq!(mask.merged.len(), 2);
+        assert!(mask.includes(100));
+        assert!(mask.includes(500));
+        assert!(!mask.includes(300));
+        assert!(mask.included_frames() < 400);
+        assert_eq!(mask.context_seconds, 1.0);
     }
 
     #[test]

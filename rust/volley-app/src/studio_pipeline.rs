@@ -1422,7 +1422,7 @@ async fn pipeline(
             "Источник проверен; первичный анализ читает оригинал без промежуточного MP4"
         },
     )?;
-    progress(path, status, "Источник видео проверен", 8.0)?;
+    progress(path, status, "Проверка исходного видео", 8.0)?;
     let (bytes, mtime_ns) = crate::inference_stream::source_stamp(&prepared)?;
     let identity = json!({"bytes":bytes,"mtime_ns":mtime_ns});
     let original_source = volley_media::preparation::source_provenance(&ready.source)?;
@@ -1611,7 +1611,6 @@ async fn pipeline(
             };
             #[cfg(any(unix, windows))]
             let shared = if let Some(plan) = shared_plan {
-                progress(path, status, "GPU · общий поток VBallNet + игроки", 8.0)?;
                 log_native(
                     path,
                     "Общий GPU",
@@ -1649,6 +1648,16 @@ async fn pipeline(
                         .as_deref(),
                     Some("0" | "false")
                 );
+                progress(
+                    path,
+                    status,
+                    if primary_prefilter {
+                        "GPU · VBallNet: траектория мяча и розыгрыши"
+                    } else {
+                        gpu_label
+                    },
+                    8.0,
+                )?;
                 let result = tokio::task::block_in_place(|| {
                     inference_full::run_joint_pair(
                         app,
@@ -1667,10 +1676,8 @@ async fn pipeline(
                         |fraction| {
                             let label = if !primary_prefilter {
                                 gpu_label
-                            } else if fraction < 0.4 {
-                                "GPU · VBallNet: анализ мяча"
                             } else if fraction <= 0.4 {
-                                "GPU · построение траектории и поиск розыгрышей"
+                                "GPU · VBallNet: траектория мяча и розыгрыши"
                             } else if full_resolution_pose {
                                 "GPU · RF-DETR + RTMPose: игровые интервалы"
                             } else {
@@ -1708,7 +1715,7 @@ async fn pipeline(
                         "Поиск розыгрышей",
                         "success",
                         &format!(
-                            "Исходных={}, объединённых={}, выбранных кадров={}, fallback={}",
+                            "Исходных={}, объединённых={}, выбранных кадров={}/{}, доля для RF-DETR={:.1}%, fallback={}",
                             status["gpu_rally_mask"]["detected"]
                                 .as_array()
                                 .map_or(0, Vec::len),
@@ -1716,6 +1723,12 @@ async fn pipeline(
                                 .as_array()
                                 .map_or(0, Vec::len),
                             status["gpu_rally_mask"]["selected_frames"],
+                            result.decoded_frames,
+                            100.0
+                                * status["gpu_rally_mask"]["selected_frames"]
+                                    .as_u64()
+                                    .unwrap_or_default() as f64
+                                / result.decoded_frames.max(1) as f64,
                             status["gpu_rally_mask"]["fallback_reason"]
                         ),
                     )?;
@@ -2764,6 +2777,50 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0]["kind"], "stage_start");
         assert_eq!(records[0]["stage"], "GPU");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn consecutive_gpu_progress_updates_keep_one_stage_per_real_pass() {
+        let dir = std::env::temp_dir().join(format!("studio-gpu-stages-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("status.json");
+        let mut status = json!({"stage":"В очереди"});
+        progress(&path, &mut status, "Проверка исходного видео", 0.0).unwrap();
+        progress(&path, &mut status, "Проверка исходного видео", 8.0).unwrap();
+        progress(
+            &path,
+            &mut status,
+            "GPU · VBallNet: траектория мяча и розыгрыши",
+            8.0,
+        )
+        .unwrap();
+        progress(
+            &path,
+            &mut status,
+            "GPU · VBallNet: траектория мяча и розыгрыши",
+            36.8,
+        )
+        .unwrap();
+        progress(
+            &path,
+            &mut status,
+            "GPU · RF-DETR + RTMPose: игровые интервалы",
+            36.9,
+        )
+        .unwrap();
+        progress(
+            &path,
+            &mut status,
+            "GPU · RF-DETR + RTMPose: игровые интервалы",
+            80.0,
+        )
+        .unwrap();
+        let stages = status["stages"].as_array().unwrap();
+        assert_eq!(stages.len(), 3);
+        assert_eq!(stages[0]["name"], "Проверка исходного видео");
+        assert_eq!(stages[1]["name"], "GPU · VBallNet");
+        assert_eq!(stages[2]["name"], "GPU · RF-DETR + RTMPose");
         fs::remove_dir_all(dir).unwrap();
     }
 

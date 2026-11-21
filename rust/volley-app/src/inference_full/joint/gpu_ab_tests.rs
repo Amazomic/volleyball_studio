@@ -790,18 +790,16 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
     fs::create_dir_all(data.join("projects/012345abcdef")).map_err(|e| e.to_string())?;
     let video = "synthetic.mp4";
     let source = uploads.join(video);
+    let start = std::env::var("VOLLEY_AB_SAMPLE_START_SEC").unwrap_or_else(|_| "28".into());
+    let seconds = std::env::var("VOLLEY_AB_SAMPLE_DURATION_SEC").unwrap_or_else(|_| "6".into());
     let output = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-ss",
-            "28",
-            "-i",
-        ])
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-ss"])
+        .arg(start)
+        .arg("-i")
         .arg(&original)
-        .args(["-t", "6", "-map", "0:v:0", "-an", "-c:v", "copy", "-y"])
+        .arg("-t")
+        .arg(seconds)
+        .args(["-map", "0:v:0", "-an", "-c:v", "copy", "-y"])
         .arg(&source)
         .status()
         .map_err(|e| e.to_string())?;
@@ -817,6 +815,10 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
     let app = state(repository, data);
     let abort = AtomicBool::new(false);
     let info = volley_media::probe(&source)?;
+    let person_stride = std::env::var("VOLLEY_AB_PERSON_STRIDE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(10);
     let started = Instant::now();
     let pair = super::run_joint_pair(
         &app,
@@ -825,7 +827,7 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
         &source,
         info.duration_sec,
         None,
-        10,
+        person_stride,
         true,
         0,
         4,
@@ -835,30 +837,45 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
     if std::env::var("VOLLEY_ZERO_COPY_PRIMARY").as_deref() == Ok("1") && !pair.zero_copy {
         return Err("Zero-copy was requested but primary scan fell back".into());
     }
-    let mask = pair
-        .rally_filter
-        .as_ref()
-        .ok_or("Primary GPU scan did not publish a rally mask")?;
-    if mask["schema"] != "volley-primary-rally-mask/1" {
-        return Err("Primary GPU mask schema mismatch".into());
-    }
-    let selected = mask["selected_frames"]
-        .as_u64()
-        .ok_or("Primary GPU mask has no selected frame count")?;
+    let prefilter = !matches!(
+        std::env::var("VOLLEY_PRIMARY_RALLY_PREFILTER")
+            .ok()
+            .as_deref(),
+        Some("0" | "false")
+    );
+    let selected = if prefilter {
+        let mask = pair
+            .rally_filter
+            .as_ref()
+            .ok_or("Primary GPU scan did not publish a rally mask")?;
+        if mask["schema"] != "volley-primary-rally-mask/1" {
+            return Err("Primary GPU mask schema mismatch".into());
+        }
+        mask["selected_frames"]
+            .as_u64()
+            .ok_or("Primary GPU mask has no selected frame count")?
+    } else {
+        if pair.rally_filter.is_some() {
+            return Err("Legacy primary run unexpectedly published a rally mask".into());
+        }
+        pair.decoded_frames
+    };
     if selected == 0 || selected > pair.decoded_frames {
         return Err("Primary GPU mask selected-frame count is out of bounds".into());
     }
     let elapsed = started.elapsed().as_secs_f64();
     println!(
-        "PRIMARY GPU MASK: zero_copy={} frames={} selected={} windows={} elapsed={elapsed:.3}s",
-        pair.zero_copy, pair.decoded_frames, selected, pair.windows
+        "PRIMARY GPU MASK: prefilter={} zero_copy={} person_stride={} frames={} selected={} windows={} elapsed={elapsed:.3}s",
+        prefilter, pair.zero_copy, person_stride, pair.decoded_frames, selected, pair.windows
     );
     let fusion = fusion_pair(&app, video, &pair.ball_job_id, &pair.player_job_id)?;
     let pose = pair
         .pending_pose
         .ok_or("GPU smoke did not produce RTMPose evidence")?
         .publish(&fusion, &abort)?;
-    if pose["sampled_frames"].as_u64() != Some(pair.decoded_frames / 10) {
+    if pose["sampled_frames"].as_u64()
+        != Some((pair.windows as u64 * 9).div_ceil(person_stride as u64))
+    {
         return Err("GPU smoke pose sampling disagrees with source timeline".into());
     }
     let (replay, touches, rallies) = replay_touches_and_rallies(&app, video, &fusion)?;

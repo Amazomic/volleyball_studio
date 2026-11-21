@@ -138,7 +138,7 @@ pub(super) fn run(
                     });
                 }
             }
-            if keep_pose && expected_index.is_multiple_of(person_stride as u64) {
+            if keep_pose && include_person && expected_index.is_multiple_of(person_stride as u64) {
                 sampled_frames.push(Some(Arc::new(GpuBuffer::copy_frame(view)?)));
             } else {
                 sampled_frames.push(None);
@@ -170,6 +170,7 @@ pub(super) fn run(
                         width,
                         height,
                         &observations,
+                        matches!(pass, ScanPass::PlayersOnly(_)),
                         cancelled,
                     )?;
                 } else {

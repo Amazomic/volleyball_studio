@@ -480,7 +480,12 @@ pub(crate) fn run_joint_pair(
                     persons.retain(|person| mask.includes(person.frame_index));
                     person_writer.push(batch.first_frame, &persons)?;
                     if let Some(stage) = pose.borrow_mut().as_mut() {
-                        stage.observe(&batch, &persons, cancelled)?;
+                        stage.observe(
+                            &batch,
+                            &persons,
+                            Some(&|frame| mask.includes(frame)),
+                            cancelled,
+                        )?;
                     }
                     if person_writer.count.is_multiple_of(10) {
                         let frames = batch.first_frame + 9;
@@ -557,7 +562,7 @@ pub(crate) fn run_joint_pair(
                 ball_writer.push(batch.first_frame, &balls)?;
                 person_writer.push(batch.first_frame, &persons)?;
                 if let Some(stage) = pose.borrow_mut().as_mut() {
-                    stage.observe(&batch, &persons, cancelled)?;
+                    stage.observe(&batch, &persons, None, cancelled)?;
                 }
                 if ball_writer.count % 10 == 0 {
                     let frames = batch.first_frame + 9;

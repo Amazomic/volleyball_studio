@@ -8,13 +8,13 @@ video's own saved analysis range:
    (at least **1.5 s**, inclusive).
 3. Merge detected intervals only when the uncovered gap is **strictly less
    than 4 s**. Preserve detected and merged intervals separately.
-4. Pad scanning intervals by 3 s before and after without altering the
+4. Pad scanning intervals by 1 s before and after without altering the
    detected rally boundaries. Short movement fragments (at least 0.5 s)
    outside confirmed intervals are retained as **uncertain** scan candidates,
    not confirmed rallies. When the ball is absent or no reliable interval
    exists, retain the entire allowed video interval.
 5. Decode the allowed range a second time and run RF-DETR only for sampled
-   frames in the selected mask. RTMPose still receives original-resolution
+   frames in the selected mask. RTMPose only retains source pixels inside selected intervals (other sampled frames remain empty and time-aligned); it still receives original-resolution
    video pixels; confirmed touches are not manufactured from the ball mask.
    Saved model evidence keeps the original 9-frame window layout for fusion
    and existing CPU ByteTrack replay.
@@ -65,3 +65,32 @@ motion to limit missed gameplay.
   peak VRAM or power reduction has been verified.
 - No existing user videos, project data or the running Studio instance were
   changed. Do not merge into develop until GPU acceptance is completed.
+
+## GPU timing audit after stage cleanup (2026-11-21)
+
+Stage transitions now keep one meaningful video-validation stage and one GPU stage
+per actual pass, without a fake zero-second "source verified" or "combined GPU"
+stage. The saved mask and pipeline event log expose selected/total frame counts
+and the fraction eligible for RF-DETR. CUDA RTMPose receives no full-size frame
+copy outside the selected mask; the FFmpeg fallback also omits out-of-rally pose
+interpolation/crops while preserving sampled blank evidence rows.
+
+Controlled WSL CUDA / NVDEC zero-copy smoke with an isolated 640x360 H.264
+synthetic scene (black/play/black; 12-second view, 362 decoded frames):
+- Default person sampling interval 1 frame: old one-pass 24.936 seconds;
+  filtered two-pass 21.894 seconds (12.2% less GPU stage wall time).
+  The mask selected 208/362 frames; both paths yielded 2160 player proposals
+  and 2145 pose observations, with CPU replay completing.
+- Sampling interval 10 frames, 18-second view: old one-pass 13.946 seconds;
+  filtered two-pass 17.293 seconds (24.0% slower). The extra full decode can
+  outweigh saved detector calls at low RF-DETR sampling rates.
+- A filtered FFmpeg/non-zero-copy integration pass also succeeded with
+  208 selected frames, 216 detected-player proposals and 215 poses.
+  The source's trimmed 9-frame tail explains replay frame count differences.
+
+These timings are only synthetic, not evidence of faster real-game analysis
+or player/rally/Touch precision. The detector defaults to a one-frame
+sampling period; custom larger strides may not benefit. The GPU pass is
+experimental until real-match precision, GPU input parity and matched A/B
+measurements are accepted. The Studio process on 127.0.0.1:8875 was not
+running during this audit and no user's active jobs were interrupted.
