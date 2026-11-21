@@ -7,7 +7,8 @@ const html=read("rust/volley-app/static/studio.html");
 const css=read("rust/volley-app/static/studio.css");
 const js=read("rust/volley-app/static/studio.js");
 for(const id of ["studio-training-rallies-by-touches","studio-training-rallies-by-trajectory",
-  "studio-training-merge-gap-seconds","studio-training-ball-touch-candidates"]){
+  "studio-training-merge-gap-seconds","studio-training-ball-touch-candidates",
+  "studio-training-ball-touch-types"]){
   assert.equal((html.match(new RegExp('id="'+id+'"',"g"))||[]).length,1);
 }
 assert.ok(html.indexOf('class="studio-training-rally-visibility"')>html.indexOf('class="rallies-panel-head"'),
@@ -18,7 +19,10 @@ assert.ok(css.includes("#studio-preview-view.training-workspace .studio-rallies-
 assert.ok(css.includes('.studio-trajectory-proposal)[hidden]{display:none!important}'),
   "Hidden timeline marker elements must not remain visible");
 assert.ok(js.includes('overlay.canvas.addEventListener("contextmenu"'));
-assert.ok(!js.includes('showAnnotationContext(annotationFrame(),event);\n  });\n  const pickTrainingPlayer'));
+assert.match(js,/overlay\.canvas\.addEventListener\("contextmenu",event=>\{[\s\S]{0,240}showAnnotationContext\(annotationFrame\(\),event\);/,
+  "Training context actions are restricted to the right-click handler");
+assert.match(js,/overlay\.canvas\.addEventListener\("click",\(\)=>\{[\s\S]{0,130}hideAnnotationContext\(\);/,
+  "Ordinary clicks close the context menu instead of opening it");
 
 class Node {
   constructor(){this.style={};this.checked=true;this.hidden=false;this.listeners={};this.textContent="";}
@@ -71,7 +75,7 @@ const {timeline,drawTimeline,timelineRallyLayers}=runInNewContext(
     document:{querySelector:()=>({append(){}})},
     comparisonMatches:()=>true,annotationReady:()=>true,
     annotationSourceValid:()=>true,fps:()=>30,
-    cards:()=>{renderedLists++;},renderComparison:()=>{},
+    cards:()=>{renderedLists++;},renderComparison:()=>{},drawOverlay:()=>{},
     invalidateTrainingTouchPrediction:()=>{},
     cpuTouchKind:kind=>kind,
     cpuTouchStyle:{unknown_touch:["#f14f4f"]}
@@ -106,14 +110,25 @@ assert.ok(!palette().includes("#ffbd55"),"Ball touch candidates default hidden")
 rects.length=0;
 timelineRallyLayers.candidates.checked=true;
 timelineRallyLayers.candidates.listeners.change();
+assert.equal(timelineRallyLayers.types.disabled,false,
+  "Type display requires candidate detection to be enabled");
+timelineRallyLayers.types.checked=true;
+timelineRallyLayers.types.listeners.change();
+assert.match(timelineRallyLayers.typeStatus.textContent,/RTMPose/);
 assert.ok(palette().includes("#ffbd55"),"Optional touch candidates follow explicit toggle");
 assert.ok(!palette().includes("#37b9ce80"),
   "Optional touch candidates must not restore the old rally detector");
+assert.ok(!palette().includes("#c6bf96")&&!palette().includes("#f14f4f"),
+  "Training timeline must not inherit classified or unclassified CPU touches");
+assert.ok(!palette().includes("#10deb2"),
+  "Manual marks must remain distinct from trajectory candidates");
 rects.length=0;
 timelineRallyLayers.touches.checked=true;
 timelineRallyLayers.touches.listeners.change();
 assert.ok(!palette().includes("#37b9ce80"),
   "Even an outdated saved checkbox cannot reactivate touch-based rallies");
+assert.ok(!palette().includes("#f14f4f"),
+  "Even a previously enabled CPU layer cannot restore CPU touch ticks");
 rects.length=0;
 timelineRallyLayers.ball.checked=false;
 timelineRallyLayers.ball.listeners.change();
@@ -121,6 +136,9 @@ assert.ok(!palette().includes("#efb15773"),
   "Turning off the only rally layer hides its intervals");
 assert.ok(!palette().includes("#ffbd55"),
   "Ball candidate markers must obey the trajectory layer");
+assert.equal(timelineRallyLayers.types.disabled,true);
+assert.equal(marks[".studio-annotation-tick"][0].hidden,false,
+  "Manually annotated touches remain independent from trajectory candidates");
 assert.equal(marks[".studio-trajectory-proposal"][0].hidden,true);
 assert.equal(ui.list.scrollTop,0);
 assert.ok(renderedLists>=5,"Changing trajectory settings refreshes the rally list");
@@ -130,4 +148,39 @@ assert.match(html,/class="studio-training-source studio-training-source-cpu" hid
 assert.match(html,/id="studio-training-rallies-by-touches">/);
 assert.match(html,/id="studio-training-rallies-by-trajectory" checked hidden/);
 
+const overlayStart=js.indexOf("  const trainingTouchCandidateAtFrame=");
+const overlayEnd=js.indexOf("  const drawOverlay=()=>",overlayStart);
+assert.ok(overlayStart>0&&overlayEnd>overlayStart);
+let detectionVisible=true,typeVisible=false;
+const rendered=[];
+const paint={
+  save(){},restore(){},beginPath(){},arc(){},stroke(){rendered.push("ring");},
+  fill(){},fillRect(){},fillText(label){rendered.push(label);},
+  measureText:label=>({width:label.length*8})
+};
+const digest="b".repeat(64);
+const overlayAnnotation={prediction:{
+  source_replay_sha256:digest,proposals:[{frame:100,score:12}]
+}};
+const {drawTrainingTouchCandidate}=runInNewContext(
+  js.slice(overlayStart,overlayEnd)+"\n({drawTrainingTouchCandidate})",{
+    annotation:overlayAnnotation,annotationSourceValid:()=>true,
+    showBallCandidates:()=>detectionVisible,showBallTouchTypes:()=>typeVisible
+  });
+const detectedBall={replay_sha256:digest,frames:[{frame:100,ball:[0.5,0.4]}]};
+drawTrainingTouchCandidate(paint,detectedBall,100,0,0,640,360);
+assert.ok(rendered.includes("ring"),"Video must highlight trajectory candidates on the ball");
+assert.ok(rendered.some(value=>value.includes("Касание?")));
+rendered.length=0;typeVisible=true;
+drawTrainingTouchCandidate(paint,detectedBall,100,0,0,640,360);
+assert.ok(rendered.some(value=>value.includes("Тип не определён")),
+  "Unknown type must not be supplied by the CPU postprocessing");
+rendered.length=0;
+drawTrainingTouchCandidate(paint,{...detectedBall,replay_sha256:"a".repeat(64)},100,0,0,640,360);
+assert.equal(rendered.length,0,"A different replay must never display candidates");
+drawTrainingTouchCandidate(paint,detectedBall,109,0,0,640,360);
+assert.equal(rendered.length,0,"Candidate marker must not float on unrelated frames");
+detectionVisible=false;
+drawTrainingTouchCandidate(paint,detectedBall,100,0,0,640,360);
+assert.equal(rendered.length,0,"Disabling ball detection must hide its video marker");
 console.log("Training rally visibility: single continuous-ball source, merge gap and optional touch candidates: OK");

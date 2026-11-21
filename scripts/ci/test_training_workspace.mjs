@@ -13,6 +13,8 @@ assert.ok(!html.includes('id="studio-annotation-touch-lane"'),"Training has no d
 assert.equal([...html.matchAll(/id="studio-timeline-track"/g)].length,1,"One shared seek ruler");
 assert.ok(html.indexOf('id="studio-timeline"')>html.indexOf('id="studio-video"'));
 assert.ok(js.includes('lane:$("studio-timeline-track")'),"Annotation ticks use the shared timeline");
+assert.match(js,/s\.current="";s\.stopAt=null;s\.clipStart=null;s\.clipEnd=null;[\s\S]{0,100}wipe\(ui\.events\);/,
+  "Entering training clears stale CPU selection, playback clip and event badges");
 assert.ok(!js.includes('training.panel.before(element)'),
   "Training must not relocate the full-width ruler into the player column");
 assert.ok(js.includes('if(element.parentElement!==layout)layout.append(element)'),

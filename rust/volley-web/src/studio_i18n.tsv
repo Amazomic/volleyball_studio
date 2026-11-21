@@ -549,6 +549,21 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Нет расчёта	Not calculated
 Объединять при паузе меньше	Merge if the gap is shorter than
 Кандидаты касаний по мячу	Ball-based touch candidates
+Определение касания	Touch detection
+Розыгрыш по мячу не выбран	No ball-trajectory rally selected
+Выберите розыгрыш по траектории. CPU-касания в дообучении не отображаются.	Select a ball-trajectory rally. CPU contacts are hidden in training.
+Определение типа касания	Touch type classification
+Устаревшие CPU-метки недоступны для разметки	Legacy CPU labels cannot seed annotations
+Кандидаты из отдельного расчёта траектории VBallNet, без CPU-касаний и типов.	Candidates from a separate VBallNet trajectory calculation, without CPU contacts or touch types.
+Тип вычисляется только отдельным анализатором позы, а не из CPU-постобработки.	Type can be determined only by a separate pose-based analyzer, not from CPU postprocessing.
+Тип не определён	Type not determined
+Касание? · по мячу	Touch candidate · ball motion
+Касание? · по мячу · мяч не виден	Touch candidate · ball motion · ball not visible
+Нажмите «Рассчитать касания по мячу»	Run «Calculate ball-based touches»
+Сначала включите определение касаний	Enable touch detection first
+Типы отключены · CPU-постобработка не используется	Types off · CPU postprocessing not used
+Тип не определён: отдельная классификация RTMPose пока недоступна	Type unknown: independent RTMPose classification not available yet
+Нет расчёта касаний · используется только VBallNet	Touches not calculated · VBallNet only
 Не рассчитаны · отдельно от розыгрышей	Not calculated · separate from rallies
 Максимальная пауза между розыгрышами для объединения, секунды	Maximum pause to merge adjacent rallies, seconds
 Отображение тестовых розыгрышей	Test rally visibility

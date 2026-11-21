@@ -338,7 +338,7 @@
                   <details class="studio-training-advanced studio-training-legacy-tools">
                     <summary>Дополнительные кнопки разметки</summary>
                     <div class="studio-annotation-tools">
-                    <button type="button" class="secondary" id="studio-annotation-seed">Взять CPU-метки за основу</button>
+                    <button type="button" class="secondary" id="studio-annotation-seed" hidden disabled>Устаревшие CPU-метки недоступны для разметки</button>
                     <button type="button" class="secondary" id="studio-annotation-add-touch">+ Касание</button>
                     <button type="button" class="secondary" id="studio-annotation-move-touch" disabled>Перенести касание сюда</button>
                     <button type="button" class="secondary" id="studio-annotation-delete-touch" disabled>Удалить касание</button>
@@ -395,8 +395,13 @@
                   </label>
                   <label class="studio-training-candidate-toggle">
                     <input type="checkbox" id="studio-training-ball-touch-candidates">
-                    <span>Кандидаты касаний по мячу</span>
-                    <small id="studio-training-ball-touch-provenance" title="Не подтверждены игроками. Дополнительная функция расчёта по траектории.">Не рассчитаны · отдельно от розыгрышей</small>
+                    <span>Определение касания</span>
+                    <small id="studio-training-ball-touch-provenance" title="Кандидаты из отдельного расчёта траектории VBallNet, без CPU-касаний и типов.">Нажмите «Рассчитать касания по мячу»</small>
+                  </label>
+                  <label class="studio-training-candidate-toggle studio-training-touch-type-toggle">
+                    <input type="checkbox" id="studio-training-ball-touch-types" disabled>
+                    <span>Определение типа касания</span>
+                    <small id="studio-training-ball-touch-types-status" title="Тип вычисляется только отдельным анализатором позы, а не из CPU-постобработки.">Сначала включите определение касаний</small>
                   </label>
                 </div>
               </div>
