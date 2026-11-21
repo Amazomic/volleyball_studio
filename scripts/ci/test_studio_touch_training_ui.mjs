@@ -67,7 +67,7 @@ const context={
     }},
   fps:()=>30,
   timelineDuration:()=>200/30,
-  drawTimeline:()=>{drawn++;},seekTimeline:()=>{},showAnnotationContext:()=>{},
+  drawTimeline:()=>{drawn++;},drawOverlay:()=>{},seekTimeline:()=>{},showAnnotationContext:()=>{},
   refreshComparison:async()=>{},
   training:{active:true},
   request:async()=>({...original}),

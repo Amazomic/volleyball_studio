@@ -80,5 +80,6 @@ paints.length=0;timelineCtx.draw();
 assert.equal(paints.length,1,"Disabling touches removes all timeline markers");
 
 assert.match(js,/overlay\.actionFlags\[input\.dataset\.overlayAction\]=input\.checked;\s*drawOverlay\(\);drawTimeline\(\);refreshRallyCardTouchTicks\(\);/);
-assert.ok(js.includes("validTimeline&&!overlay.raw&&overlay.flags.touches?"));
+assert.ok(js.includes('validTimeline&&(typeof training==="undefined"||!training.active)&&'),
+  "CPU card ticks must be suppressed only in training, not in the standard preview");
 console.log("Preview touch filter visibility and timeline/card redraw: OK");

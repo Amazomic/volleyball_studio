@@ -70,7 +70,7 @@ assert.equal(groups.ball[0].end,220);
 helpers.updateTrainingSummaries(groups);
 assert.equal(layers.cpuSummary.textContent,"Устаревший способ отключён");
 assert.equal(layers.ballSummary.textContent,"1 розыгрыш · 0:06");
-assert.match(layers.provenance.textContent,/непрерывная траектория определяет только розыгрыши/);
+assert.match(layers.provenance.textContent,/Нет расчёта касаний · используется только VBallNet/);
 assert.equal(helpers.showBallCandidates(),false);
 layers.candidates.checked=true;
 assert.equal(helpers.showBallCandidates(),true);

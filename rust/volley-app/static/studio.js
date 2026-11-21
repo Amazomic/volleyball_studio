@@ -642,7 +642,7 @@
     return near;
   };
   const drawCpuTouches=(ctx,record,project,run,video,frame,x,y,width,height)=>{
-    if(!overlay.flags.touches||!record.width||!record.height)return;
+    if(typeof training!=="undefined"&&training.active||!overlay.flags.touches||!record.width||!record.height)return;
     const events=cpuTouchesForFrame(project,run,video,record.replay_sha256,frame);
     for(const event of events){
       const kind=cpuTouchKind(event.kind);
@@ -718,6 +718,36 @@
   };
   // Processed skeletons have the same rally scope as server-filtered player boxes.
   const poseVisibleInRally=frame=>frame?.in_rally===true&&Array.isArray(frame.pose_points);
+  const trainingTouchCandidateAtFrame=frame=>{
+    if(!showBallCandidates()||!annotationSourceValid()||!annotation.prediction)return null;
+    return annotation.prediction.proposals.find(item=>Math.abs(item.frame-frame)<=4)||null;
+  };
+  const drawTrainingTouchCandidate=(ctx,record,frame,x,y,width,height)=>{
+    const candidate=trainingTouchCandidateAtFrame(frame);
+    if(!candidate||record?.replay_sha256&&annotation.prediction.source_replay_sha256&&
+       record.replay_sha256!==annotation.prediction.source_replay_sha256)return;
+    const rows=record?.frames||[];
+    const detected=rows.find(row=>row.frame===candidate.frame&&Array.isArray(row.ball))||
+      rows.find(row=>Math.abs(row.frame-candidate.frame)<=2&&Array.isArray(row.ball));
+    const ball=detected?.ball?.length===2&&detected.ball.every(Number.isFinite)?detected.ball:null;
+    const px=ball?x+ball[0]*width:x+18;
+    const py=ball?y+ball[1]*height:y+24;
+    const label=showBallTouchTypes()?"Тип не определён":"Касание? · по мячу";
+    ctx.save();
+    if(ball){
+      ctx.strokeStyle="#ffbd55";ctx.fillStyle="#ffbd55";ctx.lineWidth=3;
+      ctx.beginPath();ctx.arc(px,py,16,0,Math.PI*2);ctx.stroke();
+      ctx.beginPath();ctx.arc(px,py,3.5,0,Math.PI*2);ctx.fill();
+    }
+    ctx.font="bold 13px Inter, sans-serif";ctx.textBaseline="top";
+    const message=ball?label:label+" · мяч не виден";
+    const textWidth=ctx.measureText(message).width;
+    const tx=ball?Math.max(x+5,Math.min(x+width-textWidth-12,px+20)):x+8;
+    const ty=ball?Math.max(y+6,Math.min(y+height-22,py-18)):y+8;
+    ctx.fillStyle="rgba(9,20,35,.94)";ctx.fillRect(tx-5,ty-3,textWidth+10,20);
+    ctx.fillStyle="#ffdb8f";ctx.fillText(message,tx,ty);
+    ctx.restore();
+  };
   const drawOverlay=()=>{
     const box=overlayContext(),source=overlay.source;
     if(box)drawCourtPreview(box);
@@ -727,7 +757,8 @@
     // Until the next decoded frame arrives, keep the canvas transparent.
     if(!ui.video.paused&&typeof ui.video.requestVideoFrameCallback==="function"&&
        !Number.isFinite(overlay.presentedTime))return;
-    if(!overlay.raw&&!overlay.flags.touches&&!overlay.flags.trajectory&&!overlay.flags.players&&!overlay.flags.pose)return;
+    if(!overlay.raw&&!overlay.flags.touches&&!overlay.flags.trajectory&&!overlay.flags.players&&
+       !overlay.flags.pose&&!showBallCandidates())return;
     // HTMLVideoElement.currentTime can advance before a frame is decoded.
     // requestVideoFrameCallback.mediaTime is the actual frame on screen.
     const shown=Number.isFinite(overlay.presentedTime)?
@@ -759,7 +790,10 @@
       if(!overlay.raw&&index?.project_id===project&&index?.rally_run_id===run&&
          index?.video===video&&typeof index.source_replay_sha256==="string"){
         const {ctx,x,y,width,height}=box;
-        drawCpuTouches(ctx,{
+        if(typeof training!=="undefined"&&training.active)drawTrainingTouchCandidate(ctx,{
+          replay_sha256:index.source_replay_sha256
+        },frame,x,y,width,height);
+        else drawCpuTouches(ctx,{
           width:ui.video.videoWidth,height:ui.video.videoHeight,
           replay_sha256:index.source_replay_sha256
         },project,run,video,frame,x,y,width,height);
@@ -939,6 +973,7 @@
     }
     // Only CPU-processed mode may display verified timeline touch annotations.
     drawCpuTouches(ctx,record,project,run,video,frame,x,y,width,height);
+    if(typeof training!=="undefined"&&training.active)drawTrainingTouchCandidate(ctx,record,frame,x,y,width,height);
     if(overlay.flags.players&&current){
       ctx.strokeStyle="#71acff";ctx.lineWidth=1.8;
       ctx.font="bold 11px Inter, sans-serif";ctx.textBaseline="top";
@@ -1268,7 +1303,7 @@
     annotation.calculate.disabled=annotation.busy||annotation.dirty||!s.run||!annotationSourceValid();
     annotation.adopt.disabled=annotation.busy||!annotation.prediction||!annotationSourceValid();
     annotation.save.disabled=annotation.busy||!annotation.dirty||!ready||!annotationSourceValid();
-    annotation.seed.disabled=annotation.busy||!s.run||!annotationSourceValid()||!timeline.data;
+    annotation.seed.disabled=true;
     annotation.seed.textContent=ready?"Сбросить метки к автоматическим":"Взять автоматические метки за основу";
     for(const key of ["add","begin","finish","next"])
       annotation[key].disabled=annotation.busy||!ready||!annotationSourceValid();
@@ -1451,6 +1486,7 @@
     const epoch=++annotation.epoch;
     annotation.data=null;annotation.prediction=null;annotation.touchId=null;annotation.rallyId=null;
     annotation.pendingStart=null;annotation.source=annotationSource();
+    drawOverlay();
     if(!training.active||!project||!run){
       annotationNotice("Для разметки выберите CPU-анализ и видео.");
       drawAnnotation();return;
@@ -1545,7 +1581,7 @@
   const invalidateTrainingTouchPrediction=()=>{
     if(!annotation.prediction)return;
     annotation.prediction=null;
-    drawAnnotation();drawTimeline();
+    drawAnnotation();drawTimeline();drawOverlay();
     annotationNotice("Настройки розыгрышей изменены. Пересчитайте касания внутри новых интервалов.");
   };
   const calculateTrajectory=async()=>{
@@ -1575,12 +1611,12 @@
             !result.rally_intervals.some(r=>r.start<=p.frame&&p.frame<=r.end)))
         throw Error("Касания выходят за рассчитанные розыгрыши по мячу");
       annotation.prediction=result;
-      drawTimeline();
+      drawTimeline();drawOverlay();
       await refreshComparison(true);
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run||video!==s.video)return;
       annotationNotice("Внутри "+result.rally_count+" розыгрышей по мячу найдено "+
         result.proposals.length+" кандидатов касаний. Вне розыгрышей поиск не выполняется. "+
-        "Типы и игроки не определяются. Включите «Кандидаты касаний по мячу» для просмотра.");
+        "Типы и игроки не определяются. Включите «Определение касания» для просмотра.");
     }catch(error){
       if(epoch===annotation.epoch)annotationNotice("Ошибка расчёта касаний: "+error.message,true);
     }finally{
@@ -1610,7 +1646,7 @@
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run||video!==s.video)return;
       if(result.schema!=="volley-touch-annotations/1"||result.video!==video)throw Error("Неверное подтверждение сохранения");
       annotation.data=result;annotation.dirty=false;annotation.prediction=null;
-      drawTimeline();void refreshComparison(true);
+      drawTimeline();drawOverlay();void refreshComparison(true);
       annotationNotice("Данные сохранены. Повторите расчёт касаний — алгоритм использует исправления для подбора порога и сдвига.");
     }catch(error){
       if(epoch===annotation.epoch)annotationNotice("Ошибка сохранения: "+error.message,true);
@@ -2195,6 +2231,10 @@
       if(training.active)return;
       ui.video.pause();
       overlay.raw=false;training.active=true;training.track=null;training.frame=null;
+      s.current="";s.stopAt=null;s.clipStart=null;s.clipEnd=null;
+      wipe(ui.events);
+      ui.viewTitle.textContent="Розыгрыш по мячу не выбран";
+      ui.viewDescription.textContent="Выберите розыгрыш по траектории. CPU-касания в дообучении не отображаются.";
       training.previousRallyFilter=ui.filter.value;
       if(ui.filter.value!=="all"){
         ui.filter.value="all";
@@ -2207,6 +2247,7 @@
       training.panel.classList.remove("hidden");
       placeTrainingTimeline(true);
       annotationFocus();
+      updateTrainingRallyLayers();
       updateOverlayToggles();
       setOverlaySource(s.run?{}:null);
       drawTimeline();drawOverlay();cards();
@@ -2297,6 +2338,8 @@
     touches:$("studio-training-rallies-by-touches"),
     ball:$("studio-training-rallies-by-trajectory"),
     candidates:$("studio-training-ball-touch-candidates"),
+    types:$("studio-training-ball-touch-types"),
+    typeStatus:$("studio-training-ball-touch-types-status"),
     gap:$("studio-training-merge-gap-seconds"),
     cpuSummary:$("studio-training-cpu-summary"),
     ballSummary:$("studio-training-ball-summary"),
@@ -2340,28 +2383,31 @@
       "Розыгрыши ещё не рассчитаны";
     const prediction=annotation.prediction&&annotationSourceValid()?
       annotation.prediction.proposals:null;
-    const simulated=comparisonMatches(comparison.data)&&comparison.simulated&&
-      comparison.data?.mode==="impacts"?
-      comparison.data.simulated_touch_candidates:null;
     if(training.active&&timeline.data)timeline.status.textContent=
       "Розыгрыши по мячу: "+groups.ball.length+
       " · пауза < "+trainingGapSeconds()+" с";
     timelineRallyLayers.provenance.textContent=prediction?
       prediction.length+" кандидатов · в "+annotation.prediction.rally_count+" розыгрышах VBallNet":
-      simulated?simulated.length+" кандидатов · перегибы мяча":
-      "Нет кандидатов · непрерывная траектория определяет только розыгрыши";
+      "Нет расчёта касаний · используется только VBallNet";
   };
   const showBallCandidates=()=>training.active&&timelineRallyLayers.ball.checked&&
     timelineRallyLayers.candidates.checked;
+  const showBallTouchTypes=()=>showBallCandidates()&&timelineRallyLayers.types.checked;
   const updateTrainingRallyLayers=()=>{
     annotation.touchLayerVisible=timelineRallyLayers.touches.checked;
     annotation.ballLayerVisible=showBallCandidates();
     timelineRallyLayers.candidates.disabled=!timelineRallyLayers.ball.checked;
+    timelineRallyLayers.types.disabled=!showBallCandidates();
+    timelineRallyLayers.typeStatus.textContent=!showBallCandidates()?
+      "Сначала включите определение касаний":
+      showBallTouchTypes()?
+      "Тип не определён: отдельная классификация RTMPose пока недоступна":
+      "Типы отключены · CPU-постобработка не используется";
     for(const [selector,visible] of [
       [".studio-annotation-tick",annotation.touchLayerVisible],
       [".studio-trajectory-proposal",annotation.ballLayerVisible]
     ])annotation.lane.querySelectorAll(selector).forEach(marker=>{marker.hidden=!visible;});
-    drawTimeline();
+    drawTimeline();drawOverlay();
     ui.list.scrollTop=0;
     cards();
     renderComparison();
@@ -2369,7 +2415,7 @@
   annotation.touchLayerVisible=timelineRallyLayers.touches.checked;
   annotation.ballLayerVisible=showBallCandidates();
   for(const layer of [timelineRallyLayers.touches,timelineRallyLayers.ball,
-    timelineRallyLayers.candidates])
+    timelineRallyLayers.candidates,timelineRallyLayers.types])
     layer.addEventListener("change",updateTrainingRallyLayers);
   timelineRallyLayers.gap.addEventListener("input",()=>{
     if(timelineRallyLayers.gap.value.trim()!==""){
@@ -2465,14 +2511,6 @@
           ctx.fillStyle="#f4c576c2";
           ctx.fillRect(x,y+Math.max(0,bandHeight-3),Math.max(2,x2-x),Math.min(3,bandHeight));
         }
-        if(showBallCandidates()&&comparison.simulated&&
-          comparison.data.mode==="impacts"&&!annotation.prediction){
-          for(const frame of comparison.data.simulated_touch_candidates){
-            const x=((Number(s.analysisOffset)||0)+frame/fps())/duration*width;
-            ctx.fillStyle="#ffc857";
-            ctx.fillRect(x-2,y+Math.floor(bandHeight*0.1),5,Math.max(3,bandHeight*0.8));
-          }
-        }
       }
       if(showBallCandidates()&&annotation.prediction&&annotationSourceValid()){
         for(const proposal of annotation.prediction.proposals){
@@ -2492,8 +2530,7 @@
           ctx.fillStyle="#10deb2";ctx.fillRect(x,y,Math.max(2,Math.ceil(dpr)),bandHeight);
         }
       }
-      if(overlay.flags.touches&&(!training.active||timelineRallyLayers.touches.checked)&&
-        Array.isArray(data.touch_annotations)){
+      if(!training.active&&overlay.flags.touches&&Array.isArray(data.touch_annotations)){
         for(const classified of [false,true]){
           for(const touch of data.touch_annotations){
             if(touch.touch_attributed!==true&&touch.contact_verified!==true)continue;
@@ -2510,14 +2547,11 @@
     $("studio-timeline-rally-key").hidden=overlay.raw||(training.active?!timelineRallyLayers.touches.checked:!overlay.flags.rallies);
     $("studio-timeline-ball-key").hidden=!training.active||overlay.raw||!timelineRallyLayers.ball.checked||
       !comparisonMatches(comparison.data)||comparison.data.trajectory_status!=="ready";
-    $("studio-timeline-touch-key").hidden=overlay.raw||!overlay.flags.touches||
-      (training.active&&!timelineRallyLayers.touches.checked);
+    $("studio-timeline-touch-key").hidden=overlay.raw||training.active||!overlay.flags.touches;
     $("studio-timeline-manual-key").hidden=!training.active||
       !timelineRallyLayers.touches.checked;
     $("studio-timeline-candidates-key").hidden=!showBallCandidates()||
-      !(annotation.prediction&&annotationSourceValid()||
-        comparisonMatches(comparison.data)&&comparison.simulated&&
-        comparison.data?.mode==="impacts");
+      !(annotation.prediction&&annotationSourceValid());
     updateTimelineProgress();
   };
   const clearTimeline=()=>{
@@ -3250,7 +3284,8 @@
     const validTimeline=Boolean(data)&&data.project_id===s.project&&
       data.rally_run_id===s.run&&data.video===s.video&&
       Array.isArray(data.touch_annotations);
-    const touches=validTimeline&&!overlay.raw&&overlay.flags.touches?data.touch_annotations.filter(event=>
+    const touches=validTimeline&&(typeof training==="undefined"||!training.active)&&
+      !overlay.raw&&overlay.flags.touches?data.touch_annotations.filter(event=>
       (event.touch_attributed===true||event.contact_verified===true)&&
       overlay.actionFlags[cpuTouchKind(event.kind)]):[];
     for(const {progress,markers,start,end} of rallyCardProgresses.values()){
@@ -3300,6 +3335,10 @@
     const valid=data?.project_id===s.project&&data?.rally_run_id===s.run&&
       data?.video===s.video&&Array.isArray(data.touch_annotations);
     wipe(ui.events);
+    if(training.active){
+      ui.viewDescription.textContent="Дообучение: только кандидаты по мячу; типы не рассчитаны.";
+      return;
+    }
     if(!valid){
       ui.viewDescription.textContent=
         "Загрузка касаний выбранной CPU-постобработки…";
