@@ -33,7 +33,7 @@
         <a id="studio-nav-players" href="#players" data-studio-tab="players"><span>♙</span> Игроки</a>
         <a id="studio-nav-analysis" href="#analysis" data-studio-tab="analysis"><span>▤</span> Анализ</a>
         <a id="studio-nav-preview" class="active" href="#preview" data-studio-tab="preview" aria-current="page"><span>▣</span> Предпросмотр</a>
-        <a id="studio-nav-training" href="#training" data-studio-tab="training"><span>✎</span> Дообучение</a>
+        <a id="studio-nav-training" href="#training" data-studio-tab="training"><span>⌘</span> Дебаг</a>
         <a id="studio-nav-report" href="#report" data-studio-tab="report"><span>▥</span> Отчёт</a>
         <a id="studio-nav-montage" href="#montage" data-studio-tab="montage"><span>◧</span> Монтаж</a>
       </nav>
@@ -186,75 +186,11 @@
         <section class="workspace">
           <div class="viewer-layout">
             <section class="viewer-panel" aria-label="Плеер розыгрышей">
-              <div class="viewer-head"><strong><span class="studio-preview-caption">Просмотр видео</span><span class="studio-training-caption">Дообучение</span></strong><div class="studio-training-video-actions"><button type="button" class="primary" id="studio-comparison-recalculate">Рассчитать розыгрыши</button><button type="button" class="primary" id="studio-annotation-calculate" disabled>Рассчитать касания</button><button type="button" class="primary" id="studio-annotation-classify" disabled>Определить тип касания</button><small id="studio-simulation-summary" role="status" aria-live="polite"></small></div><span id="studio-video-time">—</span></div>
-              <div class="video-wrap">
-                <video id="studio-video" tabindex="0" preload="metadata" playsinline aria-label="Просмотр исходного видео. Пробел — воспроизведение или пауза"></video>
-                <canvas id="studio-video-overlay" class="video-overlay" aria-hidden="true"></canvas>
-                <div class="video-overlay-controls">
-                <div class="video-overlay-toggles" role="group" aria-label="Фильтры и режимы плеера">
-                  <div class="video-overlay-filters" role="group" aria-label="Фильтры отображения">
-                  <button type="button" id="studio-overlay-rallies" class="video-overlay-toggle" aria-pressed="true" title="Показывать или скрывать блоки розыгрышей на шкале">▰ Розыгрыши</button>
-                  <button type="button" id="studio-overlay-touches" class="video-overlay-toggle" aria-pressed="true" title="Касания только из выбранной CPU-постобработки">● Касания</button>
-                  <button type="button" id="studio-overlay-trajectory" class="video-overlay-toggle" aria-pressed="true" title="Показывать или скрывать траекторию мяча">⌁ Траектория</button>
-                  <button type="button" id="studio-overlay-players" class="video-overlay-toggle" aria-pressed="true" title="Показывать или скрывать рамки игроков">▢ Игроки</button>
-                  <button type="button" id="studio-overlay-court" class="video-overlay-toggle" aria-pressed="true" title="Показать сохранённые границы площадки и сетку">▱ Поле и сетка</button>
-                  <button type="button" id="studio-overlay-pose" class="video-overlay-toggle" aria-pressed="false" title="Показывать точки суставов и скелеты RTMPose">♧ Скелеты</button>
-                  </div>
-                  <div class="video-overlay-modes" role="tablist" aria-label="Режим данных">
-                    <button type="button" id="studio-overlay-processed" role="tab" aria-selected="true">Обработанные</button>
-                    <button type="button" id="studio-overlay-raw" role="tab" aria-selected="false">Сырые</button>
-                  </div>
-                </div>
-                <fieldset id="studio-overlay-actions" class="video-overlay-actions hidden" aria-label="Типы касаний — оценка CPU">
-                  <label><input type="checkbox" data-overlay-action="unknown_touch" checked><span class="action-unknown-touch">●</span> Касание</label>
-                  <label><input type="checkbox" data-overlay-action="attack" checked><span class="action-attack">●</span> Атака</label>
-                  <label><input type="checkbox" data-overlay-action="block" checked><span class="action-block">●</span> Блок</label>
-                  <label><input type="checkbox" data-overlay-action="serve" checked><span class="action-serve">●</span> Подача</label>
-                  <label><input type="checkbox" data-overlay-action="overhead_pass" checked><span class="action-overhead-pass">●</span> Передача сверху</label>
-                  <label><input type="checkbox" data-overlay-action="dig" checked><span class="action-dig">●</span> Приём снизу</label>
-                </fieldset>
-                <div id="studio-overlay-raw-controls" class="video-overlay-raw-controls hidden" role="group" aria-label="Сохранённые GPU-данные — настройки каждой модели">
-                  <fieldset class="raw-model-control">
-                    <legend><label><input id="studio-raw-vball-visible" type="checkbox" checked> VballNet</label></legend>
-                    <label><input id="studio-raw-ball-trail" type="checkbox"> След мяча</label>
-                    <label>Мяч <input id="studio-raw-ball" type="range" min="0" max="100" value="0"><output id="studio-raw-ball-value">0%</output></label>
-                  </fieldset>
-                  <fieldset class="raw-model-control">
-                    <legend><label><input id="studio-raw-people-visible" type="checkbox" checked> <span id="studio-raw-person-model">Детектор игроков + RTMPose</span></label></legend>
-                    <label>Игроки <input id="studio-raw-player" type="range" min="0" max="100" value="50"><output id="studio-raw-player-value">50%</output></label>
-                    <label id="studio-raw-player-interpolated-option" class="hidden"><input id="studio-raw-player-interpolated" type="checkbox" checked> Интерполированные рамки <small style="color:#ffbc69">— —</small></label>
-                  </fieldset>
-                  <fieldset class="raw-model-control">
-                    <legend><label><input id="studio-raw-pose-visible" type="checkbox" checked> RTMPose-M · плавные точки (между измерениями — интерполяция)</label></legend>
-                    <label>Уверенность суставов <input id="studio-raw-pose" type="range" min="0" max="100" value="35"><output id="studio-raw-pose-value">35%</output></label>
-                    <small>Точные измерения раз в несколько кадров; между ними только визуальная интерполяция. Без Track ID.</small>
-                  </fieldset>
-                </div>
-                </div>
-                <span id="studio-overlay-status" class="video-overlay-status hidden" role="status"></span>
-                <div id="studio-annotation-context" class="studio-annotation-context hidden" role="group" aria-label="Действия с меткой видео">
-                  <strong id="studio-annotation-context-label"></strong>
-                  <div id="studio-annotation-context-actions"></div>
-                </div>
-                <span id="studio-video-empty">Выберите розыгрыш справа</span>
-
-
-                <div class="viewer-playback-controls" role="group" aria-label="Управление видео">
-                  <button id="studio-video-play" type="button" class="secondary" aria-label="Воспроизвести">▶ Воспроизвести</button>
-                  <button id="studio-video-mute" type="button" class="secondary" aria-label="Отключить звук" aria-pressed="false">♫ Звук</button>
-                  <button id="studio-video-fullscreen" type="button" class="secondary" aria-label="Полноэкранный режим">⛶ На весь экран</button>
-                </div>
-                <div class="video-playback-mode">
-                  <label class="sr-only" for="studio-video-mode">Режим воспроизведения</label>
-                  <select id="studio-video-mode" aria-label="Режим воспроизведения" title="Режим воспроизведения">
-                    <option value="sequence">Розыгрыши по очереди</option>
-                    <option value="loop">Один по кругу</option>
-                    <option value="free">Свободное воспроизведение</option>
-                    <option value="once">Один и остановиться</option>
-                  </select>
-                </div>
-              </div>
-              <section id="studio-training-panel" class="studio-training-panel hidden" aria-label="Дообучение на подтверждённых касаниях">
+              <div class="viewer-head"><strong><span class="studio-preview-caption">Просмотр видео</span><span class="studio-training-caption">Дебаг</span></strong><div class="studio-training-video-actions"><button type="button" class="primary" id="studio-comparison-recalculate">Рассчитать розыгрыши</button><button type="button" class="primary" id="studio-annotation-calculate" disabled>Рассчитать касания</button><button type="button" class="primary" id="studio-annotation-classify" disabled>Определить тип касания</button><small id="studio-simulation-summary" role="status" aria-live="polite"></small>
+              <section id="studio-training-panel" class="studio-debug-controls hidden" aria-label="Параметры дебага">
+                <details id="studio-debug-settings" class="studio-debug-settings">
+                  <summary>⚙ Настройки и сохранение</summary>
+                  <div class="studio-debug-settings-body">
                 <div class="studio-annotation-save-bar" role="group" aria-label="Сохранение разметки видео">
                   <div class="studio-annotation-save-info">
                     <label class="studio-training-method-picker">Метод касаний
@@ -362,7 +298,77 @@
                   <p id="studio-annotation-status" role="status" aria-live="polite">Исправления сохраняются как независимый эталон для проверки и настройки детектора.</p>
                 </section>
                 <details class="studio-training-advanced studio-training-library"><summary>База обучающих примеров RTMPose · <span id="studio-training-count">0</span></summary><div id="studio-training-list" aria-live="polite"></div></details>
+                  </div>
+                </details>
               </section>
+              </div><span id="studio-video-time">—</span></div>
+              <div class="video-wrap">
+                <video id="studio-video" tabindex="0" preload="metadata" playsinline aria-label="Просмотр исходного видео. Пробел — воспроизведение или пауза"></video>
+                <canvas id="studio-video-overlay" class="video-overlay" aria-hidden="true"></canvas>
+                <div class="video-overlay-controls">
+                <div class="video-overlay-toggles" role="group" aria-label="Фильтры и режимы плеера">
+                  <div class="video-overlay-filters" role="group" aria-label="Фильтры отображения">
+                  <button type="button" id="studio-overlay-rallies" class="video-overlay-toggle" aria-pressed="true" title="Показывать или скрывать блоки розыгрышей на шкале">▰ Розыгрыши</button>
+                  <button type="button" id="studio-overlay-touches" class="video-overlay-toggle" aria-pressed="true" title="Касания только из выбранной CPU-постобработки">● Касания</button>
+                  <button type="button" id="studio-overlay-trajectory" class="video-overlay-toggle" aria-pressed="true" title="Показывать или скрывать траекторию мяча">⌁ Траектория</button>
+                  <button type="button" id="studio-overlay-players" class="video-overlay-toggle" aria-pressed="true" title="Показывать или скрывать рамки игроков">▢ Игроки</button>
+                  <button type="button" id="studio-overlay-court" class="video-overlay-toggle" aria-pressed="true" title="Показать сохранённые границы площадки и сетку">▱ Поле и сетка</button>
+                  <button type="button" id="studio-overlay-pose" class="video-overlay-toggle" aria-pressed="false" title="Показывать точки суставов и скелеты RTMPose">♧ Скелеты</button>
+                  </div>
+                  <div class="video-overlay-modes" role="tablist" aria-label="Режим данных">
+                    <button type="button" id="studio-overlay-processed" role="tab" aria-selected="true">Обработанные</button>
+                    <button type="button" id="studio-overlay-raw" role="tab" aria-selected="false">Сырые</button>
+                  </div>
+                </div>
+                <fieldset id="studio-overlay-actions" class="video-overlay-actions hidden" aria-label="Типы касаний — оценка CPU">
+                  <label><input type="checkbox" data-overlay-action="unknown_touch" checked><span class="action-unknown-touch">●</span> Касание</label>
+                  <label><input type="checkbox" data-overlay-action="attack" checked><span class="action-attack">●</span> Атака</label>
+                  <label><input type="checkbox" data-overlay-action="block" checked><span class="action-block">●</span> Блок</label>
+                  <label><input type="checkbox" data-overlay-action="serve" checked><span class="action-serve">●</span> Подача</label>
+                  <label><input type="checkbox" data-overlay-action="overhead_pass" checked><span class="action-overhead-pass">●</span> Передача сверху</label>
+                  <label><input type="checkbox" data-overlay-action="dig" checked><span class="action-dig">●</span> Приём снизу</label>
+                </fieldset>
+                <div id="studio-overlay-raw-controls" class="video-overlay-raw-controls hidden" role="group" aria-label="Сохранённые GPU-данные — настройки каждой модели">
+                  <fieldset class="raw-model-control">
+                    <legend><label><input id="studio-raw-vball-visible" type="checkbox" checked> VballNet</label></legend>
+                    <label><input id="studio-raw-ball-trail" type="checkbox"> След мяча</label>
+                    <label>Мяч <input id="studio-raw-ball" type="range" min="0" max="100" value="0"><output id="studio-raw-ball-value">0%</output></label>
+                  </fieldset>
+                  <fieldset class="raw-model-control">
+                    <legend><label><input id="studio-raw-people-visible" type="checkbox" checked> <span id="studio-raw-person-model">Детектор игроков + RTMPose</span></label></legend>
+                    <label>Игроки <input id="studio-raw-player" type="range" min="0" max="100" value="50"><output id="studio-raw-player-value">50%</output></label>
+                    <label id="studio-raw-player-interpolated-option" class="hidden"><input id="studio-raw-player-interpolated" type="checkbox" checked> Интерполированные рамки <small style="color:#ffbc69">— —</small></label>
+                  </fieldset>
+                  <fieldset class="raw-model-control">
+                    <legend><label><input id="studio-raw-pose-visible" type="checkbox" checked> RTMPose-M · плавные точки (между измерениями — интерполяция)</label></legend>
+                    <label>Уверенность суставов <input id="studio-raw-pose" type="range" min="0" max="100" value="35"><output id="studio-raw-pose-value">35%</output></label>
+                    <small>Точные измерения раз в несколько кадров; между ними только визуальная интерполяция. Без Track ID.</small>
+                  </fieldset>
+                </div>
+                </div>
+                <span id="studio-overlay-status" class="video-overlay-status hidden" role="status"></span>
+                <div id="studio-annotation-context" class="studio-annotation-context hidden" role="group" aria-label="Действия с меткой видео">
+                  <strong id="studio-annotation-context-label"></strong>
+                  <div id="studio-annotation-context-actions"></div>
+                </div>
+                <span id="studio-video-empty">Выберите розыгрыш справа</span>
+
+
+                <div class="viewer-playback-controls" role="group" aria-label="Управление видео">
+                  <button id="studio-video-play" type="button" class="secondary" aria-label="Воспроизвести">▶ Воспроизвести</button>
+                  <button id="studio-video-mute" type="button" class="secondary" aria-label="Отключить звук" aria-pressed="false">♫ Звук</button>
+                  <button id="studio-video-fullscreen" type="button" class="secondary" aria-label="Полноэкранный режим">⛶ На весь экран</button>
+                </div>
+                <div class="video-playback-mode">
+                  <label class="sr-only" for="studio-video-mode">Режим воспроизведения</label>
+                  <select id="studio-video-mode" aria-label="Режим воспроизведения" title="Режим воспроизведения">
+                    <option value="sequence">Розыгрыши по очереди</option>
+                    <option value="loop">Один по кругу</option>
+                    <option value="free">Свободное воспроизведение</option>
+                    <option value="once">Один и остановиться</option>
+                  </select>
+                </div>
+              </div>
               <div class="viewer-details" hidden aria-hidden="true">
                 <h3 id="studio-view-title">Розыгрыш не выбран</h3>
                 <p id="studio-view-description">Временная разметка пока предварительная. Откройте видео для проверки.</p>
@@ -371,7 +377,7 @@
             </section>
             <aside class="rallies-panel" aria-label="Список розыгрышей">
               <div class="rallies-panel-head">
-                <div class="rallies-panel-titles"><strong>Список розыгрышей</strong><span>Сравнение алгоритмов · дообучение</span></div>
+                <div class="rallies-panel-titles"><strong>Список розыгрышей</strong><span>Тестирование алгоритмов в плеере</span></div>
                 <div class="studio-rallies-sort-control">
                   <label class="sr-only" for="studio-filter">Фильтр розыгрышей</label>
                   <select id="studio-filter" aria-label="Фильтр и сортировка розыгрышей" title="Фильтр и сортировка розыгрышей">

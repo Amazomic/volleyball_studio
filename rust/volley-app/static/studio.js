@@ -1087,7 +1087,7 @@
   const openTrainingExample=async item=>{
     if(training.viewBusy)return;
     training.viewBusy=true;
-    window.VolleyballTasks?.set("training-open",{label:"Дообучение",stage:"Открытие примера",progress:null});
+    window.VolleyballTasks?.set("training-open",{label:"Дебаг",stage:"Открытие примера",progress:null});
     trainingMessage("Открываем исходный кадр обучающего примера…");
     try{
       if(s.project!==item.project_id)await projects(item.project_id);
@@ -1180,7 +1180,7 @@
           accept.type="button";accept.className="primary";accept.textContent="Сохранить тип";
           accept.addEventListener("click",async()=>{
             accept.disabled=true;
-            window.VolleyballTasks?.set("training-relabel",{label:"Дообучение",stage:"Изменение типа касания",progress:null});
+            window.VolleyballTasks?.set("training-relabel",{label:"Дебаг",stage:"Изменение типа касания",progress:null});
             try{
               await post("/api/training/examples",{
                 action:"relabel",project_id:item.project_id,
@@ -1212,7 +1212,7 @@
         remove.addEventListener("click",async()=>{
           if(!window.confirm("Удалить этот обучающий пример?"))return;
           remove.disabled=true;
-          window.VolleyballTasks?.set("training-delete",{label:"Дообучение",stage:"Удаление примера",progress:null});
+          window.VolleyballTasks?.set("training-delete",{label:"Дебаг",stage:"Удаление примера",progress:null});
           try{
             await post("/api/training/examples",{
               action:"delete",project_id:item.project_id,id:item.id
@@ -1523,7 +1523,7 @@
       if(annotation.dirty||!annotationReady())return;
       const project=s.project,run=s.run,epoch=annotation.epoch;
       annotation.busy=true;drawAnnotation();
-      window.VolleyballTasks?.set("training-annotation",{label:"Дообучение",stage:"Проверка разметки",progress:null});
+      window.VolleyballTasks?.set("training-annotation",{label:"Дебаг",stage:"Проверка разметки",progress:null});
       try{
         const result=await post("/api/training/annotations",{
           action:"review",project_id:project,rally_run_id:run,revision:annotation.data.revision
@@ -1597,7 +1597,7 @@
     if(annotation.busy||annotation.dirty||!s.run||!annotationSourceValid())return;
     const epoch=annotation.epoch,project=s.project,run=s.run,video=s.video;
     annotation.busy=true;drawAnnotation();
-    window.VolleyballTasks?.set("training-trajectory",{label:"Дообучение",stage:"Поиск касаний по траектории VBallNet",progress:null});
+    window.VolleyballTasks?.set("training-trajectory",{label:"Дебаг",stage:"Поиск касаний по траектории VBallNet",progress:null});
     annotationNotice("Ищем касания только внутри розыгрышей, найденных по мячу, без GPU…");
     const rally=trainingTouchRallySettings();
     const settingsKey=JSON.stringify(rally);
@@ -1641,7 +1641,7 @@
     const rally=trainingTouchRallySettings(),settingsKey=JSON.stringify(rally);
     annotation.busy=true;drawAnnotation();
     window.VolleyballTasks?.set("training-types",{
-      label:"Дообучение",stage:"Определение типов касаний по RTMPose",progress:null
+      label:"Дебаг",stage:"Определение типов касаний по RTMPose",progress:null
     });
     annotationNotice("Проверяем движение рук RTMPose только в найденных по мячу касаниях…");
     try{
@@ -1692,7 +1692,7 @@
     if(annotation.busy||!annotation.dirty||!annotationReady()||!annotationSourceValid())return;
     const epoch=annotation.epoch,project=s.project,run=s.run,video=s.video;
     annotation.busy=true;drawAnnotation();
-    window.VolleyballTasks?.set("training-annotation",{label:"Дообучение",stage:"Сохранение меток и признаков траектории",progress:null});
+    window.VolleyballTasks?.set("training-annotation",{label:"Дебаг",stage:"Сохранение меток и признаков траектории",progress:null});
     annotationNotice("Сохраняем метки и признаки траектории…");
     try{
       const result=await post("/api/training/annotations",{
@@ -1996,7 +1996,7 @@
     }
     if(calibrate)options.calibrate=true;
     window.VolleyballTasks?.set("training-simulation",{
-      label:"Дообучение",
+      label:"Дебаг",
       stage:calibrate?"Подбор параметров по эталону":simulate?"Моделирование розыгрышей и касаний":"Сравнение алгоритмов",
       progress:null
     });
@@ -2215,7 +2215,7 @@
       trainingMessage("Выберите касавшегося мяча игрока на текущем кадре.",true);return;
     }
     training.busy=true;training.save.disabled=true;
-    window.VolleyballTasks?.set("training-save",{label:"Дообучение",stage:"Сохранение примера",progress:null});
+    window.VolleyballTasks?.set("training-save",{label:"Дебаг",stage:"Сохранение примера",progress:null});
     try{
       const editing=training.editId;
       await post("/api/training/examples",{
@@ -2274,7 +2274,7 @@
       else if(!s.run)timeline.status.textContent="Выберите CPU-версию";
       else if(timeline.data)timeline.status.textContent=
         timeline.data.rallies.length+" розыгрышей · "+timeline.data.touch_annotations.filter(event=>event.touch_attributed===true||event.contact_verified===true).length+" касаний (CPU)";
-      placeTrainingTimeline(false);
+      placeTrainingTimeline();
       drawTimeline();
       cards();
       refreshRallyCardTouchTicks();
@@ -2289,7 +2289,7 @@
       s.current="";s.stopAt=null;s.clipStart=null;s.clipEnd=null;
       wipe(ui.events);
       ui.viewTitle.textContent="Розыгрыш по мячу не выбран";
-      ui.viewDescription.textContent="Выберите розыгрыш по траектории. CPU-касания в дообучении не отображаются.";
+      ui.viewDescription.textContent="Выберите розыгрыш по траектории. CPU-касания в дебаге не отображаются.";
       training.previousRallyFilter=ui.filter.value;
       if(ui.filter.value!=="all"){
         ui.filter.value="all";
@@ -2300,7 +2300,7 @@
       overlay.rawMode.setAttribute("aria-selected","false");
       overlay.rawControls.classList.add("hidden");
       training.panel.classList.remove("hidden");
-      placeTrainingTimeline(true);
+      placeTrainingTimeline();
       annotationFocus();
       updateTrainingRallyLayers();
       updateOverlayToggles();
@@ -2484,16 +2484,10 @@
     updateTrainingRallyLayers();
   });
   const rallyCardProgresses=new Map();
-  const placeTrainingTimeline=active=>{
-    // The single timeline spans both columns, directly under the player and list.
-    // Move the editor below it in training; restore its original parent on exit.
+  const placeTrainingTimeline=()=>{
     const element=$("studio-timeline");
     const layout=document.querySelector("#studio-preview-view .viewer-layout");
-    const player=layout.querySelector(".viewer-panel");
     if(element.parentElement!==layout)layout.append(element);
-    if(active){
-      if(training.panel.parentElement!==layout)layout.append(training.panel);
-    }else if(training.panel.parentElement!==player)player.append(training.panel);
     requestAnimationFrame(drawTimeline);
   };
   const timeLabel=value=>{
