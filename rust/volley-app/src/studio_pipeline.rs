@@ -34,7 +34,6 @@ use volley_core::{
 use volley_inference::ModelKind;
 
 const SCHEMA: &str = "volley-studio-pipeline/1";
-const MAX_STATUS_BYTES: u64 = 32 * 1024;
 const MAX_LOG_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_LOG_ROW: usize = 8192;
 const MAX_LOG_PAGE: usize = 150;
@@ -654,7 +653,7 @@ fn save(path: &Path, status: &Value) -> Result<(), String> {
 fn read(path: &Path) -> Result<Value, ApiError> {
     let meta =
         fs::symlink_metadata(path).map_err(|_| storage::not_found("Статус анализа не найден"))?;
-    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_STATUS_BYTES {
+    if meta.file_type().is_symlink() || !meta.is_file() {
         return Err(storage::bad_request("Файл статуса анализа повреждён"));
     }
     storage::read_json(path)?.ok_or_else(|| storage::not_found("Пустой статус анализа"))
@@ -2760,6 +2759,20 @@ mod tests {
         assert!(!shared_native_pose_supported(false, 1920, 1080));
         assert!(!shared_native_pose_supported(true, 0, 1080));
         assert!(!shared_native_pose_supported(true, 7680, 4320));
+    }
+
+    #[test]
+    fn completed_pipeline_status_over_32_kib_is_readable() {
+        let dir = std::env::temp_dir().join(format!("studio-status-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("status.json");
+        let detected = vec![json!({"start": 1.1, "end": 2.2, "confidence": 0.8}); 1_000];
+        let expected = json!({"schema": SCHEMA, "status": "complete",
+            "gpu_rally_mask": {"detected": detected}});
+        save(&path, &expected).unwrap();
+        assert!(fs::metadata(&path).unwrap().len() > 32 * 1024);
+        assert_eq!(read(&path).unwrap(), expected);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
