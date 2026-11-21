@@ -2768,6 +2768,43 @@ Studio показывает кнопку перехода между debug и re
 - FAIL (давний baseline, не изменён): cargo clippy --workspace --all-targets --offline --locked -- -D warnings, dead_code auto_decode_input в rust/volley-media/src/raw_decoder/shared.rs:463. Предупреждение не подавлялось, NVDEC не исправлялся в этой задаче.
 - Новая release-сборка запущена в изолированной студии http://127.0.0.1:8875/studio, PID 81610, active_jobs=0. При безопасном перезапуске проверена неизменность каталога проектов и HTTP 200 для /studio, /studio/app.js, /studio/app.css, /studio/selection.wasm, /internal/rewrite-status, /api/projects. Текст реально отдаваемого JS/CSS/HTML проверен на новые функции и элементы; ручная визуальная проверка в браузере не выполнена.
 
+## 2026-11-21 ? game-interval primary GPU prefilter (unmerged experimental branch)
+
+- Source baseline: `a4959fc2` from `origin/develop`; isolated branch `agent/gpu-rally-intervals-20261121` because the main checkout has concurrent uncommitted GPU edits.
+- Implemented the initial VBallNet-only pass, rally masks (1.5 s, <4 s, 3 s context), uncertain fragment coverage, full-analysis fallback, selected RF-DETR/RTMPose frames, intermediate mask evidence, pipeline stage/status reporting and training defaults. Details: [Primary prefilter](PRIMARY_RALLY_GPU_PREFILTER.md).
+- PASS: Windows WASM release build; `cargo check -p volley-app --offline --locked`; `cargo clippy --workspace --all-targets --offline --locked -- -D warnings`; targeted 1.5-second/trajectory/mask Rust tests; `node scripts/ci/test_training_rally_comparison.mjs`; non-GPU JS gates in `scripts/check-all.ps1`.
+- FAIL / NOT ACCEPTED: `scripts/check-all.ps1` fails at four pre-existing GPU preprocessing tests with `cuInit = 100`; `cargo test -p volley-media` also fails two NVDEC tests with the same GPU initialization issue. `cargo test -p volley-app` runs 404 passed, 1 failed (Windows permission denied cleaning a temporary HTTP test directory), 10 ignored. The test suite is **not green**.
+- NOT TESTED: actual CUDA/NVDEC runtime correctness, real-match quality, A/B timing/VRAM benchmarks, separate test-instance Studio launch, recovery from checkpoints, Windows/Linux GPU parity. No merge to `develop` or release until these are validated.
+
+## 2026-11-21 - second GPU audit and CUDA input lifetime correction
+
+- Verified against branch `agent/gpu-rally-intervals-20261121` at
+  `748bb607` plus its unmerged follow-up changes. The original user
+  checkout remains untouched.
+- Root cause of the native WSL zero-copy SIGSEGV: `cuda_input::allocate`
+  returned a Tensor after dropping the ORT CUDA allocator that created it.
+  `CudaInput` now owns both, dropping the tensor before the allocator.
+  The VBallNet-only first scan no longer advances RTMPose or emits a pose tail.
+  Also corrected the synthetic A/B fixture's 6.0-second duration and
+  tolerated transient Windows temp-directory locks during HTTP-test teardown.
+- PASS: Windows `scripts/check-all.ps1` (Rust build, strict Clippy, Rust
+  workspace tests, WASM and 91 Node gates); Windows CUDA preprocessing 5/5,
+  NVDEC 10/10 (3 hardware-specific tests ignored).
+- PASS: Linux/WSL explicit real ONNX CUDA smoke in a disposable data root,
+  with `VOLLEY_PRIMARY_RALLY_PREFILTER=1` and
+  `VOLLEY_ZERO_COPY_PRIMARY=0` and `=1`. On the tracked
+  `examples/player-touch.gif` converted to isolated H264: 180 canonical
+  frames, 174 selected by the mask, 216 player proposals, 214 pose outputs,
+  and complete CPU replay. These are existence and lineage checks only.
+- NOT PASSED: Strict A/B raw-ball SHA comparison for FFmpeg pixels versus
+  CUDA zero-copy pixels; the tested GPU preprocessing is not byte-identical.
+  Do not accept or weaken the exact A/B gate without separate numerical
+  quality/precision tests.
+- NOT TESTED: full-match rally/Touch precision and recall, true saved-range
+  VFR/PTS end-to-end parity, restart from saved partial GPU evidence,
+  baseline-versus-filtered timing/VRAM savings, and Studio deployment.
+  Keep the PR draft and do not merge until these acceptance gaps are resolved.
+
 ### 2026-11-21 — Расчёт касаний только внутри розыгрышей по мячу
 
 - Base `develop` `a4959fc2`; изолированная ветка `agent/training-ball-touch-20261121`. Владелец: `rust/volley-app/src/rally_training_comparison.rs`, `rust/volley-app/src/native_player_tracks/trajectory.rs`, `rust/volley-app/src/touch_annotation/trajectory.rs`, `rust/volley-app/static/studio.{html,js}`; документация и регрессионные тесты.
@@ -2782,3 +2819,16 @@ Studio показывает кнопку перехода между debug и re
 - При загрузке выбора исходного видео сохраняется приоритет GPU-источника, выбранного видео и сохранённой настройки проекта; если ни один вариант не подходит, выбирается первое доступное видео. В непустом списке больше нет пункта с пустым значением. Пустой список остаётся корректным состоянием только при отсутствии исходников.
 - Исходная ошибка воспроизведена тестом до правки: проект с двумя видео давал пустой выбор вместо первого видео. После исправления PASS: создание проекта, восстановление ручного выбора, сохранённые настройки, выбранный GPU-источник, смена проекта и пустой каталог.
 - PASS: `powershell -ExecutionPolicy Bypass -File scripts/check-all.ps1` на HOME-PC в изолированном worktree: `cargo fmt`, `cargo clippy`, `cargo test --workspace`, сборка WASM, 92/92 Node CI; `git diff --check`. Реальный визуальный сценарий F5 в браузере NOT TESTED: локальная Studio на `127.0.0.1:8875` не была запущена. GPU/видеоматериалы для изменения селектора не требовались.
+
+### 2026-11-21 — Стадии первичного GPU и ограничение RTMPose игровыми интервалами
+
+- База origin/develop 2c240d85, ветка agent/gpu-rally-intervals-20261121; слияние совместило два независимых изменения интерфейса дообучения и первичного анализа. Основной рабочий checkout с чужими изменениями не трогали.
+- Убраны фиктивные быстрые записи этапов; GPU-прогресс разделён на реальный проход VBallNet и проход RF-DETR/RTMPose. Контекст вокруг обнаруженных розыгрышей сокращён с 3 до 1 с при неизменных порогах траектории 1,5 с и слияния 4 с. Добавлена диагностика доли выбранных кадров.
+- CUDA-копии полных кадров для RTMPose и FFmpeg-RTMPose вне выбранных отрезков больше не создаются; пропущенные кадры остаются пустыми строками во временной шкале и не интерполируются. Профили/исходные данные и сохранённые SHA не подменяются.
+- GPU CUDA synthetic A/B: person_stride=1 — 24,936 с без фильтра, 21,894 с с фильтром (208 из 362 кадров); person_stride=10 — 13,946 с без, 17,293 с с фильтром. Это не замер реального матча. Zero-copy и FFmpeg-тесты со включённым фильтром прошли; полная сверка качества с реальными видео и строгая SHA-паритетность обработки кадров остаются NOT TESTED/FAIL согласно журналу PR.
+- Применение: только ветка и черновой PR до подтверждения качества и производительности на настоящей игре; Studio на 8875 в момент проверки не была запущена.
+### 2026-11-21 — Диагностика SIGSEGV на 8% и приёмка GPU для 60 FPS
+
+- Проверены реальные журналы старой Studio без изменения пользовательских файлов: три полных анализа остались на 8%, в Linux journalctl обнаружен воспроизводимый SIGSEGV tokio-rt-worker. Предыдущая версия бинарника не содержала исправление времени жизни ONNX Runtime CUDA Allocator и Tensor из PR #18.
+- Изолированный контроль H.264 1920x1080 60 FPS, 20 секунд, единый кодер, GPU NVDEC zero-copy и postprocessing: 600 канонических кадров, 298 с мячом, 2 игровых интервала, 312 выбранных кадров, завершение без SIGSEGV. Точно совпал SHA-256 данных VBallNet, однопроходный и двухпроходный режимы заняли 38,515 и 31,212 секунды. Количество детекций/поз разнится ожидаемо за пределами маски.
+- Новые проверочные сообщения показывают наблюдения мяча, количество интервалов и причину резервного полного анализа; проверка SHA VBallNet может быть вызвана с VOLLEY_AB_EXPECT_BALL_SHA256. Точность на размеченном реальном матче и byte-to-byte идентичность прежнего FFmpeg и GPU-препроцессинга остаются непроверенными/отличающимися.

@@ -362,7 +362,7 @@ impl Engine {
         &self.model
     }
 
-    pub fn allocate_cuda_clip_input(&self) -> Result<Tensor<f32>, String> {
+    pub fn allocate_cuda_clip_input(&self) -> Result<crate::cuda_input::CudaInput, String> {
         if self.model.kind != ModelKind::Ball {
             return Err("CUDA clip input is only supported for VBallNet".into());
         }

@@ -10,6 +10,7 @@ const DETECTOR_RGB_FRAME_BYTES: usize = 640 * 360 * 3;
 
 #[derive(Debug)]
 enum FramePixels {
+    Skipped,
     Host {
         rgb: Arc<Vec<u8>>,
         offset: usize,
@@ -174,6 +175,7 @@ impl PoseStream {
         &mut self,
         batch: &PrimaryFrameBatch,
         detected: &[RawDetection],
+        in_scope: Option<&dyn Fn(u64) -> bool>,
         cancelled: &AtomicBool,
     ) -> Result<(), String> {
         if cancelled.load(Ordering::Acquire) {
@@ -206,15 +208,24 @@ impl PoseStream {
                 continue;
             }
             let begin = offset * frame_bytes;
-            self.pending.push_back(PendingFrame {
-                index,
-                pixels: FramePixels::Host {
+            let boxes = boxes_from_raw_detections(detected, index)?;
+            let pixels = if in_scope.is_some_and(|allows| !allows(index)) {
+                if !boxes.is_empty() {
+                    return Err("Excluded RTMPose frame has player detections".into());
+                }
+                FramePixels::Skipped
+            } else {
+                FramePixels::Host {
                     rgb: native.rgb.clone(),
                     offset: begin,
-                },
+                }
+            };
+            self.pending.push_back(PendingFrame {
+                index,
+                pixels,
                 width: native.width,
                 height: native.height,
-                boxes: boxes_from_raw_detections(detected, index)?,
+                boxes,
             });
         }
         self.next_frame += 9;
@@ -234,6 +245,7 @@ impl PoseStream {
         width: usize,
         height: usize,
         detected: &[RawDetection],
+        allow_skipped_frames: bool,
         cancelled: &AtomicBool,
     ) -> Result<(), String> {
         if cancelled.load(Ordering::Acquire) {
@@ -259,17 +271,22 @@ impl PoseStream {
                 }
                 continue;
             }
-            let frame = frame.ok_or("Missing sampled CUDA RTMPose original frame")?;
-            self.pending.push_back(PendingFrame {
-                index,
-                pixels: FramePixels::Cuda {
+            let boxes = boxes_from_raw_detections(detected, index)?;
+            let pixels = match frame {
+                Some(frame) => FramePixels::Cuda {
                     frame,
                     pitch,
                     matrix,
                 },
+                None if allow_skipped_frames && boxes.is_empty() => FramePixels::Skipped,
+                None => return Err("Missing sampled CUDA RTMPose original frame".into()),
+            };
+            self.pending.push_back(PendingFrame {
+                index,
+                pixels,
                 width,
                 height,
-                boxes: boxes_from_raw_detections(detected, index)?,
+                boxes,
             });
         }
         self.next_frame += 9;
@@ -329,8 +346,13 @@ impl PoseStream {
             if cancelled.load(Ordering::Acquire) {
                 return Err("cancelled".into());
             }
-            let inferred = interpolation::interpolate_boxes(&snapshots, frame.index, &frame.boxes);
-            let proposals = pose_proposals(frame.boxes.clone(), inferred);
+            let proposals = if matches!(frame.pixels, FramePixels::Skipped) {
+                Vec::new()
+            } else {
+                let inferred =
+                    interpolation::interpolate_boxes(&snapshots, frame.index, &frame.boxes);
+                pose_proposals(frame.boxes.clone(), inferred)
+            };
             let mut poses = Vec::with_capacity(proposals.len());
             for group in proposals.chunks(8) {
                 if cancelled.load(Ordering::Acquire) {
@@ -338,6 +360,9 @@ impl PoseStream {
                 }
                 let boxes: Vec<_> = group.iter().map(|(bb, _)| *bb).collect();
                 let points = match &frame.pixels {
+                    FramePixels::Skipped => {
+                        return Err("Skipped RTMPose frame has unexpected proposals".into());
+                    }
                     FramePixels::Host { rgb, offset } => {
                         let frame_bytes = frame.width * frame.height * 3;
                         self.engine.infer_batch_original(

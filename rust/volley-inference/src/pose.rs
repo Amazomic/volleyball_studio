@@ -146,7 +146,10 @@ impl PoseEngine {
         self.infer_batch_original(rgb, IMAGE_WIDTH, IMAGE_HEIGHT, boxes)
     }
 
-    pub fn allocate_cuda_pose_input(&self, batch: usize) -> Result<Tensor<f32>, String> {
+    pub fn allocate_cuda_pose_input(
+        &self,
+        batch: usize,
+    ) -> Result<crate::cuda_input::CudaInput, String> {
         if !(1..=8).contains(&batch) {
             return Err("RTMPose CUDA input batch must contain 1..8 players".into());
         }

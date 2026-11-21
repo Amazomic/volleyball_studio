@@ -54,65 +54,47 @@ fn median_ball_position(points: &[Option<[f64; 2]>], start: usize) -> Option<[f6
     Some([xs[count / 2], ys[count / 2]])
 }
 
-pub(crate) fn continuous_ball_intervals(
-    source: &Path,
-    expected_sha: &str,
-    frames: u64,
-    min_score: f64,
+pub(crate) fn continuous_intervals_from_positions(
+    points: &[Option<[f64; 2]>],
     min_seconds: f64,
 ) -> Result<Vec<(u64, u64)>, String> {
-    if frames == 0
-        || frames > 48 * 3600 * 30
-        || !min_score.is_finite()
-        || !(0.01..=1.0).contains(&min_score)
-        || !min_seconds.is_finite()
-        || !(0.1..=120.0).contains(&min_seconds)
-    {
-        return Err("Invalid continuous ball trajectory settings".into());
+    if !min_seconds.is_finite() || !(0.1..=120.0).contains(&min_seconds) {
+        return Err("Invalid continuous ball trajectory duration".into());
     }
-    let minimum_frames = (min_seconds * 30.0).floor() as usize + 1;
-    let mut reader = BoundedReader::open(source)?;
-    let mut points = Vec::with_capacity(frames as usize);
-    for frame in 0..frames {
-        let line = reader.line()?.ok_or("Truncated continuous ball source")?;
-        let row: BallOnlyFrame =
-            serde_json::from_slice(&line).map_err(|_| "Malformed continuous ball source")?;
-        if row.frame_index != frame {
-            return Err("Continuous ball source frames out of order".into());
-        }
-        let point = row.selected_ball.and_then(|ball| {
-            let bbox = ball.detection.bbox_xyxy_norm;
-            (ball.source_model == "vballnet"
-                && ball.detection.score.is_finite()
-                && ball.detection.score >= min_score
-                && bbox
-                    .iter()
-                    .all(|coord| coord.is_finite() && (0.0..=1.0).contains(coord))
-                && bbox[0] < bbox[2]
-                && bbox[1] < bbox[3])
-                .then_some([(bbox[0] + bbox[2]) * 0.5, (bbox[1] + bbox[3]) * 0.5])
-        });
-        points.push(point);
-    }
-    if reader.line()?.is_some() || reader.finish() != expected_sha {
-        return Err("Continuous ball source SHA-256 mismatch".into());
-    }
-
+    let minimum_frames = (min_seconds * 30.0).ceil() as usize;
     let mut intervals = Vec::new();
     let mut started = None::<usize>;
     let mut last = 0usize;
     let mut evidence = 0usize;
     let mut close = |start: usize, end: usize, support: usize| {
+        let start = start.saturating_sub(9);
+        let end = end.saturating_add(9).min(points.len().saturating_sub(1));
+        let slice = &points[start..=end];
+        let (Some(first), Some(last)) = (
+            slice.iter().position(Option::is_some),
+            slice.iter().rposition(Option::is_some),
+        ) else {
+            return;
+        };
+        let start = start + first;
+        let end = start + last - first;
         let duration = end - start + 1;
-        if duration >= minimum_frames && support * 100 >= duration * 35 {
+        let observed = slice[first..=last]
+            .iter()
+            .filter(|item| item.is_some())
+            .count();
+        if duration >= minimum_frames
+            && support * 100 >= duration * 35
+            && observed * 100 >= duration * 35
+        {
             intervals.push((start as u64, end as u64));
         }
     };
     for frame in 9..points.len().saturating_sub(9) {
-        let Some(before) = median_ball_position(&points, frame - 9) else {
+        let Some(before) = median_ball_position(points, frame - 9) else {
             continue;
         };
-        let Some(after) = median_ball_position(&points, frame + 7) else {
+        let Some(after) = median_ball_position(points, frame + 7) else {
             continue;
         };
         let displacement = (after[0] - before[0]).hypot(after[1] - before[1]);
@@ -142,6 +124,52 @@ pub(crate) fn continuous_ball_intervals(
         return Err("Too many continuous ball intervals".into());
     }
     Ok(intervals)
+}
+
+pub(crate) fn continuous_ball_intervals(
+    source: &Path,
+    expected_sha: &str,
+    frames: u64,
+    min_score: f64,
+    min_seconds: f64,
+) -> Result<Vec<(u64, u64)>, String> {
+    if frames == 0
+        || frames > 48 * 3600 * 30
+        || !min_score.is_finite()
+        || !(0.01..=1.0).contains(&min_score)
+        || !min_seconds.is_finite()
+        || !(0.1..=120.0).contains(&min_seconds)
+    {
+        return Err("Invalid continuous ball trajectory settings".into());
+    }
+    let mut reader = BoundedReader::open(source)?;
+    let mut points = Vec::with_capacity(frames as usize);
+    for frame in 0..frames {
+        let line = reader.line()?.ok_or("Truncated continuous ball source")?;
+        let row: BallOnlyFrame =
+            serde_json::from_slice(&line).map_err(|_| "Malformed continuous ball source")?;
+        if row.frame_index != frame {
+            return Err("Continuous ball source frames out of order".into());
+        }
+        let point = row.selected_ball.and_then(|ball| {
+            let bbox = ball.detection.bbox_xyxy_norm;
+            (ball.source_model == "vballnet"
+                && ball.detection.score.is_finite()
+                && ball.detection.score >= min_score
+                && bbox
+                    .iter()
+                    .all(|coord| coord.is_finite() && (0.0..=1.0).contains(coord))
+                && bbox[0] < bbox[2]
+                && bbox[1] < bbox[3])
+                .then_some([(bbox[0] + bbox[2]) * 0.5, (bbox[1] + bbox[3]) * 0.5])
+        });
+        points.push(point);
+    }
+    if reader.line()?.is_some() || reader.finish() != expected_sha {
+        return Err("Continuous ball source SHA-256 mismatch".into());
+    }
+
+    continuous_intervals_from_positions(&points, min_seconds)
 }
 
 pub(crate) fn preliminary_rally_scope(
@@ -460,6 +488,25 @@ mod tests {
     use super::*;
     use serde_json::json;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn continuous_ball_accepts_exact_one_and_a_half_seconds() {
+        let mut samples = (0_u64..150)
+            .map(|frame| {
+                if (40..85).contains(&frame) {
+                    Some([0.1 + (frame - 40) as f64 * 0.0035, 0.4])
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let exact = continuous_intervals_from_positions(&samples, 1.5).unwrap();
+        assert_eq!(exact, vec![(40, 84)]);
+        samples[84] = None;
+        assert!(continuous_intervals_from_positions(&samples, 1.5)
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn continuous_ball_rejects_unmoving_high_confidence_detections() {

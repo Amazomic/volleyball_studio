@@ -224,6 +224,7 @@ struct EvidenceWriter {
     writer: BufWriter<File>,
     digest: Sha256,
     count: usize,
+    ball_samples: Option<Vec<RawDetection>>,
 }
 impl EvidenceWriter {
     fn create(folder: &Path) -> Result<Self, String> {
@@ -236,9 +237,18 @@ impl EvidenceWriter {
             writer: BufWriter::new(file),
             digest: Sha256::new(),
             count: 0,
+            ball_samples: None,
         })
     }
     fn push(&mut self, frame: u64, records: &[RawDetection]) -> Result<(), String> {
+        if let Some(samples) = self.ball_samples.as_mut() {
+            samples.extend(
+                records
+                    .iter()
+                    .filter(|item| item.class_name == "ball")
+                    .cloned(),
+            );
+        }
         let mut line = serde_json::to_vec(&json!({
             "first_frame":frame,
             "raw_detections":records,

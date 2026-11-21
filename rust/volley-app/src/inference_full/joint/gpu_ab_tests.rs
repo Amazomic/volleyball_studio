@@ -210,7 +210,7 @@ fn real_uu_match_gpu_ab_legacy_vs_shared() -> Result<(), String> {
         if !extraction.success() {
             return Err(format!("Cannot extract the user's uu match: {extraction}"));
         }
-        9.1
+        6.0
     };
     crate::storage::write_json_atomic(
         &data.join("projects/projects.json"),
@@ -766,5 +766,142 @@ fn original_pose_single_decode_benchmark() -> Result<(), String> {
             run(false)?;
         }
     }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires local CUDA ONNX models and synthetic source; isolated GPU pipeline"]
+fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
+    let original = PathBuf::from(std::env::var("VOLLEY_AB_SOURCE").map_err(|e| e.to_string())?);
+    let repository =
+        PathBuf::from(std::env::var("VOLLEY_AB_MODEL_ROOT").map_err(|e| e.to_string())?);
+    if !original.is_file() || !repository.join("models/rf-detr-medium.onnx").is_file() {
+        return Err("GPU smoke source or model unavailable".into());
+    }
+    let base = std::env::temp_dir().join(format!(
+        "volley-primary-mask-smoke-{}",
+        Uuid::new_v4().simple()
+    ));
+    fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    let _cleanup = IsolatedGpuFixture(base.clone());
+    let data = base.join("sandbox");
+    let uploads = data.join("uploads/project_sources");
+    fs::create_dir_all(&uploads).map_err(|e| e.to_string())?;
+    fs::create_dir_all(data.join("projects/012345abcdef")).map_err(|e| e.to_string())?;
+    let video = "synthetic.mp4";
+    let source = uploads.join(video);
+    let start = std::env::var("VOLLEY_AB_SAMPLE_START_SEC").unwrap_or_else(|_| "28".into());
+    let seconds = std::env::var("VOLLEY_AB_SAMPLE_DURATION_SEC").unwrap_or_else(|_| "6".into());
+    let output = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-ss"])
+        .arg(start)
+        .arg("-i")
+        .arg(&original)
+        .arg("-t")
+        .arg(seconds)
+        .args(["-map", "0:v:0", "-an", "-c:v", "copy", "-y"])
+        .arg(&source)
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !output.success() {
+        return Err("Could not create isolated GPU smoke sample".into());
+    }
+    crate::storage::write_json_atomic(
+        &data.join("projects/projects.json"),
+        &json!({"schema":1,"projects":[{"id":"012345abcdef",
+            "name":"Primary GPU rally mask smoke","videos":[video]}]}),
+    )
+    .map_err(|e| format!("Seed isolated GPU smoke project: {e:?}"))?;
+    let app = state(repository, data);
+    let abort = AtomicBool::new(false);
+    let info = volley_media::probe(&source)?;
+    let person_stride = std::env::var("VOLLEY_AB_PERSON_STRIDE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(10);
+    let started = Instant::now();
+    let pair = super::run_joint_pair(
+        &app,
+        "012345abcdef",
+        video,
+        &source,
+        info.duration_sec,
+        None,
+        person_stride,
+        true,
+        0,
+        4,
+        &abort,
+        |_| Ok(()),
+    )?;
+    if std::env::var("VOLLEY_ZERO_COPY_PRIMARY").as_deref() == Ok("1") && !pair.zero_copy {
+        return Err("Zero-copy was requested but primary scan fell back".into());
+    }
+    let prefilter = !matches!(
+        std::env::var("VOLLEY_PRIMARY_RALLY_PREFILTER")
+            .ok()
+            .as_deref(),
+        Some("0" | "false")
+    );
+    let selected = if prefilter {
+        let mask = pair
+            .rally_filter
+            .as_ref()
+            .ok_or("Primary GPU scan did not publish a rally mask")?;
+        if mask["schema"] != "volley-primary-rally-mask/1" {
+            return Err("Primary GPU mask schema mismatch".into());
+        }
+        println!(
+            "RALLY MASK: ball_frames={} detected={} uncertain={} fallback={}",
+            mask["observed_ball_frames"],
+            mask["detected"].as_array().map_or(0, Vec::len),
+            mask["uncertain"].as_array().map_or(0, Vec::len),
+            mask["fallback_reason"]
+        );
+        mask["selected_frames"]
+            .as_u64()
+            .ok_or("Primary GPU mask has no selected frame count")?
+    } else {
+        if pair.rally_filter.is_some() {
+            return Err("Legacy primary run unexpectedly published a rally mask".into());
+        }
+        pair.decoded_frames
+    };
+    if selected == 0 || selected > pair.decoded_frames {
+        return Err("Primary GPU mask selected-frame count is out of bounds".into());
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    println!(
+        "PRIMARY GPU MASK: prefilter={} zero_copy={} person_stride={} frames={} selected={} windows={} elapsed={elapsed:.3}s",
+        prefilter, pair.zero_copy, person_stride, pair.decoded_frames, selected, pair.windows
+    );
+    let ball_sha = model_hash(&app.data_root, &pair.ball_job_id)?;
+    println!("PRIMARY GPU BALL SHA256: {ball_sha}");
+    if let Ok(expected) = std::env::var("VOLLEY_AB_EXPECT_BALL_SHA256") {
+        if ball_sha != expected {
+            return Err("Filtered VBallNet evidence differs from the reference run".into());
+        }
+    }
+    let fusion = fusion_pair(&app, video, &pair.ball_job_id, &pair.player_job_id)?;
+    let pose = pair
+        .pending_pose
+        .ok_or("GPU smoke did not produce RTMPose evidence")?
+        .publish(&fusion, &abort)?;
+    if pose["sampled_frames"].as_u64()
+        != Some((pair.windows as u64 * 9).div_ceil(person_stride as u64))
+    {
+        return Err("GPU smoke pose sampling disagrees with source timeline".into());
+    }
+    let (replay, touches, rallies) = replay_touches_and_rallies(&app, video, &fusion)?;
+    println!(
+        "PRIMARY GPU -> CPU: zero_copy={} frames={} players={} poses={} replay={} touches={} rallies={}",
+        pair.zero_copy,
+        pair.decoded_frames,
+        fusion["player_proposals"],
+        pose["player_poses"],
+        replay["frames"],
+        touches["touch_candidates"],
+        rallies["rallies"]
+    );
     Ok(())
 }
