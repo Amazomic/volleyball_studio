@@ -9,6 +9,17 @@ use std::{
     ptr,
 };
 
+const MAX_NVRTC_LOG_BYTES: usize = 1024 * 1024;
+
+fn nvrtc_log_capacity(bytes: usize) -> Result<usize, String> {
+    if !(1..=MAX_NVRTC_LOG_BYTES).contains(&bytes) {
+        return Err(format!(
+            "NVRTC compilation log size is invalid: {bytes} bytes"
+        ));
+    }
+    Ok(bytes)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Nv12View {
     pub ptr: u64,
@@ -80,14 +91,27 @@ fn compile_ptx() -> Result<Vec<u8>, String> {
             unsafe { (api.nvrtcCompileProgram)(prog, options.len() as i32, options.as_ptr()) };
         if result != nvrtcResult::NVRTC_SUCCESS {
             let mut bytes = 0usize;
-            let _ = unsafe { (api.nvrtcGetProgramLogSize)(prog, &mut bytes) };
-            let mut log = vec![0u8; bytes.min(16 * 1024)];
-            if !log.is_empty() {
-                let _ = unsafe { (api.nvrtcGetProgramLog)(prog, log.as_mut_ptr().cast()) };
-            }
+            let size_status = unsafe { (api.nvrtcGetProgramLogSize)(prog, &mut bytes) };
+            let diagnostics = if size_status == nvrtcResult::NVRTC_SUCCESS {
+                match nvrtc_log_capacity(bytes) {
+                    Ok(size) => {
+                        let mut log = vec![0u8; size];
+                        let read_status =
+                            unsafe { (api.nvrtcGetProgramLog)(prog, log.as_mut_ptr().cast()) };
+                        if read_status == nvrtcResult::NVRTC_SUCCESS {
+                            String::from_utf8_lossy(&log).into_owned()
+                        } else {
+                            format!("NVRTC compilation log read failed: {read_status:?}")
+                        }
+                    }
+                    Err(error) => error,
+                }
+            } else {
+                format!("NVRTC compilation log size unavailable: {size_status:?}")
+            };
             return Err(format!(
                 "CUDA preprocessing compilation: {result:?}: {}",
-                String::from_utf8_lossy(&log)
+                diagnostics
             ));
         }
         let mut size = 0usize;
@@ -418,6 +442,16 @@ impl Drop for GpuBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nvrtc_log_capacity_never_truncates_native_write_buffer() {
+        assert!(nvrtc_log_capacity(0).is_err());
+        assert_eq!(nvrtc_log_capacity(16 * 1024 + 1), Ok(16 * 1024 + 1));
+        assert_eq!(
+            nvrtc_log_capacity(MAX_NVRTC_LOG_BYTES),
+            Ok(MAX_NVRTC_LOG_BYTES)
+        );
+        assert!(nvrtc_log_capacity(MAX_NVRTC_LOG_BYTES + 1).is_err());
+    }
     #[test]
     fn cuda_p016_rotation_preserves_expected_luma_in_device_memory() {
         if mini_cuda::driver::try_init_driver().is_none()

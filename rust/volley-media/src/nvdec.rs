@@ -20,6 +20,11 @@ use std::{
 const MAX_BYTES_PER_PACKET: usize = 128 * 1024;
 const MAX_SURFACES: u8 = 32;
 
+fn guarded_gpu_callback<T>(operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    catch_unwind(AssertUnwindSafe(operation))
+        .unwrap_or_else(|_| Err("NVDEC GPU frame consumer panicked".into()))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NvdecCodec {
     H264,
@@ -289,15 +294,17 @@ where
         if status != CUresult::CUDA_SUCCESS {
             return Err(format!("Map NVDEC GPU surface: {status:?}"));
         }
-        let outcome = (self.callback)(GpuNv12Frame {
-            frame_index: self.frames,
-            device_ptr: ptr,
-            pitch: pitch as usize,
-            width: self.width,
-            height: self.height,
-            bit_depth: self.bit_depth,
-            chroma: self.chroma,
-            _mapped: PhantomData,
+        let outcome = guarded_gpu_callback(|| {
+            (self.callback)(GpuNv12Frame {
+                frame_index: self.frames,
+                device_ptr: ptr,
+                pitch: pitch as usize,
+                width: self.width,
+                height: self.height,
+                bit_depth: self.bit_depth,
+                chroma: self.chroma,
+                _mapped: PhantomData,
+            })
         });
         let completion = try_init_driver()
             .ok_or_else(|| "CUDA driver disappeared during NVDEC output".to_owned())
@@ -928,6 +935,14 @@ mod tests {
                 window.first_frame + offset as u64,
             );
         }
+    }
+
+    #[test]
+    fn gpu_consumer_panic_is_converted_to_error_before_unmap() {
+        let result: Result<(), String> = guarded_gpu_callback(|| panic!("callback failed"));
+        assert_eq!(result.unwrap_err(), "NVDEC GPU frame consumer panicked");
+        let success: Result<u32, String> = guarded_gpu_callback(|| Ok(42));
+        assert_eq!(success, Ok(42));
     }
 
     #[test]
