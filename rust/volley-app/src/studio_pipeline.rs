@@ -768,6 +768,44 @@ fn progress_with_frames(
     }
     save(path, status)
 }
+fn publish_primary_rally_mask(
+    path: &Path,
+    status: &mut Value,
+    mask: &Value,
+    decoded_frames: u64,
+) -> Result<(), String> {
+    let detected = mask["detected"]
+        .as_array()
+        .ok_or("GPU rally mask has no detected intervals")?
+        .len();
+    let merged = mask["merged"]
+        .as_array()
+        .ok_or("GPU rally mask has no merged intervals")?
+        .len();
+    let selected = mask["selected_frames"]
+        .as_u64()
+        .filter(|frames| *frames <= decoded_frames)
+        .ok_or("GPU rally mask has invalid selected frame count")?;
+    let fallback = mask["fallback_reason"].as_str().unwrap_or("none");
+    progress_with_frames(
+        path,
+        status,
+        "Поиск розыгрышей",
+        8.0 + 72.0 * 0.399999,
+        Some((decoded_frames, decoded_frames)),
+    )?;
+    status["gpu_rally_mask"] = mask.clone();
+    save(path, status)?;
+    log_event(
+        path,
+        "Поиск розыгрышей",
+        "success",
+        &format!(
+            "Исходных={detected}, объединённых={merged}, выбранных кадров={selected}/{decoded_frames}, доля для RF-DETR={:.1}%, fallback={fallback}",
+            100.0 * selected as f64 / decoded_frames.max(1) as f64,
+        ),
+    )
+}
 fn require_id(response: &Value, field: &str) -> Result<String, String> {
     response[field]
         .as_str()
@@ -1715,7 +1753,10 @@ async fn pipeline(
                         request.gpu.gpu_memory_limit_mb,
                         request.gpu.cpu_threads,
                         cancel,
-                        |fraction, processed, total| {
+                        |fraction, processed, total, rally_mask| {
+                            if let Some((mask, decoded_frames)) = rally_mask {
+                                publish_primary_rally_mask(path, status, mask, decoded_frames)?;
+                            }
                             let label = if !primary_prefilter {
                                 gpu_label
                             } else if fraction < 0.4 {
@@ -1757,30 +1798,6 @@ async fn pipeline(
                 )?;
                 status["zero_copy_active"] = json!(result.zero_copy);
                 status["gpu_rally_mask"] = result.rally_filter.unwrap_or(Value::Null);
-                if status["gpu_rally_mask"].is_object() {
-                    log_event(
-                        path,
-                        "Поиск розыгрышей",
-                        "success",
-                        &format!(
-                            "Исходных={}, объединённых={}, выбранных кадров={}/{}, доля для RF-DETR={:.1}%, fallback={}",
-                            status["gpu_rally_mask"]["detected"]
-                                .as_array()
-                                .map_or(0, Vec::len),
-                            status["gpu_rally_mask"]["merged"]
-                                .as_array()
-                                .map_or(0, Vec::len),
-                            status["gpu_rally_mask"]["selected_frames"],
-                            result.decoded_frames,
-                            100.0
-                                * status["gpu_rally_mask"]["selected_frames"]
-                                    .as_u64()
-                                    .unwrap_or_default() as f64
-                                / result.decoded_frames.max(1) as f64,
-                            status["gpu_rally_mask"]["fallback_reason"]
-                        ),
-                    )?;
-                }
                 save(path, status)?;
                 pending_shared_pose = result.pending_pose;
                 Some((result.ball_job_id, result.player_job_id))
@@ -2893,6 +2910,77 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    #[test]
+    fn primary_rally_mask_is_logged_before_person_inference() {
+        let dir = std::env::temp_dir().join(format!("studio-rally-log-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("status.json");
+        let mut status = json!({"stage":"В очереди"});
+        progress_with_frames(
+            &path,
+            &mut status,
+            "GPU · VBallNet: траектория мяча и розыгрыши",
+            36.8,
+            Some((900, 900)),
+        )
+        .unwrap();
+        let mask = json!({
+            "detected":[[50, 100], [500, 550]],
+            "merged":[[50, 100], [500, 550]],
+            "selected":[[20, 130], [470, 580]],
+            "selected_frames":222,
+            "fallback_reason":null
+        });
+        publish_primary_rally_mask(&path, &mut status, &mask, 900).unwrap();
+        assert_eq!(read(&path).unwrap()["gpu_rally_mask"], mask);
+        assert_eq!(status["stage"], "Поиск розыгрышей");
+        assert_eq!(status["stages"][1]["frames_processed"], 900);
+        assert_eq!(status["stages"][1]["frames_total"], 900);
+        let log_before_players = fs::read_to_string(dir.join("events.jsonl")).unwrap();
+        assert!(log_before_players.contains("выбранных кадров=222/900"));
+        assert!(log_before_players.contains("доля для RF-DETR=24.7%"));
+        assert!(!log_before_players.contains("GPU · RF-DETR"));
+        progress_with_frames(
+            &path,
+            &mut status,
+            "GPU · RF-DETR + RTMPose: игровые интервалы",
+            36.8,
+            Some((0, 222)),
+        )
+        .unwrap();
+        let entries: Vec<Value> = fs::read_to_string(dir.join("events.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|row| serde_json::from_str(row).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0]["stage"], "GPU · VBallNet");
+        assert_eq!(entries[1]["stage"], "Поиск розыгрышей");
+        assert_eq!(entries[1]["kind"], "stage_start");
+        assert_eq!(entries[2]["stage"], "Поиск розыгрышей");
+        assert_eq!(entries[2]["level"], "success");
+        assert_eq!(entries[3]["stage"], "GPU · RF-DETR + RTMPose");
+        assert!(status["stages"][1]["finished_ms"].is_number());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn primary_rally_mask_reports_full_video_fallback_before_person_inference() {
+        let dir = std::env::temp_dir().join(format!("studio-rally-fallback-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("status.json");
+        let mut status = json!({"stage":"GPU · VBallNet"});
+        let mask = json!({
+            "detected":[], "merged":[], "selected_frames":600,
+            "fallback_reason":"insufficient_ball_observations"
+        });
+        publish_primary_rally_mask(&path, &mut status, &mask, 600).unwrap();
+        let log = fs::read_to_string(dir.join("events.jsonl")).unwrap();
+        assert!(log.contains("fallback=insufficient_ball_observations"));
+        assert!(log.contains("доля для RF-DETR=100.0%"));
+        assert_eq!(read(&path).unwrap()["gpu_rally_mask"], mask);
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn eta_uses_matching_stage_durations_not_global_percent() {
         let now = 200_000;

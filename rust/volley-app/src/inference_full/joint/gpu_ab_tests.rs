@@ -334,7 +334,7 @@ fn real_uu_match_gpu_ab_legacy_vs_shared() -> Result<(), String> {
         memory,
         threads,
         &abort,
-        |_, _, _| Ok(()),
+        |_, _, _, _| Ok(()),
     )?;
     let shared_fusion = fusion_pair(&app, video, &joint.ball_job_id, &joint.player_job_id)?;
     let shared_pose = joint
@@ -629,7 +629,7 @@ fn original_pose_single_decode_benchmark() -> Result<(), String> {
             0,
             4,
             &abort,
-            |_, _, _| Ok(()),
+            |_, _, _, _| Ok(()),
         )?;
         let gpu_sec = started.elapsed().as_secs_f64();
         let ball_sha = model_hash(&app.data_root, &pair.ball_job_id)?;
@@ -848,7 +848,7 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
         0,
         4,
         &abort,
-        |_, _, _| Ok(()),
+        |_, _, _, _| Ok(()),
     )?;
     if std::env::var("VOLLEY_ZERO_COPY_PRIMARY").as_deref() == Ok("1") && !pair.zero_copy {
         return Err("Zero-copy was requested but primary scan fell back".into());
