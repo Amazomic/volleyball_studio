@@ -12,6 +12,12 @@ Download both formats from [GitHub Releases](https://github.com/Amazomic/volleyb
 - **External inference requirements:** supply compatible models and native runtimes separately; the UI starting successfully is **not** proof of successful GPU inference. An extracted beta archive is a standalone application root, not the full source repository/model distribution. For model-based work, provision the expected model locations and dependencies in the selected runtime environment. Do not open the only copy of production projects or overwrite existing results.
 - **Verified scope:** the published Windows/Linux archives were extracted and their servers started on isolated loopback ports, with `/studio` and embedded WASM returning HTTP 200. The full Rust/Node local gate passed, but real-match accuracy, complete GPU inference and MP4 export were **NOT TESTED** as release acceptance. `production_ready=false` remains correct.
 
+## Обязательная доставка агентских задач
+
+Каждая задача проходит [контракт веток и развёртывания](AGENT_DELIVERY_POLICY.md): отдельные локальные task-ветка и worktree → проверки → последовательная интеграция с актуальным `develop` → push только `origin/develop` → сборка на точном опубликованном SHA → проверенный безопасный restart → HTTP 200, корректный PID и совпадение SHA на странице. Даже изменения только документации не считаются «Выполнено» до подтверждения живой сборки на новом коммите.
+
+`master` не изменять без прямого указания пользователя. Если активен другой агент, не использовать его дерево. Если `/internal/rewrite-status` сообщает активные задания, запуск небезопасен или скомпилированный SHA отличается — не прерывать Studio и сообщить «Не завершено» вместо заявления о готовом результате. Только после успешной проверки дать ссылку [на локальную Studio](http://127.0.0.1:8875/studio), указав commit SHA. Ссылка предназначена для компьютера с запущенной Studio.
+
 ## Build from source on Windows / WSL (developer workflow)
 
 The following `start-volley-ui.cmd` commands apply to a **repository checkout**, not a downloaded beta ZIP. The source launcher compiles as needed and uses the isolated WSL sandbox; its defaults differ from the prebuilt Windows launcher.
