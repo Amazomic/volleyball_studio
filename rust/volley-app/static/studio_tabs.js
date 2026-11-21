@@ -213,6 +213,7 @@
     interpolate_players:$("studio-gpu-interpolate-players").checked,
     interpolate_pose:$("studio-gpu-interpolate-pose").checked,
     pose_classification:true,
+    auto_assign_threshold_percent:inputValue("studio-post-auto-assign-threshold"),
     tracking:{
       min_player_score:inputValue("studio-post-player-score"),
       nms_iou:inputValue("studio-post-nms"),

@@ -391,7 +391,7 @@
       if(state.autoThresholdScope!==autoScope){
         state.autoThresholdScope=autoScope;
         const applied=Number(result.automatic_assignment_threshold_percent);
-        galleryAutoThreshold.value=Number.isInteger(applied)&&applied>=1&&applied<=99?String(applied):"80";
+        galleryAutoThreshold.value=Number.isInteger(applied)&&applied>=1&&applied<=99?String(applied):"75";
         galleryAutoValue.textContent=galleryAutoThreshold.value+"%";
       }
       const savedMatches=result.automatic_identity_matches;
@@ -903,9 +903,9 @@
   galleryAuto.addEventListener("click",()=>autoAssignSimilar());
   const galleryAutoThreshold=node("input");
   galleryAutoThreshold.type="range";galleryAutoThreshold.min="1";galleryAutoThreshold.max="99";
-  galleryAutoThreshold.step="1";galleryAutoThreshold.value="80";
+  galleryAutoThreshold.step="1";galleryAutoThreshold.value="75";
   galleryAutoThreshold.setAttribute("aria-label","Минимальное сходство для автопривязки, %");
-  const galleryAutoValue=node("output","","80%");
+  const galleryAutoValue=node("output","","75%");
   const galleryAutoLabel=node("label","track-auto-threshold","Сходство от");
   galleryAutoLabel.append(galleryAutoThreshold,galleryAutoValue);
   galleryAutoThreshold.addEventListener("input",()=>{

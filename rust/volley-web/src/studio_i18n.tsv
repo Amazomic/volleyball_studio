@@ -585,3 +585,5 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Архивный CPU-источник (не используется)	Legacy CPU source (disabled)
 Архивные розыгрыши	Archived rallies
 Детекция розыгрышей по траектории мяча	Ball trajectory rally detection
+
+Автопривязка игроков, сходство от (%)	Auto-assign players, similarity from (%)

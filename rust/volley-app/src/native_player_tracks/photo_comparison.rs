@@ -134,6 +134,10 @@ fn exclude_cross_athlete_reference_collisions(photos: &mut Vec<PhotoInput>) {
     });
 }
 
+fn comparison_track_count_supported(count: usize) -> bool {
+    count <= MAX_TRACKS
+}
+
 pub(super) struct Snapshot {
     ctx: Inputs,
     identity: Value,
@@ -175,9 +179,9 @@ pub(super) fn snapshot(state: &AppState, req: &ReidReviewRequest) -> Result<Snap
         .keys()
         .filter(|id| !assigned.contains_key(&id.to_string()) && !excluded.contains(id))
         .collect::<Vec<_>>();
-    if eligible.len() > 1024 {
+    if !comparison_track_count_supported(eligible.len()) {
         return Err(storage::bad_request(
-            "Comparison is limited to 1024 Track IDs",
+            "Comparison exceeds the native Track ID limit",
         ));
     }
     let mut albums = Vec::new();
@@ -892,6 +896,13 @@ mod tests {
         assert!(album_capacity >= 46 + 64 + 48 + 32 + 55 + 64);
         assert!(album_capacity >= 12 * MAX_PLAYER_PHOTOS);
         assert!(cache_capacity >= album_capacity);
+    }
+
+    #[test]
+    fn photo_comparison_accepts_long_rally_track_sets() {
+        assert!(comparison_track_count_supported(1025));
+        assert!(comparison_track_count_supported(MAX_TRACKS));
+        assert!(!comparison_track_count_supported(MAX_TRACKS + 1));
     }
 
     #[test]

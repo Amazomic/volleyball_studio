@@ -21,6 +21,7 @@ assert.match(panel.slice(details,close),/<summary>Параметры посто�
 for(const id of [
   "studio-post-touch-threshold",
   "studio-post-player-score",
+  "studio-post-auto-assign-threshold",
   "studio-post-max-gap",
   "studio-post-rally-min",
   "studio-analysis-reset"
@@ -40,7 +41,7 @@ const b=tabs.indexOf("  const allProfileFields=()=>",a);
 assert.ok(a>=0&&b>a,"Postprocessing request factory is missing");
 const env={
   $:id=>({checked:id==="studio-post-tcn-experimental"?false:true,value:"1",id}),
-  inputValue:()=>0.48
+  inputValue:id=>id==="studio-post-auto-assign-threshold"?75:0.48
 };
 runInNewContext(tabs.slice(a,b)+"\nthis.profile=postProfile;",env);
 const profile=env.profile();
@@ -51,6 +52,7 @@ env.$=id=>({checked:true,value:"1",id});
 assert.equal(env.profile().touches.algorithm,"trajectory_tcn",
   "TCN opt-in must be passed to backend");
 assert.equal(profile.touches.threshold,0.48);
+assert.equal(profile.auto_assign_threshold_percent,75);
 assert.equal(profile.touches.require_pose,true);
 assert.equal(profile.interpolate_players,true);
 assert.doesNotMatch(tabs,/\$\("studio-post-touch-algorithm"\)/,

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 const source=readFileSync(new URL("../../rust/volley-app/static/studio_tracks.js",import.meta.url),"utf8");
 for(const snippet of [
   'galleryAutoThreshold.type="range";galleryAutoThreshold.min="1";galleryAutoThreshold.max="99"',
-  'galleryAutoThreshold.value="80"',
+  'galleryAutoThreshold.value="75"',
   'autoAssignControls.append(galleryAutoLabel,galleryAuto,autoAssignStatus)',
   'ui.list.before(autoAssignControls)',
   'autoAssignControls.hidden=mode==="player"'

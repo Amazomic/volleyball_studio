@@ -1,6 +1,6 @@
 use super::*;
 
-const AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD: f64 = 0.80;
+const AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD: f64 = 0.75;
 
 pub(super) fn saved_automatic_photo_threshold(doc: &Value) -> f64 {
     if doc["automatic_identity_evidence"]["photo_sample_policy"] != "three_observations_v1" {

@@ -845,7 +845,7 @@ fn automatic_photo_links_enforce_threshold_and_conflicting_tracks() {
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[&7], "abcdef012345");
     doc["excluded_ids"] = json!([7]);
-    let below = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.99}],"8":[{"player_id":"abcdef012345","cosine_similarity":0.799}]});
+    let below = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.99}],"8":[{"player_id":"abcdef012345","cosine_similarity":0.749}]});
     assert!(choose_automatic_photo_links(&ctx, &doc, &below)
         .unwrap()
         .is_empty());
@@ -1109,7 +1109,7 @@ fn reviewed_group_counts_only_unassigned_tracks_and_recomputes_average() {
 #[test]
 fn legacy_automatic_similarity_threshold_is_not_reused() {
     let mut doc = json!({"automatic_identity_evidence":{"threshold":0.35}});
-    assert_eq!(saved_automatic_photo_threshold(&doc), 0.80);
+    assert_eq!(saved_automatic_photo_threshold(&doc), 0.75);
     doc["automatic_identity_evidence"]["photo_sample_policy"] = json!("three_observations_v1");
     assert_eq!(saved_automatic_photo_threshold(&doc), 0.35);
 }
@@ -1125,7 +1125,7 @@ fn auto_assignment_requires_three_samples_when_sample_count_is_known() {
     assert!(choose_automatic_photo_links(&ctx, &doc, &incomplete)
         .unwrap()
         .is_empty());
-    let complete = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.80,
+    let complete = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.75,
         "samples_used":3}]});
     assert_eq!(
         choose_automatic_photo_links(&ctx, &doc, &complete)
@@ -1134,7 +1134,7 @@ fn auto_assignment_requires_three_samples_when_sample_count_is_known() {
             .map(String::as_str),
         Some("abcdef012345")
     );
-    let below = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.799,
+    let below = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.749,
         "samples_used":3}]});
     assert!(choose_automatic_photo_links(&ctx, &doc, &below)
         .unwrap()
@@ -1199,7 +1199,7 @@ fn competing_player_photo_is_checked_against_a_second_real_frame() {
 
     let chosen = choose_automatic_photo_links(&ctx, &base_document(&ctx), &verified).unwrap();
     assert_eq!(chosen.get(&12).map(String::as_str), Some("abcdef012345"));
-    assert!(!chosen.contains_key(&13));
+    assert_eq!(chosen.get(&13).map(String::as_str), Some("123456abcdef"));
     fs::remove_dir_all(root).unwrap();
 }
 

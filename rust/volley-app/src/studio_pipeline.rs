@@ -425,9 +425,14 @@ pub struct PostProfile {
     rallies: RallySettings,
     #[serde(default = "default_pose_classification")]
     pose_classification: bool,
+    #[serde(default = "default_auto_assign_threshold_percent")]
+    auto_assign_threshold_percent: u8,
 }
 fn default_pose_classification() -> bool {
     true
+}
+fn default_auto_assign_threshold_percent() -> u8 {
+    75
 }
 impl Default for PostProfile {
     fn default() -> Self {
@@ -442,6 +447,7 @@ impl Default for PostProfile {
             },
             rallies: RallySettings::default(),
             pose_classification: true,
+            auto_assign_threshold_percent: default_auto_assign_threshold_percent(),
         }
     }
 }
@@ -542,6 +548,9 @@ impl TryFrom<StartRequestWire> for StartRequest {
             );
         }
         let (gpu, mut post) = decode_profiles(wire.gpu, wire.post)?;
+        if !(1..=99).contains(&post.auto_assign_threshold_percent) {
+            return Err("Порог сходства для автопривязки должен быть от 1 до 99%".into());
+        }
         // TouchSettings::default() remains legacy for old saved data. An API
         // request with partial touch parameters uses PoseMotion unless TCN is explicit.
         if post.touches.algorithm != TouchAlgorithm::TrajectoryTcn {
@@ -2161,7 +2170,7 @@ async fn pipeline(
             track_ids: Vec::new(),
             expected_revision: None,
             threshold_percent: 30,
-            auto_threshold_percent: None,
+            auto_threshold_percent: Some(request.post.auto_assign_threshold_percent),
         }),
     )
     .await;
@@ -3326,6 +3335,20 @@ mod tests {
         .unwrap();
         assert_eq!(manual.gpu.cpu_threads, 12);
         assert_eq!(manual.gpu.gpu_memory_limit_mb, 4096);
+        assert_eq!(profile.post.auto_assign_threshold_percent, 75);
+        let custom: StartRequest = serde_json::from_value(json!({
+            "project_id":"abc123def456","video":"match.mp4",
+            "post":{"auto_assign_threshold_percent":87}
+        }))
+        .unwrap();
+        assert_eq!(custom.post.auto_assign_threshold_percent, 87);
+        for threshold in [0, 100] {
+            assert!(serde_json::from_value::<StartRequest>(json!({
+                "project_id":"abc123def456","video":"match.mp4",
+                "post":{"auto_assign_threshold_percent":threshold}
+            }))
+            .is_err());
+        }
         assert_eq!(profile.post.tracking.max_gap_frames, 90);
         assert_eq!(profile.post.touches.threshold, 0.48);
         assert_eq!(profile.post.touches.algorithm, TouchAlgorithm::PoseMotion);
