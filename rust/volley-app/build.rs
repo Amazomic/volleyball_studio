@@ -1,16 +1,51 @@
 use std::{env, fs, path::Path, process::Command};
 
-fn git(repo: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .ok()?;
+fn git_output(repo: &Path, args: &[&str], git_dir: Option<(&Path, &Path)>) -> Option<String> {
+    let mut command = Command::new("git");
+    if let Some((dir, worktree)) = git_dir {
+        command
+            .arg("--git-dir")
+            .arg(dir)
+            .arg("--work-tree")
+            .arg(worktree);
+    }
+    let output = command.arg("-C").arg(repo).args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }
     Some(String::from_utf8(output.stdout).ok()?.trim().to_owned())
+}
+
+fn git(repo: &Path, args: &[&str]) -> Option<String> {
+    if let Some(result) = git_output(repo, args, None) {
+        return Some(result);
+    }
+
+    let root = repo
+        .ancestors()
+        .find(|ancestor| ancestor.join(".git").is_file())?;
+    let pointer = fs::read_to_string(root.join(".git")).ok()?;
+    let raw_git_dir = pointer.trim().strip_prefix("gitdir: ")?.trim();
+    let git_dir = if Path::new(raw_git_dir).is_absolute() {
+        std::path::PathBuf::from(raw_git_dir)
+    } else if raw_git_dir.len() >= 3
+        && raw_git_dir.as_bytes()[0].is_ascii_alphabetic()
+        && raw_git_dir.as_bytes()[1] == b':'
+        && matches!(raw_git_dir.as_bytes()[2], b'/' | b'\\')
+    {
+        let output = Command::new("wslpath")
+            .args(["-u", raw_git_dir])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        std::path::PathBuf::from(String::from_utf8(output.stdout).ok()?.trim())
+    } else {
+        root.join(raw_git_dir)
+    };
+    let git_dir = git_dir.canonicalize().ok()?;
+    git_output(repo, args, Some((&git_dir, root)))
 }
 
 fn main() {
