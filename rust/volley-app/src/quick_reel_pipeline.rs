@@ -505,31 +505,6 @@ pub(super) async fn run_native_pipeline(
         )
         .await?;
         let rally_id = require_id(&rally, "rally_run_id")?;
-        let refined = quick_cpu_stage(
-            (
-                cpu_touches::TouchRequest {
-                    project_id: project_id.clone(),
-                    video: alias.clone(),
-                    replay_id,
-                    settings: None,
-                    pose_classification: false,
-                },
-                rally_id,
-            ),
-            &workspace,
-            "CPU: сопровождение ведущего мяча",
-            run,
-            &videos,
-            73.5 + 14.0 * index as f64 / count as f64,
-            &cancelled,
-            |state, (request, discovery)| {
-                cpu_rallies::refine_leading_ball(state, request, Default::default(), discovery)
-            },
-        )
-        .await?;
-        let touches = &refined["touches"];
-        let rally = &refined["rallies"];
-        let rally_id = require_id(rally, "rally_run_id")?;
         let state = workspace.app.clone();
         let project = workspace.project_id.clone();
         let runid = rally_id.clone();
@@ -557,8 +532,7 @@ pub(super) async fn run_native_pipeline(
             "fusion":fusion["fusion_id"],"tracking":replay["replay_id"],
             "touches":touches["touch_id"],"rallies":rally_id,
             "replay_sha256":replay["sha256"],"touch_sha256":touches["sha256"],
-            "rally_sha256":rally["sha256"],
-            "ball_tracking_boundary_source":refined["ball_tracking_boundary_source"]
+            "rally_sha256":rally["sha256"]
         });
         verified.insert(rally_id, alias.clone());
         stage_status(

@@ -42,13 +42,18 @@ detector. Primary intervals are clipped only for the 0–8 trailing frames
 not represented by complete nine-frame GPU fusion/replay windows. The
 original GPU boundaries remain saved.
 
-Leading-ball tracking receives primary interval starts on the first CPU Touch
-pass. Studio no longer runs the former discovery-rallies -> refined touches ->
-discovery-rallies cycle. The CPU rally event record remains necessary for
-touch references, player linking, previews and montage. GPU runs without
-a saved primary mask cannot enter the Studio postprocessing path; rerun a
-compatible primary analysis. Independent manual/training CPU endpoints
-retain their existing snapshot-specific behavior.
+Primary interval starts separate Touch evaluation windows; the Studio CPU
+pipeline does not run a leading-ball tracker or its former discovery-rallies
+-> refined touches -> discovery-rallies cycle. It applies the VBallNet
+confidence threshold and bounded local artifact rejection only, with the
+versioned vballnet_local_artifacts_v1 policy and no leading-ball Track IDs.
+Preview continues limited per-rally short-gap interpolation without a leading
+tracker. Quick Reel no longer performs a second leading-ball refinement pass.
+The CPU rally event record remains necessary for touch references, player
+linking, previews and montage. GPU runs without a saved primary mask cannot
+enter the Studio postprocessing path; rerun a compatible primary analysis.
+Old saved rally runs keep their original policy. Independent manual/training
+CPU endpoints retain their existing snapshot-specific behavior.
 
 ## Control / safety
 

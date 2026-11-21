@@ -1066,7 +1066,7 @@ pub(crate) fn process(state: &AppState, req: &TouchRequest) -> Result<Value, Api
     process_with_ball_scope_and_rally_settings(
         state,
         req,
-        &[0],
+        &[],
         volley_core::rally_reconstruction::RallySettings::default(),
     )
 }
@@ -1101,24 +1101,6 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
         None,
         None,
         None,
-    )
-}
-
-pub(crate) fn process_with_ball_scope_and_rally_settings_cancel(
-    state: &AppState,
-    req: &TouchRequest,
-    rally_starts: &[u64],
-    rally_settings: volley_core::rally_reconstruction::RallySettings,
-    cancel: &AtomicBool,
-) -> Result<Value, ApiError> {
-    process_with_ball_scope_and_rally_settings_report(
-        state,
-        req,
-        rally_starts,
-        rally_settings,
-        None,
-        None,
-        Some(cancel),
     )
 }
 
@@ -1313,7 +1295,11 @@ fn process_with_ball_scope_and_rally_settings_report(
             frames,
             (dimensions.width, dimensions.height),
             settings.min_ball_score,
-            rally_starts,
+            if primary_scope.is_some() {
+                &[]
+            } else {
+                rally_starts
+            },
             cancel,
         )?;
         if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
@@ -1401,8 +1387,12 @@ fn process_with_ball_scope_and_rally_settings_report(
             "width":dimensions.width,"height":dimensions.height,"fps":30,
             "frames":frames,
             "settings":settings,
-            "ball_tracking_policy":if rally_starts.is_empty() { "vballnet_local_artifacts_v1" } else { crate::cpu_retrack::ball_track::POLICY },
-            "leading_ball_rally_starts":rally_starts,
+            "ball_tracking_policy":if primary_scope.is_some() || rally_starts.is_empty() {
+                crate::cpu_retrack::ball_track::LOCAL_POLICY
+            } else {
+                crate::cpu_retrack::ball_track::POLICY
+            },
+            "leading_ball_rally_starts":if primary_scope.is_some() {json!([])} else {json!(rally_starts)},
             "leading_ball_min_score":settings.min_ball_score,
             "interpolate_players":manifest["interpolate_players"].as_bool().unwrap_or(true),
             "court_revision":court_calibration.as_ref().map(|c| &c.revision),

@@ -48,7 +48,7 @@
 - [Позы: версионная заметка](RTMPOSE_PIPELINE.md)
 - [Постобработка касаний](TOUCH_PROCESSING.md)
 - [Траекторный детектор](TRAJECTORY_TOUCH_DETECTOR.md)
-- [Выбор ведущей траектории мяча](LEADING_BALL_TRACKING.md)
+- [Архивный алгоритм ведущего мяча](LEADING_BALL_TRACKING.md)
 - [Совместимость геометрической интерпретации касаний](TOUCH_DETECTION_RUST_PARITY.md)
 - [Регрессия смены личности](IDENTITY_CUT_REGRESSION.md)
 

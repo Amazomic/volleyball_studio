@@ -297,7 +297,8 @@ pub struct RunQuery {
 }
 fn valid_manifest(value: &Value, project_id: &str, run_id: &str, project_videos: &[&str]) -> bool {
     value["schema"] == "volley-native-cpu-rally-proposals/1"
-        && value["ball_tracking_policy"] != "vballnet_local_artifacts_v1"
+        && (value["ball_tracking_policy"] != crate::cpu_retrack::ball_track::LOCAL_POLICY
+            || value["preliminary_rally_scope_version"] == "primary_gpu_rally_mask_v1")
         && value["state"] == "provisional_rally_segments"
         && value["project_id"] == project_id
         && value["rally_run_id"] == run_id
@@ -455,6 +456,21 @@ mod tests {
             "1234abcdef01",
             "0123456789abcdef0123456789abcdef",
             &["other.mp4"]
+        ));
+        let mut local = v.clone();
+        local["ball_tracking_policy"] = json!(crate::cpu_retrack::ball_track::LOCAL_POLICY);
+        assert!(!valid_manifest(
+            &local,
+            "1234abcdef01",
+            "0123456789abcdef0123456789abcdef",
+            &["volley.mp4"]
+        ));
+        local["preliminary_rally_scope_version"] = json!("primary_gpu_rally_mask_v1");
+        assert!(valid_manifest(
+            &local,
+            "1234abcdef01",
+            "0123456789abcdef0123456789abcdef",
+            &["volley.mp4"]
         ));
         let mut invalid = v.clone();
         invalid["montage_ready"] = json!(true);

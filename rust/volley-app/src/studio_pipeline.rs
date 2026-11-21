@@ -1124,8 +1124,9 @@ fn cpu_lineage_valid(
         && rallies["state"] == "provisional_rally_segments"
         && rallies["court_contact_context_version"] == "python_serve_toss_possession_v2"
         && rallies["ground_boundary_version"] == "trajectory_court_surface_v3"
-        && touches["ball_tracking_policy"] == crate::cpu_retrack::ball_track::POLICY
-        && rallies["ball_tracking_policy"] == crate::cpu_retrack::ball_track::POLICY
+        && touches["ball_tracking_policy"] == crate::cpu_retrack::ball_track::LOCAL_POLICY
+        && rallies["ball_tracking_policy"] == crate::cpu_retrack::ball_track::LOCAL_POLICY
+        && touches["leading_ball_rally_starts"] == json!([])
         && touches["leading_ball_rally_starts"] == rallies["leading_ball_rally_starts"]
         && touches["leading_ball_min_score"] == rallies["leading_ball_min_score"]
         && rallies["rally_run_id"] == rally
@@ -2052,7 +2053,7 @@ async fn pipeline(
     let (primary, primary_mask) = load_primary_rally_scope(app, &request.project_id, status)?;
     status["gpu_rally_mask"] = primary_mask;
     status["gpu_rally_mask_sha256"] = json!(primary.sha256);
-    status["ball_tracking_boundary_source"] =
+    status["primary_rally_source"] =
         json!({"ball_job_id":primary.ball_job_id,"sha256":primary.sha256});
     save(path, status)?;
     let fusion_id = require_id(status, "analysis_id")?;
@@ -3554,8 +3555,8 @@ mod branching_tests {
                 "preliminary_rally_settings":request.post.rallies,
                 "primary_ball_job_id":gpu_ball,"primary_rally_mask_sha256":sha,
                 "preliminary_rally_scope_applied":false,
-                "ball_tracking_policy":crate::cpu_retrack::ball_track::POLICY,
-                "leading_ball_rally_starts":true,"leading_ball_min_score":0.28
+                "ball_tracking_policy":crate::cpu_retrack::ball_track::LOCAL_POLICY,
+                "leading_ball_rally_starts":[],"leading_ball_min_score":0.28
             }),
         );
         emit(
@@ -3570,11 +3571,10 @@ mod branching_tests {
                 "preliminary_rally_scope_version":"primary_gpu_rally_mask_v1",
                 "preliminary_rally_scope_applied":false,
                 "primary_ball_job_id":gpu_ball,"primary_rally_mask_sha256":sha,
-                "ball_tracking_policy":crate::cpu_retrack::ball_track::POLICY,
+                "ball_tracking_policy":crate::cpu_retrack::ball_track::LOCAL_POLICY,
                 "project_id":request.project_id,"video":request.video,
                 "source_replay_id":replay,"source_touch_id":touch,"sha256":sha,
-                "ball_tracking_policy":crate::cpu_retrack::ball_track::POLICY,
-                "leading_ball_rally_starts":true,"leading_ball_min_score":0.28
+                "leading_ball_rally_starts":[],"leading_ball_min_score":0.28
             }),
         );
         let saved = json!({

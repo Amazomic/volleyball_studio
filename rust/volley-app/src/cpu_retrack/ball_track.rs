@@ -12,6 +12,7 @@ use std::{
 use volley_core::touch_pipeline::{flag_local_ball_artifacts, LeadingBallTracker};
 
 pub(crate) const POLICY: &str = "vballnet_leading_ball_rally_v1";
+pub(crate) const LOCAL_POLICY: &str = "vballnet_local_artifacts_v1";
 pub(crate) const CONTINUOUS_MIN_SECONDS: f64 = 1.5;
 pub(crate) const CONTINUOUS_MERGE_SECONDS: f64 = 4.0;
 
@@ -42,6 +43,19 @@ pub(crate) fn merge_continuous_intervals(
 }
 
 pub(crate) fn saved_scope(manifest: &serde_json::Value) -> Result<Option<(Vec<u64>, f64)>, String> {
+    if manifest["ball_tracking_policy"] == LOCAL_POLICY {
+        let starts: Vec<u64> =
+            serde_json::from_value(manifest["leading_ball_rally_starts"].clone())
+                .map_err(|_| "Invalid local ball policy marker")?;
+        let score = manifest["leading_ball_min_score"]
+            .as_f64()
+            .filter(|score| score.is_finite() && (0.0..=1.0).contains(score))
+            .ok_or("Invalid local ball confidence threshold")?;
+        if !starts.is_empty() {
+            return Err("Local ball policy cannot reset a leading tracker".into());
+        }
+        return Ok(Some((Vec::new(), score)));
+    }
     if manifest["ball_tracking_policy"] != POLICY {
         return Ok(None);
     }
@@ -484,7 +498,7 @@ fn scan(
         track_ids: vec![0; total],
         candidate_counts: vec![0; total],
     };
-    let mut tracker = LeadingBallTracker::new(width, height);
+    let mut tracker = (!rally_starts.is_empty()).then(|| LeadingBallTracker::new(width, height));
     let mut next_rally = 0;
     let mut reader = BoundedReader::open(source)?;
     let mut buffer = std::collections::VecDeque::<Option<[f64; 2]>>::new();
@@ -528,23 +542,22 @@ fn scan(
             if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
                 return Err("cancelled".into());
             }
-            if rally_starts.get(next_rally) == Some(&(index as u64)) {
-                if index > 0 {
-                    tracker.begin_rally();
-                }
-                next_rally += 1;
-            }
             let point = points[index - region_start];
             mask.candidate_counts[index] = u8::from(point.is_some());
             let observed = point.filter(|_| !local_flags[index - region_start]);
-            let leading = tracker.observe(index as u64, observed.as_slice());
-            mask.rejected[index] = point.is_some()
-                && (local_flags[index - region_start]
-                    || !rally_starts.is_empty() && leading.selected.is_none());
-            mask.accepted[index] =
-                observed.is_some() && (rally_starts.is_empty() || leading.selected.is_some());
-            mask.track_ids[index] = leading.track_id.unwrap_or(0);
-            if !rally_starts.is_empty() {
+            mask.rejected[index] = point.is_some() && local_flags[index - region_start];
+            mask.accepted[index] = observed.is_some();
+            if let Some(leader) = tracker.as_mut() {
+                if rally_starts.get(next_rally) == Some(&(index as u64)) {
+                    if index > 0 {
+                        leader.begin_rally();
+                    }
+                    next_rally += 1;
+                }
+                let leading = leader.observe(index as u64, observed.as_slice());
+                mask.rejected[index] |= observed.is_some() && leading.selected.is_none();
+                mask.accepted[index] &= leading.selected.is_some();
+                mask.track_ids[index] = leading.track_id.unwrap_or(0);
                 if let Some(anchors) = leading.acquired_frames {
                     for frame in anchors[0] as usize..=index {
                         mask.track_ids[frame] = leading.track_id.unwrap_or(0);
@@ -788,6 +801,45 @@ mod tests {
         manifest["leading_ball_min_score"] = json!(0.67);
         manifest["leading_ball_rally_starts"] = json!([0, 260, 200]);
         assert!(saved_scope(&manifest).is_err());
+    }
+
+    #[test]
+    fn local_ball_policy_never_resets_or_tracks_a_leading_ball() {
+        let root = std::env::temp_dir().join(format!("local-ball-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("frames.jsonl");
+        let mut bytes = Vec::new();
+        for frame in 0..300_u64 {
+            let x = if frame < 200 {
+                0.15 + frame as f64 * 0.0008
+            } else {
+                0.65 + (frame - 200) as f64 * 0.0008
+            };
+            bytes.extend(
+                serde_json::to_vec(&json!({
+                    "frame_index":frame,
+                    "selected_ball":{
+                        "source_model":"vballnet",
+                        "detection":{"score":0.90,"bbox_xyxy_norm":[x,0.4,x+0.005,0.405]}
+                    }
+                }))
+                .unwrap(),
+            );
+            bytes.push(b'\n');
+        }
+        fs::write(&path, &bytes).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let local = read(&path, &sha, 300, 1280, 720, 0.35, &[]).unwrap();
+        assert!(local.track_ids.iter().all(|id| *id == 0));
+        assert!(local.accepted[260]);
+        let saved = json!({
+            "ball_tracking_policy":"vballnet_local_artifacts_v1",
+            "leading_ball_rally_starts":[],
+            "leading_ball_min_score":0.35,
+            "frames":300
+        });
+        assert_eq!(saved_scope(&saved).unwrap(), Some((vec![], 0.35)));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

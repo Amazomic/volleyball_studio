@@ -535,6 +535,9 @@ fn extract_frames(
             starts.push(start);
             starts
         });
+    let local_ball_policy = ball_scope
+        .as_ref()
+        .is_some_and(|(starts, _)| starts.is_empty());
     let (rally_starts, tracking_score) = ball_scope.unwrap_or((&starts, min_ball_score));
     let ball_mask = crate::cpu_retrack::ball_track::read(
         path,
@@ -632,13 +635,22 @@ fn extract_frames(
         }
         let begin = (begin - read_start) as usize;
         let end = (end - read_start) as usize;
-        let (points, inferred) = volley_core::touch_pipeline::repair_accepted_vballnet_trajectory(
-            &accepted[begin..end],
-            &player_boxes[begin..end],
-            &track_ids[begin..end],
-            width,
-            height,
-        );
+        let (points, inferred) = if local_ball_policy {
+            volley_core::touch_pipeline::repair_vballnet_trajectory_with_players(
+                &accepted[begin..end],
+                &player_boxes[begin..end],
+                width,
+                height,
+            )
+        } else {
+            volley_core::touch_pipeline::repair_accepted_vballnet_trajectory(
+                &accepted[begin..end],
+                &player_boxes[begin..end],
+                &track_ids[begin..end],
+                width,
+                height,
+            )
+        };
         gated[begin..end].copy_from_slice(&points);
         synthetic[begin..end].copy_from_slice(&inferred);
     }
@@ -750,7 +762,7 @@ pub async fn get(
     let pose_root = projects::project_root(&state).join(&query.project_id);
     let identity_state = state.clone();
     let continuity_state = state.clone();
-    let (frames, poses_available) = tokio::task::spawn_blocking(move || {
+    let (frames, poses_available, ball_policy) = tokio::task::spawn_blocking(move || {
         let windows = native_rally_evidence::verified_track_windows(&preview_run)
             .map_err(|e| format!("Unverified rally scope: {e}"))?;
         let rally_dir = preview_run
@@ -763,6 +775,10 @@ pub async fn get(
         )
         .map_err(|_| "Invalid rally ball policy manifest")?;
         let ball_scope = crate::cpu_retrack::ball_track::saved_scope(&saved)?;
+        let ball_policy = saved["ball_tracking_policy"].as_str().map_or_else(
+            || json!(crate::cpu_retrack::ball_track::POLICY),
+            |policy| json!(policy),
+        );
         let (context_start, context_end) = continuity::context(start, end, &windows.intervals);
         let mut frames = extract_frames(
             (&replay_path, &replay_sha, total),
@@ -823,7 +839,7 @@ pub async fn get(
             continuity::append_poses(&mut frames);
         }
         frames.retain(|row| row["frame"].as_u64().is_some_and(|f| f >= start && f < end));
-        Ok::<_, String>((frames, poses_available))
+        Ok::<_, String>((frames, poses_available, ball_policy))
     })
     .await
     .map_err(|e| storage::internal(format!("Overlay task failure: {e}")))?
@@ -831,7 +847,7 @@ pub async fn get(
     Ok(Json(json!({
         "schema":"volley-native-preview-overlay/1",
         "continuity_policy":"cpu_rally_linear_v1",
-        "ball_policy":"vballnet_leading_ball_rally_v1",
+        "ball_policy":ball_policy,
         "expected_balls":1,
         "fps":30,
         "project_id":run.project_id,"video":run.video,
