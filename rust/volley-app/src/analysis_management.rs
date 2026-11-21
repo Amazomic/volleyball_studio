@@ -748,8 +748,7 @@ fn edit(root: &Path, req: &EditRequest) -> Result<Option<std::path::PathBuf>, Ap
     if req.kind == "gpu"
         && all.iter().any(|(kind, _, v)| {
             kind == "fusion"
-                && ((v["sources"]["person_pose"]["job_id"] == req.id
-                    || v["sources"]["ravel"]["job_id"] == req.id)
+                && (v["sources"]["person_pose"]["job_id"] == req.id
                     || v["sources"]["vballnet"]["job_id"] == req.id)
         })
     {
@@ -834,9 +833,7 @@ fn edit(root: &Path, req: &EditRequest) -> Result<Option<std::path::PathBuf>, Ap
     }
     if req.kind == "fusion" {
         for id in [
-            target.2["sources"]["person_pose"]["job_id"]
-                .as_str()
-                .or_else(|| target.2["sources"]["ravel"]["job_id"].as_str()),
+            target.2["sources"]["person_pose"]["job_id"].as_str(),
             target.2["sources"]["vballnet"]["job_id"].as_str(),
         ]
         .into_iter()
@@ -846,8 +843,7 @@ fn edit(root: &Path, req: &EditRequest) -> Result<Option<std::path::PathBuf>, Ap
             let shared = all.iter().any(|(kind, other, v)| {
                 kind == "fusion"
                     && other != &req.id
-                    && ((v["sources"]["person_pose"]["job_id"] == id
-                        || v["sources"]["ravel"]["job_id"] == id)
+                    && (v["sources"]["person_pose"]["job_id"] == id
                         || v["sources"]["vballnet"]["job_id"] == id)
             });
             if !shared
@@ -869,7 +865,7 @@ fn edit(root: &Path, req: &EditRequest) -> Result<Option<std::path::PathBuf>, Ap
             continue;
         }
         let referenced = match stage.as_str() {
-            "fusion" => ["ravel", "vballnet"].iter().any(|key| {
+            "fusion" => ["person_pose", "vballnet"].iter().any(|key| {
                 row["sources"][key]["job_id"]
                     .as_str()
                     .is_some_and(|id| selected.contains(&("gpu", id)))

@@ -11,7 +11,7 @@ The five maintained crates share `rust/Cargo.toml` and `rust/Cargo.lock`:
 - `volley-core`: deterministic geometry and motion kernels (historic S01/S02a).
 - `volley-media`: FFprobe metadata, rotation, target resolution, H.264/30 FPS readiness, schema-2 SHA256 prepared identities, JPEG preview rendering, bounded nine-frame raw-video windowing and original-quality montage planning.
 - `volley-app`: standalone HTTP server, JSON project/catalog/history APIs, isolated preparation and manual montage jobs, audio upload, FFmpeg orchestration and byte-range MP4 streaming.
-- `volley-inference`: native ONNX Runtime model sessions, full-video raw GPU jobs and RAVEL/VballNet decoding.
+- `volley-inference`: native ONNX Runtime model sessions, full-video raw GPU jobs and VBallNet and RF-DETR decoding.
 - `volley-web`: first real Rust/WebAssembly browser state engine for manual rally selection, with further client migration pending.
 
 For Windows, use the isolated WSL development launcher from the repository root:
@@ -89,7 +89,7 @@ POST /api/quick-reel/native/select   register chosen local video paths without c
 POST /api/quick-reel/native/start    start independent video preparation; GPU/CPU not yet available
 GET  /api/quick-reel/native/status   latest Quick Reel stage or ?id=uuid
 POST /api/quick-reel/native/cancel  cancel only the currently active Quick Reel
-POST /api/inference/native/preflight    inspect VballNet/RAVEL sidecars, optionally open ORT sessions
+POST /api/inference/native/preflight    inspect VBallNet/RF-DETR sidecars, optionally open ORT sessions
 POST /api/inference/native/clip-preview  one real 9-frame ONNX inference from a project prepared video
 POST /api/inference/native/window-scan   multi-window FFmpeg→persistent ONNX scan (1–120 windows; no cache writes)
 POST /api/inference/native/evidence/save  isolated immutable raw-model candidate snapshot (not GPU run)
@@ -97,7 +97,6 @@ GET  /api/inference/native/evidence?project_id=...&evidence_id=...  list/read bo
 POST /api/inference/native/full/start  experimental full prepared-video ONNX model job, isolated JSONL
 GET  /api/inference/native/full/status  durable progress; interrupted on restart
 POST /api/inference/native/full/cancel  cooperative single-model cancellation
-POST /api/cpu/touch-preview          read-only RAVEL Touch proposals and motion-confirmed contacts for explicit run/video
 ```
 
 These routes are implementations of persisted formats, not a claim of complete API parity. Rust project creation/update now queues native preparation. Compatible original MP4s are reused without recoding; other sources are converted by native FFmpeg to H.264/30 FPS/YUV420P and stored in the separate content-addressed development cache. One converter runs at a time; file locks prevent duplicate publication, status tracks FFmpeg progress, and cancellation is persisted per project until an explicit retry. Existing projects may use legacy storage conventions not fully supported; player catalog loading does not yet run legacy photo/identity backfills.
@@ -150,24 +149,6 @@ One montage can render at once; clip extraction preserves native video resolutio
 Read-only planning works against existing project/CPU result files. The response contains `candidates`, `selected`, selected duration and stable `rally_id` values. For manually chosen groups, change `rally_selection_mode` to `manual` and pass the saved `selected_rally_ids` from the same current plan; stale/foreign IDs are rejected. The server rechecks the exact named CPU run and cache ownership on every request. Automatic selections never shorten a detected rally to fill the duration.
 
 `POST /api/montage/native/start-from-run` accepts the same selection fields plus optional `audio_file`, `audio_volume` and `encoder`, and performs video encoding **only** when `VOLLEY_RUST_DATA_ROOT` is an isolated sandbox that contains the relevant project/CPU snapshots. This route derives frames and time offsets server-side; no arbitrary timestamp override is accepted. The old manual `/start` route still trusts its explicit clip coordinates and should not be interpreted as CPU-verified. Both APIs are development-only. Full browser integrations, gold marking, player ReID and formal rendered-video tests remain outstanding.
-
-## Experimental RAVEL-013 Touch preview
-
-Read-only `POST /api/cpu/touch-preview` example:
-
-```json
-{
-  "project_id": "1234abcdef01",
-  "run_id": "run_20261107_123456",
-  "video": "match.mp4",
-  "threshold": 0.5,
-  "smooth": 5,
-  "min_gap": 10,
-  "max_reach_ratio": 0.35
-}
-```
-
-The route reads immutable RAVEL-013 probabilities from the exact run's inference cache and saves nothing. It returns time-smoothed `peaks` and `confirmed_contacts` from its chosen CPU game tracks if available; unverified player identities remain null. It requires the specific saved project/run/video mapping, not an arbitrary filesystem path. It does not use a Python subprocess or GPU. This is **only an algorithm diagnostic**, not a replacement for the complete CPU postprocessing command or final touch statistics.
 
 ## Experimental continuity preview
 
@@ -333,7 +314,7 @@ The response returns new source selection IDs. Upload music first using `POST /a
 }
 ~~~
 
-to `POST /api/quick-reel/native/start`. Track progress through `GET /api/quick-reel/native/status` or `?id=<reel_id>`; cancel through `POST /api/quick-reel/native/cancel` with `{"id":"<reel_id>"}`. Quick Reel reuses **prepared MP4s only** (or skips conversion for analysis-ready sources), then reports `awaiting_native_inference` with `output:null` because native RAVEL/VballNet inference + fresh CPU and MP4 render are not yet ported. This is a development API, not the existing one-click browser Quick Reel. Only the latest scratch run is retained; original project files and Python Quick Reel history are untouched.
+to `POST /api/quick-reel/native/start`. Track progress through `GET /api/quick-reel/native/status` or `?id=<reel_id>`; cancel through `POST /api/quick-reel/native/cancel` with `{"id":"<reel_id>"}`. Quick Reel reuses **prepared MP4s only** (or skips conversion for analysis-ready sources), then reports `awaiting_native_inference` with `output:null` because the selected GPU/CPU stages or video rendering have not completed. This is a development API, not the existing one-click browser Quick Reel. Only the latest scratch run is retained; original project files and Python Quick Reel history are untouched.
 
 ## Experimental native ONNX clip kernel
 
@@ -345,7 +326,7 @@ To inspect the model contracts, call `POST /api/inference/native/preflight`:
 {"device":"cuda","gpu_device_id":0,"gpu_memory_limit_mb":0,"cpu_threads":8,"probe_runtime":false}
 ~~~
 
-Setting `probe_runtime:true` additionally attempts to construct **real** VballNet and RAVEL sessions and returns provider-specific failures. It does not invoke GPU prediction.
+Setting `probe_runtime:true` additionally attempts to construct **real** VBallNet and RF-DETR sessions and returns provider-specific failures. It does not invoke GPU prediction.
 
 After native video preparation has finished for a selected project, the bounded single-window proof-of-inference path is `POST /api/inference/native/clip-preview`:
 
@@ -361,19 +342,19 @@ After native video preparation has finished for a selected project, the bounded 
 }
 ~~~
 
-For RAVEL use `"model":"players"`. This reads exactly nine prepared video frames using FFmpeg, builds normalized float model input, executes the actual ONNX graph through Rust/ORT and returns **unconfirmed raw** ball candidates or RAVEL Touch query maxima. All outputs are read-only and are **not** a complete player/ball tracker, finished model run or analyzed montage. Quality/performance and pixel-level comparison to the original Python decoder remain to be performed in the deferred final testing phase.
+For RF-DETR/RTMPose use `"model":"players"`. This reads exactly nine prepared video frames using FFmpeg, builds normalized float model input, executes the actual ONNX graph through Rust/ORT and returns **unconfirmed raw** ball candidates or RF-DETR boxes and RTMPose keypoints. All outputs are read-only and are **not** a complete player/ball tracker, finished model run or analyzed montage. Quality/performance and pixel-level comparison to the original Python decoder remain to be performed in the deferred final testing phase.
 
-### Merge native RAVEL + VballNet raw GPU results
+### Merge native RF-DETR + VBallNet raw GPU results
 
-After separate model jobs complete for the same project/video at **stride 9**, call `POST /api/inference/native/fuse` with JSON `{"project_id":"<project 12 hex>","video":"match.mp4","ravel_job_id":"<RAVEL 32 hex>","vball_job_id":"<Vball 32 hex>"}`. Rust checks both manifests, frame alignment, model identities, prepared source metadata and SHA-256 of the raw JSONL inputs, then streams an immutable raw candidate fusion to the isolated project tree under `native_gpu_fusions/<fusion_id>/`. Inspect it using `GET /api/inference/native/fusion?project_id=...&fusion_id=...`. The selected ball is exclusively VballNet; RAVEL ball detections are retained only as raw alternative diagnostics, never used to fill gaps. Short missing segments are interpolated between VballNet observations in the processed preview (never in raw GPU detections). These frame rows are **inputs for future CPU tracking/contact analysis, not verified Track IDs, contacts or completed Studio GPU runs**. No inference is rerun by the merge.
+After separate model jobs complete for the same project/video at **stride 9**, call `POST /api/inference/native/fuse` with JSON `{"project_id":"<project 12 hex>","video":"match.mp4","person_job_id":"<person 32 hex>","vball_job_id":"<Vball 32 hex>"}`. Rust checks both manifests, frame alignment, model identities, prepared source metadata and SHA-256 of the raw JSONL inputs, then streams an immutable raw candidate fusion to the isolated project tree under `native_gpu_fusions/<fusion_id>/`. Inspect it using `GET /api/inference/native/fusion?project_id=...&fusion_id=...`. The selected ball and all raw ball candidates come exclusively from VBallNet. Short missing segments are interpolated between VballNet observations in the processed preview (never in raw GPU detections). These frame rows are **inputs for future CPU tracking/contact analysis, not verified Track IDs, contacts or completed Studio GPU runs**. No inference is rerun by the merge.
 
 ### CPU-only provisional Track ID replay (no GPU rerun)
 
-After a verified RAVEL/VballNet fusion, `POST /api/cpu/native/retrack` with `{"project_id":"<12 hex>","video":"match.mp4","fusion_id":"<32 hex>","settings":{"min_player_score":0.30,"nms_iou":0.88,"max_gap_frames":12,"min_assignment_score":0.48,"ambiguity_margin":0.11}}`. `settings` can be omitted for defaults; each explicit replay creates its own isolated `native_cpu_replays/<replay_id>/tracked_frames.jsonl` with a SHA-256 manifest. Inspect via `GET /api/cpu/native/retrack?project_id=...&replay_id=...`. The IDs are **provisional machine tracklets**, not reviewed athlete identities. Two simultaneous players never share a single ID, and ambiguous/long gaps remain for subsequent review. Neither the source fusion nor the expensive GPU model runs are rewritten.
+After a verified RF-DETR/VBallNet fusion, `POST /api/cpu/native/retrack` with `{"project_id":"<12 hex>","video":"match.mp4","fusion_id":"<32 hex>","settings":{"min_player_score":0.30,"nms_iou":0.88,"max_gap_frames":12,"min_assignment_score":0.48,"ambiguity_margin":0.11}}`. `settings` can be omitted for defaults; each explicit replay creates its own isolated `native_cpu_replays/<replay_id>/tracked_frames.jsonl` with a SHA-256 manifest. Inspect via `GET /api/cpu/native/retrack?project_id=...&replay_id=...`. The IDs are **provisional machine tracklets**, not reviewed athlete identities. Two simultaneous players never share a single ID, and ambiguous/long gaps remain for subsequent review. Neither the source fusion nor the expensive GPU model runs are rewritten.
 
 ### Recalculate motion-gated Touch proposals without GPU
 
-Run `POST /api/cpu/native/touches` with `{ "project_id":"<12 hex>", "video":"match.mp4", "replay_id":"<32 hex>", "settings": { "threshold":0.50, "smooth":5, "min_gap":10, "max_reach_ratio":0.35, "min_interval_sec":0.35 } }`. Settings are optional; each request creates a new immutable `native_cpu_touch_runs/<touch_id>/touch_candidates.jsonl` with its own SHA-256 manifest. Inspect `GET /api/cpu/native/touches?project_id=...&touch_id=...`. Source player Track IDs are provisional, physical contact signals are **candidates only**, and action types/athlete ownership are not automatically confirmed. The CPU stage requires all three: RAVEL temporal signal, proximity/reach and a speed or direction change after motion/gravity analysis. It rejects spurious Touch near VballNet/RAVEL source switches and does not invoke the GPU again.
+Run `POST /api/cpu/native/touches` with `{ "project_id":"<12 hex>", "video":"match.mp4", "replay_id":"<32 hex>", "settings": { "threshold":0.50, "smooth":5, "min_gap":10, "max_reach_ratio":0.35, "min_interval_sec":0.35 } }`. Settings are optional; each request creates a new immutable `native_cpu_touch_runs/<touch_id>/touch_candidates.jsonl` with its own SHA-256 manifest. Inspect `GET /api/cpu/native/touches?project_id=...&touch_id=...`. Source player Track IDs are provisional, physical contact signals are **candidates only**, and action types/athlete ownership are not automatically confirmed. The CPU stage requires a physical motion change and player proximity/reach, with optional pose validation. It rejects spurious Touch near discontinuities in VBallNet observations and does not invoke the GPU again.
 
 ### Build provisional rally candidates from CPU tracking + Touch snapshots
 
@@ -406,7 +387,7 @@ The pinned `.wasm` is intentionally tracked so a normal backend build serves a w
 
 ### GPU progress reconnect on browser reload
 
-The experimental Analysis tab resumes a **currently running** native RAVEL or VballNet job after page reload by reading `GET /api/inference/native/full/active?project_id=<project>`. The Rust server validates project ownership and returns `{ "schema":"volley-native-active-gpu/1", "active":true, "job_id":..., "phase":..., "progress_percent":... }`, or `active:false` when idle. The endpoint is read-only and does not cause a new GPU inference job. Polling and cancel continue to use the same job ID. Jobs interrupted by a full server restart remain marked interrupted; this is not job checkpoint/resume functionality.
+The experimental Analysis tab resumes a **currently running** native RF-DETR or VBallNet job after page reload by reading `GET /api/inference/native/full/active?project_id=<project>`. The Rust server validates project ownership and returns `{ "schema":"volley-native-active-gpu/1", "active":true, "job_id":..., "phase":..., "progress_percent":... }`, or `active:false` when idle. The endpoint is read-only and does not cause a new GPU inference job. Polling and cancel continue to use the same job ID. Jobs interrupted by a full server restart remain marked interrupted; this is not job checkpoint/resume functionality.
 
 ### Native Track ID manual player assignments (new Rust replay snapshots)
 

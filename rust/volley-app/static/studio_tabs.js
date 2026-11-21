@@ -229,7 +229,6 @@
       min_gap:inputValue("studio-post-touch-gap"),
       max_reach_ratio:inputValue("studio-post-reach"),
       min_interval_sec:inputValue("studio-post-interval"),
-      use_ravel_touch:false,
       require_pose:true,
       pose_min_confidence:inputValue("studio-post-pose-confidence"),
       pose_max_distance:inputValue("studio-post-pose-distance"),

@@ -1,4 +1,4 @@
-//! CPU-only replay of verified native RAVEL/VballNet fusion frames.
+//! CPU-only replay of verified native RF-DETR/VBallNet fusion frames.
 //! Reconstructs provisional player Track IDs without rerunning ONNX.
 //! A tracklet ID is NOT an authenticated real athlete identity.
 use crate::{
@@ -814,8 +814,8 @@ mod tests {
                 "player_candidates":if i<12 {
                     vec![example(i,0.2+i as f64*0.002,i as usize % 2)]
                 }else{vec![]},
-                "ball_candidates":if i==0 { vec![json!({"source_model":"ravel","detection":{"frame_index":0,"class_name":"ball","score":0.9,"bbox_xyxy_norm":[0.2,0.2,0.3,0.3]}})] } else { Vec::<Value>::new() },
-                "selected_ball":if i==0 { json!({"source_model":"ravel","detection":{"frame_index":0,"class_name":"ball","score":0.9,"bbox_xyxy_norm":[0.2,0.2,0.3,0.3]}}) } else { Value::Null },
+                "ball_candidates":if i==0 { vec![json!({"source_model":"unsupported","detection":{"frame_index":0,"class_name":"ball","score":0.9,"bbox_xyxy_norm":[0.2,0.2,0.3,0.3]}})] } else { Vec::<Value>::new() },
+                "selected_ball":if i==0 { json!({"source_model":"unsupported","detection":{"frame_index":0,"class_name":"ball","score":0.9,"bbox_xyxy_norm":[0.2,0.2,0.3,0.3]}}) } else { Value::Null },
                 "player_track_ids_confirmed":false,
                 "touches_confirmed":false,
             });
@@ -849,7 +849,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(frames[0]["tracked_players"][0]["track_id"], 1);
         assert!(frames[0]["selected_ball"].is_null());
-        assert_eq!(frames[0]["ball_candidates"][0]["source_model"], "ravel");
+        assert_eq!(
+            frames[0]["ball_candidates"][0]["source_model"],
+            "unsupported"
+        );
         assert_eq!(frames[1]["tracked_players"][0]["track_id"], 1);
         assert_eq!(
             frames[1]["tracked_players"][0]["detection"]["query_index"],

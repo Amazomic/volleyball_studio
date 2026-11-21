@@ -277,7 +277,7 @@ in the setup script. Windows NVIDIA driver 616.92; GPU detected in WSL:
 GeForce RTX 5070 Ti Laptop, 12227 MiB.
 
 Actual diagnostics: ldd CUDA provider resolved all shared objects;
-Rust GPU model test passed for VballNetV4c and RAVEL-013 using
+Rust GPU model test passed for VBallNet V4c and the former player detector using
 CUDAExecutionProvider (not Python/CPU fallback). The actual running
 Rust web server at 127.0.0.1:8875 opened both CUDA ONNX model
 sessions through POST /api/inference/native/preflight with

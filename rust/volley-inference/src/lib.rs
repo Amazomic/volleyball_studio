@@ -542,9 +542,7 @@ mod tests {
             assert_eq!(results.len(), engine.spec().outputs.len());
             let detections = match kind {
                 ModelKind::Ball => decode::decode_vball(&results, 0, 0.05),
-                ModelKind::Players => {
-                    decode::decode_ravel(&results, 0, decode::DecodeConfig::default())
-                }
+                ModelKind::Players => unreachable!("ball-only smoke test"),
             }
             .unwrap_or_else(|e| panic!("Native {kind:?} tensor decoding failed: {e}"));
             assert!(detections.iter().all(|row| row.frame_index < 9));

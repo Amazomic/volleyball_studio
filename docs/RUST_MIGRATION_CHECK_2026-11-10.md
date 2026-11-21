@@ -23,8 +23,8 @@ The new Rust binary has not replaced the GPU-busy running process.
 
 ## Rechecked
 
-- Real Quick Reel advanced from VballNetV4c to RAVEL-013 but failed
-  at **50.11% overall / 42.68% of RAVEL GPU** with an ONNX Runtime
+- Real Quick Reel advanced from VballNetV4c to прежней модели игроков but failed
+  at **50.11% overall / 42.68% of её GPU-анализа** with an ONNX Runtime
   `CUDA failure 999: unknown error` during CUDA device-to-host
   `cudaMemcpyAsync`. No valid CPU/MP4 result was published. This is a
   long-running CUDA fault, **not** the earlier absent-Track-ID CPU bug.

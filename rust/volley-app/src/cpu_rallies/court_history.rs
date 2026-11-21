@@ -1,5 +1,5 @@
 //! Bounded, append-only court-context evidence ring for accepted CPU rallies.
-//! The authoritative Touch writer and RAVEL-frame reader remain unchanged.
+//! The authoritative Touch writer and source-frame reader remain unchanged.
 use std::collections::VecDeque;
 use volley_core::{
     rally_contact_context::{self, BallSample, ContactEvidence, RallyContext},

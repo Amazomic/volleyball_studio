@@ -5,7 +5,7 @@
 
 ## Processing contract
 
-- Source: decoded RAVEL player_candidates from the immutable GPU fusion.
+- Source: decoded RF-DETR player_candidates from the immutable GPU fusion.
 - Output: a new, versioned CPU replay under native_cpu_replays. Older CPU
   results are never rewritten by a tracker change.
 - A Track ID represents a provisional trajectory, not a verified athlete.

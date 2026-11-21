@@ -79,7 +79,7 @@ assert.equal(outlines,2,"No stale boxes outside source window");
 assert.equal(calls.filter(s=>s.includes("start_frame=120")).length,1);
 // GPU overlays must remain useful without a CPU run or saved Touchs.
 overlay.raw=true;s.run="";
-overlay.rawBall={value:"70"};overlay.rawRavelBall={value:"55"};
+overlay.rawBall={value:"70"};
 overlay.rawVballVisible={checked:true};overlay.rawPeopleVisible={checked:true};
 overlay.rawPlayer={value:"60"};overlay.rawBall={value:"0"};
 overlay.rawPoseVisible={checked:false};overlay.rawPose={value:"35"};
@@ -87,7 +87,7 @@ overlay.flags.touches=true;
 overlay.cache.set("p:gpu:f:v:0",{
   start_frame:0,end_frame:180,frames:[{frame:45,raw:{
     balls:[{source:"vballnet",point:[0.2,0.2],score:0.8},
-      {source:"ravel",point:[0.3,0.3],score:0.7}],
+      {source:"unsupported",point:[0.3,0.3],score:0.7}],
     players:[{box:[0.1,0.2,0.3,0.8],score:0.9,touch_probability:0.9}],poses:[]
   }}]
 });
@@ -96,8 +96,8 @@ scope.drawOverlay();
 assert.deepEqual(ballColors,["#47e2ff"],"Only VBallNet supplies the ball");
 assert.equal(outlines,3,"Raw player boxes are independent of a CPU replay");
 assert.equal(actionColors.length,0,"Raw contact probabilities cannot draw CPU Touchs");
-assert.ok(!renderedLabels.some(label=>String(label).includes("RAVEL p(contact)")),
-  "RAVEL probabilities are not displayed in the new player overlay");
+assert.ok(!renderedLabels.some(label=>String(label).includes("legacy p(contact)")),
+  "legacy probabilities are not displayed in the new player overlay");
 ballColors.length=0;overlay.rawPeopleVisible.checked=false;
 scope.drawOverlay();
 assert.deepEqual(ballColors,["#47e2ff"],"People overlays can be hidden independently");

@@ -1559,7 +1559,7 @@ fn native_ball_extrema_from_sha_bound_cpu_frames_refuse_model_switches() {
     assert!(extract_native_ball_trajectory(&path, 50, &sha, 0, 1201, 640, 360).is_err());
     let mut altered = bytes;
     let index = altered.windows(8).position(|w| w == b"vballnet").unwrap();
-    altered[index..index + 8].copy_from_slice(b"ravel   ");
+    altered[index..index + 8].copy_from_slice(b"invalid ");
     fs::write(&path, altered).unwrap();
     assert!(extract_native_ball_trajectory(&path, 50, &sha, 0, 50, 640, 360).is_err());
     fs::remove_dir_all(root).unwrap();

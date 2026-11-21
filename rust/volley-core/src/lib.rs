@@ -17,7 +17,6 @@ pub mod rally_reconstruction;
 pub mod rally_selector;
 pub mod reid;
 pub mod statistics;
-pub mod touch;
 pub mod touch_pipeline;
 pub mod tracker;
 

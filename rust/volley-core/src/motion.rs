@@ -1,4 +1,4 @@
-//! Deterministic CPU-only RAVEL touch validation: the ball must change
+//! Deterministic CPU-only physical touch validation: the ball must change
 //! velocity after subtracting gravity.  This mirrors _ball_motion_change
 //! in scripts/volleyball_studio/reprocess.py and never performs inference.
 

@@ -30,11 +30,11 @@ const invalid=edit=>{
   edit(clone);
   assert.equal(context.validate(clone),false);
 };
-invalid(data=>data.ball_policy="prefer_vballnet_then_ravel");
+invalid(data=>data.ball_policy="prefer_multiple_models");
 invalid(data=>delete data.ball_policy);
-invalid(data=>data.frames[1].ball_origin="ravel");
+invalid(data=>data.frames[1].ball_origin="unsupported");
 invalid(data=>data.frames[1].ball_interpolated=false);
 invalid(data=>data.frames[1].ball=[1.2,0.2]);
 invalid(data=>data.frames[2].frame=999);
 invalid(data=>data.frames[3].ball_origin="vballnet");
-console.log("Processed overlay rejects RAVEL, stale response formats, and unlabelled synthetic points: OK");
+console.log("Processed overlay rejects unsupported ball sources, stale response formats, and unlabelled synthetic points: OK");

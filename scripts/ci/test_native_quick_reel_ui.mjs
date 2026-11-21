@@ -49,7 +49,7 @@ async function scene(initial="idle"){
     if(url.startsWith("/api/quick-reel/native/status")){
       if(state==="idle")return body({status:"idle",stage_total:4});
       if(state==="running")return body({id:job,status:"running",stage_index:2,
-        stage:"GPU RAVEL 1",progress:33,videos:[{video:"rally.mp4",state:"gpu",gpu_percent:40}]});
+        stage:"GPU RF-DETR 1",progress:33,videos:[{video:"rally.mp4",state:"gpu",gpu_percent:40}]});
       if(state==="complete")return body({
         id:job,status:"complete",stage_index:4,progress:100,
         output:invalidOutput?{file:"quick_reel.mp4",mp4_quality:{has_audio:false}}:{

@@ -318,7 +318,6 @@ pub(crate) async fn rewrite_status(
             "POST /api/players/native/statistics (verified per-athlete project-wide counts)",
             "POST /api/montage/native/player-highlights (reviewed attack ranked preview/start)",
             "POST /api/cpu/native/ball-extrema (native selected-ball motion only)",
-            "POST /api/cpu/touch-preview (read-only RAVEL diagnostics)",
             "POST /api/players/continuity-preview (read-only geometry candidates)",
             "POST /api/players/reid-native/preview (saved embeddings, read-only)",
             "POST /api/players/reid-native/groups (read, merge, split; isolated root)",

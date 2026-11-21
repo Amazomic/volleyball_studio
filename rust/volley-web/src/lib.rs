@@ -209,7 +209,7 @@ const TEXT: &[(&str, &str)] = &[
     ("Видео проекта", "Project video"),
     ("Обновить стадии", "Refresh stages"),
     ("Запустить VballNet GPU", "Start VballNet GPU"),
-    ("Запустить RAVEL GPU", "Start RAVEL GPU"),
+    ("Запустить RF-DETR GPU", "Start RF-DETR GPU"),
     ("Отменить GPU-задачу", "Cancel GPU job"),
     ("Библиотека игроков", "Player library"),
     ("Новый игрок", "New player"),

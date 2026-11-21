@@ -12,7 +12,7 @@ const MAX_VERTICAL_ACCEL: f64 = 0.010;
 /// velocity estimates use only other *real* VBallNet observations.
 /// Two-sided velocity agreement, nonnegative downward gravity and an entirely
 /// in-frame curve are required when enough evidence exists. Missing endpoint
-/// velocities fall back to a straight chord, never to RAVEL or extrapolation
+/// velocities fall back to a straight chord, never to unsupported model boxes or extrapolation
 /// beyond the last real observation.
 pub fn interpolate_short_gaps(points: &mut [Option<[f64; 2]>]) -> Vec<bool> {
     let mut synthetic = vec![false; points.len()];

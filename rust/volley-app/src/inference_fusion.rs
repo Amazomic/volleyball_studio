@@ -221,18 +221,18 @@ struct FusedTotals {
 
 fn write_fused(
     ball: &ModelEvidence,
-    ravel: &ModelEvidence,
+    person: &ModelEvidence,
     output: &Path,
 ) -> Result<(String, FusedTotals), String> {
-    if ball.windows != ravel.windows
-        || ball.decoded_frames != ravel.decoded_frames
-        || ball.source_identity != ravel.source_identity
+    if ball.windows != person.windows
+        || ball.decoded_frames != person.decoded_frames
+        || ball.source_identity != person.source_identity
     {
         return Err(
             "GPU model runs represent different frame sequences or source recordings".into(),
         );
     }
-    let mut players = WindowReader::open(ravel)?;
+    let mut players = WindowReader::open(person)?;
     let mut balls = WindowReader::open(ball)?;
     let result = OpenOptions::new()
         .write(true)
@@ -244,11 +244,11 @@ fn write_fused(
     let mut totals = FusedTotals::default();
     for window in 0..ball.windows {
         let first = window * 9;
-        let ravel_window = players.window(first)?;
+        let person_window = players.window(first)?;
         let ball_window = balls.window(first)?;
         for frame in fuse_window(
             first,
-            ravel_window.raw_detections,
+            person_window.raw_detections,
             ball_window.raw_detections,
         )? {
             totals.frames += 1;
@@ -272,7 +272,7 @@ fn write_fused(
             hash.update(&line);
         }
     }
-    players.finish(ravel)?;
+    players.finish(person)?;
     balls.finish(ball)?;
     writer
         .flush()
@@ -321,7 +321,7 @@ pub(crate) fn do_fusion(state: &AppState, request: &FuseRequest) -> Result<Value
     let identity = json!({"bytes":bytes,"mtime_ns":mtime});
     let project_root = projects::project_root(state).join(&request.project_id);
     let root = project_root.join("native_gpu_runs");
-    let ravel = open_evidence(
+    let person = open_evidence(
         &root,
         &request.person_job_id,
         &request.project_id,
@@ -337,19 +337,19 @@ pub(crate) fn do_fusion(state: &AppState, request: &FuseRequest) -> Result<Value
         "ball",
     )
     .map_err(storage::bad_request)?;
-    if ravel.analysis_range != ball.analysis_range {
+    if person.analysis_range != ball.analysis_range {
         return Err(storage::conflict(
             "GPU models use different video analysis intervals",
         ));
     }
-    if ravel.original_source != ball.original_source {
+    if person.original_source != ball.original_source {
         return Err(storage::conflict(
             "GPU models belong to different original content",
         ));
     }
     volley_media::preparation::verify_source_provenance(&plan.source, &ball.original_source)
         .map_err(storage::conflict)?;
-    if ravel.source_identity != identity || ball.source_identity != identity {
+    if person.source_identity != identity || ball.source_identity != identity {
         return Err(storage::conflict(
             "Prepared source changed since original model runs",
         ));
@@ -370,7 +370,7 @@ pub(crate) fn do_fusion(state: &AppState, request: &FuseRequest) -> Result<Value
         .map_err(|e| storage::internal(format!("Create isolated fusion snapshot: {e}")))?;
     let result = (|| -> Result<Value, String> {
         let temp = output.join("frames.jsonl.partial");
-        let (digest, totals) = write_fused(&ball, &ravel, &temp)?;
+        let (digest, totals) = write_fused(&ball, &person, &temp)?;
         // Reject changing either source between validation and publication.
         if inference_stream::source_stamp(prepared)? != (bytes, mtime) {
             return Err("Prepared video changed during fusion".into());
@@ -384,7 +384,7 @@ pub(crate) fn do_fusion(state: &AppState, request: &FuseRequest) -> Result<Value
             "video":request.video,
             "state":"raw_candidates_fused",
             "sources":{
-                "person_pose":{"job_id":ravel.job_id,"sha256":ravel.sha256},
+                "person_pose":{"job_id":person.job_id,"sha256":person.sha256},
                 "vballnet":{"job_id":ball.job_id,"sha256":ball.sha256},
             },
             "source_identity":identity,
@@ -395,7 +395,7 @@ pub(crate) fn do_fusion(state: &AppState, request: &FuseRequest) -> Result<Value
             "decoded_frames":ball.decoded_frames,
             "emitted_frames":totals.frames,
             "player_proposals":totals.players,
-            "player_sampling_period_frames":ravel.person_sampling_period_frames,
+            "player_sampling_period_frames":person.person_sampling_period_frames,
             "ball_candidates":totals.ball_candidates,
             "selected_ball_vballnet":totals.selected_vball,
             "ball_policy":"vballnet_only",
@@ -530,19 +530,15 @@ mod tests {
         let root = std::env::temp_dir().join(format!("volley-native-fusion-{}", Uuid::new_v4()));
         let run = root.join("runs");
         fs::create_dir_all(&run).unwrap();
-        let ravel_id = "0123456789abcdef0123456789abcdef";
+        let person_id = "0123456789abcdef0123456789abcdef";
         let ball_id = "abcdef0123456789abcdef0123456789";
-        let ravel = build_input(
-            &run.join(ravel_id),
+        let person = build_input(
+            &run.join(person_id),
             "players",
-            ravel_id,
+            person_id,
             "match.mp4",
             vec![
-                vec![
-                    candidate(0, "player", Some(3), 0.9),
-                    candidate(0, "ball", None, 0.99),
-                    candidate(1, "ball", None, 0.96),
-                ],
+                vec![candidate(0, "player", Some(3), 0.9)],
                 vec![candidate(9, "player", Some(2), 0.7)],
             ],
         );
@@ -556,10 +552,10 @@ mod tests {
                 vec![candidate(9, "ball", None, 0.7)],
             ],
         );
-        assert!(open_evidence(&run, ravel_id, "1234abcdef01", "match.mp4", "players").is_ok());
+        assert!(open_evidence(&run, person_id, "1234abcdef01", "match.mp4", "players").is_ok());
         assert!(open_evidence(&run, ball_id, "1234abcdef01", "match.mp4", "ball").is_ok());
         let out = root.join("merged.jsonl");
-        let (sha, counts) = write_fused(&ball, &ravel, &out).unwrap();
+        let (sha, counts) = write_fused(&ball, &person, &out).unwrap();
         let bytes = fs::read(&out).unwrap();
         assert_eq!(sha, format!("{:x}", Sha256::digest(&bytes)));
         let rows = bytes
@@ -572,12 +568,12 @@ mod tests {
         assert_eq!(counts.players, 2);
         assert_eq!(counts.selected_vball, 2);
         assert_eq!(rows[0]["selected_ball"]["source_model"], "vballnet");
-        assert_eq!(rows[0]["ball_candidates"].as_array().unwrap().len(), 2);
+        assert_eq!(rows[0]["ball_candidates"].as_array().unwrap().len(), 1);
         assert!(
             rows[1]["selected_ball"].is_null(),
-            "RAVEL cannot fill a VballNet hole"
+            "RF-DETR cannot fill a VballNet hole"
         );
-        assert_eq!(rows[1]["ball_candidates"][0]["source_model"], "ravel");
+        assert!(rows[1]["ball_candidates"].as_array().unwrap().is_empty());
         assert_eq!(rows[0]["player_candidates"][0]["touch_probability"], 0.8);
         assert_eq!(rows[9]["frame_index"], 9);
         assert_eq!(rows[0]["touches_confirmed"], false);
@@ -590,7 +586,7 @@ mod tests {
         let run = root.join("runs");
         fs::create_dir_all(&run).unwrap();
         let id = "0123456789abcdef0123456789abcdef";
-        let ravel = build_input(
+        let person = build_input(
             &run.join(id),
             "players",
             id,
@@ -609,7 +605,7 @@ mod tests {
         let mut altered = fs::read(ball.folder.join(SOURCE_FILE)).unwrap();
         altered[0] = b' ';
         fs::write(ball.folder.join(SOURCE_FILE), altered).unwrap();
-        assert!(write_fused(&ball, &ravel, &root.join("merged.jsonl")).is_err());
+        assert!(write_fused(&ball, &person, &root.join("merged.jsonl")).is_err());
         fs::remove_dir_all(&root).unwrap();
     }
     #[test]
@@ -745,21 +741,21 @@ mod tests {
             std::env::temp_dir().join(format!("volley-native-fusion-invalid-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let id = "0123456789abcdef0123456789abcdef";
-        let ravel = build_input(
+        let person = build_input(
             &root.join(id),
             "players",
             id,
             "match.mp4",
             vec![vec![], vec![]],
         );
-        let mut ball = ravel.clone();
+        let mut ball = person.clone();
         ball.windows = 3;
-        assert!(write_fused(&ball, &ravel, &root.join("merged.jsonl")).is_err());
-        let mut ball = ravel.clone();
+        assert!(write_fused(&ball, &person, &root.join("merged.jsonl")).is_err());
+        let mut ball = person.clone();
         ball.decoded_frames = 20;
-        assert!(write_fused(&ball, &ravel, &root.join("other.jsonl")).is_err());
-        fs::write(ravel.folder.join(SOURCE_FILE), vec![b'x'; MAX_LINE + 1]).unwrap();
-        let mut reader = WindowReader::open(&ravel).unwrap();
+        assert!(write_fused(&ball, &person, &root.join("other.jsonl")).is_err());
+        fs::write(person.folder.join(SOURCE_FILE), vec![b'x'; MAX_LINE + 1]).unwrap();
+        let mut reader = WindowReader::open(&person).unwrap();
         assert!(reader.next_line().is_err());
         assert!(!opaque_id("../unsafe"));
         fs::remove_dir_all(&root).unwrap();

@@ -374,41 +374,31 @@ fn rebuild_from_snapshots_with_scope(
         });
         let ball = match frame.selected_ball {
             Some(ball) => {
-                if !matches!(ball.source_model.as_str(), "vballnet" | "ravel")
+                if ball.source_model != "vballnet"
                     || ball.detection.frame_index != frame_index
                     || ball.detection.class_name != "ball"
                 {
                     return Err("Invalid selected-ball proposal from CPU replay".into());
                 }
-                let model = if ball.source_model == "ravel" {
-                    "players"
-                } else {
-                    "ball"
-                };
                 ball.detection
-                    .validate(frame_index - frame_index % 9, model)?;
-                if ball.source_model == "ravel" {
-                    None
-                } else {
-                    let [left, top, right, bottom] = ball.detection.bbox_xyxy_norm;
-                    if ball.detection.score >= settings.min_ball_score
-                        && accepted_ball_frames[frame_index as usize]
-                        && in_preliminary_rally
-                    {
-                        history.push_ball(CourtBallSample {
-                            frame: frame_index,
-                            y_px: (top + bottom) * 0.5 * height as f64,
-                            radius_px: ((right - left) * width as f64
-                                + (bottom - top) * height as f64)
-                                * 0.25,
-                        });
-                    }
-                    Some(BallFrame {
-                        x_px: (left + right) * 0.5 * width as f64,
+                    .validate(frame_index - frame_index % 9, "ball")?;
+                let [left, top, right, bottom] = ball.detection.bbox_xyxy_norm;
+                if ball.detection.score >= settings.min_ball_score
+                    && accepted_ball_frames[frame_index as usize]
+                    && in_preliminary_rally
+                {
+                    history.push_ball(CourtBallSample {
+                        frame: frame_index,
                         y_px: (top + bottom) * 0.5 * height as f64,
-                        score: ball.detection.score,
-                    })
+                        radius_px: ((right - left) * width as f64 + (bottom - top) * height as f64)
+                            * 0.25,
+                    });
                 }
+                Some(BallFrame {
+                    x_px: (left + right) * 0.5 * width as f64,
+                    y_px: (top + bottom) * 0.5 * height as f64,
+                    score: ball.detection.score,
+                })
             }
             None => None,
         };
@@ -1381,7 +1371,7 @@ mod tests {
         for frame in 0..frames {
             let t = frame % 200;
             // Strong, physically observable VBallNet reversal even without
-            // RAVEL Touch logits; the player box stays within ball reach.
+            // The player box stays within ball reach.
             let x = (0.60 - (100_i64 - t as i64).unsigned_abs() as f64 * 0.008).max(0.10);
             let touch = (96..=104).contains(&frame) || (296..=304).contains(&frame);
             let players = if frame == 100 {

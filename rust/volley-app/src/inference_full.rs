@@ -440,7 +440,6 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
         &context.original_source,
     )?;
     let before = inference_stream::source_stamp(&context.source)?;
-    // The player path never constructs or runs a RAVEL session.
     let mut ball_engine = if context.config.model == ModelKind::Ball {
         Some(Engine::load(&context.repo, &context.config)?)
     } else {
@@ -673,7 +672,7 @@ pub async fn start(
     tokio::spawn(worker(state, context));
     Ok(Json(json!({"job_id":job_id,"state":"queued",
         "studio_gpu_run_complete":false,
-        "note":"Raw single-model scan. Full RAVEL/VballNet+CPU Studio pipeline remains pending."})))
+        "note":"Raw single-model scan. Full VBallNet/RF-DETR/RTMPose+CPU Studio pipeline remains pending."})))
 }
 
 pub async fn status(
@@ -1175,7 +1174,7 @@ mod tests {
         assert_eq!(merged["sha256"].as_str(), Some(digest.as_str()));
         assert_eq!(fused.iter().filter(|&&byte| byte == 10u8).count(), 18);
         println!(
-            "Real {device:?} RAVEL/VballNet fusion: 18 verified frame rows, {} bytes",
+            "Real {device:?} RF-DETR/VBallNet fusion: 18 verified frame rows, {} bytes",
             fused.len()
         );
         let cpu_replay = crate::cpu_retrack::process(

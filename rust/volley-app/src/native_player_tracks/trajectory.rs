@@ -54,23 +54,14 @@ pub(super) fn extract_native_ball_trajectory(
         let Some(ball) = row.selected_ball else {
             continue;
         };
-        if !matches!(ball.source_model.as_str(), "vballnet" | "ravel")
+        if ball.source_model != "vballnet"
             || ball.detection.class_name != "ball"
             || ball.detection.frame_index != frame_index
         {
             return Err("Saved ball trajectory contains unsupported detection".into());
         }
-        ball.detection.validate(
-            frame_index - frame_index % 9,
-            if ball.source_model == "ravel" {
-                "players"
-            } else {
-                "ball"
-            },
-        )?;
-        if ball.source_model != "vballnet" {
-            continue;
-        }
+        ball.detection
+            .validate(frame_index - frame_index % 9, "ball")?;
         let bbox = ball.detection.bbox_xyxy_norm;
         if source_model
             .as_ref()
@@ -247,21 +238,14 @@ pub(crate) fn full_video_ball_suggestions_scoped(
             }
             continue;
         };
-        if !matches!(ball.source_model.as_str(), "vballnet" | "ravel")
+        if ball.source_model != "vballnet"
             || ball.detection.class_name != "ball"
             || ball.detection.frame_index != frame
         {
             return Err("Unsupported saved ball detection".into());
         }
-        ball.detection.validate(
-            frame - frame % 9,
-            if ball.source_model == "vballnet" {
-                "ball"
-            } else {
-                "players"
-            },
-        )?;
-        if ball.source_model != "vballnet" || ball.detection.score < run.min_ball_score {
+        ball.detection.validate(frame - frame % 9, "ball")?;
+        if ball.detection.score < run.min_ball_score {
             continue;
         }
         let b = ball.detection.bbox_xyxy_norm;

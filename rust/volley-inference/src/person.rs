@@ -719,7 +719,7 @@ mod tests {
 
     #[test]
     #[ignore = "Run with PERSON_PREVIEW_RGB and ORT_DYLIB_PATH on host"]
-    fn actual_onnx_model_detects_pose_people_without_ravel() {
+    fn actual_onnx_model_detects_pose_people_with_rfdetr() {
         let path = std::env::var("PERSON_PREVIEW_RGB").expect("raw RGB path");
         let rgb = std::fs::read(path).expect("prepared RGB frame");
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

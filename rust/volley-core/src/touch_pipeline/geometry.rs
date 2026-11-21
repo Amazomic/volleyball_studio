@@ -1,5 +1,5 @@
 //! Independent geometric touch proposals: ball-trajectory breaks near an observed player.
-//! Unlike RAVEL Touch peaks, this path can recover contacts without neural Touch logits.
+//! Unlike confidence-only touch peaks, this path can recover contacts without neural Touch logits.
 //! It is deliberately conservative: a ball flight near a person alone is not a Touch.
 
 use super::{center, pixel_bbox, standing_height, TouchFrame};
@@ -15,7 +15,7 @@ pub(super) struct GeometryContact {
     pub ball_y: f64,
 }
 
-/// Do not interpret a switch from RAVEL to VballNet (or back) as an impact.
+/// Do not interpret a switch to an unsupported ball source as an impact.
 pub(super) fn stable_ball_source(frames: &[TouchFrame], index: usize) -> bool {
     stable_ball_source_with_min_samples(frames, index, 3)
 }
@@ -113,7 +113,7 @@ fn single_frame_outlier(frames: &[TouchFrame], index: usize, width: f64, height:
 }
 
 /// The motion fitter sees up to five observations on either side of an impact.
-/// A single bad localization must not become a nearby RAVEL or geometric Touch.
+/// A single bad localization must not become a nearby false geometric Touch.
 pub(super) fn motion_window_has_outlier(
     frames: &[TouchFrame],
     index: usize,
@@ -177,7 +177,7 @@ fn touching_player(
         let reach_y = (reach_bottom - reach_top) * 0.5;
         let reach =
             ((ball_x - (x1 + x2) * 0.5) / reach_x).hypot((ball_y - reach_mid) / reach_y.max(1.0));
-        // A geometry-only proposal must be closer than the broader RAVEL gate.
+        // A geometry-only proposal must be closer than the broader distance gate.
         let reach_limit = (0.55 + max_reach_ratio * 0.65).clamp(0.58, 1.0);
         if reach > reach_limit {
             continue;
@@ -1430,7 +1430,7 @@ mod gap_tests {
     }
 
     #[test]
-    fn straight_flight_and_ravel_ball_are_not_gap_contacts() {
+    fn straight_flight_and_unsupported_ball_are_not_gap_contacts() {
         let frames = exclude_ball_teleports(&flight_at_13_seconds(false), 1280, 720);
         assert!(detect_gap_rebounds(&frames, 1280.0, 720.0, 0.70).is_empty());
         let mut frames = exclude_ball_teleports(&flight_at_13_seconds(true), 1280, 720);
@@ -1438,7 +1438,7 @@ mod gap_tests {
             .selected_ball
             .as_mut()
             .unwrap()
-            .source_model = "ravel".into();
+            .source_model = "unsupported".into();
         assert!(detect_gap_rebounds(&frames, 1280.0, 720.0, 0.70).is_empty());
     }
 }

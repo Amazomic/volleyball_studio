@@ -58,7 +58,6 @@ mod studio_pipeline;
 mod studio_restart;
 mod studio_web;
 mod touch_annotation;
-mod touch_preview;
 mod training_samples;
 mod versioned_store;
 mod video_edits;
@@ -375,7 +374,6 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
             "/api/cpu/native/rallies/timeline",
             get(native_rally_preview::timeline),
         )
-        .route("/api/cpu/touch-preview", post(touch_preview::touch_preview))
         .route(
             "/api/players/statistics/native",
             post(player_statistics::statistics),

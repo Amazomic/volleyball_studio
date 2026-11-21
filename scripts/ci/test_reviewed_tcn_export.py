@@ -33,7 +33,7 @@ class Tests(unittest.TestCase):
                 "score":0.2 if i==5 else 0.95,
                 "bbox_xyxy_norm":[0.2+i/1000,0.3,0.22+i/1000,0.32]
             }}
-            if i==7:ball["source_model"]="ravel"
+            if i==7:ball["source_model"]="unsupported"
             frames.append({"frame_index":i,"track_ids_provisional":True,
                            "confirmed_athlete_identities":False,
                            "selected_ball":ball})

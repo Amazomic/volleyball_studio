@@ -149,7 +149,7 @@ fn pose_contact_with_ball(
     };
     // RTMPose and VBallNet are sampled independently. A missing VBallNet
     // observation on the exact pose frame must not invalidate an otherwise
-    // real contact. Use a nearby observed ball, never a synthetic or RAVEL one;
+    // real contact. Use a nearby observed ball, never a synthetic or unsupported-source one;
     // keep the observation on the same side of the impact.
     let sample_ball = |sample: &PoseFrame, before_impact: bool| -> Option<[f64; 2]> {
         let impact = current.frame_index;

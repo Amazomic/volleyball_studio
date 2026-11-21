@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Explicit REAL native CUDA smoke: both original ONNX models must actually
-# load and produce output on GPU. Never report passed from file presence only.
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/../.." && pwd -P)"
 bundle="$HOME/.local/share/volley-rust/ort-1.22.0"
@@ -31,7 +29,7 @@ cd "$repo/rust"
 export VOLLEY_TEST_ORT_DEVICE=cuda
 cargo test -p volley-inference --offline --locked \
   native_onnx_clip_infers_and_decodes -- --ignored --nocapture --test-threads=1
-echo "Real native Rust VballNetV4c + RAVEL-013 9-frame CUDA inference: PASSED"
+echo "Real native Rust VBallNet V4c CUDA inference: PASSED"
 if [[ "$#" -gt 0 && "$1" == "--full" ]];then
   cargo test -p volley-app --offline --locked \
     native_full_model_fixture_end_to_end -- --ignored --nocapture --test-threads=1

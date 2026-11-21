@@ -43,7 +43,6 @@ pub struct OverlayQuery {
     raw: Option<bool>,
     pose: Option<bool>,
     ball_confidence: Option<u8>,
-    ravel_ball_confidence: Option<u8>,
     player_confidence: Option<u8>,
     touch_confidence: Option<u8>,
 }
@@ -434,7 +433,6 @@ fn overlay_players(frame: &Value) -> Vec<Value> {
 fn raw_frame(
     frame: &Value,
     ball_threshold: u8,
-    ravel_ball_threshold: u8,
     player_threshold: u8,
     touch_threshold: u8,
 ) -> Value {
@@ -453,15 +451,8 @@ fn raw_frame(
         .filter_map(|item| {
             let detection = &item["detection"];
             let source = item["source_model"].as_str()?;
-            if !matches!(source, "ravel" | "vballnet")
-                || !above(
-                    &detection["score"],
-                    if source == "ravel" {
-                        ravel_ball_threshold
-                    } else {
-                        ball_threshold
-                    },
-                )
+            if source != "vballnet"
+                || !above(&detection["score"], ball_threshold)
             {
                 return None;
             }
@@ -528,7 +519,7 @@ fn extract_frames(
     scope: &native_rally_evidence::RallyWindows,
     dimensions: (u32, u32),
     min_ball_score: f64,
-    raw_thresholds: Option<(u8, u8, u8, u8)>,
+    raw_thresholds: Option<(u8, u8, u8)>,
     ball_scope: Option<(&[u64], f64)>,
 ) -> Result<Vec<Value>, String> {
     let (path, sha, total) = source;
@@ -592,8 +583,8 @@ fn extract_frames(
         } else {
             Vec::new()
         };
-        let raw = raw_thresholds
-            .map(|(ball, ravel, player, touch)| raw_frame(&frame, ball, ravel, player, touch));
+        let raw =
+            raw_thresholds.map(|(ball, player, touch)| raw_frame(&frame, ball, player, touch));
         output.push(json!({
             "frame":i,"ball":ball,"ball_source":frame["selected_ball"]["source_model"],
             "raw":raw,"in_rally":in_rally,"players":players,
@@ -695,14 +686,10 @@ pub async fn get(
     }
     let thresholds = (
         query.ball_confidence.unwrap_or(50),
-        query
-            .ravel_ball_confidence
-            .or(query.ball_confidence)
-            .unwrap_or(50),
         query.player_confidence.unwrap_or(50),
         query.touch_confidence.unwrap_or(50),
     );
-    if thresholds.0 > 100 || thresholds.1 > 100 || thresholds.2 > 100 || thresholds.3 > 100 {
+    if thresholds.0 > 100 || thresholds.1 > 100 || thresholds.2 > 100 {
         return Err(storage::bad_request("Confidence must be between 0 and 100"));
     }
     let raw_thresholds = query.raw.unwrap_or(false).then_some(thresholds);
@@ -875,7 +862,6 @@ pub(crate) async fn training_frame(
             raw: None,
             pose: Some(true),
             ball_confidence: None,
-            ravel_ball_confidence: None,
             player_confidence: None,
             touch_confidence: None,
         }),
@@ -929,15 +915,13 @@ fn gpu_raw_frame(frame: &Value, expected: u64) -> Result<Value, String> {
         let source = row["source_model"]
             .as_str()
             .ok_or("Missing GPU ball model")?;
-        let model = match source {
-            "vballnet" => "ball",
-            "ravel" => "players",
-            _ => return Err("Unrecognized GPU ball model".into()),
-        };
+        if source != "vballnet" {
+            return Err("Unrecognized GPU ball model".into());
+        }
         let candidate: volley_core::fusion::Candidate =
             serde_json::from_value(row["detection"].clone())
                 .map_err(|_| "Invalid GPU ball candidate")?;
-        candidate.validate(first, model)?;
+        candidate.validate(first, "ball")?;
         if candidate.frame_index != expected || candidate.class_name != "ball" {
             return Err("GPU ball candidate is out of frame".into());
         }
@@ -1421,39 +1405,38 @@ mod tests {
     #[test]
     fn raw_fusion_players_are_not_dependent_on_cpu_replay() {
         let frame = json!({"player_candidates":[{"score":0.6,"touch_probability":0.9,"bbox_xyxy_norm":[0.2,0.2,0.4,0.8]}]});
-        let raw = raw_frame(&frame, 50, 50, 60, 80);
+        let raw = raw_frame(&frame, 50, 60, 80);
         assert_eq!(raw["players"].as_array().unwrap().len(), 1);
         assert_eq!(raw["touches"].as_array().unwrap().len(), 1);
     }
     #[test]
     fn raw_thresholds_filter_ball_player_and_touch_independently() {
         let frame = json!({
-            "ball_candidates":[{"source_model":"vballnet","detection":{"score":0.7,"bbox_xyxy_norm":[0.1,0.1,0.2,0.2]}},{"source_model":"ravel","detection":{"score":0.8,"bbox_xyxy_norm":[0.3,0.3,0.4,0.4]}}],
+            "ball_candidates":[{"source_model":"vballnet","detection":{"score":0.7,"bbox_xyxy_norm":[0.1,0.1,0.2,0.2]}},{"source_model":"invalid","detection":{"score":0.8,"bbox_xyxy_norm":[0.3,0.3,0.4,0.4]}}],
             "raw_player_candidates":[{"score":0.6,"touch_probability":0.9,"bbox_xyxy_norm":[0.2,0.2,0.4,0.8]}]
         });
-        let raw = raw_frame(&frame, 80, 90, 70, 80);
+        let raw = raw_frame(&frame, 80, 70, 80);
         assert_eq!(raw["balls"].as_array().unwrap().len(), 0);
         assert_eq!(raw["players"].as_array().unwrap().len(), 0);
         assert_eq!(raw["touches"].as_array().unwrap().len(), 1);
-        let raw = raw_frame(&frame, 70, 90, 60, 95);
+        let raw = raw_frame(&frame, 70, 60, 95);
         assert_eq!(raw["balls"].as_array().unwrap().len(), 1);
         assert_eq!(raw["players"].as_array().unwrap().len(), 1);
         assert_eq!(raw["touches"].as_array().unwrap().len(), 0);
-        let raw = raw_frame(&frame, 90, 80, 60, 95);
-        assert_eq!(raw["balls"].as_array().unwrap().len(), 1);
-        assert_eq!(raw["balls"][0]["source"], "ravel");
+        let raw = raw_frame(&frame, 90, 60, 95);
+        assert!(raw["balls"].as_array().unwrap().is_empty());
     }
     #[test]
     fn processed_overlay_uses_only_vball_observations() {
         let samples = vec![
-            Some(("ravel", [0.1, 0.1])),
+            Some(("invalid", [0.1, 0.1])),
             Some(("vballnet", [0.0, 0.2])),
             Some(("vballnet", [0.1, 0.2])),
             Some(("vballnet", [0.2, 0.2])),
-            Some(("ravel", [0.3, 0.2])),
-            Some(("ravel", [0.9, 0.9])),
+            Some(("invalid", [0.3, 0.2])),
+            Some(("invalid", [0.9, 0.9])),
             Some(("vballnet", [0.5, 0.2])),
-            Some(("ravel", [0.6, 0.2])),
+            Some(("invalid", [0.6, 0.2])),
         ];
         let result = gated_ball_observations(&samples);
         let expected = vec![
@@ -1473,7 +1456,7 @@ mod tests {
                         && (actual[1] - expected[1]).abs() < 1e-12
                 ),
                 (None, None) => (),
-                _ => panic!("RAVEL cannot become an observed processed ball"),
+                _ => panic!("unsupported cannot become an observed processed ball"),
             }
         }
     }
@@ -1518,14 +1501,14 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn processed_overlay_interpolates_vballnet_without_reusing_ravel_ball() {
+    fn processed_overlay_interpolates_vballnet_without_reusing_invalid_ball() {
         let root = std::env::temp_dir().join(format!("volley-ball-gap-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("tracked_frames.jsonl");
         let mut data = Vec::new();
         for frame in 0..8u64 {
             let source = if (3..=4).contains(&frame) {
-                "ravel"
+                "invalid"
             } else {
                 "vballnet"
             };
@@ -1566,7 +1549,7 @@ mod tests {
             &scope,
             (640, 360),
             0.35,
-            Some((50, 50, 50, 50)),
+            Some((50, 50, 50)),
             None,
         )
         .unwrap();
@@ -1575,7 +1558,7 @@ mod tests {
             assert_eq!(row["ball_interpolated"], true);
             assert_eq!(row["ball_origin"], "vballnet_interpolated");
             assert!(row["ball"][0].as_f64().unwrap() < 0.55);
-            assert_eq!(row["raw"]["balls"][0]["source"], "ravel");
+            assert!(row["raw"]["balls"].as_array().unwrap().is_empty());
         }
         assert!((frames[0]["ball"][0].as_f64().unwrap() - 0.35).abs() < 1e-12);
         assert!((frames[1]["ball"][0].as_f64().unwrap() - 0.45).abs() < 1e-12);

@@ -2,7 +2,7 @@
 
 ## Root cause and fix
 
-The old Touch pipeline associated a temporal RAVEL peak with a player box
+The previous Touch pipeline associated a model confidence peak with a player box
 within ±2 frames. Strict CPU rally reconstruction correctly required the
 referenced provisional Track ID and selected ball to be observed **on the
 exact Touch frame**, so valid motion evidence could abort the reel.

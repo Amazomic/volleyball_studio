@@ -170,26 +170,20 @@ fn transform_frame(item: TrackedFrame, expected: u64) -> Result<TouchFrame, Stri
     let selected_ball = item
         .selected_ball
         .map(|ball| -> Result<TouchBall, String> {
-            if !matches!(ball.source_model.as_str(), "vballnet" | "ravel")
+            if ball.source_model != "vballnet"
                 || ball.detection.frame_index != expected
                 || ball.detection.class_name != "ball"
             {
                 return Err("Invalid source for selected ball".into());
             }
-            let kind = if ball.source_model == "ravel" {
-                "players"
-            } else {
-                "ball"
-            };
-            ball.detection.validate(expected - (expected % 9), kind)?;
+            ball.detection.validate(expected - (expected % 9), "ball")?;
             Ok(TouchBall {
                 source_model: ball.source_model,
                 score: ball.detection.score,
                 bbox_xyxy_norm: ball.detection.bbox_xyxy_norm,
             })
         })
-        .transpose()?
-        .filter(|ball| ball.source_model == "vballnet");
+        .transpose()?;
     Ok(TouchFrame {
         frame_index: expected,
         players,
@@ -617,7 +611,7 @@ fn apply_training(
 /// Bounded 240-frame chunk, 40-frame halos for 5-frame smoothing, motion
 /// window and time-cluster NMS. A single pending event deduplicates across
 /// chunk seams. Source is hashed in the same pass. Whole matches never
-/// require their frame records or raw RAVEL boxes to be resident in memory.
+/// require their frame records or raw player boxes to be resident in memory.
 #[cfg(test)]
 pub(crate) fn detect_stream(
     source: &Path,
@@ -1565,13 +1559,10 @@ mod tests {
         .unwrap();
         assert_eq!(manifest["frames"], 756);
         let sha = manifest["sha256"].as_str().unwrap();
-        for use_ravel_touch in [false, true] {
+        {
             let output =
                 std::env::temp_dir().join(format!("volley-new2-physics-{}.jsonl", Uuid::new_v4()));
-            let settings = TouchSettings {
-                use_ravel_touch,
-                ..TouchSettings::default()
-            };
+            let settings = TouchSettings::default();
             let run = detect_stream(&input, &output, sha, 756, 1280, 720, settings).unwrap();
             let events: Vec<Value> = fs::read_to_string(&output)
                 .unwrap()
@@ -1588,20 +1579,20 @@ mod tests {
                 assert_eq!(
                     near.len(),
                     1,
-                    "pilot: expected one real contact in frames {start}..{end}; RAVEL hints={use_ravel_touch}, actual={near:?}"
+                    "pilot: expected one real contact in frames {start}..{end}; actual={near:?}"
                 );
             }
         }
     }
 
     #[test]
-    fn old_ravel_ball_is_not_touch_evidence() {
+    fn unsupported_ball_is_not_touch_evidence() {
         let (bytes, _) = sample_frames(true, 320);
         let first = bytes.split(|byte| *byte == b'\n').next().unwrap();
         let mut raw: Value = serde_json::from_slice(first).unwrap();
-        raw["selected_ball"]["source_model"] = json!("ravel");
+        raw["selected_ball"]["source_model"] = json!("unsupported");
         let frame: TrackedFrame = serde_json::from_value(raw).unwrap();
-        assert!(transform_frame(frame, 0).unwrap().selected_ball.is_none());
+        assert!(transform_frame(frame, 0).is_err());
     }
     #[test]
     fn saved_pose_refines_motion_touch_without_rerunning_gpu() {
@@ -1974,7 +1965,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("touch-seams-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         // The seam check must use a physically reachable trajectory reversal,
-        // not a RAVEL-only peak rejected by motion-first detection.
+        // not a confidence-only peak rejected by motion-first detection.
         let reference = TouchSettings {
             min_gap: 10,
             max_reach_ratio: 0.70,

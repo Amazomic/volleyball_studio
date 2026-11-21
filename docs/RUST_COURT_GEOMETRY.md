@@ -35,7 +35,7 @@ The Python-compatible thresholds:
   held-ball frames, at least 9 frames of released flight, and outgoing
   speed gain >=1.2. Location in the serve zone alone is insufficient.
 
-Only on-court player boxes enter the existing RAVEL/motion-backed CPU Touch
+Only on-court player boxes enter the existing VBallNet-motion-backed CPU Touch
 detector when court markup is available. RTMPose and source-frame Track ID
 checks remain in place. Court data enriches an unverified action prediction;
 it does not certify the identity of a player or a played action.
@@ -88,7 +88,7 @@ preparation and a faster outgoing ball, strict source-lineage validation.
 ## Stage 2: provisional rally-contact context (2026-11-12)
 
 Implemented as an independent CPU-only substep after saved Touch proposals
-are replayed and SHA-256 verified. Neither VballNet, RAVEL nor RTMPose
+are replayed and SHA-256 verified. Neither VBallNet nor RF-DETR/RTMPose
 needs to run again.
 
 - rust/volley-core/src/rally_contact_context.rs: deterministic Safe Rust

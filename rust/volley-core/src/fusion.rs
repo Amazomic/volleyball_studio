@@ -1,5 +1,5 @@
 //! Model-independent CPU fusion of independently persisted 9-frame GPU
-//! windows. Keep every RAVEL player proposal and both ball alternatives;
+//! windows. Keep RF-DETR player proposals and VBallNet ball candidates;
 //! a selected ball is a *visualization candidate*, not a verified trajectory.
 use serde::{Deserialize, Serialize};
 
@@ -79,7 +79,7 @@ pub struct FusedFrame {
 /// differently-scored raw neural evidence needed for CPU reprocessing.
 pub fn fuse_window(
     first: u64,
-    ravel: Vec<Candidate>,
+    person: Vec<Candidate>,
     vball: Vec<Candidate>,
 ) -> Result<Vec<FusedFrame>, String> {
     if first > u64::MAX - 9 {
@@ -95,20 +95,16 @@ pub fn fuse_window(
             touches_confirmed: false,
         })
         .collect::<Vec<_>>();
-    if ravel.len() > 9 * 33 || vball.len() > 9 {
+    if person.len() > 9 * 300 || vball.len() > 9 {
         return Err("GPU window candidate count exceeds neural decoder bounds".into());
     }
-    for candidate in ravel {
+    for candidate in person {
         candidate.validate(first, "players")?;
-        let slot = (candidate.frame_index - first) as usize;
-        if candidate.class_name == "player" {
-            frames[slot].player_candidates.push(candidate);
-        } else {
-            frames[slot].ball_candidates.push(BallCandidate {
-                source_model: "ravel",
-                detection: candidate,
-            });
+        if candidate.class_name != "player" {
+            return Err("Person model emitted a non-player proposal".into());
         }
+        let slot = (candidate.frame_index - first) as usize;
+        frames[slot].player_candidates.push(candidate);
     }
     for candidate in vball {
         candidate.validate(first, "ball")?;
@@ -164,10 +160,10 @@ mod tests {
         }
     }
     #[test]
-    fn preserves_player_candidates_touch_and_both_ball_sources() {
+    fn fuses_rfdetr_players_and_vballnet_only() {
         let frames = fuse_window(
             9,
-            vec![player(9, 3, 0.94), ball(9, 0.99), player(9, 2, 0.50)],
+            vec![player(9, 3, 0.94), player(9, 2, 0.50)],
             vec![ball(9, 0.31)],
         )
         .unwrap();
@@ -176,21 +172,18 @@ mod tests {
         assert_eq!(first.player_candidates.len(), 2);
         assert_eq!(first.player_candidates[0].touch_probability, Some(0.5));
         assert_eq!(first.player_candidates[1].touch_probability, Some(0.94));
-        assert_eq!(first.ball_candidates.len(), 2);
+        assert_eq!(first.ball_candidates.len(), 1);
         assert_eq!(
             first.selected_ball.as_ref().unwrap().source_model,
             "vballnet"
         );
-        assert_eq!(first.ball_candidates[1].source_model, "ravel");
         assert!(!first.player_track_ids_confirmed);
         assert!(!first.touches_confirmed);
         assert!(frames[1].selected_ball.is_none());
     }
     #[test]
-    fn ravel_ball_remains_raw_when_vballnet_is_missing() {
-        let frames = fuse_window(0, vec![ball(2, 0.65)], vec![]).unwrap();
-        assert!(frames[2].selected_ball.is_none());
-        assert_eq!(frames[2].ball_candidates[0].source_model, "ravel");
+    fn rejects_non_player_person_proposals() {
+        assert!(fuse_window(0, vec![ball(2, 0.65)], vec![]).is_err());
     }
     #[test]
     fn rejects_cross_window_invalid_boxes_and_fabricated_ids() {

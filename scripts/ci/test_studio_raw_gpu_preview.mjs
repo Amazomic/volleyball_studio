@@ -9,8 +9,8 @@ assert.match(html,/id="studio-raw-pose"/);
 assert.match(html,/id="studio-raw-pose-visible"/);
 assert.match(html,/id="studio-raw-ball"[^>]*value="0"/,
   "Raw VballNet candidates should be visible before tuning confidence");
-assert.doesNotMatch(html,/id="studio-raw-ravel-ball"/,
-  "RAVEL ball candidates must not appear in the new UI");
+assert.doesNotMatch(html,/id="studio-raw-obsolete-ball"/,
+  "Obsolete ball candidates must not appear in the new UI");
 const first=source.indexOf("  const rawFusion=()=>");
 const last=source.indexOf("  const cpuTouchStyle=",first);
 assert.ok(first>=0&&last>first);

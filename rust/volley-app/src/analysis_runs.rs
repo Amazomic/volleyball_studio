@@ -542,7 +542,7 @@ mod tests {
             python_sorted_json(&json!({"b":2,"a":{"z":1,"c":[3,4]}})),
             r#"{"a": {"c": [3, 4], "z": 1}, "b": 2}"#
         );
-        assert_eq!(settings_hash(&json!({"mode":"RAVEL"})).len(), 12);
+        assert_eq!(settings_hash(&json!({"mode":"RF-DETR"})).len(), 12);
     }
     #[test]
     fn ids_reject_traversal() {

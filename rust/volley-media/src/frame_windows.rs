@@ -144,7 +144,7 @@ impl<R: Read> FrameWindows<R> {
 }
 
 /// Pixel-normalization contract shared by clip diagnostics and future full
-/// model streaming: grayscale [T,H,W] and RAVEL RGB [T,C,H,W], both [0,1].
+/// model streaming: grayscale [T,H,W] and player RGB [T,C,H,W], both [0,1].
 pub fn normalized_model_window(
     raw: &[u8],
     width: usize,

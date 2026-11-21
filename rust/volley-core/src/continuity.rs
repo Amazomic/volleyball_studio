@@ -1,4 +1,4 @@
-//! CPU-only candidate continuity between tracked RAVEL player segments.
+//! CPU-only candidate continuity between tracked player segments.
 //!
 //! Short-gap geometry replicates the conservative Python
 //! player_continuity.group_tracklets policy, without writing identity labels.
