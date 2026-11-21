@@ -20,7 +20,7 @@
     selected:new Set(),rallyIds:new Set(),revision:"absent",rows:[],total:0,
     roster:[],writable:false,busy:false,sourceSha:"",groupRevision:null,
     groups:[],grouped:new Set(),groupLoaded:false,groupShown:24,singleCount:0,
-    playerMatches:{},similarityStatus:"not_calculated",libraryPlayers:[],projectPlayerIds:new Set(),
+    playerMatches:{},similarityStatus:"not_calculated",libraryPlayers:[],projectPlayerIds:new Set(),playerTrackCounts:{},
     rosterEpoch:0,rosterBusy:false,rosterLoaded:false,tracksLoaded:false,loadingKey:null,grouping:false,
     photoIndices:new Map(),groupNavigation:new Map(),viewPlayer:"",viewConflicts:false,filteredTotal:0,unassignedIds:new Set(),identityConflictIds:new Set(),comparisonIds:new Set(),
     photoScoreLoading:false,autoThresholdScope:"",autoAssignPending:null
@@ -89,19 +89,26 @@
       a.name.localeCompare(b.name,"ru"));
     for(const person of sorted){
       const attached=state.projectPlayerIds.has(person.id);
+      const count=attached?Number(state.playerTrackCounts[person.id]||0):0;
       const chip=node("button","track-roster-chip"+(attached?" is-attached":""),
-        (attached?"✓ ":"+ ")+person.name);
+        (attached?"✓ ":"+ ")+person.name+(attached?" · "+count+" ID":""));
       chip.type="button";
-      chip.disabled=attached||state.rosterBusy||!state.rosterLoaded;
-      chip.title=attached?"Уже добавлен в проект":"Добавить "+person.name+" в состав проекта";
-      if(!attached)chip.addEventListener("click",()=>attachPlayers([person.id]));
+      chip.disabled=state.rosterBusy||!state.rosterLoaded;
+      chip.title=attached?"Показать привязанные Track ID игрока "+person.name:
+        "Добавить "+person.name+" в состав проекта";
+      chip.addEventListener("click",()=>{
+        if(attached)window.dispatchEvent(new CustomEvent("volley:player-gallery-select",{detail:{
+          project_id:state.project,player_id:person.id,name:person.name
+        }}));
+        else void attachPlayers([person.id]);
+      });
       rosterChips.append(chip);
     }
     rosterHint.textContent=!state.rosterLoaded?
       "Читаем библиотеку и состав проекта…":
       !state.libraryPlayers.length?"В библиотеке нет игроков. Добавьте их ниже.":
       !missing.length?"Все игроки библиотеки уже включены в проект.":
-      "✓ В проекте · + Только в библиотеке. Нажмите +, чтобы разрешить привязку Track ID.";
+      "✓ В проекте · число привязанных ID. Нажмите игрока, чтобы открыть его треки; + добавляет игрока в проект.";
   };
   const showPlayerChoices=()=>{
     const chosen=ui.player.value;
@@ -234,7 +241,7 @@
     state.viewPlayer="";state.viewConflicts=false;state.filteredTotal=0;state.unassignedIds.clear();state.identityConflictIds.clear();
     state.comparisonIds.clear();state.autoAssignPending=null;
     updateUnassignedLabel();viewBack.hidden=true;groupsMode.hidden=false;playerMode.hidden=true;setMode("singles");
-    state.rosterEpoch++;state.libraryPlayers=[];state.projectPlayerIds.clear();
+    state.rosterEpoch++;state.libraryPlayers=[];state.projectPlayerIds.clear();state.playerTrackCounts={};
     state.rosterLoaded=false;state.rosterBusy=false;
     renderRosterBar();
     galleryStatus.textContent="Группы загружаются из выбранной CPU-версии.";
@@ -416,6 +423,8 @@
       state.writable=result.writable===true;
       ui.total.textContent=String(state.total);
       ui.assigned.textContent=String(result.assigned_count||0);
+      state.playerTrackCounts=result.player_track_counts&&typeof result.player_track_counts==="object"?
+        result.player_track_counts:{};
       ui.excluded.textContent=String(result.excluded_count||0);
       publishTrackCovers(result.player_track_counts);
       showPlayerChoices();

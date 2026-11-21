@@ -67,4 +67,35 @@ const slice=(start,end)=> {
   await context.loadPage({preserveCards:true});
   assert.equal(events.length,1,"unchanged revision must not invalidate preview labels");
 }
+{
+  const events=[],added=[],chips=[];
+  const state={project:"match",libraryPlayers:[
+    {id:"player-a",name:"Игрок А"},{id:"player-b",name:"Игрок Б"}
+  ],projectPlayerIds:new Set(["player-a"]),playerTrackCounts:{"player-a":17},
+    rosterBusy:false,rosterLoaded:true};
+  const rosterBar={hidden:false},rosterTitle={textContent:""},
+    rosterAddAll={hidden:false,disabled:false,textContent:""},
+    rosterChips={append:chip=>chips.push(chip)},
+    rosterHint={textContent:""};
+  const context={state,rosterBar,rosterTitle,rosterAddAll,rosterChips,rosterHint,
+    clear:()=>{chips.length=0;},
+    node:(_tag,_klass,value)=>({textContent:value,addEventListener(_name,fn){this.click=fn;}}),
+    attachPlayers:ids=>added.push(ids),
+    window:{dispatchEvent:e=>events.push(e)},
+    CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail;}}};
+  runInNewContext(slice("  const renderRosterBar=()=>{","  const showPlayerChoices=")+
+    "\nthis.renderRosterBar=renderRosterBar;",context);
+  context.renderRosterBar();
+  const linked=chips.find(chip=>chip.textContent.includes("Игрок А"));
+  const unlinked=chips.find(chip=>chip.textContent.includes("Игрок Б"));
+  assert.match(linked.textContent,/17 ID/);
+  assert.equal(linked.disabled,false);
+  linked.click();
+  assert.equal(events.length,1);
+  assert.equal(events[0].type,"volley:player-gallery-select");
+  assert.equal(events[0].detail.player_id,"player-a");
+  unlinked.click();
+  assert.equal(added.length,1);
+  assert.equal(added[0][0],"player-b");
+}
 console.log("Players reloads live assignments; preview labels invalidate on revision change: OK");
