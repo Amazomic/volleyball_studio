@@ -335,6 +335,7 @@ pub struct EditLabels {
     rallies: Option<Vec<RallyMark>>,
 }
 pub(crate) mod trajectory;
+pub(crate) mod types;
 use trajectory::{scan_trajectory, trajectory_profile};
 fn aggregate(lib: &Library) -> Value {
     // Only explicitly reviewed videos contribute to the global benchmark.

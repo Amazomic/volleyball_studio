@@ -553,6 +553,13 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Розыгрыш по мячу не выбран	No ball-trajectory rally selected
 Выберите розыгрыш по траектории. CPU-касания в дообучении не отображаются.	Select a ball-trajectory rally. CPU contacts are hidden in training.
 Определение типа касания	Touch type classification
+Рассчитать розыгрыши	Calculate rallies
+Рассчитать касания	Calculate touches
+Определить тип касания	Classify touch type
+Типы ещё не рассчитаны · нажмите «Определить тип касания»	Touch types not calculated · click «Classify touch type»
+Касание · тип не определён	Touch · type unknown
+Тип определён у	Classified type for
+Типы рассчитаны по RTMPose	Types classified with RTMPose
 Устаревшие CPU-метки недоступны для разметки	Legacy CPU labels cannot seed annotations
 Кандидаты из отдельного расчёта траектории VBallNet, без CPU-касаний и типов.	Candidates from a separate VBallNet trajectory calculation, without CPU contacts or touch types.
 Тип вычисляется только отдельным анализатором позы, а не из CPU-постобработки.	Type can be determined only by a separate pose-based analyzer, not from CPU postprocessing.

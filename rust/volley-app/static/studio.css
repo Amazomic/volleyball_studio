@@ -1823,7 +1823,7 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 #studio-preview-view.training-workspace .studio-training-video-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 #studio-preview-view.training-workspace .viewer-head{align-items:center;flex-wrap:wrap;gap:9px}
 #studio-preview-view.training-workspace .viewer-head strong{white-space:nowrap}
-#studio-preview-view.training-workspace #studio-comparison-recalculate{padding:8px 11px;font-size:12px;justify-content:center;white-space:normal}
+#studio-preview-view.training-workspace .studio-training-video-actions .primary{padding:8px 11px;font-size:12px;justify-content:center;white-space:normal}
 #studio-simulation-summary{font-size:11px;color:#f5cc78}
 #studio-preview-view .video-wrap.training-annotation #studio-video-overlay{pointer-events:auto;cursor:crosshair}
 #studio-preview-view .studio-rallies-sort-control{flex:0 0 130px;min-width:0}

@@ -207,6 +207,10 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
             axum::routing::post(touch_annotation::trajectory::calculate),
         )
         .route(
+            "/api/training/trajectory/types",
+            axum::routing::post(touch_annotation::types::calculate),
+        )
+        .route(
             "/api/video-primary-preview",
             get(preparation::primary_preview::get),
         )

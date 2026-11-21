@@ -128,7 +128,7 @@ assert.match(elements.get("studio-simulation-summary").textContent,/Устойч
 assert.equal(comparison.calibrate.disabled,true);
 assert.equal(comparison.impactSettings.hidden,true);
 assert.equal(comparison.continuousSettings.hidden,false);
-assert.equal(comparison.recalculate.textContent,"Смоделировать розыгрыши");
+assert.equal(comparison.recalculate.textContent,"Рассчитать розыгрыши");
 assert.equal(comparison.minSeconds.disabled,false);
 assert.equal(comparison.minImpacts.disabled,true);
 assert.equal(comparison.minSeconds.value,3.5);

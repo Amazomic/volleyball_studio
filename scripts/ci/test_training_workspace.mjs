@@ -64,7 +64,7 @@ const annotation={
   data:source,busy:false,dirty:false,source:["p","cpu","v.mp4"].join("\u0000"),
   touchId:null,rallyId:null,pendingStart:null,prediction:null,
   lane,touchList:new Node(),rallies:new Node(),metrics:new Node(),saveState:new Node(),pending:new Node(),
-  seed:new Node(),calculate:new Node(),adopt:new Node(),save:new Node(),
+  seed:new Node(),calculate:new Node(),classify:new Node(),adopt:new Node(),save:new Node(),
   add:new Node(),move:new Node(),remove:new Node(),next:new Node(),
   begin:new Node(),finish:new Node(),review:new Node(),current:new Node()
 };

@@ -6,6 +6,7 @@ const read=path=>readFileSync(new URL("../../"+path,import.meta.url),"utf8");
 const html=read("rust/volley-app/static/studio.html");
 const js=read("rust/volley-app/static/studio.js");
 const rust=read("rust/volley-app/src/touch_annotation/trajectory.rs");
+const typesRust=read("rust/volley-app/src/touch_annotation/types.rs");
 const server=read("rust/volley-app/src/main.rs");
 const annotationSource=read("rust/volley-app/src/touch_annotation.rs");
 const scanner=read("rust/volley-app/src/native_player_tracks/trajectory.rs");
@@ -17,6 +18,9 @@ for(const id of ["studio-annotation-calculate","studio-annotation-seed-trajector
 }
 assert.match(server,/\/api\/training\/trajectory\/calculate"[\s\S]{0,90}touch_annotation::trajectory::calculate/);
 assert.ok(rust.includes("trajectory_profile(&lib)"));
+assert.match(server,/\/api\/training\/trajectory\/types"[\s\S]{0,100}touch_annotation::types::calculate/);
+assert.ok(typesRust.includes("observed_pose_motion")&&typesRust.includes("refine_with_motion"));
+assert.ok(typesRust.includes("expected != req.frames"),"Types must never invent a second touch detector");
 assert.ok(rust.includes("saved_manual_timing_calibrates_recalculation"));
 assert.ok(scanner.includes("reader.finish() != run.replay_sha"));
 assert.ok(annotationSource.includes('"save" => {'));
@@ -41,7 +45,7 @@ const $=id=>{
   if(!elements.has(id))elements.set(id,new Element());
   return elements.get(id);
 };
-const logs=[],writeActions=[],calculations=[];
+const logs=[],writeActions=[],calculations=[],classifications=[];
 const original={
   schema:"volley-touch-annotations/1",project_id:"p",rally_run_id:"r",
   video:"match.mp4",total_frames:200,revision:0,reviewed:false,
@@ -56,7 +60,7 @@ const timeline={data:{
 const ui={video:{currentTime:3.333,addEventListener(){}}};
 let drawn=0;
 const context={
-  $,s,timeline,ui,comparison:{data:{trajectory_status:"ready",trajectory_rallies:[{start:95,end:150}]},
+  $,s,timeline,ui,trainingNames:{attack:"Атака",dig:"Приём снизу",overhead_pass:"Передача сверху"},comparison:{data:{trajectory_status:"ready",trajectory_rallies:[{start:95,end:150}]},
     mode:{value:"continuous"},minSeconds:{value:"1.5"}},
   comparisonMatches:data=>data?.trajectory_status==="ready",
   trainingGapSeconds:()=>4,
@@ -69,6 +73,8 @@ const context={
   timelineDuration:()=>200/30,
   drawTimeline:()=>{drawn++;},drawOverlay:()=>{},seekTimeline:()=>{},showAnnotationContext:()=>{},
   refreshComparison:async()=>{},
+  timelineRallyLayers:{candidates:{checked:false},types:{checked:false}},
+  updateTrainingRallyLayers:()=>{},
   training:{active:true},
   request:async()=>({...original}),
   url:(path,query)=>({path,query}),
@@ -85,6 +91,15 @@ const context={
         calibration:{min_score:8,shift_frames:calculations.length===1?0:2,
           training_videos:calculations.length===1?0:1},
         metrics_on_labeled_video:null};
+    }
+    if(path==="/api/training/trajectory/types"){
+      classifications.push(payload);
+      return {schema:"volley-trajectory-touch-types/1",project_id:"p",
+        video:"match.mp4",rally_run_id:"r",total_frames:200,
+        source_replay_sha256:"a".repeat(64),total:payload.frames.length,
+        classified:1,touches:payload.frames.map((frame,i)=>({frame,
+          kind:i===0?"attack":null,track_id:i===0?7:null,
+          score:i===0?0.85:null}))};
     }
     if(path==="/api/training/annotations"){
       writeActions.push(payload);
@@ -111,6 +126,13 @@ assert.equal(calculations.length,1);
 assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].rally)),
   {mode:"continuous",merge_gap_seconds:4,min_trajectory_seconds:1.5});
 assert.equal(annotation.prediction.proposals.length,2);
+assert.equal(annotation.classify.disabled,false,"Type stage requires ball candidates");
+await elements.get("studio-annotation-classify").click();
+assert.deepEqual(JSON.parse(JSON.stringify(classifications[0].frames)),[100,140]);
+assert.equal(classifications[0].source_replay_sha256,"a".repeat(64));
+assert.equal(annotation.typePrediction.classified,1);
+assert.equal(context.timelineRallyLayers.types.checked,true);
+assert.equal(writeActions.length,0,"Type prediction does not modify labels");
 assert.equal(elements.get("studio-annotation-seed-trajectory").disabled,false);
 assert.equal(elements.get("studio-trajectory-proposal"),undefined);
 assert.ok(elements.get("studio-timeline-track").children.length>=2);
@@ -135,6 +157,7 @@ assert.equal(writeActions[0].touches[0].frame,102);
 assert.equal(annotation.dirty,false);
 assert.equal(annotation.data.revision,1);
 assert.equal(annotation.prediction,null,"Saved labels require a fresh calculation");
+assert.equal(annotation.typePrediction,null,"Saved labels must invalidate classified proposals");
 assert.equal(elements.get("studio-annotation-calculate").disabled,false);
 await elements.get("studio-annotation-calculate").click();
 assert.equal(calculations.length,2);

@@ -732,7 +732,10 @@
     const ball=detected?.ball?.length===2&&detected.ball.every(Number.isFinite)?detected.ball:null;
     const px=ball?x+ball[0]*width:x+18;
     const py=ball?y+ball[1]*height:y+24;
-    const label=showBallTouchTypes()?"Тип не определён":"Касание? · по мячу";
+    const classified=annotation.typePrediction?.touches.find(item=>item.frame===candidate.frame);
+    const label=showBallTouchTypes()?
+      (classified?.kind?(trainingNames[classified.kind]||classified.kind):"Касание · тип не определён"):
+      "Касание? · по мячу";
     ctx.save();
     if(ball){
       ctx.strokeStyle="#ffbd55";ctx.fillStyle="#ffbd55";ctx.lineWidth=3;
@@ -1229,13 +1232,13 @@
   // Source-scoped human truth. Separate from automatic CPU predictions and
   // from pose examples: training mode never rewrites immutable inference.
   const annotation={
-    data:null,epoch:0,busy:false,dirty:false,prediction:null,source:"",priorFlags:null,touchId:null,rallyId:null,pendingStart:null,
+    data:null,epoch:0,busy:false,dirty:false,prediction:null,typePrediction:null,source:"",priorFlags:null,touchId:null,rallyId:null,pendingStart:null,
     touchLayerVisible:true,ballLayerVisible:true,
     status:$("studio-annotation-status"),current:$("studio-annotation-current"),
     lane:$("studio-timeline-track"),touchList:$("studio-annotation-touch-list"),
     rallies:$("studio-annotation-rallies"),metrics:$("studio-annotation-metrics"),
     saveState:$("studio-annotation-save-state"),
-    calculate:$("studio-annotation-calculate"),adopt:$("studio-annotation-seed-trajectory"),
+    calculate:$("studio-annotation-calculate"),classify:$("studio-annotation-classify"),adopt:$("studio-annotation-seed-trajectory"),
     save:$("studio-annotation-save"),method:$("studio-training-method"),
     hideExtra:$("studio-annotation-hide-extra"),
     pending:$("studio-annotation-rally-pending"),
@@ -1301,6 +1304,7 @@
     if(!training.active)return;
     const data=annotation.data,ready=annotationReady();
     annotation.calculate.disabled=annotation.busy||annotation.dirty||!s.run||!annotationSourceValid();
+    annotation.classify.disabled=annotation.busy||annotation.dirty||!annotation.prediction||!annotationSourceValid();
     annotation.adopt.disabled=annotation.busy||!annotation.prediction||!annotationSourceValid();
     annotation.save.disabled=annotation.busy||!annotation.dirty||!ready||!annotationSourceValid();
     annotation.seed.disabled=true;
@@ -1327,7 +1331,9 @@
         marker.hidden=annotation.ballLayerVisible===false;
         marker.style.left=annotationPosition(item.frame)+"%";
         marker.title="Кандидат касания из отдельного расчёта VBallNet · не подтверждён игроком · кадр "+
-          item.frame+" · оценка "+Number(item.score).toFixed(2);
+          item.frame+" · оценка "+Number(item.score).toFixed(2)+
+          (annotation.typePrediction?.touches.find(v=>v.frame===item.frame)?.kind?
+            " · "+trainingNames[annotation.typePrediction.touches.find(v=>v.frame===item.frame).kind]: "");
         marker.setAttribute("aria-label",marker.title);
         marker.addEventListener("click",event=>{
           event.stopPropagation();seekTimeline(item.frame/fps());hideAnnotationContext();
@@ -1484,7 +1490,7 @@
       drawAnnotation();return;
     }
     const epoch=++annotation.epoch;
-    annotation.data=null;annotation.prediction=null;annotation.touchId=null;annotation.rallyId=null;
+    annotation.data=null;annotation.prediction=null;annotation.typePrediction=null;annotation.touchId=null;annotation.rallyId=null;
     annotation.pendingStart=null;annotation.source=annotationSource();
     drawOverlay();
     if(!training.active||!project||!run){
@@ -1563,6 +1569,7 @@
       data.rallies=data.rallies.filter(r=>r.id!==fields.id);annotation.rallyId=null;
     }else return;
     annotation.dirty=true;data.reviewed=false;data.metrics=null;
+    annotation.typePrediction=null;
     drawAnnotation();drawTimeline();
     annotationNotice("Черновик изменён. Сохраните данные касаний, затем повторите расчёт по траектории.");
   };
@@ -1580,7 +1587,7 @@
   };
   const invalidateTrainingTouchPrediction=()=>{
     if(!annotation.prediction)return;
-    annotation.prediction=null;
+    annotation.prediction=null;annotation.typePrediction=null;
     drawAnnotation();drawTimeline();drawOverlay();
     annotationNotice("Настройки розыгрышей изменены. Пересчитайте касания внутри новых интервалов.");
   };
@@ -1610,7 +1617,9 @@
             p.frame>=result.total_frames||
             !result.rally_intervals.some(r=>r.start<=p.frame&&p.frame<=r.end)))
         throw Error("Касания выходят за рассчитанные розыгрыши по мячу");
-      annotation.prediction=result;
+      annotation.prediction=result;annotation.typePrediction=null;
+      timelineRallyLayers.candidates.checked=true;
+      updateTrainingRallyLayers();
       drawTimeline();drawOverlay();
       await refreshComparison(true);
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run||video!==s.video)return;
@@ -1623,6 +1632,51 @@
       annotation.busy=false;window.VolleyballTasks?.clear("training-trajectory");drawAnnotation();
     }
   };
+  const calculateTouchTypes=async()=>{
+    if(annotation.busy||annotation.dirty||!annotation.prediction||!annotationSourceValid())return;
+    const epoch=annotation.epoch,project=s.project,run=s.run,video=s.video;
+    const candidates=annotation.prediction;
+    const rally=trainingTouchRallySettings(),settingsKey=JSON.stringify(rally);
+    annotation.busy=true;drawAnnotation();
+    window.VolleyballTasks?.set("training-types",{
+      label:"Дообучение",stage:"Определение типов касаний по RTMPose",progress:null
+    });
+    annotationNotice("Проверяем движение рук RTMPose только в найденных по мячу касаниях…");
+    try{
+      const result=await post("/api/training/trajectory/types",{
+        project_id:project,rally_run_id:run,
+        source_replay_sha256:candidates.source_replay_sha256,
+        rally,frames:candidates.proposals.map(item=>item.frame)
+      });
+      if(epoch!==annotation.epoch||s.project!==project||s.run!==run||s.video!==video||
+        annotation.prediction!==candidates)return;
+      if(JSON.stringify(trainingTouchRallySettings())!==settingsKey)
+        throw Error("Настройки розыгрышей изменились, рассчитайте типы заново.");
+      if(result.schema!=="volley-trajectory-touch-types/1"||
+        result.project_id!==project||result.video!==video||result.rally_run_id!==run||
+        result.source_replay_sha256!==candidates.source_replay_sha256||
+        result.total_frames!==candidates.total_frames||
+        !Array.isArray(result.touches)||
+        result.touches.length!==candidates.proposals.length||
+        result.touches.some((item,i)=>item.frame!==candidates.proposals[i].frame||
+          ![null,"attack","overhead_pass","dig","serve","block"].includes(item.kind)||
+          item.kind!==null&&(!Number.isSafeInteger(item.track_id)||item.track_id<=0)))
+        throw Error("Классификация не совпадает с найденными касаниями по мячу");
+      annotation.typePrediction=result;
+      timelineRallyLayers.candidates.checked=true;
+      timelineRallyLayers.types.checked=true;
+      updateTrainingRallyLayers();
+      annotationNotice("Тип определён у "+result.classified+" из "+result.total+
+        " касаний. Остальные остаются «Касание»; результаты не являются подтверждённой разметкой.");
+    }catch(error){
+      if(epoch===annotation.epoch)annotationNotice("Ошибка определения типов: "+error.message,true);
+    }finally{
+      annotation.busy=false;
+      window.VolleyballTasks?.clear("training-types");
+      drawAnnotation();
+    }
+  };
+  annotation.classify.addEventListener("click",calculateTouchTypes);
   annotation.calculate.addEventListener("click",calculateTrajectory);
   annotation.adopt.addEventListener("click",()=>{
     if(!annotation.prediction||annotation.busy||!annotationSourceValid())return;
@@ -1645,7 +1699,7 @@
       });
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run||video!==s.video)return;
       if(result.schema!=="volley-touch-annotations/1"||result.video!==video)throw Error("Неверное подтверждение сохранения");
-      annotation.data=result;annotation.dirty=false;annotation.prediction=null;
+      annotation.data=result;annotation.dirty=false;annotation.prediction=null;annotation.typePrediction=null;
       drawTimeline();drawOverlay();void refreshComparison(true);
       annotationNotice("Данные сохранены. Повторите расчёт касаний — алгоритм использует исправления для подбора порога и сдвига.");
     }catch(error){
@@ -1740,8 +1794,7 @@
   const updateComparisonModeSettings=()=>{
     comparison.impactSettings.hidden=continuousComparisonMode();
     comparison.continuousSettings.hidden=!continuousComparisonMode();
-    comparison.recalculate.textContent=continuousComparisonMode()?
-      "Смоделировать розыгрыши":"Смоделировать розыгрыши и касания";
+    comparison.recalculate.textContent="Рассчитать розыгрыши";
   };
   const comparisonMatches=data=>data&&
     data.schema==="volley-rally-training-comparison/1"&&
@@ -2400,9 +2453,9 @@
     timelineRallyLayers.types.disabled=!showBallCandidates();
     timelineRallyLayers.typeStatus.textContent=!showBallCandidates()?
       "Сначала включите определение касаний":
-      showBallTouchTypes()?
-      "Тип не определён: отдельная классификация RTMPose пока недоступна":
-      "Типы отключены · CPU-постобработка не используется";
+      annotation.typePrediction?
+      annotation.typePrediction.classified+" типов из "+annotation.typePrediction.total+" касаний · RTMPose":
+      "Типы ещё не рассчитаны · нажмите «Определить тип касания»";
     for(const [selector,visible] of [
       [".studio-annotation-tick",annotation.touchLayerVisible],
       [".studio-trajectory-proposal",annotation.ballLayerVisible]
@@ -2515,7 +2568,8 @@
       if(showBallCandidates()&&annotation.prediction&&annotationSourceValid()){
         for(const proposal of annotation.prediction.proposals){
           const x=((Number(s.analysisOffset)||0)+proposal.frame/fps())/duration*width;
-          ctx.fillStyle="#ffbd55";
+          const kind=showBallTouchTypes()&&annotation.typePrediction?.touches.find(v=>v.frame===proposal.frame)?.kind;
+          ctx.fillStyle=kind?({attack:"#ff6b6b",overhead_pass:"#66c8ff",dig:"#56dfb9",serve:"#f3a350",block:"#ac92ff"}[kind]||"#ffbd55"):"#ffbd55";
           ctx.fillRect(x-1,y,Math.max(2,Math.ceil(dpr)),bandHeight);
         }
       }
@@ -2556,7 +2610,7 @@
   };
   const clearTimeline=()=>{
     timeline.epoch++;timeline.dragging=false;timeline.data=null;
-    if(training.active&&!annotation.dirty){annotation.epoch++;annotation.data=null;annotation.prediction=null;annotation.touchId=null;
+    if(training.active&&!annotation.dirty){annotation.epoch++;annotation.data=null;annotation.prediction=null;annotation.typePrediction=null;annotation.touchId=null;
       comparison.epoch++;comparison.data=null;comparison.sourceKey="";
       annotation.rallyId=null;annotation.pendingStart=null;drawAnnotation();}
     timeline.status.textContent="Выберите CPU-версию";
