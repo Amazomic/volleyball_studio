@@ -347,13 +347,13 @@
                   <div class="video-overlay-modes" role="tablist" aria-label="Режим данных">
                     <button type="button" id="studio-overlay-processed" role="tab" aria-selected="true">Обработанные</button>
                     <button type="button" id="studio-overlay-raw" role="tab" aria-selected="false">Сырые</button>
-                    <button type="button" id="studio-overlay-stabilizer" role="tab" aria-selected="false">Ball Stabilizer · сравнение</button>
                   </div>
                 </div>
                 <div id="studio-debug-trajectory-switch" class="video-overlay-trajectory-switch hidden" role="group" aria-label="Источник траектории мяча в дебаге">
                   <span>Траектория мяча</span>
                   <button type="button" id="studio-debug-trajectory-before" aria-pressed="false" title="Исходные положения мяча до Ball Stabilizer">До стабилизации</button>
                   <button type="button" id="studio-debug-trajectory-after" aria-pressed="true" title="Единый сохранённый файл Ball Stabilizer, используемый при поиске касаний">После стабилизации</button>
+                  <button type="button" id="studio-debug-stabilizer-compare" aria-pressed="false" title="Сравнить исходные GPU-детекции VBallNet со стабилизированной траекторией только в дебаге">Ball Stabilizer · сравнение</button>
                 </div>
                 <fieldset id="studio-overlay-actions" class="video-overlay-actions hidden" aria-label="Типы касаний — оценка CPU">
                   <label><input type="checkbox" data-overlay-action="unknown_touch" checked><span class="action-unknown-touch">●</span> Касание</label>
