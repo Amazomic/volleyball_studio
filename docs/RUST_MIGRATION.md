@@ -3567,3 +3567,9 @@ Studio показывает кнопку перехода между debug и re
 - База origin/develop 3da79525; владелец UI: rust/volley-app/static/studio_tracks.js и studio.css; регрессионные контракты: scripts/ci/test_studio_viewport_layout.mjs и test_studio_player_gallery_view.mjs.
 - Кнопки «Конфликты» и «Исключённые» перенесены в левую часть нижней панели вместе с порогом и действием автопривязки справа. Верхний переключатель оставлен для режимов ID, групп и кнопки возврата к игрокам. API, состояние фильтров и идентификация игроков не изменены.
 - Регрессия RED до изменения, GREEN после; PASS: test_studio_viewport_layout.mjs, test_studio_dom_ids.mjs, test_studio_player_gallery_view.mjs, node --check studio_tracks.js, git diff --check. Полный scripts/check-all.ps1 PASS: WASM, cargo fmt, Clippy -D warnings, Rust workspace tests и 98 Node gates. Ручная проверка на реальном браузере: NOT TESTED; применение — после публикации через очередь развёртывания.
+
+### 2026-11-23 — Переключатель ID и счётчик перенесены в нижнюю панель
+
+- База origin/develop 5d78310a; владелец UI: rust/volley-app/static/studio_tracks.js, studio.css, регрессии test_studio_group_button_visibility.mjs, test_studio_player_gallery_view.mjs, test_studio_viewport_layout.mjs.
+- Верхняя строка содержит фильтры «Конфликты» и «Исключённые», нижняя панель автопривязки содержит «ID / Группы ID», динамический счётчик «Непривязанные Track ID», порог сходства и кнопку автопривязки. При открытии альбома игрока его имя переносится к кнопке возврата, и скрытые фильтры не занимают место. Алгоритмы идентификации и данные проекта не менялись.
+- TDD: регрессия новых позиций RED до правки, GREEN после; полный scripts/check-all.ps1 PASS: WASM, cargo fmt, clippy, Rust workspace tests и 98 Node gate; node --check, git diff --check PASS. Ручной браузерный QA: NOT TESTED. Применение — после публикации штатной очередью deploy-volley-queue.ps1.

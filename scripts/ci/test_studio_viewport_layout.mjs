@@ -19,8 +19,15 @@ const rail=html.match(/<aside class="rallies-panel"[^>]*>([\s\S]*?)<\/aside>/)?.
 assert.match(rail,/id="studio-rallies"[\s\S]*id="studio-debug-reference-picker"[\s\S]*class="studio-debug-mode-row"/,"debug modes must be anchored after the scrollable rally list in the right rail");
 assert.match(css,/#studio-preview-view\.training-workspace \.studio-debug-mode-row\{[\s\S]*?flex:0 0 auto/,"debug mode footer must not scroll with rally cards");
 assert.match(tracks,/viewBar\.append\(viewBack\)/,"player back button must remain in the mode navigation");
-assert.match(tracks,/filterBar\.append\(conflictToggle,excludedToggle\)/,"conflict and excluded toggles must share the lower filter group");
-assert.match(tracks,/autoAssignControls\.prepend\(filterBar\)/,"filter group must be inside the auto-assign toolbar");
+assert.match(tracks,/filterBar\.append\(conflictToggle,excludedToggle\)/,"conflict and excluded toggles must share the upper filter group");
+assert.match(tracks,/modeSwitch\.append\(filterBar,viewBar,groupingControls\)/,"filters must occupy the former ID and group position");
+assert.match(tracks,/modeInfo\.append\(modeTabs,viewLabel\)/,"ID selector and Track ID info must share the lower toolbar");
+assert.match(tracks,/autoAssignControls\.prepend\(modeInfo\)/,"lower toolbar begins with mode and Track ID info");
+assert.match(tracks,/if\(mode==="player"\)viewBar\.append\(viewLabel\)/,"player name remains visible when lower toolbar is hidden");
+assert.match(tracks,/else modeInfo\.append\(viewLabel\)/,"Track ID info returns to lower toolbar after album view");
+assert.match(tracks,/filterBar\.hidden=mode==="player"/,"filter buttons must disappear when opening a player album");
+assert.match(css,/\.track-filter-buttons\[hidden\]\{display:none\}/,"hidden player filters must not consume layout space");
+assert.doesNotMatch(tracks,/modeSwitch\.append\(modeTabs\)/,"ID selector must not remain in the upper toolbar");
 assert.doesNotMatch(tracks,/viewBar\.append\([^)]*(?:conflictToggle|excludedToggle)/,"filter toggles must not occupy the mode navigation");
-assert.match(css,/\.track-filter-buttons\{[^}]*margin-right:auto/,"filters must align left of the similarity controls");
+assert.match(css,/\.track-mode-info\{[^}]*margin-right:auto/,"mode and Track ID info must align left of similarity controls");
 console.log("PASS: no footer disclaimer; viewport shell, flexible cards, invisible upload input, compact mobile navigation and debug mode footer are constrained");
