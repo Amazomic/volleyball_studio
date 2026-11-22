@@ -36,7 +36,7 @@ const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
 pub(crate) const TRACK_ASSOCIATION_VERSION: &str =
-    "bytetrack_xyah_rally_scoped_lost_weak_head_dedup_v5";
+    "bytetrack_xyah_rally_scoped_lost_weak_boundary_stitch_v6";
 pub(crate) mod ball_track;
 mod gap_interpolation;
 #[cfg(test)]
@@ -46,6 +46,7 @@ mod identity_turnover;
 mod pose_source;
 #[cfg(test)]
 mod track_merge;
+mod track_stitch;
 
 pub(crate) use volley_core::contracts::job_id as opaque_id;
 
@@ -658,29 +659,25 @@ fn replay_frames_verified(
         .map_err(|e| format!("Sync confirmed CPU frames: {e}"))?;
     drop(writer);
     let observed_sha = format!("{:x}", sha.finalize());
-    // ByteTrack's matching is authoritative: disable the previous custom
-    // automatic Track ID merges and handoff-splitting stages. A true A/B
-    // evaluation must not silently rewrite ByteTrack's association decisions.
-    // TODO(bytetrack-removal): delete track_merge, identity_turnover,
-    // identity_handoff, and the legacy ProvisionalTracker after ByteTrack
-    // passes labeled ID-switch/fragmentation benchmarks. See the agent run
-    // document for deletion criteria.
-    let merged = 0_u64;
-    let splits = 0_u64;
+    let (stitched_sha, merged, removed_duplicate_boxes) =
+        track_stitch::stitch(output, &observed_sha, count)?;
     totals.duplicate_track_ids_merged = merged;
-    totals.identity_turnover_splits = splits;
+    totals.detections = totals
+        .detections
+        .checked_sub(removed_duplicate_boxes)
+        .ok_or("More duplicate detections removed than confirmed")?;
+    totals.identity_turnover_splits = 0;
     totals.identity_handoff_splits = 0;
-    let turnover_sha = observed_sha;
     let (continuous_sha, _inferred_positions) = if interpolate_players {
-        fill_confirmed_track_gaps(output, &turnover_sha, count, scope, cancel)?
+        fill_confirmed_track_gaps(output, &stitched_sha, count, scope, cancel)?
     } else {
-        (turnover_sha, 0)
+        (stitched_sha, 0)
     };
-    Ok((
-        continuous_sha,
-        totals,
-        summary.confirmed_tracks - merged + splits,
-    ))
+    let track_count = summary
+        .confirmed_tracks
+        .checked_sub(merged)
+        .ok_or("More Track IDs stitched than confirmed")?;
+    Ok((continuous_sha, totals, track_count))
 }
 
 fn confirmation_threshold(requested: u64, sample_period: Option<u64>) -> u64 {
