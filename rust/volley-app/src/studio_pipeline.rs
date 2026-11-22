@@ -32,6 +32,7 @@ use volley_core::{
     touch_pipeline::{TouchAlgorithm, TouchSettings},
     tracker::TrackingOptions,
 };
+#[cfg(test)]
 use volley_inference::ModelKind;
 
 const SCHEMA: &str = "volley-studio-pipeline/1";
@@ -837,6 +838,8 @@ fn shared_pose_metrics(status: &Value, pose: &Value) -> Value {
     json!({
         "source_stage_id": "players",
         "sampled_frames": pose["sampled_frames"],
+        "eligible_pose_frames": pose["eligible_pose_frames"],
+        "inferred_pose_frames": pose["inferred_pose_frames"],
         "player_poses": pose["player_poses"],
         "started_ms": player["started_ms"],
         "finished_ms": player["finished_ms"],
@@ -982,6 +985,12 @@ fn valid_sha(value: &Value) -> bool {
     value.as_str().is_some_and(volley_core::contracts::sha256)
 }
 
+fn shared_pose_source(pose: &Value) -> bool {
+    matches!(
+        pose["decode_pipeline"].as_str(),
+        Some("gpu_resident_nvdec_primary_v1" | "shared_primary_native_rgb_v2")
+    )
+}
 fn gpu_lineage_valid(
     project: &Path,
     request: &StartRequest,
@@ -994,8 +1003,10 @@ fn gpu_lineage_valid(
     let Some(ball_id) = saved["gpu_jobs"]["ball"].as_str().filter(|id| valid_id(id)) else {
         return false;
     };
-    if request.mode == PipelineMode::Full
-        && saved["gpu_rally_mask"]["schema"] != "volley-primary-rally-mask/1"
+    if saved["gpu_rally_mask"]["schema"] != "volley-primary-rally-mask/1"
+        || saved["gpu_rally_mask"]["fallback_reason"]
+            .as_str()
+            .is_some()
     {
         return false;
     }
@@ -1080,6 +1091,7 @@ fn gpu_lineage_valid(
             || pose["video"] != request.video
             || pose["source_identity"] != *identity
             || pose["source_fusion_sha256"] != fusion["sha256"]
+            || !shared_pose_source(&pose)
         {
             return false;
         }
@@ -1497,6 +1509,7 @@ fn shared_primary_requested(
 // GPU stage coordinates (progress window, status document, cancellation)
 // stay explicit; a stage-context struct is planned for stage E.
 #[expect(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn gpu(
     app: &Arc<AppState>,
     request: &StartRequest,
@@ -1630,7 +1643,7 @@ async fn pipeline(
         return Err("cancelled".into());
     }
     #[cfg(any(unix, windows))]
-    let mut pending_shared_pose: Option<crate::pose_inference::PendingPose> = None;
+    let mut pending_shared_pose: Option<crate::pose_inference::PendingPose>;
     log_native(
         path,
         "Проверка исходного видео",
@@ -1824,6 +1837,9 @@ async fn pipeline(
                 request.gpu.pose_enabled,
                 request.gpu.pose_mode,
             );
+            if !wants_shared {
+                return Err("Для анализа игроков и поз нужен общий GPU-конвейер: шаг VBallNet 9, режим поз «Фото», VOLLEY_SHARED_PRIMARY не должен быть отключён".into());
+            }
             #[cfg(any(unix, windows))]
             let shared_plan = if wants_shared {
                 let plan = preparation::plan_for_analysis_async(
@@ -1840,29 +1856,7 @@ async fn pipeline(
                 if source != plan.source {
                     return Err("Shared GPU analysis requires the original video".into());
                 }
-                #[cfg(windows)]
-                {
-                    let backend = volley_media::raw_decoder::select_decode_backend(
-                        &plan.source,
-                        volley_media::raw_decoder::DecodePreference::Auto,
-                        cancel,
-                    )?;
-                    if backend.backend == volley_media::raw_decoder::DecodeBackend::Nvdec {
-                        Some(plan)
-                    } else {
-                        log_event(
-                            path,
-                            "Общий GPU",
-                            "info",
-                            "NVDEC недоступен для источника: используется исходный режим декодирования",
-                        )?;
-                        None
-                    }
-                }
-                #[cfg(unix)]
-                {
-                    Some(plan)
-                }
+                Some(plan)
             } else {
                 None
             };
@@ -1895,6 +1889,9 @@ async fn pipeline(
                 } else {
                     false
                 };
+                if request.gpu.pose_enabled && !full_resolution_pose {
+                    return Err("RTMPose не может использовать исходные кадры этого разрешения в общем конвейере; отдельный полный проход запрещён".into());
+                }
                 let total = status["gpu_total_frames"].as_u64().unwrap_or(0);
                 progress_with_frames(
                     path,
@@ -1965,39 +1962,11 @@ async fn pipeline(
                 pending_shared_pose = result.pending_pose;
                 Some((result.ball_job_id, result.player_job_id))
             } else {
-                None
+                return Err(
+                    "Общий GPU-конвейер не был выбран; отдельная детекция игроков запрещена".into(),
+                );
             };
-            #[cfg(not(any(unix, windows)))]
-            let shared: Option<(String, String)> = None;
-            let (ball, players) = if let Some(ids) = shared {
-                ids
-            } else {
-                let ball = gpu(
-                    app,
-                    request,
-                    ModelKind::Ball,
-                    cancel,
-                    path,
-                    status,
-                    8.0,
-                    36.0,
-                )
-                .await?;
-                status["gpu_jobs"]["ball"] = json!(ball);
-                save(path, status)?;
-                let players = gpu(
-                    app,
-                    request,
-                    ModelKind::Players,
-                    cancel,
-                    path,
-                    status,
-                    44.0,
-                    36.0,
-                )
-                .await?;
-                (ball, players)
-            };
+            let (ball, players) = shared.ok_or("Общий GPU-конвейер не вернул результаты")?;
             status["gpu_jobs"]["ball"] = json!(ball);
             status["gpu_jobs"]["players"] = json!(players);
             save(path, status)?;
@@ -2059,63 +2028,14 @@ async fn pipeline(
         }
     }
 
-    // RTMPose is a separate GPU evidence stage. It uses the immutable fusion
-    // source, never Track IDs, and is intentionally never executed in Post mode.
     if request.mode.allows_gpu_execution()
         && request.gpu.pose_enabled
         && status["gpu_jobs"]["pose"].as_str().is_none()
     {
-        if cancel.load(Ordering::Acquire) {
-            return Err("cancelled".into());
-        }
-        let fusion_id = require_id(status, "analysis_id")?;
-        progress(path, status, "GPU · RTMPose-M: позы игроков", 82.0)?;
-        log_native(
-            path,
-            "GPU · RTMPose-M",
-            "pose_inference::process",
-            json!({"fusion_id":fusion_id,"model":"RTMPose-M-Body7",
-                    "stride":request.gpu.pose_stride,
-                    "box_source":"observed_detector_only",
-                    "threads":request.gpu.cpu_threads,
-                    "gpu_memory_limit_mb":request.gpu.gpu_memory_limit_mb}),
-        )?;
-        let _permit = app
-            .inference_limit
-            .acquire()
-            .await
-            .map_err(|e| format!("RTMPose inference limit: {e}"))?;
-        let pose = tokio::task::block_in_place(|| {
-            crate::pose_inference::process(
-                app,
-                &request.project_id,
-                &request.video,
-                &fusion_id,
-                request.gpu.gpu_memory_limit_mb,
-                request.gpu.cpu_threads,
-                cancel,
-                |_, p, done, total| {
-                    progress_with_frames(
-                        path,
-                        status,
-                        "GPU · RTMPose-M: позы игроков",
-                        82.0 + p * 2.5,
-                        Some((done, total)),
-                    )
-                },
-            )
-        })?;
-        status["gpu_jobs"]["pose"] = pose["pose_run_id"].clone();
-        save(path, status)?;
-        log_event(
-            path,
-            "GPU · RTMPose-M",
-            "success",
-            &format!(
-                "Позы сохранены: samples={}, players={}; рамки только RF-DETR",
-                pose["sampled_frames"], pose["player_poses"]
-            ),
-        )?;
+        return Err(
+            "Не получены позы из общего GPU-конвейера; отдельный повторный проход RTMPose запрещён"
+                .into(),
+        );
     }
     if request.mode == PipelineMode::Gpu {
         progress(path, status, "Первичный GPU-анализ завершён", 99.9)?;
@@ -2871,15 +2791,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_shared_rally_scoped_pose_sources_can_be_reused() {
+        for decoder in [
+            "gpu_resident_nvdec_primary_v1",
+            "shared_primary_native_rgb_v2",
+        ] {
+            assert!(shared_pose_source(&json!({"decode_pipeline":decoder})));
+        }
+        for decoder in ["standalone_original_video", "", "original_rgb24_full_video"] {
+            assert!(!shared_pose_source(&json!({"decode_pipeline":decoder})));
+        }
+        assert!(!shared_pose_source(&Value::Null));
+    }
+    #[test]
     fn shared_pose_reports_published_counts_and_shared_gpu_stage_duration() {
         let pipeline = json!({"stages":[
             {"id":"players","started_ms":1000,"finished_ms":37000,"duration_ms":36000},
             {"id":"fusion","started_ms":37000,"finished_ms":38000,"duration_ms":1000}
         ]});
-        let pose = json!({"sampled_frames":175,"player_poses":612});
+        let pose = json!({"sampled_frames":175,"eligible_pose_frames":50,"inferred_pose_frames":42,"player_poses":612});
         let metrics = shared_pose_metrics(&pipeline, &pose);
         assert_eq!(metrics["source_stage_id"], "players");
         assert_eq!(metrics["sampled_frames"], 175);
+        assert_eq!(metrics["eligible_pose_frames"], 50);
+        assert_eq!(metrics["inferred_pose_frames"], 42);
         assert_eq!(metrics["player_poses"], 612);
         assert_eq!(metrics["duration_ms"], 36000);
         assert_eq!(metrics["started_ms"], 1000);
@@ -3292,19 +3227,19 @@ mod tests {
     }
 
     #[test]
-    fn primary_rally_mask_reports_full_video_fallback_before_person_inference() {
+    fn primary_rally_mask_reports_zero_selected_frames_on_fallback() {
         let dir = std::env::temp_dir().join(format!("studio-rally-fallback-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("status.json");
         let mut status = json!({"stage":"GPU · VBallNet"});
         let mask = json!({
-            "detected":[], "merged":[], "selected_frames":600,
+            "detected":[], "merged":[], "selected_frames":0,
             "fallback_reason":"insufficient_ball_observations"
         });
         publish_primary_rally_mask(&path, &mut status, &mask, 600).unwrap();
         let log = fs::read_to_string(dir.join("events.jsonl")).unwrap();
         assert!(log.contains("fallback=insufficient_ball_observations"));
-        assert!(log.contains("доля для RF-DETR=100.0%"));
+        assert!(log.contains("доля для RF-DETR=0.0%"));
         assert_eq!(read(&path).unwrap()["gpu_rally_mask"], mask);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -3465,6 +3400,7 @@ mod tests {
             "source_identity":identity
         });
         assert!(compatible_version(&saved, &request, &identity));
+
         request.gpu.primary_rallies.min_trajectory_seconds = 2.5;
         assert!(!compatible_version(&saved, &request, &identity));
         request.gpu.primary_rallies.min_trajectory_seconds = 1.5;
@@ -3503,6 +3439,7 @@ mod tests {
             "source_identity":identity
         });
         assert!(compatible_version(&saved, &request, &identity));
+
         for step in [2, 3, 5, 9, 10, 30] {
             request.gpu.pose_stride = step;
             assert!(!compatible_version(&saved, &request, &identity));
@@ -3527,8 +3464,10 @@ mod tests {
             "source_identity":identity
         });
         assert!(compatible_version(&saved, &request, &identity));
+
         request.post.interpolate_players = false;
         assert!(compatible_version(&saved, &request, &identity));
+
         request.post.interpolate_pose = false;
         assert!(compatible_version(&saved, &request, &identity));
     }
@@ -3822,6 +3761,7 @@ mod branching_tests {
         );
         assert!(matching.gpu.is_some());
         assert!(compatible_version(&saved, &request, &identity));
+
         let mut failed_pose = saved.clone();
         failed_pose["status"] = json!("failed");
         failed_pose["pipeline_complete"] = json!(false);
@@ -3919,6 +3859,16 @@ mod branching_tests {
             "CPU change must reuse the GPU fusion"
         );
         assert!(compatible_version(&saved, &request, &identity));
+
+        let mut full_scan_fallback = saved.clone();
+        full_scan_fallback["gpu_rally_mask"]["fallback_reason"] =
+            json!("no_reliable_moving_ball_intervals");
+        assert!(!gpu_lineage_valid(
+            &project_dir,
+            &request,
+            &identity,
+            &full_scan_fallback
+        ));
         assert!(gpu_lineage_valid(&project_dir, &request, &identity, &saved));
         assert_ne!(
             saved["profile"]["post"],

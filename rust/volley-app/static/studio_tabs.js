@@ -201,7 +201,7 @@
       "-й кадр → "+count+" "+form+"/с.";
   };
   const gpuProfile=()=>({
-      stride:inputValue("studio-gpu-stride"),
+      stride:9,
       gpu_memory_limit_mb:inputValue("studio-gpu-memory"),
       cpu_threads:inputValue("studio-gpu-threads"),
       pose_enabled:$("studio-gpu-pose-enabled").value==="1",
@@ -530,9 +530,10 @@
       const duration=Number.isFinite(shared?.duration_ms)?shared.duration_ms:
         running&&Number.isFinite(player?.started_ms)?Math.max(0,now-player.started_ms):
         player?.duration_ms;
-      const count=shared?.sampled_frames,poses=shared?.player_poses;
+      const scoped=Number.isSafeInteger(shared?.eligible_pose_frames);
+      const count=scoped?shared.eligible_pose_frames:shared?.sampled_frames,poses=shared?.player_poses;
       if(Number.isSafeInteger(count)&&count>=0&&Number.isSafeInteger(poses)&&poses>=0)
-        return count.toLocaleString("ru-RU")+" кадр. · "+poses.toLocaleString("ru-RU")+
+        return count.toLocaleString("ru-RU")+(scoped?" игровых кадр. · ":" выборок · ")+poses.toLocaleString("ru-RU")+
           " поз · "+stageTime(duration)+" (общ.)";
       return "С RF-DETR · "+stageTime(duration);
     }

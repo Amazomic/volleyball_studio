@@ -79,6 +79,8 @@ pub(crate) struct PoseStream {
     native_width: usize,
     native_height: usize,
     sampled: u64,
+    eligible_frames: u64,
+    inferred_frames: u64,
     people: u64,
     observed_crops: u64,
     interpolated_crops: u64,
@@ -101,6 +103,8 @@ pub(crate) struct PendingPose {
     native_width: usize,
     native_height: usize,
     sampled: u64,
+    eligible_frames: u64,
+    inferred_frames: u64,
     people: u64,
     observed_crops: u64,
     interpolated_crops: u64,
@@ -497,6 +501,8 @@ impl PoseStream {
             native_width: 0,
             native_height: 0,
             sampled: 0,
+            eligible_frames: 0,
+            inferred_frames: 0,
             people: 0,
             observed_crops: 0,
             interpolated_crops: 0,
@@ -690,6 +696,12 @@ impl PoseStream {
                     interpolation::interpolate_boxes(&snapshots, frame.index, &frame.boxes);
                 pose_proposals(frame.boxes.clone(), inferred)
             };
+            if !matches!(&frame.pixels, FramePixels::Skipped) {
+                self.eligible_frames += 1;
+                if !proposals.is_empty() {
+                    self.inferred_frames += 1;
+                }
+            }
             let mut poses = Vec::with_capacity(proposals.len());
             for group in proposals.chunks(8) {
                 if cancelled.load(Ordering::Acquire) {
@@ -787,6 +799,9 @@ impl PoseStream {
         if self.sampled != expected_samples {
             return Err("Streamed RTMPose sampled frame count mismatch".into());
         }
+        if self.eligible_frames > self.sampled || self.inferred_frames > self.eligible_frames {
+            return Err("RTMPose selected-frame counters exceed the sampled timeline".into());
+        }
         if self.observed_crops + self.interpolated_crops != self.people {
             return Err("Streamed RTMPose crop provenance count mismatch".into());
         }
@@ -822,6 +837,8 @@ impl PoseStream {
             native_width: self.native_width,
             native_height: self.native_height,
             sampled: self.sampled,
+            eligible_frames: self.eligible_frames,
+            inferred_frames: self.inferred_frames,
             people: self.people,
             observed_crops: self.observed_crops,
             interpolated_crops: self.interpolated_crops,
@@ -875,6 +892,9 @@ impl PendingPose {
             "photo_stride":self.sample_stride,
             "decoded_frames":self.decoded_frames,
             "sampled_frames":self.sampled,
+            "eligible_pose_frames":self.eligible_frames,
+            "inferred_pose_frames":self.inferred_frames,
+            "skipped_pose_frames":self.sampled - self.eligible_frames,
             "player_poses":self.people,
             "observed_pose_crops":self.observed_crops,
             "interpolated_pose_crops":self.interpolated_crops,

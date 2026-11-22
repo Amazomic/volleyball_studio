@@ -171,7 +171,6 @@ impl RallyMask {
         };
         if fallback_reason.is_some() {
             selected.clear();
-            selected.push((0, frames - 1));
         }
         Ok(Self {
             schema: "volley-primary-rally-mask/1",
@@ -236,11 +235,11 @@ mod tests {
     }
 
     #[test]
-    fn missing_ball_falls_back_to_full_analysis() {
+    fn missing_ball_does_not_select_full_video() {
         let mask = RallyMask::from_ball_samples(&[], 600, PrimaryRallySettings::default()).unwrap();
         assert_eq!(mask.fallback_reason, Some("insufficient_ball_observations"));
-        assert_eq!(mask.included_frames(), 600);
-        assert!(mask.includes(599));
+        assert_eq!(mask.included_frames(), 0);
+        assert!(!mask.includes(599));
         assert!(!mask.includes(600));
     }
 
@@ -585,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn stationary_ball_does_not_hide_people_analysis() {
+    fn stationary_ball_does_not_trigger_full_video_people_analysis() {
         let samples = (0..450)
             .map(|frame| RawDetection {
                 frame_index: frame,
@@ -603,6 +602,6 @@ mod tests {
             mask.fallback_reason,
             Some("no_reliable_moving_ball_intervals")
         );
-        assert_eq!(mask.included_frames(), 450);
+        assert_eq!(mask.included_frames(), 0);
     }
 }

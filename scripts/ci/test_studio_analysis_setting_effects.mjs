@@ -60,6 +60,11 @@ assert.equal(scope.profiles.postProfile().touches.algorithm,"pose_motion");
 assert.equal(scope.profiles.postProfile().pose_classification,true);
 for(const c of controls){
   assert.ok(ids.has(c.id),"Missing help for real profile input "+c.id);
+  if(c.id==="studio-gpu-stride"){
+    assert.equal(c.baseline,"9");
+    assert.match(view,/id="studio-gpu-stride"[^>]*readonly/);
+    continue;
+  }
   const next=c.check?(c.baseline==="1"?"0":"1"):
     c.kind==="select"?(c.baseline==="1"?"0":"1"):
     Number.isFinite(c.max)&&c.max!==Number(c.baseline)?String(c.max):
@@ -74,4 +79,4 @@ for(const id of ["studio-analysis-trim-start","studio-analysis-trim-end"]){
   assert.ok(ids.has(id),"Editor trim labels need accurately scoped tooltips");
 }
 console.log("Analysis settings tooltips: "+labels.length+" labels, "+controls.length+
-  " profile controls change native request, obsolete switch absent: OK");
+  " profile controls (37 editable) correctly map to native request, obsolete switch absent: OK");

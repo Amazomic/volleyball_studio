@@ -467,6 +467,11 @@ pub(crate) fn run_joint_pair(
             ball_scan.decode.decoded_frames,
             rally_settings,
         )?;
+        if let Some(reason) = mask.fallback_reason {
+            return Err(format!(
+                "Не найдены надёжные розыгрыши ({reason}); поиск игроков и поз не запускался. Проверьте траекторию мяча и настройки розыгрышей"
+            ));
+        }
         ball_writer.ball_samples = None;
         let selected_frames = mask.included_frames();
         let mut mask_value = serde_json::to_value(&mask)

@@ -394,7 +394,7 @@ VBallNet определяет мяч.	VBallNet detects the ball.
 определяет игроков и скелеты. Результат сохраняется для повторной постобработки.	detects players and skeletons. Results are saved for repeated postprocessing.
 Исходное видео	Source video
 Шаг анализа мяча	Ball analysis stride
-Шаг окон VBallNet в кадрах: от 1 до 9. Меньший шаг увеличивает перекрытие окон и время анализа.	VBallNet window stride: 1–9 frames. A smaller stride increases overlap and processing time.
+Шаг VBallNet: 9 кадров, фиксирован для общего GPU-конвейера.	VBallNet uses a fixed 9-frame step in the shared GPU pipeline.
 Игроки и позы · шаг, кадров	Players and poses · stride, frames
 Детектор игроков и RTMPose работают на одних кадрах, по реальным рамкам детектора. Промежуточные кадры не передаются в эти нейросети.	The player detector and RTMPose use the same frames and observed detector boxes. Intermediate frames are not sent to these models.
 Видео: 30 кадров в секунду (30 FPS). Каждый 10-й кадр → 3 раза/с.	Video: 30 frames per second (30 FPS). Every 10th frame → 3 samples/s.
