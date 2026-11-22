@@ -42,7 +42,7 @@ impl Default for DirectionBreakConfig {
     fn default() -> Self {
         Self {
             min_turn_angle_deg: 45.0,
-            max_join_error_px: 20.0,
+            max_join_error_px: 28.0,
             max_fit_error_px: 4.0,
             min_separation_frames: 6,
         }
@@ -330,7 +330,16 @@ pub fn trajectory_direction_breaks(
         let Some(smooth) = fit(&joined, at) else {
             continue;
         };
-        if smooth.error < 2.0 || error > smooth.error * 0.65 {
+        let lateral_before = left[left.len() - 1].x - left[0].x;
+        let lateral_after = right[right.len() - 1].x - right[0].x;
+        let sustained_lateral_reversal = lateral_before * lateral_after < 0.0
+            && lateral_before.abs().min(lateral_after.abs()) > 2.0 * config.max_fit_error_px;
+        let impossible_gravity_reversal = by > 0.0 && ay < 0.0;
+        if (smooth.error <= config.max_fit_error_px
+            && !sustained_lateral_reversal
+            && !impossible_gravity_reversal)
+            || error > smooth.error * 0.65
+        {
             continue;
         }
         let candidate = TrajectoryBreak {
@@ -453,6 +462,40 @@ mod tests {
             ..TrajectoryBreakConfig::default()
         }
         .valid());
+    }
+
+    #[test]
+    fn quantized_gravity_apex_does_not_trigger_direction_break() {
+        let observations = [
+            (-7, 675.0, 266.25),
+            (-6, 678.75, 262.5),
+            (-5, 682.5, 258.75),
+            (-4, 686.25, 255.0),
+            (-3, 686.25, 251.25),
+            (-2, 690.0, 251.25),
+            (-1, 693.75, 247.5),
+            (0, 700.0, 250.0),
+            (1, 705.0, 247.5),
+            (2, 708.75, 251.25),
+            (3, 712.5, 255.0),
+            (4, 712.5, 255.0),
+            (5, 716.25, 258.75),
+            (6, 720.0, 258.75),
+            (7, 723.75, 262.5),
+        ];
+        let points: Vec<_> = observations
+            .into_iter()
+            .map(|(dt, x, y)| BallObservation {
+                frame: 30 + dt,
+                x,
+                y,
+            })
+            .collect();
+        let found = trajectory_direction_breaks(&points, DirectionBreakConfig::default());
+        assert!(
+            found.is_empty(),
+            "smooth quantized flight generated false contact: {found:?}"
+        );
     }
 
     #[test]

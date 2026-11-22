@@ -55,7 +55,7 @@ const $=id=>{
 };
 const logs=[],writeActions=[],calculations=[],classifications=[];
 for(const [id,value] of [
-  ["studio-impact-angle","45"],["studio-impact-join","20"],
+  ["studio-impact-angle","45"],["studio-impact-join","28"],
   ["studio-impact-fit-error","4"],["studio-impact-min-separation","6"]
 ])elements.set(id,Object.assign(new Element(),{value}));
 const original={
@@ -138,7 +138,7 @@ assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].rally)),
   {mode:"continuous",merge_gap_seconds:4,min_trajectory_seconds:1.5});
 assert.equal(annotation.prediction.proposals.length,2);
 assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].impact)),{
-  min_turn_angle_deg:45,max_join_error_px:20,
+  min_turn_angle_deg:45,max_join_error_px:28,
   max_fit_error_px:4,min_separation_frames:6
 });
 assert.equal(annotation.classify.disabled,false,"Type stage requires ball candidates");
