@@ -20,11 +20,18 @@
     zoomField:$("studio-montage-zoom-field"),previewList:$("studio-montage-preview-list"),
     refresh:$("studio-montage-refresh"),preview:$("studio-montage-preview"),
     start:$("studio-montage-start"),legacyStart:$("studio-render"),job:$("studio-job"),
-    cancel:$("studio-cancel"),download:$("studio-download"),help:$("studio-montage-help")
+    cancel:$("studio-cancel"),download:$("studio-download"),help:$("studio-montage-help"),
+    assembly:$("studio-montage-assembly"),library:$("studio-montage-library"),
+    sequence:$("studio-montage-sequence"),video:$("studio-montage-video"),
+    play:$("studio-montage-play"),restart:$("studio-montage-restart"),
+    playStatus:$("studio-montage-play-status"),playPosition:$("studio-montage-play-position"),
+    draftCount:$("studio-montage-draft-count")
   };
   if(!ui.profile)return;
   const st={project:"",token:0,busy:false,runs:new Map(),available:new Map(),fingerprint:"",key:"",
-    jobId:"",timer:null,audioSeconds:null,audioURL:""};
+    jobId:"",timer:null,audioSeconds:null,audioURL:"",
+    sourceKey:"",favoriteItems:[],order:[],previewIndex:-1,playEpoch:0,
+    mediaVideo:"",advancing:false,finished:false};
   const option=(label,value)=>{const node=document.createElement("option");
     node.textContent=String(label);node.value=String(value);return node;};
   const validRun=value=>typeof value==="string"&&/^[a-f0-9]{32}$/.test(value);
@@ -77,6 +84,9 @@
     ui.sources.classList.toggle("hidden",favorite);
     ui.statisticsField.classList.toggle("hidden",mode()!=="report");
     ui.favorites.classList.toggle("hidden",!favorite);
+    ui.assembly.classList.toggle("hidden",!favorite);
+    ui.play.disabled=st.busy||!favorite||!st.order.length;
+    ui.restart.disabled=st.busy||!favorite||!st.order.length;
     ui.cameraField.classList.toggle("hidden",ui.layout.value==="original");
     ui.zoomField.classList.toggle("hidden",ui.layout.value==="original"||ui.camera.value!=="on");
     ui.start.disabled=st.busy;ui.preview.disabled=st.busy;ui.refresh.disabled=st.busy;
@@ -97,10 +107,251 @@
       Math.max(8,Math.min(600,Math.round(st.audioSeconds))));
     invalidate();sync();
   };
+  const favoriteId=id=>typeof id==="string"&&/^[a-f0-9]{24}$/.test(id);
+  const draftStoreKey=()=>st.sourceKey?"volley:montage-draft:v1:"+st.sourceKey:"";
+  const readDraft=()=>{
+    try{
+      const raw=sessionStorage.getItem(draftStoreKey());
+      if(!raw||raw.length>2400)return [];
+      const ids=JSON.parse(raw);
+      return Array.isArray(ids)&&ids.length<=80&&ids.every(favoriteId)&&
+        new Set(ids).size===ids.length?ids:[];
+    }catch{return [];}
+  };
+  const saveDraft=()=>{
+    try{if(st.sourceKey)sessionStorage.setItem(draftStoreKey(),JSON.stringify(st.order));}catch{}
+  };
+  const chosen=()=>st.order.map(id=>st.favoriteItems.find(item=>item.id===id)).filter(Boolean);
+  window.VolleyballMontageDraft={
+    ids:(project,run)=>st.sourceKey===JSON.stringify([project,run])?
+      chosen().map(item=>item.id):[]
+  };
+  const setStatus=(message)=>{
+    ui.playStatus.textContent=message;
+    ui.playPosition.textContent=st.previewIndex<0?"0 / "+st.order.length:
+      (st.previewIndex+1)+" / "+st.order.length;
+  };
+  const stopPreview=()=>{
+    st.playEpoch++;st.previewIndex=-1;st.advancing=false;st.finished=false;
+    st.mediaVideo="";
+    if(window.VolleyballBrowserVideo?.cancel)window.VolleyballBrowserVideo.cancel(ui.video);
+    else{
+      ui.video.pause();
+      ui.video.removeAttribute("src");
+      ui.video.load();
+    }
+    setStatus(st.order.length?"Нажмите «Смотреть подборку» для просмотра всех фрагментов.":
+      "Добавьте розыгрыши в монтаж, чтобы начать просмотр.");
+  };
+  const notifyDraft=()=>{
+    saveDraft();stopPreview();renderAssembly();sync();
+    if(typeof CustomEvent==="function")
+      window.dispatchEvent(new CustomEvent("volley:montage-draft-change",
+        {detail:{project_id:ui.project.value,ids:chosen().map(item=>item.id)}}));
+  };
+  const clipButton=(text,label,handler,disabled=false)=>{
+    const button=document.createElement("button");button.type="button";
+    button.className="secondary";button.textContent=text;button.title=label;
+    button.setAttribute("aria-label",label);button.disabled=disabled;
+    button.addEventListener("click",handler);return button;
+  };
+  const clipCard=(clip,index,isSequence)=>{
+    const card=document.createElement("article");
+    card.className="montage-clip-card"+(isSequence&&st.previewIndex===index?" active":"");
+    if(isSequence){
+      card.draggable=true;
+      card.addEventListener("dragstart",event=>{
+        event.dataTransfer?.setData("text/plain",clip.id);
+        if(event.dataTransfer)event.dataTransfer.effectAllowed="move";
+      });
+      card.addEventListener("dragover",event=>{event.preventDefault();card.classList.add("drag-over");});
+      card.addEventListener("dragleave",()=>card.classList.remove("drag-over"));
+      card.addEventListener("drop",event=>{
+        event.preventDefault();card.classList.remove("drag-over");
+        const id=event.dataTransfer?.getData("text/plain");
+        const from=st.order.indexOf(id);
+        if(from<0||from===index)return;
+        st.order.splice(from,1);st.order.splice(index,0,id);notifyDraft();
+      });
+    }
+    const poster=document.createElement("div");poster.className="montage-clip-poster";
+    const img=document.createElement("img");img.loading="lazy";
+    img.alt="Кадр розыгрыша";
+    img.src="/api/video-preview?"+new URLSearchParams({
+      video:clip.video,time:String(Math.max(0,clip.start+0.2)),width:"320"
+    }).toString();
+    const number=document.createElement("span");number.className="montage-clip-index";
+    number.textContent=isSequence?String(index+1):"★";
+    poster.append(img,number);
+    const body=document.createElement("div");body.className="montage-clip-body";
+    const title=document.createElement("strong");title.className="montage-clip-title";
+    title.textContent=clip.time;
+    const detail=document.createElement("span");detail.className="montage-clip-detail";
+    detail.textContent=clip.duration+" · "+clip.video;
+    const controls=document.createElement("div");controls.className="montage-clip-controls";
+    if(isSequence){
+      controls.append(
+        clipButton("←","Переместить раньше",()=>{
+          if(index===0)return;
+          [st.order[index-1],st.order[index]]=[st.order[index],st.order[index-1]];
+          notifyDraft();
+        },index===0),
+        clipButton("→","Переместить позже",()=>{
+          if(index===st.order.length-1)return;
+          [st.order[index+1],st.order[index]]=[st.order[index],st.order[index+1]];
+          notifyDraft();
+        },index===st.order.length-1),
+        clipButton("×","Убрать из монтажа",()=>{
+          st.order.splice(index,1);notifyDraft();
+        })
+      );
+    }else{
+      const included=st.order.includes(clip.id);
+      controls.append(clipButton(included?"✓ В монтаже":"+ Добавить в монтаж",
+        included?"Розыгрыш уже в монтаже":"Добавить розыгрыш в монтаж",()=>{
+          if(st.order.length>=80||st.order.includes(clip.id))return;
+          st.order.push(clip.id);notifyDraft();
+        },included||st.order.length>=80));
+    }
+    body.append(title,detail,controls);card.append(poster,body);
+    return card;
+  };
+  const renderAssembly=()=>{
+    ui.library.replaceChildren();ui.sequence.replaceChildren();
+    for(const [index,clip] of chosen().entries())
+      ui.sequence.append(clipCard(clip,index,true));
+    if(!st.order.length){
+      const empty=document.createElement("p");empty.className="montage-assembly-empty";
+      empty.textContent="Монтажная лента пуста. Добавьте эпизоды из избранного ниже.";
+      ui.sequence.append(empty);
+    }
+    for(const [index,clip] of st.favoriteItems.entries())
+      ui.library.append(clipCard(clip,index,false));
+    if(!st.favoriteItems.length){
+      const empty=document.createElement("p");empty.className="montage-assembly-empty";
+      empty.textContent="Нет размеченного избранного для выбранной CPU-версии. Отметьте розыгрыши в предпросмотре.";
+      ui.library.append(empty);
+    }
+    ui.draftCount.textContent=st.order.length+" · "+chosen().reduce((total,clip)=>
+      total+Math.max(0,clip.end-clip.start),0).toFixed(1)+" с";
+    ui.play.disabled=st.busy||!st.order.length||mode()!=="favorites";
+    ui.restart.disabled=ui.play.disabled;
+  };
+  const acceptFavorites=event=>{
+    const data=event.detail;
+    if(!data||data.project_id!==ui.project.value||!data.rally_run_id||
+      (ui.run.value&&ui.run.value!==data.rally_run_id))return;
+    const key=JSON.stringify([data.project_id,data.rally_run_id]);
+    st.project=data.project_id;
+    if(key!==st.sourceKey){
+      stopPreview();st.sourceKey=key;st.order=readDraft();st.favoriteItems=[];
+    }
+    if(!data.ready)return;
+    const items=Array.isArray(data.items)?data.items.filter(clip=>
+      favoriteId(clip.id)&&typeof clip.video==="string"&&
+      clip.video===data.video&&Number.isFinite(clip.start)&&
+      Number.isFinite(clip.end)&&clip.start>=0&&clip.end>clip.start).slice(0,80):[];
+    const ids=new Set(items.map(item=>item.id));
+    const filtered=st.order.filter(id=>ids.has(id));
+    if(JSON.stringify(items)===JSON.stringify(st.favoriteItems)&&
+      filtered.length===st.order.length)return;
+    const changed=filtered.length!==st.order.length;
+    st.favoriteItems=items;st.order=filtered;
+    if(changed){saveDraft();stopPreview();}
+    renderAssembly();sync();
+  };
+  const showClip=async(index)=>{
+    const clip=chosen()[index];
+    if(!clip)return false;
+    const epoch=++st.playEpoch;
+    st.advancing=true;st.finished=false;st.previewIndex=index;
+    setStatus("Загрузка розыгрыша "+(index+1)+" из "+st.order.length+"…");
+    try{
+      if(st.mediaVideo!==clip.video){
+        st.mediaVideo=clip.video;
+        if(window.VolleyballBrowserVideo?.load){
+          await window.VolleyballBrowserVideo.load(ui.video,st.project,clip.video,
+            {seek:clip.start,autoplay:false});
+        }else{
+          ui.video.src="/api/video-media?"+new URLSearchParams({
+            project_id:st.project,video:clip.video
+          }).toString();
+          ui.video.load();
+          if(ui.video.readyState<1)await new Promise((resolve,reject)=>{
+            const loaded=()=>{cleanup();resolve();};
+            const failed=()=>{cleanup();reject(Error("Не удалось открыть исходное видео"));};
+            const cleanup=()=>{
+              clearTimeout(timeout);
+              ui.video.removeEventListener("loadedmetadata",loaded);
+              ui.video.removeEventListener("error",failed);
+            };
+            const timeout=setTimeout(failed,15000);
+            ui.video.addEventListener("loadedmetadata",loaded);
+            ui.video.addEventListener("error",failed);
+            if(ui.video.readyState>=1)loaded();
+          });
+        }
+      }
+      if(epoch!==st.playEpoch)return false;
+      if(ui.video.readyState<1)await new Promise((resolve,reject)=>{
+        const ready=()=>{cleanup();resolve();};
+        const failed=()=>{cleanup();reject(Error("Не удалось загрузить видеокадры"));};
+        const cleanup=()=>{
+          clearTimeout(timeout);
+          ui.video.removeEventListener("loadedmetadata",ready);
+          ui.video.removeEventListener("error",failed);
+        };
+        const timeout=setTimeout(failed,15000);
+        ui.video.addEventListener("loadedmetadata",ready);
+        ui.video.addEventListener("error",failed);
+        if(ui.video.readyState>=1)ready();
+      });
+      if(epoch!==st.playEpoch)return false;
+      ui.video.currentTime=clip.start;
+      ui.playPosition.textContent=(index+1)+" / "+st.order.length;
+      await ui.video.play();
+      if(epoch!==st.playEpoch)return false;
+      setStatus("Просмотр: розыгрыш "+(index+1)+" из "+st.order.length);
+      return true;
+    }catch(error){
+      if(epoch===st.playEpoch)setStatus("Ошибка предпросмотра: "+String(error.message||error));
+      return false;
+    }finally{
+      if(epoch===st.playEpoch){st.advancing=false;renderAssembly();}
+    }
+  };
+  ui.video.addEventListener("timeupdate",()=>{
+    if(st.advancing||st.finished||st.previewIndex<0)return;
+    const clip=chosen()[st.previewIndex];
+    if(!clip)return;
+    if(ui.video.currentTime+0.06>=clip.end){
+      if(st.previewIndex+1<st.order.length)void showClip(st.previewIndex+1);
+      else{
+        st.finished=true;ui.video.pause();
+        setStatus("Просмотр подборки завершён. Можно изменить порядок или запустить монтаж.");
+      }
+    }
+  });
+  ui.video.addEventListener("ended",()=>{
+    if(!st.advancing&&!st.finished&&st.previewIndex>=0){
+      if(st.previewIndex+1<st.order.length)void showClip(st.previewIndex+1);
+      else{
+        st.finished=true;setStatus("Просмотр подборки завершён.");
+      }
+    }
+  });
+  ui.play.addEventListener("click",()=>{void showClip(0);});
+  ui.restart.addEventListener("click",()=>{void showClip(0);});
+  window.addEventListener("volley:montage-favorites",acceptFavorites);
+  renderAssembly();
   const load=async()=>{
     const token=++st.token;st.project=ui.project.value;st.runs.clear();
     st.available.clear();
     invalidate();ui.sourceList.replaceChildren();ui.player.replaceChildren();
+    if(st.sourceKey&&!st.sourceKey.startsWith(JSON.stringify([st.project]).slice(0,-1))){
+      stopPreview();st.sourceKey="";st.order=[];st.favoriteItems=[];
+      renderAssembly();
+    }
     ui.player.append(option("Выберите игрока",""));
     if(!st.project){show("Выберите проект.");sync();return;}
     st.busy=true;sync();show("Получаем версии CPU и состав игроков...");
@@ -191,9 +442,9 @@
   };
   const preview=async()=>{
     if(mode()==="favorites"){
-      const count=Number($("studio-selected-count")?.textContent)||0;
-      show(count?"Избранных розыгрышей: "+count:"Нет избранных розыгрышей.");
-      return count>0;
+      if(!st.order.length){show("Добавьте розыгрыши в монтажную ленту.",true);return false;}
+      show("В подборке "+st.order.length+" розыгрышей. Предпросмотр из оригинального видео.");
+      return showClip(0);
     }
     if(!selectedRuns().length)throw Error("Нет выбранных CPU-версий");
     if(mode()==="player"&&!ui.player.value)throw Error("Выберите игрока");

@@ -3099,11 +3099,35 @@
       count>80?
         "В избранном "+count+" розыгрышей. Для одного монтажа допускается не больше 80 — уберите лишние отметки.":
       count?
-        "В избранном "+count+" розыгрышей. Монтаж из оригинального видео в хронологическом порядке.":
+        "В избранном "+count+" розыгрышей. Добавьте нужные эпизоды в монтажную ленту и настройте порядок.":
         "Отмечайте розыгрыши как «Избранное» в предпросмотре — они появятся здесь для монтажа.";
+    const draft=window.VolleyballMontageDraft?.ids(s.project,s.run)||[];
     ui.render.disabled=!wasmReady||s.busy||!s.run||!s.marksLoaded||
-      count===0||count>80||s.selected.size!==count;
+      count===0||count>80||s.selected.size!==count||
+      draft.length===0||draft.some(id=>!s.selected.has(id));
+    const material=timeline.data?.project_id===s.project&&
+      timeline.data?.rally_run_id===s.run?timeline.data:null;
+    const verified=new Map((Array.isArray(material?.montage_plan)?material.montage_plan:[])
+      .filter(item=>typeof item.candidate_id==="string")
+      .map(item=>[item.candidate_id,item]));
+    const items=[...s.selected.keys()].map(id=>{
+      const clip=verified.get(id);
+      const start=Number(clip?.start_sec),end=Number(clip?.end_sec);
+      if(!clip||!Number.isFinite(start)||!Number.isFinite(end)||
+        start<0||end<=start||clip.video!==s.video)return null;
+      const label=s.selected.labels?.get(id);
+      return {id,video:clip.video,start,end,
+        time:label?.time||"Розыгрыш "+id.slice(0,8),
+        duration:(end-start).toFixed(1)+" с"};
+    }).filter(Boolean);
+    window.dispatchEvent(new CustomEvent("volley:montage-favorites",{
+      detail:{project_id:s.project,rally_run_id:s.run,ready:Boolean(material),
+        video:s.video,items}
+    }));
   };
+  window.addEventListener("volley:montage-draft-change",()=>{
+    if(wasmReady)renderSelection();
+  });
   const reset=()=>{
     s.generation++;s.run="";s.video="";s.items=[];s.total=0;s.filtered=0;s.offset=0;s.analysisOffset=0;
     s.loadingMore=false;s.canLoadMore=true;s.pageLoading=false;s.pageError="";s.fps=0;
@@ -3975,9 +3999,11 @@
     }catch(e){failed(e);}
   };
   const startMontage=async()=>{
+    const ids=window.VolleyballMontageDraft?.ids(s.project,s.run)||[];
     if(!wasmReady||s.busy||!s.run||!s.marksLoaded||!s.gold.size||
-      s.gold.size>80||s.selected.size!==s.gold.size)return;
-    const project=s.project,run=s.run,ids=Array.from(s.selected.keys());
+      s.gold.size>80||s.selected.size!==s.gold.size||!ids.length||
+      ids.some(id=>!s.selected.has(id)))return;
+    const project=s.project,run=s.run;
     s.busy=true;ui.render.disabled=true;ui.download.classList.add("hidden");
     document.getElementById("studio-download-archive")?.classList.add("hidden");
     try{

@@ -542,6 +542,33 @@
                 <p id="studio-montage-help" class="panel-note">Для персонального рилса используются только короткие фрагменты вокруг проверенных касаний.</p>
               </div>
             </div>
+            <section id="studio-montage-assembly" class="montage-assembly" aria-label="Предпросмотр и порядок монтажа">
+              <div class="montage-assembly-heading">
+                <div><p class="eyebrow">ПЕРЕД ФИНАЛЬНЫМ МОНТАЖОМ</p><h3>Предпросмотр будущего ролика</h3>
+                  <p class="panel-note">Последовательное воспроизведение из оригинального видео без рендера. Кадрирование, музыка и эффекты применяются при создании MP4.</p></div>
+                <div class="montage-assembly-actions">
+                  <button id="studio-montage-play" type="button" class="primary" disabled>▶ Смотреть подборку</button>
+                  <button id="studio-montage-restart" type="button" class="secondary" disabled>↺ С начала</button>
+                </div>
+              </div>
+              <div class="montage-assembly-viewer">
+                <video id="studio-montage-video" controls playsinline preload="metadata" aria-label="Предпросмотр монтажной подборки"></video>
+                <div class="montage-assembly-meta">
+                  <span id="studio-montage-play-status" role="status" aria-live="polite">Добавьте розыгрыши в монтаж, чтобы начать просмотр.</span>
+                  <span id="studio-montage-play-position">0 / 0</span>
+                </div>
+              </div>
+              <div class="montage-assembly-heading">
+                <div><h3>Монтажная лента · <span id="studio-montage-draft-count">0</span></h3>
+                  <p class="panel-note">Перетаскивайте карточки или используйте стрелки. Экспорт повторит этот порядок.</p></div>
+              </div>
+              <div id="studio-montage-sequence" class="montage-assembly-sequence" aria-live="polite"></div>
+              <div class="montage-assembly-heading montage-library-heading">
+                <div><h3>Избранные розыгрыши</h3>
+                  <p class="panel-note">Нажмите «Добавить в монтаж» под нужным видео. Избранное остаётся сохранённым в предпросмотре.</p></div>
+              </div>
+              <div id="studio-montage-library" class="montage-assembly-library" aria-label="Каталог избранных розыгрышей"></div>
+            </section>
           </section>
         </section>
         <section id="studio-analysis-view" class="hidden tab-workspace" aria-labelledby="studio-analysis-heading">
