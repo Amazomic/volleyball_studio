@@ -1970,7 +1970,7 @@ body[data-ui-theme="light"] .analysis-flow-phase[data-phase="gpu"] .analysis-flo
 body[data-ui-theme="light"] .analysis-flow-phase[data-phase="cpu"] .analysis-flow-phase-label{color:#315e99}
 .analysis-flow-cell{position:relative;z-index:3;min-width:0;display:flex;flex-direction:column;align-items:stretch;gap:5px}
 .analysis-flow-node-stats{display:block;height:16px;line-height:16px;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;font-size:clamp(10px,.75vw,12px);font-weight:500;color:#8c9eb5;font-variant-numeric:tabular-nums}
-.analysis-flow-node-player-ids{display:block;text-align:center;white-space:pre-line;line-height:14px;font-size:clamp(10px,.7vw,11px);font-weight:550;color:#b0bac9;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.analysis-flow-node-stage-metrics{display:block;text-align:center;white-space:pre-line;line-height:14px;font-size:clamp(10px,.7vw,11px);font-weight:550;color:#b0bac9;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 .analysis-flow-node{position:relative;isolation:isolate;min-width:0;width:100%;height:58px;padding:6px 7px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;overflow:hidden;text-align:center;color:#eaf5ff;border:1px solid #365779;border-radius:10px;cursor:pointer;font-family:inherit;font-size:clamp(10px,.9vw,13px);font-weight:700;line-height:1.2;transition:background .18s,border-color .18s,box-shadow .18s}
 .analysis-flow-node-heading-row{display:flex;align-items:center;justify-content:center;gap:6px;max-width:100%}
 .analysis-flow-node-icon{width:17px;height:17px;flex:0 0 17px;color:#cdefff}

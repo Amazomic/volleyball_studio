@@ -521,19 +521,29 @@
       String(Math.floor(seconds/60)%60).padStart(2,"0")+":"+
       String(seconds%60).padStart(2,"0");
   };
-  const playerTrackingSummary=run=>{
+  const playerTrackingSummary=(run,id)=>{
     const stats=run?.player_tracking_stats;
-    const raw=stats?.raw_detections,total=stats?.total_track_ids;
-    const short=stats?.short_track_ids,final=stats?.track_ids;
-    if(![raw,total,short,final].every(n=>Number.isSafeInteger(n)&&n>=0)||
-      total<final||total<short)return null;
     const fmt=n=>n.toLocaleString("ru-RU");
-    return {
-      text:fmt(raw)+" обнаружений\n"+fmt(final)+" ID после ByteTrack",
-      title:"RF-DETR: "+fmt(raw)+" обнаружений на игровых кадрах. ByteTrack создал "+
-        fmt(total)+" Track ID, отбросил "+fmt(short)+" коротких ID; осталось "+
-        fmt(final)+" ID. Это треки, а не подтверждённые личности игроков."
-    };
+    if(id==="players"){
+      const raw=stats?.raw_detections;
+      if(!Number.isSafeInteger(raw)||raw<0)return null;
+      return {
+        text:fmt(raw)+" обнаружений",
+        title:"RF-DETR: "+fmt(raw)+" обнаружений на игровых кадрах."
+      };
+    }
+    if(id==="tracking"){
+      const total=stats?.total_track_ids,short=stats?.short_track_ids,final=stats?.track_ids;
+      if(![total,short,final].every(n=>Number.isSafeInteger(n)&&n>=0)||
+        total<final||total<short)return null;
+      return {
+        text:fmt(final)+" ID после ByteTrack",
+        title:"ByteTrack создал "+fmt(total)+" Track ID, отбросил "+
+          fmt(short)+" коротких ID; осталось "+fmt(final)+
+          " ID. Это треки, а не подтверждённые личности игроков."
+      };
+    }
+    return null;
   };
   const stageResultText=(id,entry,run,now,done,running)=>{
     if(id==="pose"&&!entry&&(run?.gpu_jobs?.pose||running)){
@@ -777,7 +787,7 @@
       });
       const stats=make("small","analysis-flow-node-stats","—");
       cell.append(node,stats);
-      if(id==="players")cell.append(make("small","analysis-flow-node-player-ids hidden"));
+      if(id==="players"||id==="tracking")cell.append(make("small","analysis-flow-node-stage-metrics hidden"));
       grid.append(cell);
     }
     target.append(svg,grid);
@@ -834,9 +844,9 @@
         stats.title=stats.textContent==="—"?"Нет данных об этапе":
           sharedPose?"RTMPose и RF-DETR использовали общий GPU-проход; время указано совместное. "+stats.textContent:stats.textContent;
       }
-      if(id==="players"){
-        const metrics=playerTrackingSummary(run);
-        const detail=node.parentElement.querySelector(".analysis-flow-node-player-ids");
+      if(id==="players"||id==="tracking"){
+        const metrics=playerTrackingSummary(run,id);
+        const detail=node.parentElement.querySelector(".analysis-flow-node-stage-metrics");
         if(detail){
           detail.textContent=metrics?.text||"";
           detail.title=metrics?.title||"";
