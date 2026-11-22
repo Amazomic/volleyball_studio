@@ -452,9 +452,6 @@ pub fn trajectory_direction_breaks(
             continue;
         }
         let join = (before.x[0] - after.x[0]).hypot(before.y[0] - after.y[0]);
-        if join > config.max_join_error_px {
-            continue;
-        }
         let (bx, by) = (before.x[1], before.y[1]);
         let (ax, ay) = (after.x[1], after.y[1]);
         let before_length = bx.hypot(by);
@@ -466,6 +463,31 @@ pub fn trajectory_direction_breaks(
         let angle = cosine.acos().to_degrees();
         if angle < config.min_turn_angle_deg {
             continue;
+        }
+        if join > config.max_join_error_px {
+            let observed_contact = points
+                .binary_search_by_key(&at, |point| point.frame)
+                .is_ok();
+            let missing =
+                right[0].frame - left[left.len() - 1].frame - if observed_contact { 2 } else { 1 };
+            let sustained_rebound = observed_contact
+                && (1..=2).contains(&missing)
+                && join <= (3.0 * config.max_join_error_px).min(84.0)
+                && angle >= config.min_turn_angle_deg.max(110.0)
+                && by >= 0.75 * config.max_fit_error_px
+                && ay <= -config.max_fit_error_px
+                && ax.abs() >= 2.0 * config.max_fit_error_px
+                && left.len() >= 5
+                && right.len() >= 5
+                && left[left.len() - 4..]
+                    .windows(2)
+                    .all(|pair| pair[1].y + 2.0 * config.max_fit_error_px >= pair[0].y)
+                && right[..4]
+                    .windows(2)
+                    .all(|pair| pair[1].y <= pair[0].y + 2.0 * config.max_fit_error_px);
+            if !sustained_rebound {
+                continue;
+            }
         }
         let joined: Vec<_> = left.iter().chain(right).copied().collect();
         let Some(smooth) = fit(&joined, at) else {
@@ -873,6 +895,66 @@ mod tests {
             impacts.len(),
             1,
             "Unexpected duplicate contacts: {impacts:?}"
+        );
+    }
+
+    #[test]
+    fn noisy_gap_at_a_sustained_sideways_rebound_still_yields_one_contact() {
+        let raw: Vec<_> = (12..65)
+            .map(|frame| {
+                let t = frame as f64 - 25.0;
+                let (x, y) = if frame <= 25 {
+                    (900.0 + 4.0 * t, 430.0 + 5.0 * t - 0.6 * t * t)
+                } else if frame == 26 {
+                    (1790.0, 620.0)
+                } else {
+                    let after = frame as f64 - 27.0;
+                    (
+                        825.0 - 15.0 * after,
+                        385.0 - 4.0 * after + 0.2 * after * after,
+                    )
+                };
+                BallObservation {
+                    frame,
+                    x: (x / 3.75).round() * 3.75,
+                    y: (y / 3.75).round() * 3.75,
+                }
+            })
+            .collect();
+        let cleaned =
+            crate::ball_interpolation::reconstruct_short_ball_motion(&raw, 1920, 1080, 28.0)
+                .unwrap();
+        assert_eq!(cleaned.rejected_frames, [26]);
+        let impacts =
+            trajectory_direction_breaks(&cleaned.observations, DirectionBreakConfig::default());
+        assert!(
+            impacts.iter().any(|impact| (24..=26).contains(&impact.frame)),
+            "A sustained downward-to-sideways reversal was missed after removing a false ball: {impacts:?}"
+        );
+        assert_eq!(
+            impacts.len(),
+            1,
+            "Unexpected duplicate contacts: {impacts:?}"
+        );
+
+        let switched: Vec<_> = raw
+            .iter()
+            .copied()
+            .map(|mut point| {
+                if point.frame >= 27 {
+                    point.x += 240.0;
+                }
+                point
+            })
+            .collect();
+        let cleaned =
+            crate::ball_interpolation::reconstruct_short_ball_motion(&switched, 1920, 1080, 28.0)
+                .unwrap();
+        assert_eq!(cleaned.rejected_frames, [26]);
+        assert!(
+            trajectory_direction_breaks(&cleaned.observations, DirectionBreakConfig::default())
+                .is_empty(),
+            "A distant track switch after a dropout is not a contact"
         );
     }
 
