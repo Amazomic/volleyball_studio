@@ -248,11 +248,26 @@ async fn album_vectors(
     Ok(vectors)
 }
 
+fn same_reference_track(left: &Value, right: &Value) -> bool {
+    let Some(track_id) = left["track_id"].as_u64().filter(|id| *id != 0) else {
+        return false;
+    };
+    if right["track_id"].as_u64() != Some(track_id) {
+        return false;
+    }
+    for key in ["project_id", "video", "replay_id", "source_replay_sha256"] {
+        if left[key].as_str().is_none_or(str::is_empty) || left[key] != right[key] {
+            return false;
+        }
+    }
+    left["rally_run_id"] == right["rally_run_id"]
+}
+
 fn redundant_references(
     album: &RefreshAlbum,
     vectors: &BTreeMap<String, Vec<f32>>,
 ) -> BTreeSet<String> {
-    let mut kept: Vec<(u64, &Vec<f32>)> = Vec::new();
+    let mut kept: Vec<(&Value, &Vec<f32>)> = Vec::new();
     let mut disabled = BTreeSet::new();
     let active_count = album
         .photos
@@ -266,18 +281,15 @@ fn redundant_references(
         if photo["reid_active"] == false {
             continue;
         }
-        let (Some(id), Some(sha), Some(track)) = (
-            photo["id"].as_str(),
-            photo["image_sha256"].as_str(),
-            photo["track_id"].as_u64(),
-        ) else {
+        let (Some(id), Some(sha)) = (photo["id"].as_str(), photo["image_sha256"].as_str()) else {
             continue;
         };
         let Some(vector) = vectors.get(sha) else {
             continue;
         };
-        let close_to_same_track = kept.iter().any(|(other_track, other)| {
-            *other_track == track && cosine(vector, other) >= DUPLICATE_COSINE_LIMIT
+        let close_to_same_track = kept.iter().any(|(other_photo, other)| {
+            same_reference_track(photo, other_photo)
+                && cosine(vector, other) >= DUPLICATE_COSINE_LIMIT
         });
         if close_to_same_track
             && disabled.len() < MAX_DISABLED_PER_ATHLETE
@@ -285,7 +297,7 @@ fn redundant_references(
         {
             disabled.insert(id.to_owned());
         } else {
-            kept.push((track, vector));
+            kept.push((photo, vector));
         }
     }
     disabled
@@ -614,6 +626,11 @@ mod tests {
                         "id":format!("{id:024x}"),
                         "image_sha256":format!("{id:064x}"),
                         "track_id":if id < 4 { 7 } else { 8 },
+                        "project_id":"project-1",
+                        "video":"match-1.mp4",
+                        "replay_id":"cpu-replay-1",
+                        "source_replay_sha256":"a".repeat(64),
+                        "rally_run_id":"rally-1",
                     })
                 })
                 .collect(),
@@ -628,5 +645,58 @@ mod tests {
         assert!(disabled.contains(&format!("{:024x}", 3)));
         assert!(!disabled.contains(&format!("{:024x}", 4)));
         assert_eq!(album.photos.len(), 6);
+    }
+
+    #[test]
+    fn same_numeric_track_id_across_videos_is_not_a_duplicate_reference() {
+        let videos = ["match-one.mp4", "match-two.mp4", "match-three.mp4"];
+        let album = RefreshAlbum {
+            player_id: "alice".into(),
+            revision: "absent".into(),
+            photos: (1..=6)
+                .map(|id| {
+                    json!({
+                        "id":format!("{id:024x}"),
+                        "image_sha256":format!("{id:064x}"),
+                        "track_id":if id <= 2 { 7 } else { id as u64 + 20 },
+                        "project_id":"project-1",
+                        "video":if id == 2 { videos[1] } else { videos[0] },
+                        "replay_id":"cpu-replay-1",
+                        "source_replay_sha256":"a".repeat(64),
+                        "rally_run_id":"rally-1",
+                    })
+                })
+                .collect(),
+        };
+        let vectors = (1..=6)
+            .map(|id| (format!("{id:064x}"), embedding(1.0, 0.0)))
+            .collect();
+        assert!(redundant_references(&album, &vectors).is_empty());
+    }
+
+    #[test]
+    fn same_numeric_track_id_across_replays_is_not_a_duplicate_reference() {
+        let album = RefreshAlbum {
+            player_id: "alice".into(),
+            revision: "absent".into(),
+            photos: (1..=5)
+                .map(|id| {
+                    json!({
+                        "id":format!("{id:024x}"),
+                        "image_sha256":format!("{id:064x}"),
+                        "track_id":if id <= 2 { 7 } else { id as u64 + 20 },
+                        "project_id":"project-1",
+                        "video":"match-1.mp4",
+                        "replay_id":if id == 2 { "cpu-replay-2" } else { "cpu-replay-1" },
+                        "source_replay_sha256":"a".repeat(64),
+                        "rally_run_id":"rally-1",
+                    })
+                })
+                .collect(),
+        };
+        let vectors = (1..=5)
+            .map(|id| (format!("{id:064x}"), embedding(1.0, 0.0)))
+            .collect();
+        assert!(redundant_references(&album, &vectors).is_empty());
     }
 }
