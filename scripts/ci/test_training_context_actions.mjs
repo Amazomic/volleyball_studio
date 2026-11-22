@@ -58,7 +58,7 @@ const context={
     addEventListener:(name,callback)=>{keys=callback;}},
   comparison,comparisonMatches:()=>true,comparisonTime:frame=>(frame/30).toFixed(2)+" с",
   annotation,annotationReady:()=>Boolean(annotation.data),
-  training:{active:true,poseAdvanced:{open:false}},
+  training:{active:true,poseAdvanced:{open:false}},reference:{active:false},
   s:{project:"p",video:"v",run:"r"},
   ui:{video:{pause:()=>{paused=true;}}},
   overlay:{canvas},

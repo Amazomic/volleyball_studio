@@ -176,10 +176,10 @@ const initOverlay={mode:tab(),rawMode:tab(),rawControls:controls,actionControls:
   rawPlayer:input,rawPose:input,rawPoseVisible:input,
   flags:{touches:true},actionFlags:{attack:true,unknown_touch:true}};
 runInNewContext(js.slice(initStart,initEnd),{
-  overlay:initOverlay,$:()=>({}),window:{addEventListener(){}},
-  training:{active:false,panel:{classList:{add(){}}}},comparison:{epoch:0},
+  overlay:initOverlay,$:()=>({classList:{remove(){}},disabled:false}),window:{addEventListener(){}},
+  training:{active:false,panel:{classList:{add(){}}}},reference:{active:false,epoch:0,entries:[],picker:{classList:{add(){}}},analysis:{setAttribute(){}},toggle:{setAttribute(){}}},comparison:{epoch:0},
   annotation:{lane:{querySelectorAll:()=>[]}},hideAnnotationContext(){},trainingEditorReset(){},
-  updateRawDetectorLabel(){},placeTrainingTimeline(){},
+  updateRawDetectorLabel(){},updateReferenceModeUi(){},placeTrainingTimeline(){},
   drawOverlay:()=>{redraws++;},drawTimeline:()=>{timelineRedraws++;},
   refreshRallyCardTouchTicks:()=>{cardRedraws++;},updateOverlayToggles:()=>{},
   setOverlaySource:()=>{},rawFusion:()=>({id:"f"}),s:{run:"",video:"",current:""},

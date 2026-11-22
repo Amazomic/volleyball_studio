@@ -203,6 +203,10 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
             get(touch_annotation::list).post(touch_annotation::edit),
         )
         .route(
+            "/api/training/annotations/catalog",
+            get(touch_annotation::catalog),
+        )
+        .route(
             "/api/training/trajectory/calculate",
             axum::routing::post(touch_annotation::trajectory::calculate),
         )

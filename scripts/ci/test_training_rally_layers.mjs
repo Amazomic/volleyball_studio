@@ -45,6 +45,7 @@ const canvas=Object.assign(new Node(),{
 });
 elements.set("studio-timeline-canvas",canvas);
 const training={active:true,panel:{before(){}}};
+const reference={active:false};
 const overlay={raw:false,flags:{rallies:false,touches:true},actionFlags:{unknown_touch:true}};
 const comparison={simulated:false,data:{trajectory_status:"ready",
   trajectory_rallies:[{start:30,end:105},{start:115,end:140}],
@@ -70,7 +71,7 @@ assert.ok(start>0&&end>start);
 const {timeline,drawTimeline,timelineRallyLayers}=runInNewContext(
   js.slice(mergeStart,mergeEnd)+"\n"+js.slice(start,end)+
     "\n({timeline,drawTimeline,timelineRallyLayers})",{
-    $,s,ui,training,overlay,comparison,annotation,
+    $,s,ui,training,overlay,comparison,annotation,reference,
     window:{devicePixelRatio:1},requestAnimationFrame:()=>{},
     document:{querySelector:()=>({append(){}})},
     comparisonMatches:()=>true,annotationReady:()=>true,
@@ -150,6 +151,17 @@ assert.equal(marks[".studio-annotation-tick"][0].hidden,false,
 assert.equal(marks[".studio-trajectory-proposal"][0].hidden,true);
 assert.equal(ui.list.scrollTop,0);
 assert.ok(renderedLists>=5,"Changing trajectory settings refreshes the rally list");
+reference.active=true;
+annotation.data.reviewed=true;
+timelineRallyLayers.ball.checked=true;
+timelineRallyLayers.touches.checked=false;
+rects.length=0;
+drawTimeline();
+assert.ok(palette().includes("#10deb2"),
+  "Verified touch marks remain visible in reference mode even when algorithm layers are disabled");
+assert.ok(!palette().includes("#efb15773"),
+  "Reference mode does not mix simulated trajectory rallies into the timeline");
+reference.active=false;
 assert.match(css,/#studio-preview-view\.training-workspace :is\(\.studio-training-source-cpu/);
 assert.match(css,/\[hidden\]\{display:none!important\}/);
 assert.match(html,/class="studio-training-source studio-training-source-cpu" hidden/);

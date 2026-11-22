@@ -38,7 +38,7 @@ const selector={value:""};
 let saved={project:"",analysis:"",run:""};
 let calls=0;
 const pickerContext={
-  s:state,ui:{project:selector},window,Event:class{constructor(type){this.type=type;}},
+  s:state,reference:{active:false},ui:{project:selector},window,Event:class{constructor(type){this.type=type;}},
   sourceSelection:{read:()=>saved},
   options:(select,rows)=>{select.options=rows.map(row=>({value:row.id}));},
   refreshPicker:()=>{},
