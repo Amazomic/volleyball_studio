@@ -12,6 +12,21 @@ const css=readFileSync(join(root,"rust/volley-app/static/studio.css"),"utf8");
 assert.match(css,/\.analysis-flow-diagram\{[^}]*max-width:none;width:100%/);
 assert.match(css,/\.analysis-flow-grid\{[^}]*grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
 assert.match(css,/\.analysis-flow-node\{[^}]*width:100%;height:84px/);
+assert.match(css,/\.analysis-flow-node-stats\{[^}]*font-size:/);
+assert.match(js,/cell\.append\(node,stats\)/);
+assert.match(js,/!!entry&&entry\.finished_ms==null&&entry===stages\.at\(-1\)/);
+const metricsSource=js.slice(js.indexOf("const stageTime="),js.indexOf("const pipelineEdges="));
+assert.ok(metricsSource.startsWith("const stageTime="));
+const metricsContext=vm.createContext({});
+vm.runInContext(metricsSource+"this.format=stageResultText;",metricsContext);
+const format=metricsContext.format;
+const run={status:"running",gpu_rally_mask:{merged:[[0,30],[90,130]]}};
+const entry={started_ms:1000,finished_ms:null,frames_processed:1450,frames_total:1450};
+assert.equal(format("players",entry,run,3662000,true,true),"1 450 / 1 450 кадров · 01:01:01");
+assert.equal(format("rallies",{started_ms:1000,finished_ms:3662000,duration_ms:3661000},run,4000000,true,false),"2 розыгрыша · 01:01:01");
+assert.equal(format("rallies",null,{status:"complete",gpu_rally_mask:{merged:[]}},0,false,false),"—");
+assert.equal(format("video",{duration_ms:423000,finished_ms:500000},{status:"complete"},0,true,false),"Готово · 00:07:03");
+assert.equal(format("touches",null,null,0,false,false),"—");
 for(const kind of ["input","gpu","cpu","output"]){
   assert.match(css,new RegExp('\\.analysis-flow-node\\[data-kind="'+kind+'"\\]\\{background:linear-gradient\\('));
 }

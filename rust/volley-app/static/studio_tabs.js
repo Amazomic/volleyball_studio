@@ -511,6 +511,31 @@
     return "";
   };
   const pipelineLabel=entry=>window.VolleyballUi.translate(pipelineNames.get(pipelineId(entry))||String(entry?.name||"Стадия"));
+  const stageTime=ms=>{
+    if(!Number.isFinite(ms)||ms<0)return "—";
+    const seconds=Math.floor(ms/1000);
+    return String(Math.floor(seconds/3600)).padStart(2,"0")+":"+
+      String(Math.floor(seconds/60)%60).padStart(2,"0")+":"+
+      String(seconds%60).padStart(2,"0");
+  };
+  const stageResultText=(id,entry,run,now,done,running)=>{
+    let result="";
+    if(id==="rallies"&&entry&&Array.isArray(run?.gpu_rally_mask?.merged)){
+      const count=run.gpu_rally_mask.merged.length;
+      const noun=count%10===1&&count%100!==11?"розыгрыш":
+        count%10>=2&&count%10<=4&&(count%100<12||count%100>14)?"розыгрыша":"розыгрышей";
+      result=count.toLocaleString("ru-RU")+" "+noun;
+    }else if(entry&&Number.isSafeInteger(entry.frames_processed)&&entry.frames_processed>=0&&
+        Number.isSafeInteger(entry.frames_total)&&entry.frames_total>0){
+      result=entry.frames_processed.toLocaleString("ru-RU")+" / "+
+        entry.frames_total.toLocaleString("ru-RU")+" кадров";
+    }else if(done)result="Готово";
+    else if(running)result="Выполняется";
+    if(!result)return "—";
+    const duration=running&&Number.isFinite(entry?.started_ms)&&entry?.finished_ms==null?
+      Math.max(0,now-entry.started_ms):entry?.duration_ms;
+    return result+" · "+stageTime(duration);
+  };
   const pipelineEdges=[
     ["video","ball"],["ball","rallies"],["rallies","players"],["players","pose"],
     ["pose","fusion"],["fusion","tracking"],["tracking","touches"],
@@ -628,8 +653,8 @@
       const a=byId.get(from),b=byId.get(to);if(!a||!b)continue;
       let d="",label=null;
       if(kind==="no-types"){
-        const y=b.t-11;
-        d="M "+a.cx+" "+a.b+" L "+a.cx+" "+y+" L "+b.cx+" "+y+" L "+b.cx+" "+b.t;
+        const x=a.r-14,y=b.t-11;
+        d="M "+x+" "+a.b+" L "+x+" "+y+" L "+b.cx+" "+y+" L "+b.cx+" "+b.t;
         label=["Без типов",(a.cx+b.cx)/2,y-3];
       }else if(kind==="cache"){
         const y=(a.b+b.t)/2;
@@ -643,7 +668,8 @@
         d=a.cx<b.cx?"M "+a.r+" "+a.cy+" L "+b.l+" "+b.cy:
           "M "+a.l+" "+a.cy+" L "+b.r+" "+b.cy;
       }else{
-        d="M "+a.cx+" "+a.b+" L "+b.cx+" "+b.t;
+        const x=Math.min(a.r,b.r)-14;
+        d="M "+x+" "+a.b+" L "+x+" "+b.t;
       }
       const path=element("path",{d,"class":"analysis-flow-edge"+(kind?" is-branch":""),
         "data-edge":from+"-"+to,"marker-end":"url(#"+markerId+")"});
@@ -668,9 +694,10 @@
     svg.setAttribute("class","analysis-flow-lines");svg.setAttribute("aria-hidden","true");
     const grid=make("div","analysis-flow-grid");
     for(const [id,name,kind,row,col] of pipelineStages){
+      const cell=make("div","analysis-flow-cell");
+      cell.style.gridRow=row;cell.style.gridColumn=col;
       const node=make("button","analysis-flow-node");
       node.type="button";node.dataset.stageId=id;node.dataset.kind=kind;
-      node.style.gridRow=row;node.style.gridColumn=col;
       const heading=make("span","analysis-flow-node-title",window.VolleyballUi.translate(name));
       const technical=make("span","analysis-flow-node-model");
       const meta=pipelineModelMeta(id,run);
@@ -688,7 +715,9 @@
         const entry=run?.stages?.find(item=>pipelineId(item)===(id==="touch_types"?"touches":id));
         openGraphSettings(id,run?entry||{name}:null);
       });
-      grid.append(node);
+      const stats=make("small","analysis-flow-node-stats","—");
+      cell.append(node,stats);
+      grid.append(cell);
     }
     target.append(svg,grid);
     requestAnimationFrame(()=>graphDraw(target));
@@ -710,7 +739,7 @@
         /RTMPose/.test(String(run?.stage||""));
       const concurrentTypes=id==="touch_types"&&currentId==="touches"&&classification;
       const running=active&&(id===currentId||combinedPose||concurrentTypes||
-        entry?.finished_ms==null&&entry===stages.at(-1));
+        !!entry&&entry.finished_ms==null&&entry===stages.at(-1));
       const done=!!entry&&(entry.finished_ms!=null||complete&&!running)&&
         (id!=="touch_types"||classification)||
         (id==="pose"&&!!run?.gpu_jobs?.pose&&
@@ -729,6 +758,11 @@
         technical.textContent=meta?.[0]||"";
         technical.classList.toggle("hidden",!meta);
         if(meta)technical.dataset.modelKind=meta[1];
+      }
+      const stats=node.nextElementSibling;
+      if(stats?.classList.contains("analysis-flow-node-stats")){
+        stats.textContent=stageResultText(id,entry,run,Date.now(),done,running);
+        stats.title=stats.textContent==="—"?"Нет данных об этапе":stats.textContent;
       }
       const name=pipelineNames.get(id)||id;
       node.title=name+(meta?" · "+(meta[1]==="model"?"Нейросеть":"Алгоритм")+": "+meta[0]:"")+
