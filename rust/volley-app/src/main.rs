@@ -65,6 +65,7 @@ mod video_edits;
 use axum::{
     response::Redirect,
     routing::{get, post},
+    serve::ListenerExt,
     Router,
 };
 use std::{env, error::Error, io, net::SocketAddr, path::PathBuf, sync::Arc};
@@ -459,6 +460,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
     };
     let root = root.canonicalize()?;
+    runtime::require_develop_checkout(&root, env::var_os("VOLLEY_REPOSITORY_ROOT").is_none())?;
     let _instance_guard = runtime::exclusive_instance(&root)?;
     let isolated = storage::writable_data_root(&root).map_err(|(_, message)| {
         io::Error::other(format!("Invalid project data root: {}", message.0))
@@ -511,8 +513,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "Volleyball Studio (development, INCOMPLETE): http://{addr}/internal/rewrite-status (isolated writes={writes_enabled})"
     );
     let gate = Arc::new(runtime::ShutdownGate::default());
-    axum::serve(listener, app_with_gate(state.clone(), gate.clone()))
-        .with_graceful_shutdown(shutdown_signal(state, gate))
-        .await?;
+    axum::serve(
+        listener.tap_io(|socket| {
+            #[cfg(target_os = "linux")]
+            if let Err(error) =
+                runtime::limit_stalled_http_connection(socket, std::time::Duration::from_secs(120))
+            {
+                eprintln!("Cannot apply bounded TCP stall timeout: {error}");
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = socket;
+        }),
+        app_with_gate(state.clone(), gate.clone()),
+    )
+    .with_graceful_shutdown(shutdown_signal(state, gate))
+    .await?;
     Ok(())
 }

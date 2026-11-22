@@ -10,6 +10,7 @@ assert.match(launcher, /git -C "\$repo" symbolic-ref --quiet --short HEAD/);
 assert.match(launcher, /git -C "\$repo" rev-parse --verify refs\/remotes\/origin\/develop/);
 assert.match(launcher, /start\|detach\|restart\) require_develop_checkout/);
 assert.match(launcher, /\[\[ "\$branch" == develop \]\]/);
+assert.match(launcher, /git -C "\$repo" status --porcelain --untracked-files=no/);
 assert.doesNotMatch(launcher, /profile="\$\{8/);
 assert.doesNotMatch(html, /studio-restart-profile/);
 assert.doesNotMatch(tasks, /restart\?profile=/);

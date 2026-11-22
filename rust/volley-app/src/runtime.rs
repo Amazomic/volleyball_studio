@@ -28,6 +28,72 @@ pub(crate) fn lock_path(repository: &Path) -> io::Result<PathBuf> {
     let hash = Sha256::digest(root.to_string_lossy().as_bytes());
     Ok(std::env::temp_dir().join(format!("volley-rust-instance-{hash:x}.lock")))
 }
+pub(crate) fn require_develop_checkout(repository: &Path, packaged: bool) -> io::Result<()> {
+    if !repository.join(".git").exists() {
+        if packaged {
+            return Ok(());
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Studio development launch denied: repository Git metadata is missing",
+        ));
+    }
+    let git = |args: &[&str]| -> io::Result<String> {
+        let result = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(args)
+            .output()?;
+        if !result.status.success() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "Studio development launch denied: git {} failed",
+                    args.join(" ")
+                ),
+            ));
+        }
+        Ok(String::from_utf8_lossy(&result.stdout).trim().to_owned())
+    };
+    let top = git(&["rev-parse", "--show-toplevel"])?;
+    if Path::new(&top).canonicalize()? != repository.canonicalize()? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Studio development launch denied: repository root mismatch",
+        ));
+    }
+    let branch = git(&["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    if branch != "develop" {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("Studio development launch denied: only develop is allowed, got {branch}"),
+        ));
+    }
+    let head = git(&["rev-parse", "--verify", "HEAD"])?;
+    let published = git(&["rev-parse", "--verify", "refs/remotes/origin/develop"])?;
+    if head != published {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Studio development launch denied: develop differs from origin/develop",
+        ));
+    }
+    if !git(&["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Studio development launch denied: checkout has uncommitted changes",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn limit_stalled_http_connection(
+    socket: &tokio::net::TcpStream,
+    timeout: std::time::Duration,
+) -> io::Result<()> {
+    socket2::SockRef::from(socket).set_tcp_user_timeout(Some(timeout))
+}
+
 pub(crate) fn exclusive_instance(repository: &Path) -> io::Result<InstanceGuard> {
     let path = lock_path(repository)?;
     if let Ok(metadata) = fs::symlink_metadata(&path) {
@@ -370,6 +436,158 @@ pub(crate) async fn rewrite_status(
 mod tests {
     use super::*;
     use uuid::Uuid;
+    #[test]
+    fn develop_only_native_entrypoint_rejects_unpublished_or_wrong_branch() {
+        let repo = std::env::temp_dir().join(format!("volley-branch-check-{}", Uuid::new_v4()));
+        fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let result = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "git {}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        };
+        assert!(require_develop_checkout(&repo, false).is_err());
+        assert!(require_develop_checkout(&repo, true).is_ok());
+        git(&["init", "-b", "develop"]);
+        git(&["config", "user.name", "Volley Test"]);
+        git(&["config", "user.email", "volley-test@example.invalid"]);
+        fs::write(repo.join("README.md"), "first\n").unwrap();
+        git(&["add", "README.md"]);
+        git(&["commit", "-m", "first"]);
+        git(&["update-ref", "refs/remotes/origin/develop", "HEAD"]);
+        require_develop_checkout(&repo, false).unwrap();
+        git(&["checkout", "-b", "feature"]);
+        assert!(require_develop_checkout(&repo, false).is_err());
+        git(&["checkout", "develop"]);
+        fs::write(repo.join("README.md"), "dirty\n").unwrap();
+        assert!(require_develop_checkout(&repo, false).is_err());
+        fs::write(repo.join("README.md"), "first\n").unwrap();
+        require_develop_checkout(&repo, false).unwrap();
+        fs::write(repo.join("README.md"), "second\n").unwrap();
+        git(&["add", "README.md"]);
+        git(&["commit", "-m", "second"]);
+        assert!(require_develop_checkout(&repo, false).is_err());
+        git(&["update-ref", "refs/remotes/origin/develop", "HEAD"]);
+        require_develop_checkout(&repo, false).unwrap();
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stalled_tcp_receiver_is_disconnected_by_kernel_timeout() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        socket2::SockRef::from(&client)
+            .set_recv_buffer_size(4096)
+            .unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        limit_stalled_http_connection(&server, std::time::Duration::from_millis(1100)).unwrap();
+        assert_eq!(
+            socket2::SockRef::from(&server).tcp_user_timeout().unwrap(),
+            Some(std::time::Duration::from_millis(1100))
+        );
+        let block = vec![0x5a; 64 * 1024];
+        let status = tokio::time::timeout(std::time::Duration::from_secs(9), async {
+            loop {
+                server.write_all(&block).await?;
+            }
+            #[allow(unreachable_code)]
+            Ok::<(), std::io::Error>(())
+        })
+        .await;
+        assert!(
+            matches!(status, Ok(Err(_))),
+            "A zero-window client must not hold a response indefinitely: {status:?}"
+        );
+        drop(client);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn abandoned_range_response_releases_http_shutdown_hold() {
+        use axum::{http::HeaderMap, routing::get, serve::ListenerExt, Router};
+        use tokio::io::AsyncWriteExt;
+        let source = std::env::temp_dir().join(format!("volley-stall-{}.mp4", Uuid::new_v4()));
+        fs::write(&source, vec![0x77; 24 * 1024 * 1024]).unwrap();
+        let gate = Arc::new(ShutdownGate::default());
+        let path = source.clone();
+        let app = Router::new()
+            .route(
+                "/media",
+                get(move |headers: HeaderMap| {
+                    let video = path.clone();
+                    async move { crate::playback::serve_mp4(video, &headers).await }
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                gate.clone(),
+                guard_request,
+            ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener.tap_io(|stream| {
+                    limit_stalled_http_connection(stream, std::time::Duration::from_millis(1100))
+                        .unwrap();
+                }),
+                app,
+            )
+            .await
+            .unwrap();
+        });
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        socket2::SockRef::from(&client)
+            .set_recv_buffer_size(4096)
+            .unwrap();
+        client
+            .write_all(
+                format!(
+                    "GET /media HTTP/1.1\r\nHost: {address}\r\nRange: bytes=0-\r\nConnection: keep-alive\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        for _ in 0..50 {
+            if gate.inflight() > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            gate.inflight() > 0,
+            "Media body must hold active HTTP status"
+        );
+        assert!(!gate.begin_shutdown());
+        for _ in 0..350 {
+            if gate.inflight() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            gate.inflight(),
+            0,
+            "Zero-window Range response must release its HTTP shutdown guard"
+        );
+        assert!(gate.begin_shutdown());
+        drop(client);
+        server.abort();
+        fs::remove_file(source).unwrap();
+    }
+
     #[test]
     fn exclusive_same_repo_even_if_ports_or_data_dirs_differ() {
         let dir = std::env::temp_dir().join(format!("volley-runtime-{}", Uuid::new_v4()));

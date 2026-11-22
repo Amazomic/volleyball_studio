@@ -29,6 +29,10 @@ require_develop_checkout(){
     { echo "Studio launch denied: origin/develop is unavailable" >&2;return 3; }
   [[ "$head" == "$published" ]] ||
     { echo "Studio launch denied: local develop differs from origin/develop" >&2;return 3; }
+  local dirty
+  dirty="$(git -C "$repo" status --porcelain --untracked-files=no)" ||return 3
+  [[ -z "$dirty" ]] ||
+    { echo "Studio launch denied: tracked files have uncommitted changes" >&2;return 3; }
 }
 case "$action" in
   start|detach|restart) require_develop_checkout;;

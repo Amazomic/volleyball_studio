@@ -20,7 +20,7 @@ Download both formats from [GitHub Releases](https://github.com/Amazomic/volleyb
 
 ## Build from source on Windows / WSL (developer workflow)
 
-The following `start-volley-ui.cmd` commands apply to a **repository checkout**, not a downloaded beta ZIP. Starting, detaching or restarting the source Studio is allowed only from an independent clean Git clone with checked-out `develop` at the exact `origin/develop` SHA. Feature branches, `master`, detached HEAD and outdated develop are rejected before a build or shutdown; `status`, `stop`, `doctor` and `check` remain available for diagnosis and safe recovery. A separate clone avoids disturbing an existing dirty `develop` worktree. The source launcher compiles as needed and uses the isolated WSL sandbox; its defaults differ from the prebuilt Windows launcher.
+The following `start-volley-ui.cmd` commands apply to a **repository checkout**, not a downloaded beta ZIP. Starting, detaching or restarting the source Studio is allowed only from an independent clean Git clone with checked-out `develop` at the exact `origin/develop` SHA. The Rust native entrypoint also enforces develop, origin/develop and clean tracked files for source checkouts, preventing direct-binary bypass. Standalone release archives without Git metadata remain supported. Feature branches, `master`, detached HEAD and outdated develop are rejected before a build or shutdown; `status`, `stop`, `doctor` and `check` remain available for diagnosis and safe recovery. A separate clone avoids disturbing an existing dirty `develop` worktree. The source launcher compiles as needed and uses the isolated WSL sandbox; its defaults differ from the prebuilt Windows launcher.
 
 The Rust launcher never starts/stops Python or changes original videos,
 historical results, or the global player cache.
@@ -72,7 +72,13 @@ preparation, Quick Reel jobs and in-flight HTTP response bodies block restart.
 In particular, an open Range video/audio stream remains active until its
 response body finishes or the client disconnects. While another response
 is open, status reports shutdown_safe=false and active_jobs includes
-http_responses. Close active browser playback and retry the guarded restart;
+http_responses. On Linux/WSL, each accepted TCP socket is configured
+with TCP_USER_TIMEOUT=120 seconds: if buffered bytes cannot be transmitted
+because the client has a zero receive window, the kernel closes the stalled
+connection and releases the HTTP shutdown guard. Active progressing video
+streams are not subject to a 120-second total-duration limit. An older
+running binary must be safely restarted to gain this protection.
+Close active browser playback and retry the guarded restart;
 do not escalate from a refusal to SIGKILL. SIGINT and SIGTERM both use native
 Tokio graceful shutdown; no force kill, Python process kill,
 or generic port-based termination is present.
