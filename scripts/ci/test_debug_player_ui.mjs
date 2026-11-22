@@ -34,6 +34,18 @@ assert.ok(css.includes(".studio-debug-settings-body"));
 assert.ok(css.includes(".studio-debug-settings-body .studio-temporal-labels"));
 assert.ok(!css.includes('grid-area:training'));
 assert.ok(!js.includes('layout.append(training.panel)'), "Do not move debug tools below the timeline");
+const internalOptions = html.match(/<div hidden aria-hidden="true" id="studio-training-internal-options">([\s\S]*?)<\/div>/);
+assert.ok(internalOptions, "Obsolete debug controls must be absent from the visible UI");
+for (const id of ["studio-training-merge-gap-seconds", "studio-training-ball-touch-candidates",
+  "studio-training-ball-touch-types", "studio-training-ball-touch-provenance",
+  "studio-training-ball-touch-types-status"]) {
+  assert.ok(internalOptions[1].includes('id="' + id + '"'), "Keep the internal state binding: " + id);
+}
+assert.ok(!html.includes('Объединять при паузе меньше'));
+assert.ok(!html.includes('<span>Определение касания</span>'));
+assert.ok(!html.includes('<span>Определение типа касания</span>'));
+assert.match(internalOptions[1], /id="studio-training-ball-touch-candidates" checked/);
+assert.match(internalOptions[1], /id="studio-training-ball-touch-types" checked/);
 assert.ok(js.includes('training.panel.classList.remove("hidden")'));
 assert.ok(js.includes('annotation.save.addEventListener("click"'));
 

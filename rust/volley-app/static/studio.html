@@ -397,20 +397,13 @@
                     <input type="checkbox" id="studio-training-rallies-by-trajectory" checked hidden>
                     <span class="studio-training-source-details"><strong>По траектории мяча</strong><small id="studio-training-ball-summary">Нет расчёта</small></span>
                   </label>
-                  <label class="studio-training-merge-gap">Объединять при паузе меньше
-                    <input type="number" id="studio-training-merge-gap-seconds" min="0" max="60" step="0.5" value="4" aria-label="Максимальная пауза между розыгрышами для объединения, секунды">
-                    <span>с</span>
-                  </label>
-                  <label class="studio-training-candidate-toggle">
-                    <input type="checkbox" id="studio-training-ball-touch-candidates">
-                    <span>Определение касания</span>
-                    <small id="studio-training-ball-touch-provenance" title="Кандидаты из отдельного расчёта траектории VBallNet, без CPU-касаний и типов.">Нажмите «Рассчитать касания по мячу»</small>
-                  </label>
-                  <label class="studio-training-candidate-toggle studio-training-touch-type-toggle">
-                    <input type="checkbox" id="studio-training-ball-touch-types" disabled>
-                    <span>Определение типа касания</span>
-                    <small id="studio-training-ball-touch-types-status" title="Тип вычисляется только отдельным анализатором позы, а не из CPU-постобработки.">Сначала включите определение касаний</small>
-                  </label>
+                  <div hidden aria-hidden="true" id="studio-training-internal-options">
+                    <input type="number" id="studio-training-merge-gap-seconds" min="0" max="60" step="0.5" value="4">
+                    <input type="checkbox" id="studio-training-ball-touch-candidates" checked>
+                    <input type="checkbox" id="studio-training-ball-touch-types" checked>
+                    <small id="studio-training-ball-touch-provenance"></small>
+                    <small id="studio-training-ball-touch-types-status"></small>
+                  </div>
                 </div>
               </div>
               <div id="studio-rallies" class="rally-grid" aria-live="polite"><div class="empty-state">Здесь появятся карточки после выбора CPU-анализа.</div></div>
