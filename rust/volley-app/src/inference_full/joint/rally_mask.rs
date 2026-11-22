@@ -52,6 +52,7 @@ pub(super) struct RallyMask {
     min_rally_seconds: f64,
     stationary_ball_ms: u32,
     stationary_intervals: Vec<(u64, u64)>,
+    unobserved_intervals: Vec<(u64, u64)>,
     movement_filter_version: &'static str,
     context_seconds: f64,
     observed_ball_frames: usize,
@@ -180,7 +181,8 @@ impl RallyMask {
             min_rally_seconds: crate::cpu_retrack::ball_track::MIN_RALLY_FRAMES as f64 / 30.0,
             stationary_ball_ms: settings.stationary_ball_ms,
             stationary_intervals: motion.stationary,
-            movement_filter_version: "stationary_ball_min_rally_5s_v2",
+            unobserved_intervals: motion.unobserved,
+            movement_filter_version: "stationary_ball_min_rally_5s_v3",
             context_seconds: CONTEXT_FRAMES as f64 / 30.0,
             observed_ball_frames,
             detected,
@@ -348,6 +350,45 @@ mod tests {
     }
 
     #[test]
+    fn long_unobserved_gap_splits_rallies_instead_of_adding_a_false_continuation() {
+        let mut samples = moving_samples(120, 305);
+        samples.extend(moving_samples(415, 610));
+        let mask =
+            RallyMask::from_ball_samples(&samples, 800, PrimaryRallySettings::default()).unwrap();
+        assert_eq!(mask.detected.len(), 2, "{:?}", mask.detected);
+        assert_eq!(mask.merged.len(), 2, "{:?}", mask.merged);
+        assert!(mask.merged[0].1 < 360 && mask.merged[1].0 > 360);
+        assert!(mask
+            .unobserved_intervals
+            .iter()
+            .any(|&(a, b)| a <= 306 && b >= 414));
+        let allowed = RallyMask::from_ball_samples(
+            &samples,
+            800,
+            PrimaryRallySettings {
+                stationary_ball_ms: 4000,
+                ..PrimaryRallySettings::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(allowed.merged.len(), 1);
+    }
+
+    #[test]
+    fn short_occlusion_can_still_merge_segments_of_one_rally() {
+        let mut samples = moving_samples(120, 305);
+        samples.extend(moving_samples(350, 550));
+        let mask =
+            RallyMask::from_ball_samples(&samples, 800, PrimaryRallySettings::default()).unwrap();
+        assert_eq!(mask.detected.len(), 2, "{:?}", mask.detected);
+        assert_eq!(mask.merged.len(), 1, "{:?}", mask.merged);
+        assert!(!mask
+            .unobserved_intervals
+            .iter()
+            .any(|&(start, end)| start <= 349 && end >= 306));
+    }
+
+    #[test]
     fn a_held_ball_splits_rallies_despite_the_four_second_merge_gap() {
         let mut samples = moving_samples(100, 285);
         samples.extend((286..=332).map(|frame| RawDetection {
@@ -468,6 +509,68 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&mask).unwrap()["min_rally_seconds"],
             5.0
+        );
+    }
+
+    #[test]
+    #[ignore = "read-only saved VBallNet evidence: set VOLLEY_RALLY_RAW, VOLLEY_RALLY_FRAMES, VOLLEY_RALLY_SPLIT_FRAMES"]
+    fn readonly_saved_ball_evidence_does_not_bridge_confirmed_pause() {
+        use std::io::BufRead;
+        let path = std::env::var("VOLLEY_RALLY_RAW").unwrap();
+        let frames: u64 = std::env::var("VOLLEY_RALLY_FRAMES")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let bounds = std::env::var("VOLLEY_RALLY_SPLIT_FRAMES").unwrap();
+        let bounds: Vec<u64> = bounds.split(',').map(|v| v.parse().unwrap()).collect();
+        assert_eq!(bounds.len(), 2);
+        assert!(bounds[0] < bounds[1]);
+        let input = std::io::BufReader::new(std::fs::File::open(path).unwrap());
+        let mut samples = Vec::new();
+        for line in input.lines() {
+            let row: serde_json::Value = serde_json::from_str(&line.unwrap()).unwrap();
+            for item in row["raw_detections"].as_array().unwrap() {
+                if item["class_name"] != "ball" {
+                    continue;
+                }
+                samples.push(RawDetection {
+                    frame_index: item["frame_index"].as_u64().unwrap(),
+                    class_name: "ball",
+                    score: item["score"].as_f64().unwrap() as f32,
+                    bbox_xyxy_norm: serde_json::from_value(item["bbox_xyxy_norm"].clone()).unwrap(),
+                    query_index: None,
+                    touch_probability: None,
+                    head_point_norm: None,
+                });
+            }
+        }
+        let mask = RallyMask::from_ball_samples(&samples, frames, PrimaryRallySettings::default())
+            .unwrap();
+        eprintln!(
+            "saved-readonly: ball={} detected={} merged={} stationary={} unobserved={}",
+            mask.observed_ball_frames,
+            mask.detected.len(),
+            mask.merged.len(),
+            mask.stationary_intervals.len(),
+            mask.unobserved_intervals.len(),
+        );
+        assert!(mask
+            .detected
+            .iter()
+            .any(|&(start, end)| start <= bounds[0] && bounds[0] <= end));
+        assert!(mask
+            .detected
+            .iter()
+            .any(|&(start, end)| start <= bounds[1] && bounds[1] <= end));
+        assert!(
+            mask.merged
+                .iter()
+                .all(|&(start, end)| start > bounds[0] || end < bounds[1]),
+            "unobserved pause merged into a rally: {:?}",
+            mask.merged
+                .iter()
+                .filter(|&&(start, end)| start <= bounds[1] && end >= bounds[0])
+                .collect::<Vec<_>>()
         );
     }
 

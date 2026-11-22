@@ -616,7 +616,7 @@
                   </label>
                 </div>
                 <div>
-                  <label class="field-label analysis-setting-help" for="studio-gpu-rally-merge-seconds" tabindex="0" data-analysis-hint="Максимальная пауза для объединения двух найденных первичных розыгрышей. Пауза должна быть строго меньше указанного числа секунд; параметры дебага не изменяются." aria-description="Максимальная пауза для объединения двух найденных первичных розыгрышей. Пауза должна быть строго меньше указанного числа секунд; параметры дебага не изменяются." data-analysis-hint-en="Maximum gap between detected primary rallies; adjacent gaps must be strictly shorter than this many seconds. Does not change Debug settings.">Объединение розыгрышей, с
+                  <label class="field-label analysis-setting-help" for="studio-gpu-rally-merge-seconds" tabindex="0" data-analysis-hint="Максимальная пауза для объединения. Удержание мяча и отсутствие достоверной детекции от 3 секунд разделяют розыгрыши даже при меньшем промежутке. Настройки дебага независимы." aria-description="Максимальная пауза для объединения. Удержание мяча и отсутствие достоверной детекции от 3 секунд разделяют розыгрыши даже при меньшем промежутке. Настройки дебага независимы." data-analysis-hint-en="Maximum interval merge gap. Stationary holds and missing reliable ball detections lasting at least 3 seconds prevent merging even within this gap. Debug settings stay independent.">Объединение розыгрышей, с
                     <input id="studio-gpu-rally-merge-seconds" type="number" min="0" max="60" step="0.1" value="4" data-default="4">
                   </label>
                 </div>

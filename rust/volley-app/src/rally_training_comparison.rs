@@ -536,6 +536,7 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         )
         .map_err(storage::bad_request)?;
         let stops = motion.stationary.clone();
+        let unseen = motion.unobserved.clone();
         let segments = motion
             .merged
             .into_iter()
@@ -546,7 +547,7 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
             Vec::new(),
             json!({"min_trajectory_seconds":seconds,"min_ball_score":run.min_ball_score,
                    "merge_gap_seconds":merge_seconds,"stationary_ball_ms":stationary_ms,
-                   "stationary_intervals":stops}),
+                   "stationary_intervals":stops,"unobserved_intervals":unseen}),
             "ready",
             "saved_cpu_replay_continuous_ball",
             None,
