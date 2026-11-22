@@ -3332,3 +3332,11 @@ Studio показывает кнопку перехода между debug и re
 - Изолированная интеграция de61ea04 с 0f2fa4e2 в integrate/20261122-ball-stabilizer-strong-weak; пользовательский исходный checkout с изменениями не затронут. Алгоритм v4 не менялся после его полного PASS, UI-слияние подтверждено отдельными Node-проверками.
 - В параллельном коммите 0f2fa4e2 зафиксированы независимые поломки полного CI: не зарегистрирован маршрут обновления ReID-эталонов; идентичные ветви условия в reference_refresh.rs отклоняет Clippy; два тестовых DOM-мока не поддерживали новый метод setAttribute, устаревший тест ожидал удалённое меню details. Исправлено без изменения ReID-поведения: занесены маршрут/владелец в docs/RUST_CANONICAL_OWNERS.json; объединено идентичное условие; тесты обновлены под реальную кнопку удаления с проверкой события и сохранения фотографий.
 - Целевые PASS: check_rust_ownership.mjs (61 маршрут), test_studio_player_gallery_view.mjs, test_studio_project_players.mjs, Clippy --workspace --all-targets -- -D warnings. Полный CI объединённого дерева и развертывание фиксируются после прогона.
+
+### 2026-11-22 — Безопасная дедупликация фотоэталонов ReID по происхождению трека
+
+- База: `origin/develop` `154f2cf3`; изолированная задача `codex/20261122/reid-reference-provenance`. Владелец: `rust/volley-app/src/native_player_tracks/reference_refresh.rs`.
+- Воспроизведённый дефект: у двух разных видео или CPU replay одинаковый числовой Track ID; прежнее сравнение `track_id + cosine >= 0.995` ошибочно деактивировало полезный эталон другого источника. Два регрессионных теста на исходном коде подтвердили FAIL.
+- Исправление: деактивация производится только для фото из одного `project_id`, видео, `replay_id`, `source_replay_sha256`, `rally_run_id` и `track_id` при прежнем строгом пороге сходства. JPEG, ручные привязки и исходные данные не изменяются.
+- Проверки: 4/4 целевых Rust-теста PASS; `scripts/check-all.ps1` — PASS (`cargo fmt`, Clippy `-D warnings`, workspace Rust-тесты, 96 Node gates); OpenVINO C smoke в WSL (`actual_openvino_model_vector_if_native_library_configured`) — PASS, нормализованный 256D вектор и повторяемый косинус; `git diff --check` — PASS.
+- Ограничение: реальная точность привязки игроков на независимом размеченном матче — NOT TESTED. Применение в Studio после публикации проверяется отдельно по SHA и безопасному статусу.
