@@ -32,6 +32,8 @@ pub struct CompareQuery {
     calibrate: Option<bool>,
     mode: Option<String>,
     min_trajectory_seconds: Option<f64>,
+    merge_gap_seconds: Option<f64>,
+    stationary_ball_ms: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -39,6 +41,7 @@ pub struct CompareQuery {
 pub(crate) struct TouchRallyFilter {
     mode: String,
     min_trajectory_seconds: Option<f64>,
+    stationary_ball_ms: Option<u32>,
     min_impacts: Option<u64>,
     context_frames: Option<u64>,
     min_duration_frames: Option<u64>,
@@ -499,6 +502,19 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
                 "Continuous ball minimum must be 0.1–120 seconds",
             ));
         }
+        let merge_seconds = query
+            .merge_gap_seconds
+            .unwrap_or(crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS);
+        let stationary_ms = query
+            .stationary_ball_ms
+            .unwrap_or(crate::cpu_retrack::ball_track::DEFAULT_STATIONARY_BALL_MS);
+        crate::inference_full::PrimaryRallySettings {
+            min_trajectory_seconds: seconds,
+            merge_gap_seconds: merge_seconds,
+            stationary_ball_ms: stationary_ms,
+        }
+        .validate()
+        .map_err(storage::bad_request)?;
         let replay_root = projects::project_root(state)
             .join(&run.project_id)
             .join("native_cpu_replays")
@@ -509,21 +525,28 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
             64 * 1024 * 1024 * 1024,
         )
         .map_err(storage::bad_request)?;
-        let segments = crate::cpu_retrack::ball_track::continuous_ball_intervals(
+        let motion = crate::cpu_retrack::ball_track::continuous_ball_analysis(
             &replay,
             &run.replay_sha,
             run.frames,
             run.min_ball_score,
             seconds,
+            merge_seconds,
+            stationary_ms,
         )
-        .map_err(storage::bad_request)?
-        .into_iter()
-        .map(|(start, end)| Interval::new(start, end, run.frames))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map_err(storage::bad_request)?;
+        let stops = motion.stationary.clone();
+        let segments = motion
+            .merged
+            .into_iter()
+            .map(|(start, end)| Interval::new(start, end, run.frames))
+            .collect::<Result<Vec<_>, _>>()?;
         (
             segments,
             Vec::new(),
-            json!({"min_trajectory_seconds":seconds,"min_ball_score":run.min_ball_score}),
+            json!({"min_trajectory_seconds":seconds,"min_ball_score":run.min_ball_score,
+                   "merge_gap_seconds":merge_seconds,"stationary_ball_ms":stationary_ms,
+                   "stationary_intervals":stops}),
             "ready",
             "saved_cpu_replay_continuous_ball",
             None,
@@ -657,24 +680,6 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         "published_cpu_unchanged":true}))
 }
 
-fn merge_touch_scope(mut ranges: Vec<Interval>, gap_seconds: f64) -> Vec<Interval> {
-    ranges.sort_by_key(|r| (r.start, r.end));
-    let gap_frames = gap_seconds * 30.0;
-    let mut merged: Vec<Interval> = Vec::with_capacity(ranges.len());
-    for range in ranges {
-        if let Some(previous) = merged.last_mut() {
-            if range.start <= previous.end.saturating_add(1)
-                || ((range.start - previous.end - 1) as f64) < gap_frames
-            {
-                previous.end = previous.end.max(range.end);
-                continue;
-            }
-        }
-        merged.push(range);
-    }
-    merged
-}
-
 pub(crate) fn touch_rally_scope(
     state: &AppState,
     run: &ValidatedRun,
@@ -688,6 +693,8 @@ pub(crate) fn touch_rally_scope(
         rally_run_id: run.run_id.clone(),
         mode: Some(filter.mode.clone()),
         min_trajectory_seconds: filter.min_trajectory_seconds,
+        merge_gap_seconds: Some(filter.merge_gap_seconds),
+        stationary_ball_ms: filter.stationary_ball_ms,
         min_impacts: filter.min_impacts,
         context_frames: filter.context_frames,
         min_duration_frames: filter.min_duration_frames,
@@ -721,10 +728,7 @@ pub(crate) fn touch_rally_scope(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(merge_touch_scope(ranges, filter.merge_gap_seconds)
-        .into_iter()
-        .map(|row| (row.start, row.end))
-        .collect())
+    Ok(ranges.into_iter().map(|row| (row.start, row.end)).collect())
 }
 
 pub async fn get(
@@ -745,30 +749,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ball_touch_scope_uses_only_merged_ball_intervals() {
-        let ranges = vec![
-            Interval { start: 0, end: 50 },
-            Interval {
-                start: 100,
-                end: 150,
-            },
-            Interval {
-                start: 300,
-                end: 350,
-            },
-        ];
-        assert_eq!(
-            merge_touch_scope(ranges.clone(), 4.0),
-            vec![
-                Interval { start: 0, end: 150 },
-                Interval {
-                    start: 300,
-                    end: 350
-                },
-            ]
-        );
-        assert_eq!(merge_touch_scope(ranges, 0.0).len(), 3);
-        assert!(merge_touch_scope(Vec::new(), 4.0).is_empty());
+    fn training_touch_scope_keeps_stationary_barriers() {
+        let intervals = vec![(0, 50), (100, 150), (300, 350)];
+        let separated = crate::cpu_retrack::ball_track::merge_continuous_intervals_with_pauses(
+            &intervals,
+            4.0,
+            &[(52, 98)],
+        )
+        .unwrap();
+        assert_eq!(separated, vec![(0, 50), (100, 150), (300, 350)]);
+        let merged = crate::cpu_retrack::ball_track::merge_continuous_intervals_with_pauses(
+            &intervals,
+            4.0,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(merged, vec![(0, 150), (300, 350)]);
     }
 
     #[test]
@@ -776,7 +772,8 @@ mod tests {
         let good = json!({
             "mode":"continuous",
             "min_trajectory_seconds":1.5,
-            "merge_gap_seconds":4.0
+            "merge_gap_seconds":4.0,
+            "stationary_ball_ms":1000
         });
         assert!(serde_json::from_value::<TouchRallyFilter>(good).is_ok());
         assert!(serde_json::from_value::<TouchRallyFilter>(json!({
@@ -789,11 +786,12 @@ mod tests {
     fn training_continuity_settings_are_distinct_from_impact_settings() {
         let parsed: CompareQuery = serde_json::from_value(json!({
             "project_id":"p","rally_run_id":"r","mode":"continuous",
-            "min_trajectory_seconds":3.5,"simulate":true
+            "min_trajectory_seconds":3.5,"stationary_ball_ms":1100,"simulate":true
         }))
         .unwrap();
         assert_eq!(parsed.mode.as_deref(), Some("continuous"));
         assert_eq!(parsed.min_trajectory_seconds, Some(3.5));
+        assert_eq!(parsed.stationary_ball_ms, Some(1100));
         assert!(parsed.min_impacts.is_none());
     }
 

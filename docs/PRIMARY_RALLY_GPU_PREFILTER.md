@@ -30,6 +30,32 @@ pipeline status includes `gpu_rally_mask`. The standalone CPU training preview
 still lets the user change the 1.5 s threshold and <4 s merge gap without
 rerunning VBallNet; custom values take precedence over defaults.
 
+## Stationary ball boundary (2026-11-22)
+
+The primary and Debug continuous-ball rally algorithms share the Rust
+movement filter in rust/volley-app/src/cpu_retrack/ball_track.rs. The
+new stationary_ball_ms setting defaults to **1000 ms** and accepts
+200–10000 ms. When the observed ball remains in a region no larger than
+3.5% of normalized frame width and height for the configured duration
+(with at least 70% observed samples), the region is classified as a
+stationary hold, rather than a rally. Isolated one-frame jumps are ignored.
+The same boundary prevents the 4-second interval merge from bridging a
+recognized stationary hold. Candidate moving intervals must also cover
+at least 10% of a frame dimension in horizontal or vertical displacement.
+
+GPU analysis and Debug have independent controls and both call this
+Rust detector, using cached VBallNet/CPU replay evidence respectively.
+The primary GPU mask records the threshold, stationary intervals and
+movement_filter_version=stationary_ball_v1, and changing this setting
+invalidates the prior GPU profile match; old immutable evidence is not
+rewritten. The 1-second person-inference scan padding remains separate
+from the saved unpadded rally boundaries. The safety fallback to scan
+the full permitted range when no reliable moving interval exists is retained.
+
+The threshold is heuristic and depends on detector stability and camera
+motion. Real-game verification for ~18:51.2 and ~19:59.2 remains separate
+from unit tests and must not be claimed without inspecting the video.
+
 ## Postprocessing boundary owner (2026-11-22)
 
 The Studio Full/Post pipeline uses the saved primary VBallNet GPU mask as

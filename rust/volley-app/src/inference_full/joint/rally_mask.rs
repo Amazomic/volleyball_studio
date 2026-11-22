@@ -9,12 +9,14 @@ const MIN_DETECTIONS: usize = 45;
 pub(crate) struct PrimaryRallySettings {
     pub min_trajectory_seconds: f64,
     pub merge_gap_seconds: f64,
+    pub stationary_ball_ms: u32,
 }
 impl Default for PrimaryRallySettings {
     fn default() -> Self {
         Self {
             min_trajectory_seconds: crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
             merge_gap_seconds: crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
+            stationary_ball_ms: crate::cpu_retrack::ball_track::DEFAULT_STATIONARY_BALL_MS,
         }
     }
 }
@@ -30,10 +32,12 @@ impl PrimaryRallySettings {
         if !self.merge_gap_seconds.is_finite() || !(0.0..=60.0).contains(&self.merge_gap_seconds) {
             return Err("Объединение розыгрышей должно быть от 0 до 60 секунд".into());
         }
+        crate::cpu_retrack::ball_track::stationary_ball_intervals(&[], self.stationary_ball_ms)?;
         Ok(())
     }
 }
 
+#[cfg(test)]
 fn merge_rally_intervals(intervals: &[(u64, u64)], gap_seconds: f64) -> Vec<(u64, u64)> {
     crate::cpu_retrack::ball_track::merge_continuous_intervals(intervals, gap_seconds)
         .expect("validated continuous rally merge gap")
@@ -45,6 +49,9 @@ pub(super) struct RallyMask {
     source_frame_count: u64,
     min_trajectory_seconds: f64,
     merge_gap_seconds: f64,
+    stationary_ball_ms: u32,
+    stationary_intervals: Vec<(u64, u64)>,
+    movement_filter_version: &'static str,
     context_seconds: f64,
     observed_ball_frames: usize,
     pub detected: Vec<(u64, u64)>,
@@ -90,11 +97,17 @@ impl RallyMask {
             scores[frame] = sample.score;
         }
         let observed_ball_frames = points.iter().filter(|point| point.is_some()).count();
-        let detected = crate::cpu_retrack::ball_track::continuous_intervals_from_positions(
+        let motion = crate::cpu_retrack::ball_track::analyze_moving_ball(
             &points,
             settings.min_trajectory_seconds,
+            settings.merge_gap_seconds,
+            settings.stationary_ball_ms,
         )?;
-        let merged = merge_rally_intervals(&detected, settings.merge_gap_seconds);
+        let detected = motion.detected;
+        let merged = motion.merged;
+        for &(start, end) in &motion.stationary {
+            points[start as usize..=end as usize].fill(None);
+        }
         let mut selected = Vec::<(u64, u64)>::new();
         for &(start, end) in &merged {
             let start = start.saturating_sub(CONTEXT_FRAMES);
@@ -163,6 +176,9 @@ impl RallyMask {
             source_frame_count: frames,
             min_trajectory_seconds: settings.min_trajectory_seconds,
             merge_gap_seconds: settings.merge_gap_seconds,
+            stationary_ball_ms: settings.stationary_ball_ms,
+            stationary_intervals: motion.stationary,
+            movement_filter_version: "stationary_ball_v1",
             context_seconds: CONTEXT_FRAMES as f64 / 30.0,
             observed_ball_frames,
             detected,
@@ -284,6 +300,7 @@ mod tests {
         let tuned = PrimaryRallySettings {
             min_trajectory_seconds: 4.0,
             merge_gap_seconds: 1.0,
+            ..PrimaryRallySettings::default()
         };
         let mask = RallyMask::from_ball_samples(&samples, 450, tuned).unwrap();
         assert!(mask.detected.is_empty());
@@ -294,6 +311,7 @@ mod tests {
         let serialized = serde_json::to_value(&mask).unwrap();
         assert_eq!(serialized["min_trajectory_seconds"], 4.0);
         assert_eq!(serialized["merge_gap_seconds"], 1.0);
+        assert_eq!(serialized["stationary_ball_ms"], 1000);
         assert_eq!(
             merge_rally_intervals(&[(30, 100), (175, 245)], 1.0).len(),
             2,
@@ -325,6 +343,115 @@ mod tests {
             .any(|&(start, end)| start <= 590 && end >= 590));
         assert!(mask.includes(590));
         assert!(!mask.includes(940));
+    }
+
+    #[test]
+    fn a_held_ball_splits_rallies_despite_the_four_second_merge_gap() {
+        let mut samples = moving_samples(100, 195);
+        samples.extend((196..=242).map(|frame| RawDetection {
+            frame_index: frame,
+            class_name: "ball",
+            score: 0.95,
+            bbox_xyxy_norm: [
+                0.49 + (frame % 3) as f32 * 0.002,
+                0.4,
+                0.50 + (frame % 3) as f32 * 0.002,
+                0.42,
+            ],
+            query_index: None,
+            touch_probability: None,
+            head_point_norm: None,
+        }));
+        samples.extend(moving_samples(244, 355));
+        let mask =
+            RallyMask::from_ball_samples(&samples, 450, PrimaryRallySettings::default()).unwrap();
+        assert_eq!(mask.detected.len(), 2, "{:?}", mask.detected);
+        assert_eq!(mask.merged.len(), 2, "{:?}", mask.merged);
+        assert!(mask.merged[0].1 < 242 && mask.merged[1].0 > 242);
+        assert!(mask
+            .stationary_intervals
+            .iter()
+            .any(|&(start, end)| start <= 215 && end >= 235));
+    }
+
+    #[test]
+    fn pre_serve_hand_hold_is_not_part_of_the_rally() {
+        let mut samples = moving_samples(20, 52);
+        samples.extend((53..=235).map(|frame| RawDetection {
+            frame_index: frame,
+            class_name: "ball",
+            score: 0.96,
+            bbox_xyxy_norm: [0.35, 0.48, 0.36, 0.49],
+            query_index: None,
+            touch_probability: None,
+            head_point_norm: None,
+        }));
+        samples.extend(moving_samples(236, 345));
+        let mask =
+            RallyMask::from_ball_samples(&samples, 420, PrimaryRallySettings::default()).unwrap();
+        assert_eq!(mask.merged.len(), 1, "{:?}", mask.merged);
+        assert!(mask.merged[0].0 >= 230, "{:?}", mask.merged);
+    }
+
+    #[test]
+    fn brief_ball_apex_does_not_end_a_rally() {
+        let mut samples = moving_samples(80, 178);
+        samples.extend((179..=188).map(|frame| RawDetection {
+            frame_index: frame,
+            class_name: "ball",
+            score: 0.93,
+            bbox_xyxy_norm: [0.495, 0.4, 0.505, 0.42],
+            query_index: None,
+            touch_probability: None,
+            head_point_norm: None,
+        }));
+        let mut second = moving_samples(189, 290);
+        for item in &mut second {
+            let offset = (item.frame_index - 189) as f32 * 0.003;
+            item.bbox_xyxy_norm = [0.495 + offset, 0.4, 0.505 + offset, 0.42];
+        }
+        samples.extend(second);
+        let mask =
+            RallyMask::from_ball_samples(&samples, 380, PrimaryRallySettings::default()).unwrap();
+        assert_eq!(mask.merged.len(), 1, "{:?}", mask.merged);
+        assert!(!mask
+            .stationary_intervals
+            .iter()
+            .any(|&(start, end)| start <= 188 && end >= 179));
+    }
+
+    #[test]
+    fn default_stillness_is_versioned_and_tunable() {
+        let mut points = vec![None; 400];
+        for (i, slot) in points.iter_mut().enumerate().take(160).skip(50) {
+            *slot = Some([0.18 + (i - 50) as f64 * 0.003, 0.4]);
+        }
+        for (i, slot) in points.iter_mut().enumerate().take(189).skip(160) {
+            if i % 11 != 0 {
+                *slot = Some([0.56 + (i % 4) as f64 * 0.002, 0.41]);
+            }
+        }
+        for (i, slot) in points.iter_mut().enumerate().take(303).skip(190) {
+            *slot = Some([0.22 + (i - 190) as f64 * 0.003, 0.4]);
+        }
+        let strict =
+            crate::cpu_retrack::ball_track::analyze_moving_ball(&points, 1.5, 4.0, 1000).unwrap();
+        let sensitive =
+            crate::cpu_retrack::ball_track::analyze_moving_ball(&points, 1.5, 4.0, 600).unwrap();
+        assert!(sensitive
+            .stationary
+            .iter()
+            .any(|&(s, e)| s <= 165 && e >= 182));
+        assert_eq!(sensitive.merged.len(), 2, "{:?}", sensitive.merged);
+        assert!(strict.stationary.is_empty());
+        for bad in [0, 199, 10_001] {
+            assert!(PrimaryRallySettings {
+                stationary_ball_ms: bad,
+                ..PrimaryRallySettings::default()
+            }
+            .validate()
+            .is_err());
+        }
     }
 
     #[test]

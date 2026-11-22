@@ -95,8 +95,8 @@ assert.match(rust,/status\["stage_id"\] = json!\(stage_id\)/);
 assert.match(html,/id="analysis-flow-diagram"/);
 assert.match(html,/id="analysis-flow-dialog"/);
 const debugSource=readFileSync(join(root,"rust/volley-app/static/studio.js"),"utf8");
-const gpuRallyFields=["studio-gpu-rally-min-seconds","studio-gpu-rally-merge-seconds"];
-const debugRallyFields=["studio-comparison-min-seconds"];
+const gpuRallyFields=["studio-gpu-rally-min-seconds","studio-gpu-rally-merge-seconds","studio-gpu-rally-stationary-ms"];
+const debugRallyFields=["studio-comparison-min-seconds","studio-comparison-stationary-ms"];
 for(const id of gpuRallyFields){
   assert.match(html,new RegExp('id="'+id+'"[^>]*data-default='));
   assert.match(js,new RegExp('inputValue\\("'+id+'"\\)'));
@@ -106,8 +106,9 @@ for(const id of debugRallyFields){
   assert.match(html,new RegExp('id="'+id+'"'));
   assert.doesNotMatch(js,new RegExp('inputValue\\("'+id+'"\\)'));
 }
-assert.match(js,/rallies:\["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds"\]/);
+assert.match(js,/rallies:\["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds","#studio-gpu-rally-stationary-ms"\]/);
 assert.match(js,/primary_rallies:\{\s*min_trajectory_seconds:/);
 assert.match(js,/merge_gap_seconds:inputValue\("studio-gpu-rally-merge-seconds"\)/);
+assert.match(js,/stationary_ball_ms:inputValue\("studio-gpu-rally-stationary-ms"\)/);
 
 console.log("PASS: 12 full-width color-coded stages, verified neural models, animated edges, history parity and conditional branches");

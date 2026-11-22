@@ -72,11 +72,12 @@ const context={
   request:async()=>{throw Error("Expected mocked API response");}
 };
 const finish=js.indexOf("  comparison.recalculate.addEventListener",end);
-const {comparison,renderComparison,refreshComparison}=runInNewContext(js.slice(start,finish)+
+const {comparison,renderComparison,refreshComparison}=runInNewContext("const trainingGapSeconds=()=>4;\n"+js.slice(start,finish)+
   "\n({comparison,renderComparison,refreshComparison})",context);
 comparison.mode.value="continuous";
 comparison.filter.value="all";
 comparison.minSeconds.value="1.5";
+comparison.stationaryMs.value="1000";
 const ready={
   schema:"volley-rally-training-comparison/1",
   project_id:"p",rally_run_id:"r",video:"source.mp4",trajectory_status:"ready",
@@ -114,12 +115,15 @@ s.run="r";
 const queries=[];
 context.request=async query=>{
   queries.push(query.query);
-  return {...ready,parameters:{min_trajectory_seconds:3.5}};
+  return {...ready,parameters:{min_trajectory_seconds:3.5,stationary_ball_ms:1300,stationary_intervals:[]}};
 };
 comparison.minSeconds.value="3.5";
+comparison.stationaryMs.value="1300";
 await refreshComparison(true);
 assert.equal(queries.at(-1).mode,"continuous");
 assert.equal(queries.at(-1).min_trajectory_seconds,3.5);
+assert.equal(queries.at(-1).stationary_ball_ms,1300);
+assert.equal(queries.at(-1).merge_gap_seconds,4);
 for(const obsolete of ["min_impacts","context_frames","min_duration_frames","max_touch_gap_frames"])
   assert.equal(Object.hasOwn(queries.at(-1),obsolete),false,
     "Legacy impact detection setting must not reach server: "+obsolete);
@@ -130,8 +134,10 @@ assert.equal(comparison.impactSettings.hidden,true);
 assert.equal(comparison.continuousSettings.hidden,false);
 assert.equal(comparison.recalculate.textContent,"Рассчитать розыгрыши");
 assert.equal(comparison.minSeconds.disabled,false);
+assert.equal(comparison.stationaryMs.disabled,false);
 assert.equal(comparison.minImpacts.disabled,true);
 assert.equal(comparison.minSeconds.value,3.5);
+assert.equal(comparison.stationaryMs.value,1300);
 assert.match(html,/id="studio-comparison-mode"><option value="continuous" selected>/);
 assert.doesNotMatch(html,/<option value="impacts">/);
 assert.match(html,/class="studio-training-compare-review" hidden/);
