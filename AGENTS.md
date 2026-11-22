@@ -18,6 +18,8 @@ Keep shared rules here and details in linked documents. Follow the requested sco
 - Current evidence is code, schemas and fresh checks. Documents state contracts; historical diagnoses, stage counts, owner status and earlier PASS reports do not prove readiness.
 - Return relevant matches, totals and failures. Keep large logs outside the repository; cite paths/excerpts. Reuse findings until files, HEAD or assumptions change.
 
+Project-local skills use the canonical discovery root `.agents/skills/`. For a matching task, read `.agents/skills/<skill-name>/SKILL.md` before work and load only its relevant `references/` files. Follow `AGENTS.md` and the delivery policy alongside the skill.
+
 Load only applicable references and sections:
 
 | Task | Reference |
