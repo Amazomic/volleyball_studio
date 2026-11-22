@@ -15,6 +15,14 @@ pub(crate) const POLICY: &str = "vballnet_leading_ball_rally_v1";
 pub(crate) const LOCAL_POLICY: &str = "vballnet_local_artifacts_v1";
 pub(crate) const CONTINUOUS_MIN_SECONDS: f64 = 1.5;
 pub(crate) const CONTINUOUS_MERGE_SECONDS: f64 = 4.0;
+pub(crate) const MIN_RALLY_FRAMES: u64 = 5 * 30;
+
+pub(crate) fn filter_short_rallies(intervals: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    intervals
+        .into_iter()
+        .filter(|&(start, end)| end - start + 1 >= MIN_RALLY_FRAMES)
+        .collect()
+}
 
 pub(crate) fn merge_continuous_intervals(
     intervals: &[(u64, u64)],
@@ -187,7 +195,11 @@ pub(crate) fn analyze_moving_ball(
             detected.push((next_start, end));
         }
     }
-    let merged = merge_continuous_intervals_with_pauses(&detected, merge_gap_seconds, &stationary)?;
+    let merged = filter_short_rallies(merge_continuous_intervals_with_pauses(
+        &detected,
+        merge_gap_seconds,
+        &stationary,
+    )?);
     Ok(MovingBallIntervals {
         detected,
         merged,
@@ -797,6 +809,19 @@ fn scan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_rally_duration_is_checked_after_merge_at_exact_five_second_boundary() {
+        let segments = [(20, 168), (300, 449), (600, 690), (750, 810)];
+        assert_eq!(filter_short_rallies(segments.to_vec()), vec![(300, 449)],);
+        let combined = merge_continuous_intervals_with_pauses(
+            &[(600, 690), (750, 810)],
+            CONTINUOUS_MERGE_SECONDS,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(filter_short_rallies(combined), vec![(600, 810)]);
+    }
 
     #[test]
     fn cancelled_ball_prescan_does_not_open_source() {

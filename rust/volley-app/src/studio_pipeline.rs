@@ -880,10 +880,13 @@ fn parse_primary_rally_scope(
         .ok_or("Некорректная длина первичного анализа розыгрышей")?;
     let intervals: Vec<(u64, u64)> = serde_json::from_value(mask["merged"].clone())
         .map_err(|_| "Некорректные границы первичных розыгрышей")?;
-    if intervals
-        .iter()
-        .any(|&(start, end)| start > end || end >= frames)
-        || intervals.windows(2).any(|pair| pair[0].1 >= pair[1].0)
+    if intervals.iter().any(|&(start, end)| {
+        start > end
+            || end >= frames
+            || end - start + 1 < crate::cpu_retrack::ball_track::MIN_RALLY_FRAMES
+    }) || intervals.windows(2).any(|pair| pair[0].1 >= pair[1].0)
+        || mask["movement_filter_version"] != "stationary_ball_min_rally_5s_v2"
+        || mask["min_rally_seconds"] != 5.0
         || evidence["schema"] != "volley-primary-rally-mask-evidence/1"
         || evidence["ball_job_id"] != ball_id
         || evidence["original_source"] != status["original_source"]
@@ -987,7 +990,9 @@ fn gpu_lineage_valid(
                 != json!(request.gpu.primary_rallies.merge_gap_seconds)
             || saved["gpu_rally_mask"]["stationary_ball_ms"]
                 != json!(request.gpu.primary_rallies.stationary_ball_ms)
-            || saved["gpu_rally_mask"]["movement_filter_version"] != "stationary_ball_v1")
+            || saved["gpu_rally_mask"]["movement_filter_version"]
+                != "stationary_ball_min_rally_5s_v2"
+            || saved["gpu_rally_mask"]["min_rally_seconds"] != 5.0)
     {
         return false;
     }
@@ -3121,19 +3126,21 @@ mod tests {
             "ball_job_id":"ball-job-123",
             "original_source":{"sha256":"original"},
             "analysis_range":null,
-            "selected_frames":92,
+            "selected_frames":400,
             "mask":{
                 "schema":"volley-primary-rally-mask/1",
-                "source_frame_count":100,
-                "merged":[[12,33],[50,78]],
-                "selected_frames":92,
+                "source_frame_count":600,
+                "merged":[[12,161],[320,469]],
+                "selected_frames":400,
+                "movement_filter_version":"stationary_ball_min_rally_5s_v2",
+                "min_rally_seconds":5.0,
                 "fallback_reason":null
             }
         });
         let bytes = serde_json::to_vec(&evidence).unwrap();
         let (scope, mask) = parse_primary_rally_scope(&bytes, "ball-job-123", &status).unwrap();
-        assert_eq!(scope.intervals, vec![(12, 33), (50, 78)]);
-        assert_eq!(scope.source_frames, 100);
+        assert_eq!(scope.intervals, vec![(12, 161), (320, 469)]);
+        assert_eq!(scope.source_frames, 600);
         assert_eq!(
             cpu_touches::align_primary_intervals(&[(12, 33), (90, 99)], 100, 99).unwrap(),
             [(12, 33), (90, 98)]
@@ -3141,12 +3148,28 @@ mod tests {
         assert!(cpu_touches::align_primary_intervals(&[(12, 33)], 120, 99).is_err());
         assert_eq!(scope.ball_job_id, "ball-job-123");
         assert_eq!(scope.sha256, format!("{:x}", Sha256::digest(&bytes)));
-        assert_eq!(mask["merged"], json!([[12, 33], [50, 78]]));
+        assert_eq!(mask["merged"], json!([[12, 161], [320, 469]]));
         assert!(parse_primary_rally_scope(&bytes, "other-job", &status).is_err());
         let mut altered = evidence.clone();
-        altered["mask"]["merged"] = json!([[50, 78], [12, 33]]);
+        altered["mask"]["merged"] = json!([[320, 469], [12, 161]]);
         assert!(parse_primary_rally_scope(
             &serde_json::to_vec(&altered).unwrap(),
+            "ball-job-123",
+            &status
+        )
+        .is_err());
+        let mut short = evidence.clone();
+        short["mask"]["merged"] = json!([[12, 160], [320, 469]]);
+        assert!(parse_primary_rally_scope(
+            &serde_json::to_vec(&short).unwrap(),
+            "ball-job-123",
+            &status
+        )
+        .is_err());
+        let mut old = evidence.clone();
+        old["mask"]["movement_filter_version"] = json!("stationary_ball_v1");
+        assert!(parse_primary_rally_scope(
+            &serde_json::to_vec(&old).unwrap(),
             "ball-job-123",
             &status
         )
@@ -3704,7 +3727,8 @@ mod branching_tests {
                 "min_trajectory_seconds":request.gpu.primary_rallies.min_trajectory_seconds,
                 "merge_gap_seconds":request.gpu.primary_rallies.merge_gap_seconds,
                 "stationary_ball_ms":request.gpu.primary_rallies.stationary_ball_ms,
-                "movement_filter_version":"stationary_ball_v1"
+                "movement_filter_version":"stationary_ball_min_rally_5s_v2",
+                "min_rally_seconds":5.0
             },
             "gpu_rally_mask_sha256":sha,
             "analysis_id":analysis,"cpu_runs":{"tracking":replay,"touches":touch,"rallies":rally},

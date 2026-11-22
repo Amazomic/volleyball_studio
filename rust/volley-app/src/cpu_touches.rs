@@ -1316,10 +1316,12 @@ fn process_with_ball_scope_and_rally_settings_report(
                 crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
                 cancel,
             )?;
-            crate::cpu_retrack::ball_track::merge_continuous_intervals(
-                &continuous,
-                crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
-            )?
+            crate::cpu_retrack::ball_track::filter_short_rallies(
+                crate::cpu_retrack::ball_track::merge_continuous_intervals(
+                    &continuous,
+                    crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
+                )?,
+            )
         };
         let preliminary_scope_applied = true;
         if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
