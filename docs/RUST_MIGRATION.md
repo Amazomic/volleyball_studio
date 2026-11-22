@@ -3398,3 +3398,11 @@ Studio показывает кнопку перехода между debug и re
 - Регрессии: длинный ложный сегмент, близкий ложный обход с возвратом, настоящее изменение направления при касании, пересечение старой траектории после касания; `cargo test -p volley-core ball_stabilizer --offline --locked` — **18/18 PASS**; `cargo test -p volley-app --bin volley-app ball_stabilizer_postprocessing_tests --offline --locked` — **2/2 PASS**; тест Debug overlay — **PASS**.
 - Проверка качества по размеченному реальному матчу, GPU-скорость и визуальная приёмка — **NOT TESTED**. Перезапуск живой Studio заблокирован: `start-volley-ui.cmd /status` не признал владельца порта 8875, хотя `/internal/rewrite-status` сообщил `shutdown_safe=true`, заданий нет. Посторонний процесс не останавливался; публикация кода не означает применения к этому запущенному экземпляру.
 - Полный итоговый gate на изолированной рабочей копии: `RUST_TEST_THREADS=1 powershell -File scripts/check-all.ps1` — **PASS** (WASM, fmt, Clippy `-D warnings`, Rust workspace, 96 Node gates); `git diff --check` — **PASS**.
+
+### 2026-11-23 — Геометрия рамок фаз конвейера анализа
+
+- База: `origin/develop` `5f621d40`, ветка `fix/20261123-analysis-phase-geometry`; владелец `rust/volley-app/static/studio.css`; регрессия `scripts/ci/test_studio_analysis_flow_geometry.mjs`.
+- Причина: отрицательный верхний отступ рамок почти совмещал заголовки фаз с кнопками этапов. Для обеих фаз заданы одинаковые горизонтальные поля, фиксированная высота заголовков и резерв места перед кнопками.
+- RED: новый тест геометрии исходной CSS не прошёл. GREEN: тест геометрии, DOM IDs, viewport, `git diff --check` — PASS. Edge headless на 1920 и 800 px подтвердил по 12 px боковых полей, зазор 10 px между заголовком и этапом и 26 px между рамками фаз.
+- Полный `RUST_TEST_THREADS=1 scripts/check-all.ps1` — PASS: сборка WASM, fmt, Clippy, Rust workspace и 97 Node gates. GPU-проход не требуется для CSS; ручная браузерная приёмка на живом проекте NOT TESTED.
+- Запущенную Studio не перезапускали: `start-volley-ui.cmd /status` не подтвердил принадлежность порта 8875 текущему `develop`. Пользовательские файлы и активные задания не затронуты.
