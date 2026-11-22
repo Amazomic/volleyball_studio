@@ -385,6 +385,89 @@ fn sustained_down_to_up_rebounds(
     candidates
 }
 
+fn occluded_vertical_rebounds(
+    points: &[BallObservation],
+    config: DirectionBreakConfig,
+) -> Vec<TrajectoryBreak> {
+    let mut results = Vec::new();
+    for (index, boundary) in points.windows(2).enumerate() {
+        let missing = boundary[1].frame - boundary[0].frame - 1;
+        if !(5..=10).contains(&missing) || index < 4 || index + 5 >= points.len() {
+            continue;
+        }
+        let before = &points[index - 4..=index];
+        let after = &points[index + 1..=index + 5];
+        if before
+            .windows(2)
+            .chain(after.windows(2))
+            .any(|pair| pair[1].frame - pair[0].frame > 2)
+        {
+            continue;
+        }
+        let slope = |samples: &[BallObservation]| -> [f64; 2] {
+            let duration = (samples.last().unwrap().frame - samples[0].frame) as f64;
+            [
+                (samples.last().unwrap().x - samples[0].x) / duration,
+                (samples.last().unwrap().y - samples[0].y) / duration,
+            ]
+        };
+        let incoming = slope(before);
+        let outgoing = slope(after);
+        if incoming[1] < 18.0
+            || outgoing[1] > -15.0
+            || before
+                .windows(2)
+                .any(|pair| pair[1].y + 2.0 * config.max_fit_error_px < pair[0].y)
+            || after
+                .windows(2)
+                .any(|pair| pair[1].y > pair[0].y + 2.0 * config.max_fit_error_px)
+        {
+            continue;
+        }
+        let before_speed = incoming[0].hypot(incoming[1]);
+        let after_speed = outgoing[0].hypot(outgoing[1]);
+        let cosine =
+            (incoming[0] * outgoing[0] + incoming[1] * outgoing[1]) / (before_speed * after_speed);
+        let angle = cosine.clamp(-1.0, 1.0).acos().to_degrees();
+        let residual = (outgoing[0] - incoming[0]).hypot(outgoing[1] - incoming[1]);
+        if angle < config.min_turn_angle_deg.max(130.0) || residual < 35.0 {
+            continue;
+        }
+        let anchor = *before.last().unwrap();
+        let first_outbound = after[0];
+        if (first_outbound.x - anchor.x).abs() > (3.0 * config.max_join_error_px).max(85.0) {
+            continue;
+        }
+        let impact_frame = anchor.frame + 1;
+        let flight_back = (first_outbound.frame - impact_frame) as f64;
+        let predicted_before = [anchor.x + incoming[0], anchor.y + incoming[1]];
+        let predicted_after = [
+            first_outbound.x - outgoing[0] * flight_back,
+            first_outbound.y - outgoing[1] * flight_back,
+        ];
+        let mismatch = (predicted_before[0] - predicted_after[0])
+            .hypot(predicted_before[1] - predicted_after[1]);
+        if mismatch > (6.0 * config.max_join_error_px).max(85.0) {
+            continue;
+        }
+        results.push(TrajectoryBreak {
+            frame: anchor.frame,
+            position: [anchor.x, anchor.y],
+            motion: MotionEvidence {
+                motion_frame: impact_frame,
+                speed_before: before_speed,
+                speed_after: after_speed,
+                angle,
+                residual,
+            },
+            fit_error: mismatch / (missing as f64 + 1.0),
+            before_frames: before.iter().map(|sample| sample.frame).collect(),
+            after_frames: after.iter().map(|sample| sample.frame).collect(),
+            contact_observed: true,
+        });
+    }
+    results
+}
 pub fn trajectory_direction_breaks(
     points: &[BallObservation],
     config: DirectionBreakConfig,
@@ -546,6 +629,17 @@ pub fn trajectory_direction_breaks(
         }) {
             if nearby.frame != rebound.frame {
                 *nearby = rebound;
+            }
+        } else {
+            found.push(rebound);
+        }
+    }
+    for rebound in occluded_vertical_rebounds(points, config) {
+        if let Some(existing) = found.iter_mut().find(|event| {
+            event.frame.abs_diff(rebound.frame) <= config.min_separation_frames as u64
+        }) {
+            if rebound.motion.residual > existing.motion.residual {
+                *existing = rebound;
             }
         } else {
             found.push(rebound);
@@ -856,6 +950,51 @@ mod tests {
         assert!((found[0].frame - 50).abs() <= 1);
     }
 
+    #[test]
+    fn ball_stabilizer_eight_frame_dropout_preserves_down_to_up_contact() {
+        let synthetic = |gap: std::ops::RangeInclusive<i64>, jump: f64| {
+            (400..=444)
+                .filter(|frame| !gap.contains(frame))
+                .map(|frame| {
+                    let t = (frame - 419) as f64;
+                    let before = frame <= 419;
+                    BallObservation {
+                        frame,
+                        x: 1035.0 + 2.5 * t + if before { 0.0 } else { jump },
+                        y: if before {
+                            820.0 + 48.0 * t + 0.15 * t * t
+                        } else {
+                            790.0 - 42.0 * t + 0.20 * t * t
+                        },
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let points = synthetic(420..=427, 0.0);
+        let impacts = trajectory_direction_breaks(&points, DirectionBreakConfig::default());
+        assert!(
+            impacts
+                .iter()
+                .any(|contact| (418..=421).contains(&contact.frame)),
+            "Eight rejected observations must not hide the impact near frame 420: {impacts:?}"
+        );
+        let switched = synthetic(420..=427, 260.0);
+        assert!(trajectory_direction_breaks(&switched, DirectionBreakConfig::default()).is_empty());
+        let too_long = synthetic(420..=431, 0.0);
+        assert!(trajectory_direction_breaks(&too_long, DirectionBreakConfig::default()).is_empty());
+        let apex = (400..=444)
+            .filter(|frame| !(420..=427).contains(frame))
+            .map(|frame| {
+                let t = (frame - 420) as f64;
+                BallObservation {
+                    frame,
+                    x: 1035.0 + 2.5 * t,
+                    y: 350.0 + 0.2 * t * t,
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(trajectory_direction_breaks(&apex, DirectionBreakConfig::default()).is_empty());
+    }
     #[test]
     fn moderate_rebound_with_short_quantized_pause_is_still_a_contact() {
         let raw: Vec<_> = (0..68)

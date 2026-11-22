@@ -319,6 +319,7 @@ fn full_video_ball_suggestions_impl(
             as usize;
     }
     let mut synthetic = std::collections::HashSet::<i64>::new();
+    let max_observation_gap = if canonical && impact.is_some() { 10 } else { 4 };
     let mut scope_index = 0usize;
     fn emit(
         points: &[BallObservation],
@@ -453,7 +454,9 @@ fn full_video_ball_suggestions_impl(
             continue;
         }
         let Some(ball) = position else {
-            if !points.is_empty() && frame as i64 - points.last().unwrap().frame > 4 {
+            if !points.is_empty()
+                && frame as i64 - points.last().unwrap().frame > max_observation_gap
+            {
                 emit(
                     &points,
                     &mut candidates,
@@ -466,7 +469,10 @@ fn full_video_ball_suggestions_impl(
             }
             continue;
         };
-        if points.last().is_some_and(|p| frame as i64 - p.frame > 4) {
+        if points
+            .last()
+            .is_some_and(|p| frame as i64 - p.frame > max_observation_gap)
+        {
             emit(
                 &points,
                 &mut candidates,
@@ -532,6 +538,113 @@ fn full_video_ball_suggestions_impl(
 mod scored_trajectory_tests {
     use super::*;
 
+    #[test]
+    fn canonical_stabilizer_gap_survives_debug_trajectory_scan() {
+        let root = std::env::temp_dir().join(format!("volley-debug-gap-{}", uuid::Uuid::new_v4()));
+        let replay_id = "a".repeat(24);
+        let touch_id = "b".repeat(24);
+        let rally_id = "c".repeat(24);
+        let artifact_id = "d".repeat(32);
+        let replay_sha = "e".repeat(64);
+        let frames = 70_u64;
+        let settings = json!({"max_gap_frames":12,"max_step_fraction":0.12});
+        let stabilizer = root.join("native_cpu_ball_stabilizer").join(&artifact_id);
+        let touch_dir = root.join("native_cpu_touch_runs").join(&touch_id);
+        std::fs::create_dir_all(&stabilizer).unwrap();
+        std::fs::create_dir_all(&touch_dir).unwrap();
+        let mut bytes = Vec::new();
+        let mut observed = 0;
+        for frame in 0..frames {
+            let ball = if (20..=48).contains(&frame) && !(30..=37).contains(&frame) {
+                observed += 1;
+                let t = frame as f64 - 29.0;
+                let y = if frame <= 29 {
+                    820.0 + 48.0 * t + 0.15 * t * t
+                } else {
+                    790.0 - 42.0 * t + 0.20 * t * t
+                };
+                Some([(1035.0 + 2.5 * t) / 1920.0, y / 1080.0])
+            } else {
+                None
+            };
+            let row = json!({
+                "frame":frame,"ball":ball,"interpolated":false,
+                "rejected":(30..=37).contains(&frame)
+            });
+            bytes.extend(serde_json::to_vec(&row).unwrap());
+            bytes.push(b'\n');
+        }
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        std::fs::write(stabilizer.join("trajectory.jsonl"), &bytes).unwrap();
+        let summary = json!({
+            "schema":"volley-ball-stabilizer/1","version":"ball_stabilizer_v6",
+            "source_replay_id":replay_id,"source_replay_sha256":replay_sha,
+            "artifact_id":artifact_id,"trajectory_file":"trajectory.jsonl",
+            "trajectory_sha256":sha,"frames":frames,"settings":settings,
+            "confidence_frames":observed,"observed_frames":observed,
+            "rejected_frames":8,"interpolated_frames":0
+        });
+        let manifest = json!({
+            "schema":"volley-native-stabilized-ball-trajectory/1","state":"complete",
+            "project_id":"test","video":"match.mp4","artifact_id":artifact_id,
+            "source_replay_id":replay_id,"source_replay_sha256":replay_sha,
+            "frames":frames,"algorithm_version":"ball_stabilizer_v6",
+            "settings":settings,"file":"trajectory.jsonl","sha256":sha,
+            "confidence_frames":observed,"observed_frames":observed,
+            "rejected_frames":8,"interpolated_frames":0
+        });
+        std::fs::write(
+            stabilizer.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            touch_dir.join("manifest.json"),
+            serde_json::to_vec(&json!({"ball_stabilizer":summary})).unwrap(),
+        )
+        .unwrap();
+        let run = crate::native_rally_evidence::ValidatedRun {
+            project_id: "test".into(),
+            video: "match.mp4".into(),
+            run_id: rally_id.clone(),
+            project_source: root.join("match.mp4"),
+            rally_file: root
+                .join("native_cpu_rallies")
+                .join(&rally_id)
+                .join("rally_candidates.jsonl"),
+            touch_file: touch_dir.join("touch_candidates.jsonl"),
+            replay_id,
+            replay_sha,
+            touch_id,
+            rally_sha: "f".repeat(64),
+            touch_sha: "f".repeat(64),
+            frames,
+            source_duration_sec: frames as f64 / 30.0,
+            analysis_range: None,
+            width: 1920,
+            height: 1080,
+            context: 0,
+            expected_rallies: 0,
+            expected_touches: 0,
+            min_ball_score: 0.35,
+        };
+        let result = full_video_ball_impacts_with_reconstruction(
+            &run,
+            &[(19, 48)],
+            volley_core::motion::DirectionBreakConfig::default(),
+        )
+        .unwrap();
+        assert!(
+            result
+                .events
+                .iter()
+                .any(|(frame, _)| (28..=31).contains(frame)),
+            "Saved canonical gap must yield one debug candidate: {:?}",
+            result.events
+        );
+        assert_eq!(result.reconstruction.rejected_outliers, 8);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn scans_saved_replay_and_rejects_changed_sha() {
         let root =
