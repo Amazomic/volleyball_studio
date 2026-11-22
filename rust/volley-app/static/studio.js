@@ -538,7 +538,6 @@
       project_id:project,video,fusion_id:run,start_frame:start,count:180,
       ...(overlay.stabilizerView?{
         stabilizer:true,
-        stabilizer_score:Number($("studio-debug-stabilizer-score").value),
         stabilizer_gap:Number($("studio-debug-stabilizer-gap").value),
         stabilizer_max_step:Number($("studio-debug-stabilizer-step").value)
       }:{})
@@ -594,7 +593,7 @@
       while(overlay.cache.size>16)overlay.cache.delete(overlay.cache.keys().next().value);
       if(isRaw&&overlay.stabilizerView){
         const stats=value.ball_stabilizer;
-        if(!["ball_stabilizer_v3","ball_stabilizer_v4"].includes(stats?.version)||
+        if(!["ball_stabilizer_v3","ball_stabilizer_v4","ball_stabilizer_v5"].includes(stats?.version)||
            value.frames.some(row=>!Object.hasOwn(row,"stabilized_ball")||
              typeof row.ball_interpolated!=="boolean"||typeof row.ball_rejected!=="boolean"))
           throw Error("Нет результата Ball Stabilizer");
@@ -915,7 +914,7 @@
         for(const item of frames){
           if(item.frame<frame-44||item.frame>frame||!item.ball_rejected)continue;
           for(const ball of item.raw?.balls||[]){
-            if(!Array.isArray(ball.point)||ball.score<Number($("studio-debug-stabilizer-score").value))continue;
+            if(!Array.isArray(ball.point))continue;
             const [rx,ry]=point(ball.point);
             ctx.strokeStyle="#ff6473";ctx.lineWidth=2;
             ctx.beginPath();ctx.moveTo(rx-4,ry-4);ctx.lineTo(rx+4,ry+4);
@@ -2486,7 +2485,7 @@
     };
     overlay.debugBefore.addEventListener("click",()=>selectTrajectoryVariant("before"));
     overlay.debugAfter.addEventListener("click",()=>selectTrajectoryVariant("after"));
-    for(const id of ["studio-debug-stabilizer-score","studio-debug-stabilizer-gap","studio-debug-stabilizer-step"]){
+    for(const id of ["studio-debug-stabilizer-gap","studio-debug-stabilizer-step"]){
       $(id).addEventListener("change",()=>{
         if(!overlay.stabilizerView)return;
         for(const controller of overlay.controllers.values())controller?.abort();

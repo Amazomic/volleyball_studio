@@ -4,7 +4,7 @@ import {runInNewContext} from "node:vm";
 
 const source=readFileSync(new URL("../../rust/volley-app/static/studio_tabs.js",import.meta.url),"utf8");
 const html=readFileSync(new URL("../../rust/volley-app/static/studio.html",import.meta.url),"utf8");
-assert.match(html,/<input id="studio-post-ball-stabilizer-score"[^>]*value="0\.70" data-default="0\.70"/);
+assert.doesNotMatch(html,/id="studio-post-ball-stabilizer-score"/);
 const extract=(begin,end)=>{
   const start=source.indexOf(begin),stop=source.indexOf(end,start);
   assert.ok(start>=0&&stop>start,"Cannot locate "+begin);
@@ -18,8 +18,7 @@ const localStorage={
 const project="f39dff74992f";
 const key="volley:studio-analysis-form:v1:"+project;
 const inputs=[
-  {id:"studio-post-ball-score",value:"0.35",dataset:{default:"0.35"},checkValidity:()=>true},
-  {id:"studio-post-ball-stabilizer-score",value:"0.70",dataset:{default:"0.70"},checkValidity:()=>true}
+  {id:"studio-post-ball-score",value:"0.35",dataset:{default:"0.35"},checkValidity:()=>true}
 ];
 const ui={analysis:{querySelectorAll:()=>inputs},video:{value:"match.mp4"}};
 const env={ui,localStorage,$:id=>inputs.find(x=>x.id===id),projectId:()=>project};
@@ -36,7 +35,6 @@ for(const version of [1,2]){
   }}));
   assert.equal(env.restore(project),"match.mp4");
   assert.equal(inputs[0].value,"0.44","Other saved settings must survive migration");
-  assert.equal(inputs[1].value,"0.65","Previous custom stabilizer score must survive new default");
   assert.equal(JSON.parse(storage.get(key)).version,3);
   assert.equal(JSON.parse(storage.get(key)).fields["studio-post-require-pose"],undefined);
 }
@@ -47,10 +45,8 @@ assert.equal(JSON.parse(storage.get(key)).fields["studio-post-touch-algorithm"],
   "Removed algorithm selector must not return to storage");
 assert.equal(env.restore(project),"match.mp4");
 assert.equal(inputs[0].value,"0.44");
-assert.equal(inputs[1].value,"0.65");
-assert.deepEqual(JSON.parse(storage.get(key)).fields["studio-post-ball-stabilizer-score"],
-  ["0.70","0.65"],"Saved manual threshold must migrate to the new baseline");
+assert.equal(JSON.parse(storage.get(key)).fields["studio-post-ball-stabilizer-score"],undefined,
+  "Removed threshold must not reappear in saved settings");
 storage.delete(key);
 assert.equal(env.restore(project),"");
-assert.equal(inputs[1].value,"0.70","New analysis must default to 70% confident anchors");
-console.log("PASS: 70% ball anchors, preserved prior custom threshold and v1/v2 form migrations.");
+console.log("PASS: removed VBallNet confidence gate and migrated v1/v2 saved profiles.");

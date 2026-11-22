@@ -311,6 +311,7 @@ pub(crate) fn verified_ball_trajectory(
                 | "ball_stabilizer_v2"
                 | "ball_stabilizer_v3"
                 | "ball_stabilizer_v4"
+                | "ball_stabilizer_v5"
         )
         || summary["source_replay_id"] != replay_id
         || summary["source_replay_sha256"] != replay_sha256
@@ -707,9 +708,10 @@ mod ball_stabilizer_postprocessing_tests {
             assert!(motion.interpolated[i]);
         }
         assert!(motion.points[6].is_some());
-        assert!(motion.interpolated[6]);
+        assert!(!motion.interpolated[6]);
         let original = block.clone();
         use_stabilized_ball(&mut block, &motion);
+        assert_eq!(block[6].selected_ball.as_ref().unwrap().score, 0.49);
         assert!(
             (original[20].selected_ball.as_ref().unwrap().bbox_xyxy_norm[0] - 0.915).abs() < 1e-9
         );

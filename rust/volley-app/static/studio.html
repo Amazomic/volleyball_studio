@@ -372,7 +372,6 @@
                   <fieldset id="studio-ball-stabilizer-controls" class="raw-model-control hidden">
                     <legend>Ball Stabilizer · сравнение на видео</legend>
                     <small>Голубой — VBallNet, золотой — стабилизированная траектория, штрих — интерполяция, красный × — отброшенная детекция.</small>
-                    <label>Мин. уверенность <input id="studio-debug-stabilizer-score" type="number" min="0.51" max="1" step="0.01" value="0.55"></label>
                     <label>Пропуск, кадров <input id="studio-debug-stabilizer-gap" type="number" min="1" max="27" step="1" value="12"></label>
                     <label>Макс. скачок, доля/кадр <input id="studio-debug-stabilizer-step" type="number" min="0.01" max="0.25" step="0.01" value="0.12"></label>
                     <small id="studio-debug-stabilizer-stats" role="status">Для сравнения выберите сохранённый GPU-анализ.</small>
@@ -588,8 +587,7 @@
             </section>
           </section>
         </section>
-        <section id="studio-analysis-view" class="hidden tab-workspace" aria-labelledby="studio-analysis-heading">
-          <p id="studio-analysis-heading" class="eyebrow">02 / ПОЛНЫЙ ЦИКЛ</p>
+        <section id="studio-analysis-view" class="hidden tab-workspace" aria-label="Анализ">
           <section id="studio-analysis-flow" class="analysis-flow" aria-label="Граф стадий анализа">
             <div class="analysis-flow-toolbar">
               <strong>Конвейер анализа</strong>
@@ -730,10 +728,6 @@
                 </div>
                 <div class="analysis-profile-subtitle">Ball Stabilizer · интерполяция траектории мяча</div>
               <div class="analysis-profile-fields analysis-post-ball-stabilizer">
-                <div>
-                  <label class="field-label analysis-setting-help" for="studio-post-ball-stabilizer-score" tabindex="0" data-analysis-hint="Детекции от 70% (по умолчанию) задают надёжные точки траектории. Более слабые уточняют только близкие к прогнозу интерполированные точки, не создавая самостоятельный трек. Исходные данные VBallNet сохраняются." aria-description="Детекции от 70% (по умолчанию) задают надёжные точки траектории. Более слабые уточняют только близкие к прогнозу интерполированные точки, не создавая самостоятельный трек. Исходные данные VBallNet сохраняются." data-analysis-hint-en="Detections above this threshold anchor the trajectory. Weaker detections only refine nearby predicted interpolation, without creating independent tracks. Raw VBallNet data remains unchanged.">Ball Stabilizer · порог уверенности VBallNet</label>
-                  <input id="studio-post-ball-stabilizer-score" type="number" min="0.51" max="1" step="0.01" value="0.70" data-default="0.70">
-                </div>
                 <div>
                   <label class="field-label analysis-setting-help" for="studio-post-ball-stabilizer-gap" tabindex="0" data-analysis-hint="Допустимая длина пробела между реальными позициями мяча, который восстанавливается перед поиском касаний; длинные пропуски остаются пустыми." aria-description="Допустимая длина пробела между реальными позициями мяча, который восстанавливается перед поиском касаний; длинные пропуски остаются пустыми." data-analysis-hint-en="Maximum gap between real ball observations filled before touch detection. Longer gaps remain empty.">Интерполяция · максимальный пропуск, кадров</label>
                   <input id="studio-post-ball-stabilizer-gap" type="number" min="1" max="27" step="1" value="12" data-default="12">
