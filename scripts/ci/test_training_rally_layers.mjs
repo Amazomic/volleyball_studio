@@ -98,6 +98,18 @@ assert.ok(!palette().includes("#37b9ce80"),
   "Old CPU touch-based rally intervals must never render in training");
 assert.equal(rects.filter(row=>row.color==="#efb15773").length,1,
   "Ball trajectory intervals separated by less than four seconds merge");
+comparison.data.trajectory_rallies=[{start:30,end:105},{start:210,end:280}];
+comparison.data.parameters={stationary_intervals:[],unobserved_intervals:[[106,209]]};
+rects.length=0;
+drawTimeline();
+assert.equal(rects.filter(row=>row.color==="#efb15773").length,2,
+  "Long unobserved pauses must remain separate on the Debug timeline");
+comparison.data.trajectory_rallies=[{start:30,end:105},{start:115,end:140}];
+comparison.data.parameters=null;
+rects.length=0;
+drawTimeline();
+assert.equal(rects.filter(row=>row.color==="#efb15773").length,1);
+
 rects.length=0;
 timelineRallyLayers.gap.value="0";
 timelineRallyLayers.gap.listeners.input();

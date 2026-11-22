@@ -43,8 +43,14 @@ new stationary_ball_ms setting defaults to **1000 ms** and accepts
 (with at least 70% observed samples), the region is classified as a
 stationary hold, rather than a rally. Isolated one-frame jumps are ignored.
 The same boundary prevents the 4-second interval merge from bridging a
-recognized stationary hold. Candidate moving intervals must also cover
-at least 10% of a frame dimension in horizontal or vertical displacement.
+recognized stationary hold. A full absence of reliable ball detections for
+3 s or longer also prevents merging, even when merge_gap_seconds=4: the
+absence is recorded separately as unobserved_intervals, not misreported as
+a visually confirmed stationary ball. Short (<3 s) occlusions can still
+merge when the configured merge gap permits. The unobserved pause threshold
+rises when stationary_ball_ms is set above 3000 ms. Candidate moving
+intervals must also cover at least 10% of a frame dimension in horizontal
+or vertical displacement.
 
 GPU analysis and Debug have independent controls and both call this
 Rust detector, using cached VBallNet/CPU replay evidence respectively.
@@ -52,8 +58,8 @@ The fixed 5-second minimum applies to the final merged intervals in
 the primary GPU path and saved-CPU-replay training comparison, regardless
 of the independently configured 1.5-second minimum moving trajectory.
 One second of RF-DETR scan padding is excluded from this duration.
-The primary GPU mask records the threshold, stationary intervals and
-movement_filter_version=stationary_ball_min_rally_5s_v2 and
+The primary GPU mask records the threshold, stationary and unobserved intervals;
+movement_filter_version=stationary_ball_min_rally_5s_v3 and
 min_rally_seconds=5.0. Both the threshold change and the stationary
 setting invalidate the prior GPU profile match; old immutable evidence is
 not rewritten. The 1-second person-inference scan padding remains separate
@@ -61,8 +67,20 @@ from the saved unpadded rally boundaries. The safety fallback to scan
 the full permitted range when no reliable moving interval exists is retained.
 
 The threshold is heuristic and depends on detector stability and camera
-motion. Real-game verification for ~18:51.2 and ~19:59.2 remains separate
-from unit tests and must not be claimed without inspecting the video.
+motion. A read-only replay of a saved long-match GPU VBallNet raw source
+(178040 frames, no GPU rerun, no sidecar writes) reproduced the defect:
+99 consecutive frames (1199.700–1202.967 s) had no reliable ball
+observations, yet the old 4-second merge joined two nearby detected segments.
+With the combined stationary_ball_min_rally_5s_v3 policy, the same saved
+evidence yields 416 detected intervals and 171 confirmed merged intervals
+after applying the five-second minimum. The 19:59.2 → 20:03.0 span no
+longer belongs to one merged rally. This confirms the narrow missing-evidence fix, not
+whole-match precision/recall. Frame review also showed a true start near
+18:51.2 without VBallNet confidence >=0.35 until about 18:53.5:
+the stationary/missing-evidence rule cannot reconstruct absent reliable
+source detections, so the exact start remains unverified and needs separate
+ball-model evidence. Running a new full GPU scan and validating the live
+Studio UI remain separate acceptance tasks.
 
 ## Postprocessing boundary owner (2026-11-22)
 

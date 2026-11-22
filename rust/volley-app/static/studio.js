@@ -2529,8 +2529,10 @@
     const gapFrames=trainingGapSeconds()*fps();
     return {
       touches:[],
-      ball:mergeTrainingIntervals(ballIntervals,gapFrames,
-        comparison.data?.parameters?.stationary_intervals||[])
+      ball:mergeTrainingIntervals(ballIntervals,gapFrames,[
+        ...(comparison.data?.parameters?.stationary_intervals||[]),
+        ...(comparison.data?.parameters?.unobserved_intervals||[])
+      ])
     };
   };
   const trainingRallyNoun=count=>{

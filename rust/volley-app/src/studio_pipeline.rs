@@ -885,7 +885,7 @@ fn parse_primary_rally_scope(
             || end >= frames
             || end - start + 1 < crate::cpu_retrack::ball_track::MIN_RALLY_FRAMES
     }) || intervals.windows(2).any(|pair| pair[0].1 >= pair[1].0)
-        || mask["movement_filter_version"] != "stationary_ball_min_rally_5s_v2"
+        || mask["movement_filter_version"] != "stationary_ball_min_rally_5s_v3"
         || mask["min_rally_seconds"] != 5.0
         || evidence["schema"] != "volley-primary-rally-mask-evidence/1"
         || evidence["ball_job_id"] != ball_id
@@ -991,7 +991,7 @@ fn gpu_lineage_valid(
             || saved["gpu_rally_mask"]["stationary_ball_ms"]
                 != json!(request.gpu.primary_rallies.stationary_ball_ms)
             || saved["gpu_rally_mask"]["movement_filter_version"]
-                != "stationary_ball_min_rally_5s_v2"
+                != "stationary_ball_min_rally_5s_v3"
             || saved["gpu_rally_mask"]["min_rally_seconds"] != 5.0)
     {
         return false;
@@ -3132,7 +3132,7 @@ mod tests {
                 "source_frame_count":600,
                 "merged":[[12,161],[320,469]],
                 "selected_frames":400,
-                "movement_filter_version":"stationary_ball_min_rally_5s_v2",
+                "movement_filter_version":"stationary_ball_min_rally_5s_v3",
                 "min_rally_seconds":5.0,
                 "fallback_reason":null
             }
@@ -3727,7 +3727,7 @@ mod branching_tests {
                 "min_trajectory_seconds":request.gpu.primary_rallies.min_trajectory_seconds,
                 "merge_gap_seconds":request.gpu.primary_rallies.merge_gap_seconds,
                 "stationary_ball_ms":request.gpu.primary_rallies.stationary_ball_ms,
-                "movement_filter_version":"stationary_ball_min_rally_5s_v2",
+                "movement_filter_version":"stationary_ball_min_rally_5s_v3",
                 "min_rally_seconds":5.0
             },
             "gpu_rally_mask_sha256":sha,

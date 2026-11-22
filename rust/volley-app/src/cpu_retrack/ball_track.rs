@@ -53,12 +53,14 @@ pub(crate) fn merge_continuous_intervals(
 pub(crate) const DEFAULT_STATIONARY_BALL_MS: u32 = 1000;
 const STATIONARY_REGION_SIZE: f64 = 0.035;
 const MIN_RALLY_FIELD_TRAVEL: f64 = 0.10;
+const MIN_UNOBSERVED_STOP_MS: u64 = 3000;
 
 #[derive(Debug)]
 pub(crate) struct MovingBallIntervals {
     pub detected: Vec<(u64, u64)>,
     pub merged: Vec<(u64, u64)>,
     pub stationary: Vec<(u64, u64)>,
+    pub unobserved: Vec<(u64, u64)>,
 }
 
 pub(crate) fn stationary_ball_intervals(
@@ -144,6 +146,30 @@ pub(crate) fn stationary_ball_intervals(
     Ok(regions)
 }
 
+fn prolonged_unobserved_ball_intervals(
+    points: &[Option<[f64; 2]>],
+    stationary_ball_ms: u32,
+) -> Vec<(u64, u64)> {
+    let minimum =
+        (u64::from(stationary_ball_ms).max(MIN_UNOBSERVED_STOP_MS) * 30).div_ceil(1000) as usize;
+    let mut ranges = Vec::new();
+    let mut first = None;
+    for (frame, point) in points
+        .iter()
+        .chain(std::iter::once(&Some([0.0, 0.0])))
+        .enumerate()
+    {
+        if point.is_none() {
+            first.get_or_insert(frame);
+        } else if let Some(start) = first.take() {
+            if frame - start >= minimum {
+                ranges.push((start as u64, frame as u64 - 1));
+            }
+        }
+    }
+    ranges
+}
+
 fn is_field_motion(points: &[Option<[f64; 2]>], start: u64, end: u64) -> bool {
     let (mut low_x, mut high_x) = (f64::INFINITY, f64::NEG_INFINITY);
     let (mut low_y, mut high_y) = (f64::INFINITY, f64::NEG_INFINITY);
@@ -163,6 +189,7 @@ pub(crate) fn analyze_moving_ball(
     stationary_ball_ms: u32,
 ) -> Result<MovingBallIntervals, String> {
     let stationary = stationary_ball_intervals(points, stationary_ball_ms)?;
+    let unobserved = prolonged_unobserved_ball_intervals(points, stationary_ball_ms);
     let mut moving = points.to_vec();
     for &(start, end) in &stationary {
         moving[start as usize..=end as usize].fill(None);
@@ -195,15 +222,18 @@ pub(crate) fn analyze_moving_ball(
             detected.push((next_start, end));
         }
     }
+    let mut barriers = stationary.clone();
+    barriers.extend(unobserved.iter().copied());
     let merged = filter_short_rallies(merge_continuous_intervals_with_pauses(
         &detected,
         merge_gap_seconds,
-        &stationary,
+        &barriers,
     )?);
     Ok(MovingBallIntervals {
         detected,
         merged,
         stationary,
+        unobserved,
     })
 }
 
@@ -821,6 +851,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(filter_short_rallies(combined), vec![(600, 810)]);
+    }
+
+    #[test]
+    fn stationary_evidence_inside_unobserved_gap_blocks_interval_merge() {
+        let detected = [(30, 120), (200, 290)];
+        let pause = [(145, 170)];
+        assert_eq!(
+            merge_continuous_intervals_with_pauses(&detected, 4.0, &pause).unwrap(),
+            detected.to_vec()
+        );
+        assert_eq!(
+            merge_continuous_intervals_with_pauses(&detected, 4.0, &[]).unwrap(),
+            vec![(30, 290)]
+        );
     }
 
     #[test]
