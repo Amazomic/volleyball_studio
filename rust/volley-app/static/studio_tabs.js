@@ -441,14 +441,14 @@
     ["ball","Детекция мяча","gpu",1,2],
     ["rallies","Розыгрыши","gpu",1,3],
     ["players","Поиск игроков","gpu",1,4],
-    ["fusion","Данные GPU","gpu",2,4],
-    ["pose","Позы игроков","gpu",2,3],
-    ["tracking","Трекинг ID","cpu",3,3],
-    ["touches","Касания","cpu",3,4],
-    ["touch_types","Типы касаний","cpu",4,4],
-    ["publish","Публикация","cpu",4,3],
-    ["identity","Привязка игроков","cpu",4,2],
-    ["material","Результат","output",4,1]
+    ["fusion","Данные GPU","gpu",1,5],
+    ["pose","Позы игроков","gpu",1,6],
+    ["tracking","Трекинг ID","cpu",2,1],
+    ["touches","Касания","cpu",2,2],
+    ["touch_types","Типы касаний","cpu",2,3],
+    ["publish","Публикация","cpu",2,4],
+    ["identity","Привязка игроков","cpu",2,5],
+    ["material","Результат","output",2,6]
   ];
   const pipelineNames=new Map(pipelineStages.map(item=>[item[0],item[1]]));
   pipelineNames.set("cache","Кэш GPU");
@@ -558,6 +558,18 @@
       Math.max(0,now-entry.started_ms):entry?.duration_ms;
     return result+" · "+stageTime(duration);
   };
+  const stageProgressPercent=(entry,running,done)=>{
+    if(done)return 100;
+    if(!running)return 0;
+    const reported=entry?.progress_percent;
+    if(typeof reported==="number"&&Number.isFinite(reported))
+      return Math.max(0,Math.min(100,reported));
+    const processed=entry?.frames_processed,total=entry?.frames_total;
+    if(typeof processed==="number"&&Number.isFinite(processed)&&
+      typeof total==="number"&&Number.isFinite(total)&&total>0)
+      return Math.max(0,Math.min(100,processed/total*100));
+    return null;
+  };
   const pipelineEdges=[
     ["video","ball"],["ball","rallies"],["rallies","players"],["players","fusion"],
     ["fusion","pose"],["pose","tracking"],["tracking","touches"],
@@ -603,37 +615,38 @@
   const closeGraphSettings=()=>{
     const dialog=$("analysis-flow-dialog");
     if(dialog.classList.contains("hidden"))return;
-    for(const [node,placeholder] of graphMoved)placeholder.replaceWith(node);
+    for(const [node,placeholder,wasOpen] of graphMoved){
+      placeholder.replaceWith(node);
+      if(wasOpen!==null)node.open=wasOpen;
+    }
     graphMoved=[];dialog.classList.add("hidden");
+    dialog.querySelector(".analysis-flow-dialog-panel").classList.remove("is-editor","is-compact","is-single","is-medium");
     if(graphFocus?.isConnected)graphFocus.focus({preventScroll:true});
   };
-  const openGraphSettings=(id,historyEntry=null)=>{
+  const openGraphSettings=id=>{
     closeGraphSettings();
     graphFocus=document.activeElement;
     $("analysis-flow-dialog-title").textContent=pipelineNames.get(id)||"Стадия";
     $("analysis-flow-dialog-description").textContent=graphDescriptions[id]||"";
     const body=$("analysis-flow-dialog-body");clear(body);
-    if(historyEntry){
-      const t=historyEntry.duration_ms;
-      body.append(make("div","", "Время: "+(Number.isFinite(t)?historyDuration(t):"—")));
-      const count=Number(historyEntry.frames_processed),total=Number(historyEntry.frames_total);
-      if(Number.isSafeInteger(count)&&Number.isSafeInteger(total)&&total>0)
-        body.append(make("div","",count.toLocaleString("ru-RU")+
-          " / "+total.toLocaleString("ru-RU")+" кадров"));
-      body.append(make("div","", "Техническая стадия: "+String(historyEntry.name||"—")));
-    }else{
-      for(const selector of graphSettings[id]||[]){
-        const control=ui.analysis.querySelector(selector);
-        if(!control)continue;
-        const item=control.matches("input,select")?
-          control.closest(".analysis-profile-toggle")||control.parentElement:control;
-        if(!item||graphMoved.some(([node])=>node===item))continue;
-        const mark=document.createComment("stage-settings");
-        item.before(mark);body.append(item);graphMoved.push([item,mark]);
-        if(item.tagName==="DETAILS")item.open=true;
-      }
-      if(!body.children.length)body.append(make("p","panel-note","Дополнительных параметров нет."));
+    for(const selector of graphSettings[id]||[]){
+      const control=ui.analysis.querySelector(selector);
+      if(!control)continue;
+      const item=control.matches("input,select")?
+        control.closest(".analysis-profile-toggle")||control.parentElement:control;
+      if(!item||graphMoved.some(([node])=>node===item))continue;
+      const mark=document.createComment("stage-settings");
+      item.before(mark);
+      graphMoved.push([item,mark,item.tagName==="DETAILS"?item.open:null]);
+      body.append(item);
+      if(item.tagName==="DETAILS")item.open=true;
     }
+    if(!body.children.length)body.append(make("p","panel-note","Дополнительных параметров нет."));
+    const panel=$("analysis-flow-dialog").querySelector(".analysis-flow-dialog-panel");
+    panel.classList.toggle("is-editor",id==="video");
+    panel.classList.toggle("is-single",id!=="video"&&body.children.length<=1);
+    panel.classList.toggle("is-compact",id!=="video"&&body.children.length>=2&&body.children.length<=4);
+    panel.classList.toggle("is-medium",id!=="video"&&body.children.length>=5&&body.children.length<=10);
     $("analysis-flow-dialog").classList.remove("hidden");
     $("analysis-flow-dialog-close").focus();
   };
@@ -674,14 +687,10 @@
     for(const [from,to,kind] of pipelineEdges){
       const a=byId.get(from),b=byId.get(to);if(!a||!b)continue;
       let d="",label=null;
-      if(kind==="no-types"){
-        const x=a.r-14,y=b.t-11;
-        d="M "+x+" "+a.b+" L "+x+" "+y+" L "+b.cx+" "+y+" L "+b.cx+" "+b.t;
-        label=["Без типов",(a.cx+b.cx)/2,y-3];
-      }else if(kind==="cache"){
-        const y=(a.b+b.t)/2;
-        d="M "+a.l+" "+a.cy+" L 5 "+a.cy+" L 5 "+y+" L "+b.cx+" "+y+" L "+b.cx+" "+b.t;
-        label=["Кэш GPU",target.clientWidth*.15,y-3];
+      if(kind==="no-types"||kind==="cache"){
+        const y=Math.min(a.t,b.t)-14;
+        d="M "+a.cx+" "+a.t+" L "+a.cx+" "+y+" L "+b.cx+" "+y+" L "+b.cx+" "+b.t;
+        label=[kind==="cache"?"Кэш GPU":"Без типов",(a.cx+b.cx)/2,y-3];
       }else if(kind==="no-pose"){
         const y=(a.b+b.t)/2;
         d="M "+(a.r-12)+" "+a.b+" L "+(a.r-12)+" "+y+" L "+b.cx+" "+y+" L "+b.cx+" "+b.t;
@@ -718,8 +727,8 @@
     svg.setAttribute("class","analysis-flow-lines");svg.setAttribute("aria-hidden","true");
     const grid=make("div","analysis-flow-grid");
     for(const [phase,label,rows] of [
-      ["gpu","1 фаза · GPU · подготовка и детекция","1 / 3"],
-      ["cpu","2 фаза · CPU · обработка результатов","3 / 5"]
+      ["gpu","1 фаза · GPU · подготовка и детекция","1"],
+      ["cpu","2 фаза · CPU · обработка результатов","2"]
     ]){
       const panel=make("div","analysis-flow-phase");
       panel.dataset.phase=phase;
@@ -748,8 +757,7 @@
         (meta?" — "+(meta[1]==="model"?"нейросеть ":"алгоритм ")+meta[0]:""));
       node.title=graphDescriptions[id];
       node.addEventListener("click",()=>{
-        const entry=run?.stages?.find(item=>pipelineId(item)===(id==="touch_types"?"touches":id));
-        openGraphSettings(id,run?entry||{name}:null);
+        openGraphSettings(id);
       });
       const stats=make("small","analysis-flow-node-stats","—");
       cell.append(node,stats);
@@ -789,6 +797,9 @@
         id==="pose"&&run?.profile?.gpu?.pose_enabled===false||
         id==="touch_types"&&!classification);
       node.classList.toggle("is-failed",run?.status==="failed"&&id===currentId);
+      const pct=stageProgressPercent(entry,!!running,done);
+      node.style.setProperty("--stage-progress",(pct??0)+"%");
+      node.classList.toggle("is-progress-unknown",!!running&&pct===null);
       const meta=pipelineModelMeta(id,run);
       const technical=node.querySelector(".analysis-flow-node-model");
       if(technical){
@@ -798,7 +809,8 @@
       }
       const stats=node.nextElementSibling;
       if(stats?.classList.contains("analysis-flow-node-stats")){
-        stats.textContent=stageResultText(id,entry,run,Date.now(),done,running);
+        const statusText=stageResultText(id,entry,run,Date.now(),done,running);
+        stats.textContent=running&&pct!==null?Math.round(pct)+"% · "+statusText:statusText;
         const sharedPose=id==="pose"&&!entry&&
           (run?.shared_pose?.source_stage_id==="players"||
             /RF-DETR.*RTMPose/.test(String(seen.get("players")?.name||"")));
