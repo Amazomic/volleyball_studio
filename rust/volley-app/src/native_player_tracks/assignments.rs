@@ -260,6 +260,136 @@ pub(super) fn choose_automatic_photo_links_at_threshold(
     }
     Ok(chosen)
 }
+pub(super) fn choose_automatic_photo_links_with_groups(
+    ctx: &Inputs,
+    doc: &Value,
+    matches: &Value,
+    groups: &Value,
+    threshold: f64,
+) -> Result<BTreeMap<u64, String>, String> {
+    let mut chosen = choose_automatic_photo_links_at_threshold(ctx, doc, matches, threshold)?;
+    let Some(groups) = groups.as_array() else {
+        return Ok(chosen);
+    };
+    let manual = doc["assignments"]
+        .as_object()
+        .ok_or("Invalid assignments")?;
+    let excluded = doc["excluded_ids"]
+        .as_array()
+        .ok_or("Invalid exclusions")?
+        .iter()
+        .filter_map(Value::as_u64)
+        .collect::<BTreeSet<_>>();
+    let suppressed = doc["automatic_suppressed_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64)
+        .collect::<BTreeSet<_>>();
+    let mut used = BTreeSet::new();
+    for group in groups {
+        if group["policy"] != "measured_complete_link_cosine_96_v1" {
+            continue;
+        }
+        let Some(owner) = group["player_id"]
+            .as_str()
+            .filter(|owner| ctx.roster.contains_key(*owner))
+        else {
+            continue;
+        };
+        let Some(members) = group["track_ids"].as_array() else {
+            continue;
+        };
+        if !(2..=200).contains(&members.len()) {
+            continue;
+        }
+        let Some(ids) = members
+            .iter()
+            .map(Value::as_u64)
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        if ids.windows(2).any(|pair| pair[0] >= pair[1])
+            || ids
+                .iter()
+                .any(|id| !ctx.tracks.contains_key(id) || used.contains(id))
+            || ids.iter().any(|id| {
+                manual
+                    .get(&id.to_string())
+                    .is_some_and(|owner_id| owner_id.as_str() != Some(owner))
+            })
+        {
+            continue;
+        }
+        used.extend(ids.iter().copied());
+        if !ids
+            .iter()
+            .any(|id| chosen.get(id).is_some_and(|v| v == owner))
+            || ids
+                .iter()
+                .any(|id| chosen.get(id).is_some_and(|v| v != owner))
+            || ids.iter().enumerate().any(|(i, id)| {
+                ids.iter()
+                    .skip(i + 1)
+                    .any(|other| tracks_co_visible(&ctx.tracks[id], &ctx.tracks[other]))
+            })
+        {
+            continue;
+        }
+        for id in ids {
+            if chosen.contains_key(&id)
+                || manual.contains_key(&id.to_string())
+                || excluded.contains(&id)
+                || suppressed.contains(&id)
+            {
+                continue;
+            }
+            let Some(rows) = matches[id.to_string()].as_array() else {
+                continue;
+            };
+            let Some(best) = rows.first() else { continue };
+            let competitor = rows
+                .iter()
+                .skip(1)
+                .filter_map(|row| row["cosine_similarity"].as_f64())
+                .fold(0.0_f64, f64::max);
+            let Some(score) = best["cosine_similarity"].as_f64() else {
+                continue;
+            };
+            if best["player_id"].as_str() != Some(owner)
+                || !score.is_finite()
+                || score < 0.65_f64.max(threshold - 0.12)
+                || score - competitor < 0.08
+                || best["samples_used"]
+                    .as_u64()
+                    .is_none_or(|count| count == 0 || count > 3)
+            {
+                continue;
+            }
+            let candidate = &ctx.tracks[&id];
+            let occupied = manual.iter().any(|(other_id, other_owner)| {
+                other_owner.as_str() == Some(owner)
+                    && other_id.parse::<u64>().ok().is_some_and(|other| {
+                        ctx.tracks
+                            .get(&other)
+                            .is_some_and(|existing| tracks_co_visible(candidate, existing))
+                    })
+            }) || chosen.iter().any(|(other_id, other_owner)| {
+                other_owner == owner
+                    && ctx
+                        .tracks
+                        .get(other_id)
+                        .is_some_and(|existing| tracks_co_visible(candidate, existing))
+            });
+            if !occupied {
+                chosen.insert(id, owner.to_owned());
+            }
+        }
+    }
+    Ok(chosen)
+}
+
 /// Re-evaluate persisted provisional links against the *full* observed replay.
 /// Older automatic passes could select a weaker, wrong athlete when the best
 /// athlete was already occupied. Do not expose such stale names in previews.
@@ -285,10 +415,11 @@ pub(super) fn reconcile_automatic_photo_links(ctx: &Inputs, doc: &mut Value) -> 
         .filter(|(id, _)| saved.contains_key(*id))
         .map(|(id, rows)| (id.clone(), rows.clone()))
         .collect();
-    let expected = choose_automatic_photo_links_at_threshold(
+    let expected = choose_automatic_photo_links_with_groups(
         ctx,
         doc,
         &Value::Object(preserved_matches),
+        &doc["automatic_identity_evidence"]["identity_groups"],
         saved_automatic_photo_threshold(doc),
     )?;
     let safe = saved
@@ -793,14 +924,21 @@ pub(super) fn read_internal(state: &AppState, req: &TrackQuery) -> Result<Value,
     )?;
     let bytes = existing(&ctx.sidecar).map_err(storage::bad_request)?;
     let mut doc = validated(bytes.as_deref(), &ctx).map_err(storage::bad_request)?;
-    if !automatic_links_current(state, &ctx, &doc) {
+    let previous_automatic = doc["automatic_assignments"]
+        .as_object()
+        .map_or(0, serde_json::Map::len);
+    let evidence_current = automatic_links_current(state, &ctx, &doc);
+    if !evidence_current {
         doc["automatic_assignments"] = json!({});
     } else {
         let assigned_scope = automatic_assignment_scope(state, &ctx, &doc)?;
         reconcile_automatic_photo_links(assigned_scope.as_ref().unwrap_or(&ctx), &mut doc)
             .map_err(storage::bad_request)?;
     }
-    filtered_page(
+    let effective_automatic = doc["automatic_assignments"]
+        .as_object()
+        .map_or(0, serde_json::Map::len);
+    let mut page = filtered_page(
         &ctx,
         &doc,
         &revision(bytes.as_deref()),
@@ -809,7 +947,19 @@ pub(super) fn read_internal(state: &AppState, req: &TrackQuery) -> Result<Value,
         req.view.as_deref(),
         req.view_player_id.as_deref(),
     )
-    .map_err(storage::bad_request)
+    .map_err(storage::bad_request)?;
+    page["automatic_link_health"] = json!({
+        "saved_count":previous_automatic,
+        "effective_count":effective_automatic,
+        "reason": if !evidence_current {
+            "source_model_or_reference_changed"
+        } else if effective_automatic < previous_automatic {
+            "observed_identity_conflict"
+        } else {
+            "current"
+        }
+    });
+    Ok(page)
 }
 pub(super) fn change(state: &AppState, req: &TrackEdit) -> Result<Value, ApiError> {
     if !state.writes_enabled {
@@ -1028,15 +1178,27 @@ pub(super) fn change(state: &AppState, req: &TrackEdit) -> Result<Value, ApiErro
     Ok(result)
 }
 
+#[cfg(test)]
 pub(super) fn refresh_automatic_photo_links(
     ctx: &Inputs,
     doc: &Value,
     matches: &Value,
     threshold: f64,
 ) -> Result<(Value, BTreeMap<u64, String>), String> {
+    refresh_automatic_photo_links_with_groups(ctx, doc, matches, &Value::Null, threshold)
+}
+
+pub(super) fn refresh_automatic_photo_links_with_groups(
+    ctx: &Inputs,
+    doc: &Value,
+    matches: &Value,
+    groups: &Value,
+    threshold: f64,
+) -> Result<(Value, BTreeMap<u64, String>), String> {
     let mut updated = doc.clone();
     updated["automatic_assignments"] = json!({});
-    let chosen = choose_automatic_photo_links_at_threshold(ctx, &updated, matches, threshold)?;
+    let chosen =
+        choose_automatic_photo_links_with_groups(ctx, &updated, matches, groups, threshold)?;
     updated["automatic_assignments"] = json!(chosen
         .iter()
         .map(|(id, player)| (id.to_string(), player.clone()))
@@ -1082,7 +1244,8 @@ fn cached_photo_comparison(
         "model_fingerprint":model,
         "photo_sample_policy":evidence["photo_sample_policy"],
         "photo_count":evidence["photo_count"],
-        "player_matches":evidence["matches"]
+        "player_matches":evidence["matches"],
+        "identity_groups":evidence["identity_groups"]
     }))
 }
 
@@ -1178,8 +1341,14 @@ fn persist_photo_comparison(
         saved_automatic_photo_threshold(&doc)
     };
     let chosen = if auto_assign {
-        let (updated, chosen) = refresh_automatic_photo_links(&scoped, &doc, matches, threshold)
-            .map_err(storage::bad_request)?;
+        let (updated, chosen) = refresh_automatic_photo_links_with_groups(
+            &scoped,
+            &doc,
+            matches,
+            &comparison["identity_groups"],
+            threshold,
+        )
+        .map_err(storage::bad_request)?;
         doc = updated;
         chosen
     } else {
@@ -1194,6 +1363,7 @@ fn persist_photo_comparison(
     }
     doc["automatic_identity_evidence"] = json!({
         "threshold":threshold, "matches":matches,
+        "identity_groups":comparison["identity_groups"],
         "photo_count":comparison["photo_count"],
         "photo_sample_policy":comparison["photo_sample_policy"],
         "rally_run_id":req.rally_run_id,

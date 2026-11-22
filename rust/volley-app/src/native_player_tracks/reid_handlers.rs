@@ -63,12 +63,12 @@ pub(super) fn native_reid_report(
             last_frame: i64::try_from(track.last).expect("Replay frame bounded by manifest"),
             detected_frames: u32::try_from(track.observed).unwrap_or(u32::MAX),
             start_center: [
-                (track.best_box[0] + track.best_box[2]) * 0.5,
-                (track.best_box[1] + track.best_box[3]) * 0.5,
+                (track.first_box[0] + track.first_box[2]) * 0.5,
+                (track.first_box[1] + track.first_box[3]) * 0.5,
             ],
             end_center: [
-                (track.best_box[0] + track.best_box[2]) * 0.5,
-                (track.best_box[1] + track.best_box[3]) * 0.5,
+                (track.last_box[0] + track.last_box[2]) * 0.5,
+                (track.last_box[1] + track.last_box[3]) * 0.5,
             ],
             fps: 30.0,
         })

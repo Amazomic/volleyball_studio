@@ -10,14 +10,14 @@ let click;
 const requests=[],notes=[],modes=[],tasks=[],renders=[],refreshes=[];
 let finishFirst;
 const first=new Promise(resolve=>{finishFirst=resolve;});
-const state={busy:false,writable:true,token:1,rallyRun:"rally",unassignedIds:new Set([1,2,3,4,5,6,7,8,9])};
+const state={busy:false,writable:true,token:1,rallyRun:"rally",unassignedIds:new Set(Array.from({length:49},(_,i)=>i+1))};
 const scope={project_id:"project",video:"video",replay_id:"replay",expected_source_sha256:"sha",threshold_percent:75};
 const context={state,groupButton:{addEventListener:(_,fn)=>{click=fn;}},reviewReady:()=>true,
   reviewScope:()=>scope,unlock:()=>{},reidUnlock:()=>{},note:(...args)=>notes.push(args),
   window:{VolleyballTasks:{set:(...args)=>tasks.push(args),clear:key=>tasks.push([key,"clear"])}},
   renderGroupCards:()=>renders.push(state.grouping),
   post:async(url,body)=>{requests.push({url,body});if(requests.length===1)await first;return {computed_count:body.track_ids.length,cache_persisted:true};},
-  reviewLoad:async()=>true,refreshPhotoMatches:async(scope,token)=>{refreshes.push([scope,token]);return {trackCount:9,photoCount:5};},
+  reviewLoad:async()=>true,refreshPhotoMatches:async(scope,token)=>{refreshes.push([scope,token]);return {trackCount:49,photoCount:5};},
   setMode:mode=>modes.push(mode)};
 runInNewContext(source.slice(start,end),context);
 const running=click();
@@ -26,8 +26,8 @@ assert.equal(renders[0],true);
 assert.equal(tasks[0][1].progress,0);
 finishFirst();await running;
 assert.equal(requests.length,2);
-assert.deepEqual(Array.from(requests[0].body.track_ids),[1,2,3,4,5,6,7,8]);
-assert.deepEqual(Array.from(requests[1].body.track_ids),[9]);
+assert.deepEqual(Array.from(requests[0].body.track_ids),Array.from({length:48},(_,i)=>i+1));
+assert.deepEqual(Array.from(requests[1].body.track_ids),[49]);
 assert.equal(requests[0].body.rally_run_id,"rally");
 assert.deepEqual(modes,["groups"]);
 assert.equal(refreshes.length,1,"grouping must refresh saved athlete photo matches");

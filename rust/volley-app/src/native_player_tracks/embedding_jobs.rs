@@ -13,6 +13,8 @@ pub struct EmbeddingRequest {
     pub(super) transient: bool,
 }
 
+const MAX_EMBEDDING_BATCH_TRACKS: usize = 48;
+
 pub async fn embeddings(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -21,11 +23,11 @@ pub async fn embeddings(
     storage::validate_origin(&headers)?;
     if !valid_sha(&req.expected_source_sha256)
         || req.track_ids.is_empty()
-        || req.track_ids.len() > 8
+        || req.track_ids.len() > MAX_EMBEDDING_BATCH_TRACKS
         || req.track_ids.iter().collect::<BTreeSet<_>>().len() != req.track_ids.len()
     {
         return Err(storage::bad_request(
-            "Select 1–8 unique native Track IDs with exact source SHA-256",
+            "Select 1–48 unique native Track IDs with exact source SHA-256",
         ));
     }
     let _reid_slot = state

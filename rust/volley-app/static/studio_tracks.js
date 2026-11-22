@@ -433,7 +433,14 @@
       // ReID group calculation is a secondary read, not part of the gallery
       // response. Never block card interaction while it is being refreshed.
       if(reviewReady()&&(preserveCards||!state.groupLoaded))void reviewLoad();
-      note(state.roster.length?
+      const health=result.automatic_link_health||{};
+      const missing=Math.max(0,Number(health.saved_count||0)-Number(health.effective_count||0));
+      if(missing){
+        note("Из "+health.saved_count+" сохранённых автопривязок временно не подтверждены "+missing+
+          (health.reason==="source_model_or_reference_changed"?
+            " · изменились модель или эталонные фотографии. Повторите сравнение.":
+            " · обнаружен конфликт идентичностей. Проверьте группу и подтверждённые ID."),true);
+      }else note(state.roster.length?
         "Track ID получены. Выберите ID и вручную назначьте игрока из состава проекта.":
         "Добавьте игроков в состав проекта через управление проектом, чтобы разрешить ручную привязку.");
     }catch(error){if(!preserveCards)ui.list.replaceChildren(node("div","empty-state","Не удалось загрузить Track ID."));
@@ -491,17 +498,24 @@
         const score=Number(candidate.cosine_similarity);
         if(!roster.has(candidate.player_id)||!Number.isFinite(score)||
           score<=0||score>1)continue;
-        const current=byPlayer.get(candidate.player_id);
-        if(!current||score>current.score){
-          byPlayer.set(candidate.player_id,{
-            playerId:candidate.player_id,name:roster.get(candidate.player_id),
-            score,trackId:id,reference: candidate.reference_track_id,
-            referenceKind:candidate.reference_kind
-          });
+        const current=byPlayer.get(candidate.player_id)||{
+          playerId:candidate.player_id,name:roster.get(candidate.player_id),
+          total:0,supported:0,score:0,trackId:id,reference: candidate.reference_track_id,
+          referenceKind:candidate.reference_kind
+        };
+        current.total+=score;
+        current.supported++;
+        if(score>current.score){
+          current.score=score;current.trackId=id;
+          current.reference=candidate.reference_track_id;
+          current.referenceKind=candidate.reference_kind;
         }
+        byPlayer.set(candidate.player_id,current);
       }
     }
-    return [...byPlayer.values()].sort((a,b)=>
+    return [...byPlayer.values()].map(match=>({
+      ...match,score:match.total/match.supported,groupSize:members.size
+    })).sort((a,b)=>b.supported-a.supported||
       b.score-a.score||a.name.localeCompare(b.name,"ru"));
   };
   const attachSuggestions=(card,ids)=>{
@@ -511,11 +525,13 @@
     controls.dataset.trackCount=String(ids.length);
     const select=node("select");
     select.setAttribute("aria-label","Назначить игрока для "+ids.map(id=>"ID "+id).join(", "));
-    if(!candidates.length){
+    const reliableDefault=ids.length===1||(candidates[0]?.supported||0)>=2;
+    if(!candidates.length||!reliableDefault){
       const empty=node("option","","Выберите игрока");empty.value="";select.append(empty);
     }
     for(const match of candidates){
-      const option=node("option","",match.name+" · "+(match.score*100).toFixed(1)+"%");
+      const option=node("option","",match.name+" · "+(match.score*100).toFixed(1)+"%"+
+        (ids.length>1?" · "+match.supported+"/"+ids.length+" ID":""));
       option.value=match.playerId;select.append(option);
     }
     const matched=new Set(candidates.map(match=>match.playerId));
@@ -524,14 +540,15 @@
       const option=node("option","",person.name+" · нет данных ReID");option.value=person.id;
       select.append(option);
     }
-    if(candidates.length)select.value=candidates[0].playerId;
+    if(candidates.length&&reliableDefault)select.value=candidates[0].playerId;
     const kind=candidates[0]?.referenceKind==="reviewed_track"?
       " · с подтверждённым ID":" · с фото";
     const emptySimilarity=state.similarityStatus==="no_reference_photos"?
       "Нет эталонных фото игроков":state.similarityStatus==="calculated"?
       "Совпадений с игроками не найдено":"Не рассчитано при постобработке · проверьте журнал";
     const similarity=node("small","track-match-score",candidates.length?
-      "Лучшее сходство: "+candidates[0].name+" · "+(candidates[0].score*100).toFixed(1)+"%"+kind:
+      "Лучшее сходство: "+candidates[0].name+" · "+(candidates[0].score*100).toFixed(1)+"%"+
+      (ids.length>1?" · "+candidates[0].supported+"/"+ids.length+" ID":"")+kind:
       emptySimilarity);
     const link=node("button","primary","Добавить игроку");
     link.type="button";
@@ -706,7 +723,10 @@
       expected_source_sha256:state.sourceSha};
     // Preserve the selected image for EVERY ID before the refresh removes
     // its card. Different IDs in a ReID group often show different angles.
-    const samples=ids.map(trackId=>({
+    const observed=new Map((state.rows||[]).map(row=>[Number(row.track_id),
+      Number(row.observations||0)*Number(row.best_score||0)]));
+    const samples=[...new Set(ids)].sort((a,b)=>
+      (observed.get(b)||0)-(observed.get(a)||0)).slice(0,3).map(trackId=>({
       trackId,photoIndex:state.photoIndices.get(trackId)||0
     }));
     if(!await edit("assign",ids,playerId))return;
@@ -718,7 +738,7 @@
     note("Track ID привязаны. Фото сохраняются отдельно; можно продолжать работу."+notice,
       displaced.length>0);
     return enqueuePhotoEnrollment(playerId,async()=>{
-      let saved=0,alreadySaved=0;
+      let saved=0,alreadySaved=0,limited=0;
       const failures=[];
       try{
         const album=await post("/api/players/native/references",{
@@ -728,6 +748,7 @@
         let photos=Array.isArray(album.photos)?album.photos:[];
         for(const {trackId,photoIndex} of samples){
           if(scope.project_id!==state.project||scope.replay_id!==state.replay)break;
+          if(photos.length>=12){limited++;break;}
           const existing=photos.some(photo=>
             photo.project_id===scope.project_id&&photo.video===scope.video&&
             photo.replay_id===scope.replay_id&&photo.track_id===trackId&&
@@ -750,14 +771,15 @@
         }
         if(saved)window.dispatchEvent(new Event("volley:player-photo-saved"));
         if(scope.project_id===state.project&&scope.replay_id===state.replay){
-          const summary="Track ID привязаны. Сохранено фото: "+saved+
-            (alreadySaved?" · уже было: "+alreadySaved:"");
-          note((failures.length?summary+" · ошибки: "+failures.join("; "):summary)+notice,
-            failures.length>0||displaced.length>0);
+          const summary="Привязка ID сохранена. Эталоны: "+saved+
+            (alreadySaved?" · уже были: "+alreadySaved:"")+
+            (limited?" · достигнут лимит 12 автоматических эталонов":"");
+          note((failures.length?summary+" · не удалось добавить фото: "+failures.join("; "):summary)+notice,
+            displaced.length>0);
         }
       }catch(error){
         if(scope.project_id===state.project&&scope.replay_id===state.replay)
-          note("Track ID привязаны, но фото не сохранены: "+error.message,true);
+          note("Привязка ID сохранена. Эталонные фото не добавлены: "+error.message);
       }
     });
   };
@@ -1385,17 +1407,17 @@
       label:"Обновление признаков и совпадений",stage:"Подготовка признаков: 0 / "+ids.length,progress:0
     });
     try{
-      for(let offset=0;offset<ids.length;offset+=8){
+      for(let offset=0;offset<ids.length;offset+=48){
         if(token!==state.token)return;
-        note("Подготовка признаков: "+Math.min(offset+8,ids.length)+" / "+ids.length);
+        note("Подготовка признаков: "+Math.min(offset+48,ids.length)+" / "+ids.length);
         const result=await post("/api/players/native/embeddings",{
           project_id:scope.project_id,video:scope.video,replay_id:scope.replay_id,
           rally_run_id:state.rallyRun,expected_source_sha256:scope.expected_source_sha256,
-          track_ids:ids.slice(offset,offset+8)
+          track_ids:ids.slice(offset,offset+48)
         });
         if(token!==state.token)return;
         if(result.computed_count>0&&!result.cache_persisted)throw Error("Не удалось сохранить признаки для группировки");
-        const done=Math.min(offset+8,ids.length);
+        const done=Math.min(offset+48,ids.length);
         window.VolleyballTasks?.set("track-grouping",{
           label:"Обновление признаков и совпадений",stage:"Подготовка признаков: "+done+" / "+ids.length,
           progress:ids.length?done/ids.length*100:0

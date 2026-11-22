@@ -48,8 +48,8 @@ assert.deepEqual(enrolls.map(call=>call.body.expected_revision),["rev0","rev1"],
 assert.ok(enrolls.every(call=>call.body.rally_run_id==="run"&&
   call.body.expected_source_sha256===sha));
 assert.deepEqual(events,["volley:player-photo-saved"]);
-assert.match(messages.at(-1).message,/Сохранено фото: 2/);
-assert.match(messages.at(-1).message,/уже было: 1/);
+assert.match(messages.at(-1).message,/Эталоны: 2/);
+assert.match(messages.at(-1).message,/уже были: 1/);
 assert.equal(state.busy,false);
 
 calls.length=0;
@@ -71,15 +71,34 @@ await context.bindSelected([7,8],"player");
 assert.deepEqual(calls.filter(call=>call.body?.action==="enroll")
   .map(call=>call.body.track_id),[7,8],
   "A failed photo must not abort saving the remaining group");
-assert.equal(messages.at(-1).error,true);
+assert.equal(messages.at(-1).error,false,
+  "A failed reference crop must not label a successful assignment as failed");
 assert.match(messages.at(-1).message,/ID 7: crop unavailable/);
-assert.match(messages.at(-1).message,/Сохранено фото: 1/);
+assert.match(messages.at(-1).message,/Эталоны: 1/);
 
 context.post=async(url,body)=>{
   if(body.action==="read")throw Error("album unavailable");
   throw Error("unexpected");
 };
 await context.bindSelected([7],"player");
-assert.equal(messages.at(-1).error,true);
-assert.match(messages.at(-1).message,/Track ID привязаны, но фото не сохранены/);
-console.log("Group assignment enrolls distinct Track IDs with revision-safe dedup and partial failure recovery: OK");
+assert.equal(messages.at(-1).error,undefined);
+assert.match(messages.at(-1).message,/Привязка ID сохранена. Эталонные фото не добавлены/);
+context.post=async(url,body)=>{
+  calls.push({url,body});
+  if(body.action==="read")return {revision:"rev0",photos:[]};
+  return {revision:"rev"+calls.length,photos:[]};
+};
+calls.length=0;
+await context.bindSelected([7,8,9,10,11,12],"player");
+assert.equal(calls.filter(call=>call.body?.action==="enroll").length,3,
+  "Group of many fragments must not create a reference photo for every ID");
+context.post=async(url,body)=>{
+  calls.push({url,body});
+  if(body.action==="read")return {revision:"rev0",photos:Array.from({length:12},(_,i)=>savedPhoto(i+100,0))};
+  throw Error("Automatic reference ceiling was ignored");
+};
+calls.length=0;
+await context.bindSelected([7,8,9],"player");
+assert.equal(calls.filter(call=>call.body?.action==="enroll").length,0,
+  "Completed album must not be expanded on every manual Track ID binding");
+console.log("Group assignment preserves links, bounds photo enrollment and handles reference failures: OK");
