@@ -2150,7 +2150,18 @@ async fn pipeline(
     )
     .await?;
     let replay_id = require_id(&replay, "replay_id")?;
+    if replay["player_frame_scope_version"] != "primary_gpu_selected_intervals_v1"
+        || replay["player_frame_scope_sha256"] != status["gpu_rally_mask_sha256"]
+        || replay["player_frame_scope_ball_job_id"] != status["gpu_jobs"]["ball"]
+    {
+        return Err("Трекинг CPU вышел за границы проверенной GPU-маски розыгрышей".into());
+    }
     status["cpu_runs"]["tracking"] = json!(replay_id);
+    status["cpu_player_frame_coverage"] = json!({
+        "processed_frames":replay["player_frames_processed"],
+        "eligible_frames":replay["player_frame_scope_frames"],
+        "total_frames":replay["frames"],
+    });
     save(path, status)?;
     log_event(
         path,
@@ -2161,6 +2172,17 @@ async fn pipeline(
             replay["provisional_track_count"].as_u64().unwrap_or(0),
             replay["discarded_short_track_ids"].as_u64().unwrap_or(0),
             replay["discarded_short_track_detections"].as_u64().unwrap_or(0),
+        ),
+    )?;
+    log_event(
+        path,
+        "Track ID",
+        "info",
+        &format!(
+            "CPU обработал {} из {} кадров выбранных игровых интервалов (всего кадров мяча: {})",
+            replay["player_frames_processed"],
+            replay["player_frame_scope_frames"],
+            replay["frames"],
         ),
     )?;
     if cancel.load(Ordering::Acquire) {

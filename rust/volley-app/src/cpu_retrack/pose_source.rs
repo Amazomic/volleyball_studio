@@ -243,6 +243,20 @@ impl PoseRows {
         Ok((candidates, landmarks, pose_count))
     }
 
+    pub fn skip_frame(&mut self, frame: u64) -> Result<(), String> {
+        match self.next.as_ref().and_then(|row| row["frame"].as_u64()) {
+            Some(at) if at < frame => {
+                return Err("Pose source stream fell behind CPU replay".into())
+            }
+            Some(at) if at == frame => {
+                self.next = self.read_one()?;
+            }
+            _ => (),
+        }
+        self.recent_pose_crops.clear();
+        Ok(())
+    }
+
     pub fn finish(mut self, count: u64) -> Result<u64, String> {
         while self.next.is_some() {
             if self
