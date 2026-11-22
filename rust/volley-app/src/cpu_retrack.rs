@@ -35,7 +35,7 @@ use volley_core::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_xyah_two_stage_v2";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_xyah_rally_scoped_v3";
 pub(crate) mod ball_track;
 mod gap_interpolation;
 #[cfg(test)]
@@ -81,6 +81,92 @@ struct FusedFrame {
     touches_confirmed: bool,
 }
 
+#[derive(Clone, Debug)]
+struct PlayerFrameScope {
+    selected: Vec<(u64, u64)>,
+    ball_job_id: String,
+    mask_sha256: String,
+}
+
+impl PlayerFrameScope {
+    fn interval(&self, frame: u64) -> Option<(u64, u64)> {
+        let index = self.selected.partition_point(|&(start, _)| start <= frame);
+        self.selected
+            .get(index.checked_sub(1)?)
+            .copied()
+            .filter(|&(_, end)| frame <= end)
+    }
+
+    fn contains(&self, frame: u64) -> bool {
+        self.interval(frame).is_some()
+    }
+
+    fn same_interval(&self, first: u64, last: u64) -> bool {
+        self.interval(first)
+            .is_some_and(|(start, end)| first >= start && last <= end)
+    }
+
+    fn frame_count(&self) -> u64 {
+        self.selected
+            .iter()
+            .map(|&(first, last)| last - first + 1)
+            .sum()
+    }
+}
+
+fn load_player_frame_scope(
+    project_root: &Path,
+    fusion: &Value,
+    replay_frames: u64,
+) -> Result<Option<PlayerFrameScope>, String> {
+    let Some(ball_job_id) = fusion["sources"]["vballnet"]["job_id"].as_str() else {
+        return Ok(None);
+    };
+    if !opaque_id(ball_job_id) {
+        return Err("Invalid ball GPU source in fusion".into());
+    }
+    let root = project_root.join("native_gpu_runs").join(ball_job_id);
+    let file = root.join("rally_mask.json");
+    if !file.exists() {
+        return Ok(None);
+    }
+    let file = safe_file(&root, "rally_mask.json", 64 * 1024 * 1024)?;
+    let bytes = fs::read(&file).map_err(|error| format!("Read player rally scope: {error}"))?;
+    let evidence: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid saved primary rally scope")?;
+    let mask = &evidence["mask"];
+    let source_frames = mask["source_frame_count"]
+        .as_u64()
+        .ok_or("Missing primary rally frame count")?;
+    let selected: Vec<(u64, u64)> = serde_json::from_value(mask["selected"].clone())
+        .map_err(|_| "Invalid selected player rally intervals")?;
+    let total_selected: u64 = selected
+        .iter()
+        .try_fold(0_u64, |count, &(first, last)| {
+            count.checked_add(last.checked_sub(first)?.checked_add(1)?)
+        })
+        .ok_or("Invalid selected player rally interval length")?;
+    if selected.is_empty()
+        || evidence["schema"] != "volley-primary-rally-mask-evidence/1"
+        || mask["schema"] != "volley-primary-rally-mask/1"
+        || mask["movement_filter_version"] != "stationary_ball_min_rally_5s_v3"
+        || evidence["ball_job_id"] != ball_job_id
+        || evidence["original_source"] != fusion["original_source"]
+        || evidence["analysis_range"] != fusion["analysis_range"]
+        || evidence["selected_frames"].as_u64() != Some(total_selected)
+        || mask["selected_frames"].as_u64() != Some(total_selected)
+    {
+        return Err("Primary player frame scope does not match GPU fusion".into());
+    }
+    let selected =
+        crate::cpu_touches::align_primary_intervals(&selected, source_frames, replay_frames)?;
+    Ok(Some(PlayerFrameScope {
+        selected,
+        ball_job_id: ball_job_id.to_owned(),
+        mask_sha256: format!("{:x}", Sha256::digest(&bytes)),
+    }))
+}
+
 #[derive(Default)]
 struct ReplayTotals {
     frames: u64,
@@ -95,6 +181,7 @@ struct ReplayTotals {
     identity_turnover_splits: u64,
     identity_handoff_splits: u64,
     pose_detections: u64,
+    processed_player_frames: u64,
     bytetrack_low_confidence_matches: u64,
 }
 
@@ -133,6 +220,7 @@ fn replay_frames_with_pose(
         pose,
         ReplayOptions {
             interpolate_players: true,
+            scope: None,
             cancel: None,
         },
     )
@@ -140,6 +228,7 @@ fn replay_frames_with_pose(
 
 struct ReplayOptions<'a> {
     interpolate_players: bool,
+    scope: Option<&'a PlayerFrameScope>,
     cancel: Option<&'a AtomicBool>,
 }
 
@@ -179,6 +268,7 @@ fn fill_confirmed_track_gaps(
     source: &Path,
     expected_sha: &str,
     frame_count: u64,
+    scope: Option<&PlayerFrameScope>,
     cancel: Option<&AtomicBool>,
 ) -> Result<(String, u64), String> {
     use std::collections::{BTreeMap, VecDeque};
@@ -240,7 +330,10 @@ fn fill_confirmed_track_gaps(
         for (track_id, observation) in observations {
             if let Some((left, prior)) = anchors.get(&track_id) {
                 let duration = current - left;
-                if (2..=90).contains(&duration) && prior.score.min(observation.score) >= 0.35 {
+                if (2..=90).contains(&duration)
+                    && prior.score.min(observation.score) >= 0.35
+                    && scope.is_none_or(|mask| mask.same_interval(*left, current))
+                {
                     let a = prior.bbox_xyxy_norm;
                     let b = observation.bbox_xyxy_norm;
                     let aw = a[2] - a[0];
@@ -357,6 +450,7 @@ fn replay_frames_verified(
 ) -> Result<(String, ReplayTotals, u64), String> {
     let ReplayOptions {
         interpolate_players,
+        scope,
         cancel,
     } = options;
     if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
@@ -389,18 +483,38 @@ fn replay_frames_verified(
         {
             return Err("Fusion frame index or raw status changed".into());
         }
+        let player_frame = scope.is_none_or(|mask| mask.contains(expected_frame));
+        if !player_frame && !frame.player_candidates.is_empty() {
+            return Err("Player detections exist outside the GPU rally selection".into());
+        }
         let (proposals, joints, pose_count) = if let Some(rows) = pose_rows.as_mut() {
-            rows.frame(expected_frame, &frame.player_candidates)?
+            if player_frame {
+                rows.frame(expected_frame, &frame.player_candidates)?
+            } else {
+                rows.skip_frame(expected_frame)?;
+                (Vec::new(), Vec::new(), 0)
+            }
         } else {
             (frame.player_candidates.clone(), Vec::new(), 0)
         };
-        let tracking = tracker.process_frame_with_poses(expected_frame, &proposals, &joints)?;
-        confirmations.observe(expected_frame, &tracking.tracks)?;
+        let tracking = if player_frame {
+            let tracking = tracker.process_frame_with_poses(expected_frame, &proposals, &joints)?;
+            confirmations.observe(expected_frame, &tracking.tracks)?;
+            totals.processed_player_frames += 1;
+            totals.rejected += tracking.rejected_boxes as u64;
+            totals.ambiguous += tracking.ambiguous_detections as u64;
+            Some(tracking)
+        } else {
+            None
+        };
         totals.pose_detections += pose_count;
-        // Explicit provenance: RTMPose estimates are measured on actual RGB
-        // frames; legacy detector proposals are never mislabeled as joints.
-        let mut tracked_players = serde_json::to_value(&tracking.tracks)
-            .map_err(|e| format!("Serialize tracked pose observations: {e}"))?;
+        let mut tracked_players = serde_json::to_value(
+            tracking
+                .as_ref()
+                .map(|row| row.tracks.as_slice())
+                .unwrap_or(&[]),
+        )
+        .map_err(|e| format!("Serialize tracked pose observations: {e}"))?;
         if let Some(rows) = tracked_players.as_array_mut() {
             for row in rows {
                 let index = row["detection"]["query_index"].as_u64().unwrap_or(u64::MAX) as usize;
@@ -417,8 +531,6 @@ fn replay_frames_verified(
             }
         }
         totals.frames += 1;
-        totals.rejected += tracking.rejected_boxes as u64;
-        totals.ambiguous += tracking.ambiguous_detections as u64;
         let selected_ball = frame
             .selected_ball
             .filter(|ball| ball["source_model"] == "vballnet");
@@ -431,7 +543,7 @@ fn replay_frames_verified(
             "raw_player_candidates":frame.player_candidates,
             "ball_candidates":frame.ball_candidates,
             "selected_ball":selected_ball,
-            "ambiguous_detections":tracking.ambiguous_detections,
+            "ambiguous_detections":tracking.as_ref().map_or(0, |row| row.ambiguous_detections),
             "track_ids_provisional":true,
             "confirmed_athlete_identities":false,
             "touches_confirmed":false,
@@ -554,7 +666,7 @@ fn replay_frames_verified(
     totals.identity_handoff_splits = 0;
     let turnover_sha = observed_sha;
     let (continuous_sha, _inferred_positions) = if interpolate_players {
-        fill_confirmed_track_gaps(output, &turnover_sha, count, cancel)?
+        fill_confirmed_track_gaps(output, &turnover_sha, count, scope, cancel)?
     } else {
         (turnover_sha, 0)
     };
@@ -689,6 +801,8 @@ fn process_inner(
         .ok_or_else(|| storage::bad_request("Fusion SHA-256 missing or invalid"))?;
     let source =
         safe_file(&source_folder, "frames.jsonl", MAX_INPUT_BYTES).map_err(storage::bad_request)?;
+    let player_scope =
+        load_player_frame_scope(&project_root, &manifest, frames).map_err(storage::bad_request)?;
     // Pose evidence was measured on actual GPU RGB frames and bound to the
     // selected fusion SHA. Legacy fusions without RTMPose remain readable.
     let pose_source =
@@ -717,6 +831,7 @@ fn process_inner(
             pose_source.as_ref(),
             ReplayOptions {
                 interpolate_players: req.interpolate_players,
+                scope: player_scope.as_ref(),
                 cancel,
             },
         )?;
@@ -770,6 +885,20 @@ fn process_inner(
             "touches_confirmed":false,
             "cpu_processing_complete":false,
         });
+        record["player_frame_scope_version"] = json!(if player_scope.is_some() {
+            "primary_gpu_selected_intervals_v1"
+        } else {
+            "legacy_unscoped_v1"
+        });
+        record["player_frame_scope_ball_job_id"] = json!(player_scope
+            .as_ref()
+            .map(|scope| scope.ball_job_id.as_str()));
+        record["player_frame_scope_sha256"] = json!(player_scope
+            .as_ref()
+            .map(|scope| scope.mask_sha256.as_str()));
+        record["player_frame_scope_frames"] =
+            json!(player_scope.as_ref().map(PlayerFrameScope::frame_count));
+        record["player_frames_processed"] = json!(totals.processed_player_frames);
         record["track_detector_low_score"] =
             json!(volley_core::tracker::bytetrack::LOW_DETECTION_SCORE);
         record["track_detector_high_score"] =
@@ -852,6 +981,154 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rally_scope_only_tracks_selected_frames_and_preserves_full_ball() {
+        let root = std::env::temp_dir().join(format!("rally-cpu-scope-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("fusion.jsonl");
+        let output = root.join("tracked.jsonl");
+        let scope = PlayerFrameScope {
+            selected: vec![(0, 20), (50, 70)],
+            ball_job_id: "0123456789abcdef0123456789abcdef".into(),
+            mask_sha256: "a".repeat(64),
+        };
+        let mut source_bytes = Vec::new();
+        for frame in 0..90_u64 {
+            let players = if [0, 4, 8, 12, 16, 20, 50, 54, 58, 62, 66, 70].contains(&frame) {
+                vec![example(frame, 0.2, 0)]
+            } else {
+                Vec::new()
+            };
+            let mut bytes = serde_json::to_vec(&json!({
+                "frame_index":frame,
+                "player_candidates":players,
+                "ball_candidates":[],
+                "selected_ball":{"source_model":"vballnet","frame_index":frame},
+                "player_track_ids_confirmed":false,
+                "touches_confirmed":false,
+            }))
+            .unwrap();
+            bytes.push(b'\n');
+            source_bytes.extend(bytes);
+        }
+        fs::write(&source, &source_bytes).unwrap();
+        let hash = format!("{:x}", Sha256::digest(&source_bytes));
+        let (digest, totals, _) = replay_frames_with_pose_options(
+            &source,
+            &output,
+            90,
+            TrackingOptions {
+                min_track_observations: 6,
+                ..TrackingOptions::default()
+            },
+            &hash,
+            None,
+            ReplayOptions {
+                interpolate_players: true,
+                scope: Some(&scope),
+                cancel: None,
+            },
+        )
+        .unwrap();
+        let result = fs::read(&output).unwrap();
+        assert_eq!(format!("{:x}", Sha256::digest(&result)), digest);
+        let rows: Vec<Value> = result
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 90);
+        assert_eq!(totals.frames, 90);
+        assert_eq!(totals.processed_player_frames, 42);
+        assert!(rows.iter().all(|row| !row["selected_ball"].is_null()));
+        for row in &rows[21..50] {
+            assert!(row["tracked_players"].as_array().unwrap().is_empty());
+        }
+        assert!(!rows[10]["tracked_players"].as_array().unwrap().is_empty());
+        assert!(!rows[15]["tracked_players"].as_array().unwrap().is_empty());
+
+        let bad_line = serde_json::to_vec(&json!({
+            "frame_index":35,
+            "player_candidates":[example(35, 0.2, 0)],
+            "ball_candidates":[],
+            "selected_ball":{"source_model":"vballnet","frame_index":35},
+            "player_track_ids_confirmed":false,
+            "touches_confirmed":false,
+        }))
+        .unwrap();
+        let mut lines = source_bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(Vec::from)
+            .collect::<Vec<_>>();
+        lines[35] = bad_line;
+        let corrupted: Vec<u8> = lines
+            .into_iter()
+            .flat_map(|mut row| {
+                row.push(b'\n');
+                row
+            })
+            .collect();
+        fs::write(&source, &corrupted).unwrap();
+        let bad_hash = format!("{:x}", Sha256::digest(&corrupted));
+        let rejected = replay_frames_with_pose_options(
+            &source,
+            &root.join("invalid.jsonl"),
+            90,
+            TrackingOptions::default(),
+            &bad_hash,
+            None,
+            ReplayOptions {
+                interpolate_players: false,
+                scope: Some(&scope),
+                cancel: None,
+            },
+        );
+        assert!(
+            matches!(rejected, Err(error) if error.contains("outside the GPU rally selection"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn player_scope_is_sha_bound_to_primary_gpu_mask_and_clips_tail() {
+        let root = std::env::temp_dir().join(format!("rally-scope-source-{}", Uuid::new_v4()));
+        let ball = "0123456789abcdef0123456789abcdef";
+        let dir = root.join("native_gpu_runs").join(ball);
+        fs::create_dir_all(&dir).unwrap();
+        let fusion = json!({
+            "sources":{"vballnet":{"job_id":ball}},
+            "original_source":{"sha256":"source"},
+            "analysis_range":null
+        });
+        let mut evidence = json!({
+            "schema":"volley-primary-rally-mask-evidence/1",
+            "ball_job_id":ball,
+            "original_source":{"sha256":"source"},
+            "analysis_range":null,
+            "selected_frames":42,
+            "mask":{
+                "schema":"volley-primary-rally-mask/1",
+                "source_frame_count":98,
+                "movement_filter_version":"stationary_ball_min_rally_5s_v3",
+                "selected_frames":42,
+                "selected":[[0,20],[77,97]]
+            }
+        });
+        storage::write_json_atomic(&dir.join("rally_mask.json"), &evidence).unwrap();
+        let mask = load_player_frame_scope(&root, &fusion, 90)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mask.selected, vec![(0, 20), (77, 89)]);
+        assert!(!mask.contains(50));
+        assert!(mask.same_interval(77, 89));
+        assert!(!mask.same_interval(20, 77));
+        evidence["ball_job_id"] = json!("unrelated");
+        storage::write_json_atomic(&dir.join("rally_mask.json"), &evidence).unwrap();
+        assert!(load_player_frame_scope(&root, &fusion, 90).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cancelled_tracking_does_not_open_or_publish_files() {
         let cancelled = AtomicBool::new(true);
         let missing = std::env::temp_dir().join(format!("no-cpu-source-{}", Uuid::new_v4()));
@@ -865,6 +1142,7 @@ mod tests {
             None,
             ReplayOptions {
                 interpolate_players: false,
+                scope: None,
                 cancel: Some(&cancelled),
             },
         );
@@ -993,7 +1271,7 @@ mod tests {
         }
         fs::write(&source, &bytes).unwrap();
         let sha = format!("{:x}", Sha256::digest(&bytes));
-        let (_, inferred) = fill_confirmed_track_gaps(&source, &sha, 21, None).unwrap();
+        let (_, inferred) = fill_confirmed_track_gaps(&source, &sha, 21, None, None).unwrap();
         assert_eq!(inferred, 18);
         let rows = fs::read_to_string(&source).unwrap();
         for line in rows.lines() {
@@ -1037,7 +1315,7 @@ mod tests {
         }
         fs::write(&source, &bytes).unwrap();
         let sha = format!("{:x}", Sha256::digest(&bytes));
-        let (written, inferred) = fill_confirmed_track_gaps(&source, &sha, 6, None).unwrap();
+        let (written, inferred) = fill_confirmed_track_gaps(&source, &sha, 6, None, None).unwrap();
         assert_eq!(inferred, 0);
         assert_eq!(
             written,
@@ -1138,7 +1416,7 @@ mod tests {
         }
         fs::write(&file, &bytes).unwrap();
         let sha = format!("{:x}", Sha256::digest(&bytes));
-        let (after, inferred) = fill_confirmed_track_gaps(&file, &sha, 71, None).unwrap();
+        let (after, inferred) = fill_confirmed_track_gaps(&file, &sha, 71, None, None).unwrap();
         assert!(
             inferred > 0,
             "legitimate gaps in ID 792 remain interpolated"
@@ -1586,6 +1864,7 @@ mod tests {
             Some(&snapshot),
             ReplayOptions {
                 interpolate_players: false,
+                scope: None,
                 cancel: None,
             },
         )
