@@ -35,7 +35,7 @@ use volley_core::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_xyah_rally_scoped_v3";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_xyah_rally_scoped_lost_weak_v4";
 pub(crate) mod ball_track;
 mod gap_interpolation;
 #[cfg(test)]
@@ -183,6 +183,7 @@ struct ReplayTotals {
     pose_detections: u64,
     processed_player_frames: u64,
     bytetrack_low_confidence_matches: u64,
+    bytetrack_lost_low_confidence_matches: u64,
 }
 
 /// Replay once with provisional IDs, then filter complete-video track evidence
@@ -544,6 +545,7 @@ fn replay_frames_verified(
             "ball_candidates":frame.ball_candidates,
             "selected_ball":selected_ball,
             "ambiguous_detections":tracking.as_ref().map_or(0, |row| row.ambiguous_detections),
+            "new_track_diagnostics":tracking.as_ref().map(|row| row.new_track_diagnostics.as_slice()).unwrap_or(&[]),
             "track_ids_provisional":true,
             "confirmed_athlete_identities":false,
             "touches_confirmed":false,
@@ -582,6 +584,7 @@ fn replay_frames_verified(
     totals.short_track_detections = summary.discarded_detections;
     totals.tentative_tracks = tracker.next_id() - 1;
     totals.bytetrack_low_confidence_matches = tracker.low_confidence_matches();
+    totals.bytetrack_lost_low_confidence_matches = tracker.lost_low_confidence_matches();
     debug_assert_eq!(
         totals.tentative_tracks,
         summary.confirmed_tracks + summary.discarded_tracks
@@ -905,6 +908,8 @@ fn process_inner(
             json!(volley_core::tracker::bytetrack::HIGH_DETECTION_SCORE);
         record["legacy_tracker_enabled"] = json!(false);
         record["bytetrack_low_confidence_matches"] = json!(totals.bytetrack_low_confidence_matches);
+        record["bytetrack_lost_low_confidence_matches"] =
+            json!(totals.bytetrack_lost_low_confidence_matches);
         record["pose_proposal_role"] = json!(if pose_source.is_some() {
             "measured_rgb_pose_crops_only"
         } else {

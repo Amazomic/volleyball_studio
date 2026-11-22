@@ -661,3 +661,5 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 
 Неподвижный мяч (мс)	Stationary ball (ms)
 Неподвижный мяч, мс	Stationary ball, ms
+Возврат ID по слабой детекции, кадров (0 = выкл)	Restore lost ID from weak detections, frames (0 = off)
+Совпадение рамки потерянного ID, IoU	Lost ID box overlap, IoU

@@ -5,7 +5,9 @@
 //! ByteTrack reference: FoundationVision/ByteTrack, yolox/tracker/byte_tracker.py.
 //! No synthetic/interpolated coordinate ever counts as an observed detection.
 
-use super::{association, PoseEvidence, TrackedFrame, TrackedPlayer, TrackingOptions};
+use super::{
+    association, NewTrackDiagnostic, PoseEvidence, TrackedFrame, TrackedPlayer, TrackingOptions,
+};
 use crate::{bbox_iou, fusion::Candidate};
 
 /// Preserve weak RF-DETR detections solely for second-stage continuation.
@@ -224,6 +226,7 @@ pub struct ByteTracker {
     skipped: u64,
     ambiguous: u64,
     low_confidence_matches: u64,
+    lost_low_confidence_matches: u64,
 }
 
 impl ByteTracker {
@@ -241,6 +244,7 @@ impl ByteTracker {
             skipped: 0,
             ambiguous: 0,
             low_confidence_matches: 0,
+            lost_low_confidence_matches: 0,
         })
     }
     pub fn process_frame_with_poses(
@@ -316,7 +320,13 @@ impl ByteTracker {
             }
         }
 
+        let previous_predictions = self
+            .tracks
+            .iter()
+            .map(|track| (track.id, track.kalman.bbox(), track.last_frame))
+            .collect::<Vec<_>>();
         let mut emitted = Vec::<TrackedPlayer>::new();
+        let mut new_track_diagnostics = Vec::new();
         // Stage 1: match high confidence to Kalman-predicted tracked/lost IDs.
         let all_ids: Vec<usize> = (0..self.tracks.len()).collect();
         let (matches_high, unmatched_high, unmatched_tracks, ambiguous_high, blocked_high) =
@@ -325,21 +335,47 @@ impl ByteTracker {
         for (d, t) in matches_high {
             self.observe(frame, &high[d], t, &mut emitted);
         }
-        // Stage 2: weak detections can recover ONLY existing confirmed/tracked
-        // trajectories, never create an ID or resurrect an unrelated lost ID.
         let recently_tracked = unmatched_tracks
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|&t| {
                 self.tracks[t].status == Status::Tracked
                     && frame.saturating_sub(self.tracks[t].last_frame) <= 15
             })
             .collect::<Vec<_>>();
-        let (matches_low, _, _, ambiguous_low, _) =
+        let (matches_low, unmatched_low, _, ambiguous_low, blocked_low) =
             self.associate(frame, &low, &recently_tracked, LOW_IOU);
         self.ambiguous += ambiguous_low;
         self.low_confidence_matches += matches_low.len() as u64;
         for (d, t) in matches_low {
             self.observe(frame, &low[d], t, &mut emitted);
+        }
+        if self.config.lost_low_confidence_max_gap_frames > 0 && !unmatched_low.is_empty() {
+            let lost_indices = unmatched_tracks
+                .into_iter()
+                .filter(|&t| {
+                    self.tracks[t].status == Status::Lost
+                        && frame.saturating_sub(self.tracks[t].last_frame)
+                            <= self.config.lost_low_confidence_max_gap_frames
+                })
+                .collect::<Vec<_>>();
+            let weak_remaining = unmatched_low
+                .iter()
+                .filter(|index| !blocked_low.contains(index))
+                .map(|&index| low[index].clone())
+                .collect::<Vec<_>>();
+            let (recovered, _, _, ambiguous_lost, _) = self.associate(
+                frame,
+                &weak_remaining,
+                &lost_indices,
+                self.config.lost_low_confidence_min_iou,
+            );
+            self.ambiguous += ambiguous_lost;
+            self.low_confidence_matches += recovered.len() as u64;
+            self.lost_low_confidence_matches += recovered.len() as u64;
+            for (d, t) in recovered {
+                self.observe(frame, &weak_remaining[d], t, &mut emitted);
+            }
         }
         // Only unmatched HIGH detections become new tentative Track IDs.
         let activation = self.config.min_player_score.max(HIGH_DETECTION_SCORE);
@@ -352,6 +388,35 @@ impl ByteTracker {
             }
             let id = self.next_id;
             self.next_id = id.checked_add(1).ok_or("ByteTrack Track ID overflow")?;
+            let nearest = previous_predictions
+                .iter()
+                .filter(|(_, bbox, _)| valid_bbox_inferred(*bbox))
+                .map(|(track_id, bbox, last)| {
+                    (
+                        *track_id,
+                        bbox_iou(*bbox, high[d].box_.bbox_xyxy_norm),
+                        distance(*bbox, high[d].box_.bbox_xyxy_norm),
+                        frame.saturating_sub(*last),
+                    )
+                })
+                .max_by(|a, b| a.1.total_cmp(&b.1));
+            let reason = match nearest {
+                None => "no_previous_track",
+                Some((_, overlap, _, _)) if overlap < HIGH_IOU => "predicted_overlap_too_low",
+                Some((_, _, movement, gap))
+                    if movement > (0.055 + gap as f64 * 0.005).min(0.30) =>
+                {
+                    "predicted_movement_too_far"
+                }
+                Some(_) => "no_assignment_after_matching",
+            };
+            new_track_diagnostics.push(NewTrackDiagnostic {
+                track_id: id,
+                reason,
+                closest_previous_track_id: nearest.map(|entry| entry.0),
+                closest_predicted_iou: nearest.map(|entry| entry.1),
+                frames_since_last_seen: nearest.map(|entry| entry.3),
+            });
             self.tracks.push(Track {
                 id,
                 kalman: Kalman::new(high[d].box_.bbox_xyxy_norm),
@@ -378,6 +443,7 @@ impl ByteTracker {
             retained_boxes: emitted.len(),
             rejected_boxes: raw.len().saturating_sub(emitted.len()),
             ambiguous_detections: (ambiguous_high + ambiguous_low) as usize,
+            new_track_diagnostics,
             tracks: emitted,
         })
     }
@@ -470,6 +536,9 @@ impl ByteTracker {
     pub fn low_confidence_matches(&self) -> u64 {
         self.low_confidence_matches
     }
+    pub fn lost_low_confidence_matches(&self) -> u64 {
+        self.lost_low_confidence_matches
+    }
     pub fn totals(&self) -> (u64, u64, u64) {
         (self.seen, self.skipped, self.ambiguous)
     }
@@ -528,6 +597,165 @@ mod tests {
         assert_eq!(second.tracks[0].track_id, id);
         assert_eq!(tr.next_id(), id + 1);
     }
+    #[test]
+    fn lost_track_reactivates_from_weak_detection_within_configured_window() {
+        let mut tr = tracker();
+        let id = tr
+            .process_frame_with_poses(0, &[person(0, 0, 0.20, 0.95)], &[])
+            .unwrap()
+            .tracks[0]
+            .track_id;
+        tr.process_frame_with_poses(1, &[person(1, 0, 0.20, 0.90)], &[])
+            .unwrap();
+        for frame in 2..=20 {
+            assert!(tr
+                .process_frame_with_poses(frame, &[], &[])
+                .unwrap()
+                .tracks
+                .is_empty());
+        }
+        let restored = tr
+            .process_frame_with_poses(21, &[person(21, 0, 0.205, 0.17)], &[])
+            .unwrap();
+        assert_eq!(restored.tracks.len(), 1);
+        assert_eq!(restored.tracks[0].track_id, id);
+        assert_eq!(tr.next_id(), id + 1);
+        assert_eq!(tr.lost_low_confidence_matches(), 1);
+        assert!(restored.new_track_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn weak_recovery_does_not_reactivate_expired_or_disabled_lost_tracks() {
+        for window in [0, 10] {
+            let mut tr = ByteTracker::new(TrackingOptions {
+                lost_low_confidence_max_gap_frames: window,
+                ..TrackingOptions::default()
+            })
+            .unwrap();
+            tr.process_frame_with_poses(0, &[person(0, 0, 0.20, 0.95)], &[])
+                .unwrap();
+            tr.process_frame_with_poses(1, &[person(1, 0, 0.20, 0.90)], &[])
+                .unwrap();
+            for frame in 2..=20 {
+                tr.process_frame_with_poses(frame, &[], &[]).unwrap();
+            }
+            assert!(tr
+                .process_frame_with_poses(21, &[person(21, 0, 0.20, 0.16)], &[])
+                .unwrap()
+                .tracks
+                .is_empty());
+            assert_eq!(tr.lost_low_confidence_matches(), 0);
+        }
+    }
+
+    #[test]
+    fn ambiguous_weak_reappearance_does_not_merge_two_lost_players() {
+        let mut tr = tracker();
+        tr.process_frame_with_poses(
+            0,
+            &[person(0, 0, 0.20, 0.95), person(0, 1, 0.24, 0.95)],
+            &[],
+        )
+        .unwrap();
+        tr.process_frame_with_poses(
+            1,
+            &[person(1, 0, 0.20, 0.95), person(1, 1, 0.24, 0.95)],
+            &[],
+        )
+        .unwrap();
+        for frame in 2..=16 {
+            tr.process_frame_with_poses(frame, &[], &[]).unwrap();
+        }
+        let ambiguous = tr
+            .process_frame_with_poses(17, &[person(17, 0, 0.22, 0.16)], &[])
+            .unwrap();
+        assert!(ambiguous.tracks.is_empty());
+        assert_eq!(tr.next_id(), 3);
+        assert_eq!(tr.lost_low_confidence_matches(), 0);
+    }
+
+    #[test]
+    fn active_player_has_priority_over_lost_player_for_weak_matching() {
+        let mut tr = tracker();
+        tr.process_frame_with_poses(
+            0,
+            &[person(0, 0, 0.20, 0.95), person(0, 1, 0.25, 0.95)],
+            &[],
+        )
+        .unwrap();
+        let confirmed = tr
+            .process_frame_with_poses(
+                1,
+                &[person(1, 0, 0.20, 0.95), person(1, 1, 0.25, 0.95)],
+                &[],
+            )
+            .unwrap();
+        let active_id = confirmed.tracks[1].track_id;
+        for frame in 2..=16 {
+            tr.process_frame_with_poses(frame, &[person(frame, 1, 0.25, 0.95)], &[])
+                .unwrap();
+        }
+        let weak = tr
+            .process_frame_with_poses(17, &[person(17, 0, 0.225, 0.16)], &[])
+            .unwrap();
+        assert_eq!(weak.tracks.len(), 1);
+        assert_eq!(weak.tracks[0].track_id, active_id);
+        assert_eq!(tr.lost_low_confidence_matches(), 0);
+    }
+
+    #[test]
+    fn ambiguous_active_weak_detection_cannot_steal_a_lost_id() {
+        let mut tr = tracker();
+        for frame in 0..=1 {
+            tr.process_frame_with_poses(
+                frame,
+                &[
+                    person(frame, 0, 0.20, 0.95),
+                    person(frame, 1, 0.24, 0.94),
+                    person(frame, 2, 0.22, 0.93),
+                ],
+                &[],
+            )
+            .unwrap();
+        }
+        for frame in 2..=10 {
+            tr.process_frame_with_poses(
+                frame,
+                &[person(frame, 0, 0.20, 0.95), person(frame, 1, 0.24, 0.94)],
+                &[],
+            )
+            .unwrap();
+        }
+        let result = tr
+            .process_frame_with_poses(11, &[person(11, 0, 0.22, 0.16)], &[])
+            .unwrap();
+        assert!(result.tracks.is_empty());
+        assert_eq!(tr.lost_low_confidence_matches(), 0);
+    }
+
+    #[test]
+    fn newly_spawned_ids_explain_nearest_failed_prediction() {
+        let mut tr = tracker();
+        let first = tr
+            .process_frame_with_poses(0, &[person(0, 0, 0.20, 0.9)], &[])
+            .unwrap();
+        assert_eq!(first.new_track_diagnostics[0].reason, "no_previous_track");
+        tr.process_frame_with_poses(1, &[person(1, 0, 0.20, 0.9)], &[])
+            .unwrap();
+        let switched = tr
+            .process_frame_with_poses(2, &[person(2, 0, 0.60, 0.9)], &[])
+            .unwrap();
+        assert_eq!(switched.new_track_diagnostics.len(), 1);
+        assert_eq!(
+            switched.new_track_diagnostics[0].reason,
+            "predicted_overlap_too_low"
+        );
+        assert_eq!(
+            switched.new_track_diagnostics[0].closest_previous_track_id,
+            Some(1)
+        );
+    }
+
     #[test]
     fn low_confidence_updates_existing_track_without_minting_an_id() {
         let mut tr = tracker();

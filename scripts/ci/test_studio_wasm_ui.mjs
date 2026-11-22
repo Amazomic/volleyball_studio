@@ -36,7 +36,7 @@ const profileInputs=[...markup.matchAll(/<input[^>]*id="(studio-(?:gpu|post)[^"]
     for(const attr of row[0].matchAll(/([\w-]+)="([^"]*)"/g))attrs[attr[1]]=attr[2];
     return attrs;
   });
-assert.equal(profileInputs.length,35,"GPU + CPU post-processing profile fields");
+assert.equal(profileInputs.length,37,"GPU + CPU post-processing profile fields");
 const profileSelects=[...markup.matchAll(/<select[^>]*id="(studio-(?:gpu|post)[^"]*)"[^>]*>/g)]
   .map(row=>Object.fromEntries([...row[0].matchAll(/([\w-]+)="([^"]*)"/g)]
     .map(attr=>[attr[1],attr[2]])));
@@ -370,6 +370,8 @@ assert.equal(postOnly.gpu,undefined,"CPU-only must not request a new GPU run");
 assert.equal(postOnly.post.interpolate_players,false);
 assert.equal(postOnly.post.interpolate_pose,false);
 assert.equal(postOnly.post.tracking.max_gap_frames,90);
+assert.equal(postOnly.post.tracking.lost_low_confidence_max_gap_frames,30);
+assert.equal(postOnly.post.tracking.lost_low_confidence_min_iou,0.30);
 assert.equal(postOnly.post.tracking.min_track_observations,12);
 assert.match(postOnly.client_request_id,/^[a-f0-9]{32}$/,
   "Pipeline requests must carry a unique idempotency token");
