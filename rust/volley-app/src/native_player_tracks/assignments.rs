@@ -108,7 +108,10 @@ pub(super) fn conflicting_automatic_links(
                 .any(|(other, assigned)| {
                     *other != id
                         && assigned == owner
-                        && measured_conflict_frame(ctx, id, *other).is_some()
+                        && (measured_conflict_frame(ctx, id, *other).is_some()
+                            || ctx.tracks.get(&id).zip(ctx.tracks.get(other)).is_some_and(
+                                |(candidate, confirmed)| tracks_co_visible(candidate, confirmed),
+                            ))
                 })
                 .then_some(id)
         })
