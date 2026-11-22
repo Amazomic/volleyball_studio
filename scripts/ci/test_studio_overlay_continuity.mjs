@@ -171,12 +171,12 @@ const checkbox={dataset:{overlayAction:"attack"},checked:false,addEventListener:
 const input={addEventListener(){}};
 const controls={querySelectorAll:()=>[checkbox],classList:{toggle(){},remove(){},add(){}}};
 const tab=()=>({attributes:{},closest:()=>controls,addEventListener(name,fn){this[name]=fn;},setAttribute(name,value){this.attributes[name]=value;}});
-const initOverlay={mode:tab(),rawMode:tab(),rawControls:controls,actionControls:controls,canvas:{closest:()=>controls},
+const initOverlay={mode:tab(),rawMode:tab(),stabilizerMode:tab(),stabilizerControls:controls,rawControls:controls,actionControls:controls,canvas:{closest:()=>controls},
   rawBall:input,rawVballVisible:input,rawPeopleVisible:input,
   rawPlayer:input,rawPose:input,rawPoseVisible:input,
   flags:{touches:true},actionFlags:{attack:true,unknown_touch:true}};
 runInNewContext(js.slice(initStart,initEnd),{
-  overlay:initOverlay,$:()=>({classList:{remove(){}},disabled:false}),window:{addEventListener(){}},
+  overlay:initOverlay,$:()=>({classList:{remove(){}},disabled:false,addEventListener(){},value:"0.55"}),window:{addEventListener(){}},
   training:{active:false,panel:{classList:{add(){}}}},reference:{active:false,epoch:0,entries:[],picker:{classList:{add(){}}},analysis:{setAttribute(){}},toggle:{setAttribute(){}}},comparison:{epoch:0},
   annotation:{lane:{querySelectorAll:()=>[]}},hideAnnotationContext(){},trainingEditorReset(){},
   updateRawDetectorLabel(){},updateReferenceModeUi(){},placeTrainingTimeline(){},

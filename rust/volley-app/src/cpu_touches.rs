@@ -225,6 +225,259 @@ fn transform_frame(item: TrackedFrame, expected: u64) -> Result<TouchFrame, Stri
     })
 }
 
+/// Per-postprocessing-run trajectory. Original GPU and tracked-frame evidence remains immutable.
+pub(crate) struct StabilizedReplay {
+    pub source_sha256: String,
+    pub motion: volley_core::ball_interpolation::StabilizedBallMotion,
+    pub settings: volley_core::ball_interpolation::BallStabilizerSettings,
+}
+
+impl StabilizedReplay {
+    pub(crate) fn summary(&self) -> Value {
+        json!({
+            "schema":"volley-ball-stabilizer/1",
+            "version":"ball_stabilizer_v1",
+            "source_replay_sha256":self.source_sha256,
+            "settings":self.settings,
+            "confidence_frames":self.motion.confidence_frames,
+            "observed_frames":self.motion.observed_frames,
+            "rejected_frames":self.motion.rejected_frames.len(),
+            "interpolated_frames":self.motion.interpolated.iter().filter(|&&v| v).count()
+        })
+    }
+}
+
+/// A verified, cancellable CPU-only stage which runs before touch inference.
+pub(crate) fn stabilize_primary_replay(
+    state: &AppState,
+    project_id: &str,
+    video: &str,
+    replay_id: &str,
+    settings: volley_core::ball_interpolation::BallStabilizerSettings,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(u64, u64) -> Result<(), String>,
+) -> Result<StabilizedReplay, String> {
+    settings.validate().map_err(str::to_owned)?;
+    storage::project_id(project_id).map_err(|e| format!("{e:?}"))?;
+    storage::video_name(video).map_err(|e| format!("{e:?}"))?;
+    if !opaque_id(replay_id) {
+        return Err("Invalid CPU replay ID".into());
+    }
+    if cancel.load(Ordering::Acquire) {
+        return Err("cancelled".into());
+    }
+    let project = projects::project_root(state).join(project_id);
+    safe_folder(&project)?;
+    let replay = project.join("native_cpu_replays").join(replay_id);
+    safe_folder(&replay)?;
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(safe_file(&replay, "manifest.json", MAX_MANIFEST_BYTES)?)
+            .map_err(|e| format!("Read CPU replay manifest: {e}"))?,
+    )
+    .map_err(|e| format!("Parse CPU replay manifest: {e}"))?;
+    let frames = manifest["frames"]
+        .as_u64()
+        .filter(|n| *n > 0 && *n <= 48 * 3600 * 30)
+        .ok_or("Invalid replay frame count")?;
+    let sha = manifest["sha256"]
+        .as_str()
+        .filter(|v| volley_core::contracts::sha256(v))
+        .ok_or("Invalid replay SHA-256")?
+        .to_owned();
+    if manifest["schema"] != "volley-native-cpu-tracking/1"
+        || manifest["state"] != "provisional_tracklets_rebuilt"
+        || manifest["project_id"] != project_id
+        || manifest["video"] != video
+        || manifest["replay_id"] != replay_id
+        || manifest["file"] != "tracked_frames.jsonl"
+        || manifest["fps"] != 30
+        || manifest["touches_confirmed"] != false
+        || manifest["track_ids_provisional"] != true
+    {
+        return Err("Incompatible CPU replay for Ball Stabilizer".into());
+    }
+    let path = safe_file(&replay, "tracked_frames.jsonl", MAX_INPUT_BYTES)?;
+    let motion = stabilize_replay_rows(&path, &sha, frames, settings, cancel, &mut progress)?;
+    Ok(StabilizedReplay {
+        source_sha256: sha,
+        motion,
+        settings,
+    })
+}
+
+fn stabilize_replay_rows(
+    path: &Path,
+    sha: &str,
+    frames: u64,
+    settings: volley_core::ball_interpolation::BallStabilizerSettings,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(u64, u64) -> Result<(), String>,
+) -> Result<volley_core::ball_interpolation::StabilizedBallMotion, String> {
+    let mut reader = BoundedReader::open(path)?;
+    let mut samples = Vec::new();
+    progress(0, frames)?;
+    for index in 0..frames {
+        if cancel.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        let line = reader
+            .line()?
+            .ok_or("Truncated CPU replay for Ball Stabilizer")?;
+        let row: TrackedFrame = serde_json::from_slice(&line)
+            .map_err(|e| format!("Invalid CPU replay frame for stabilizer: {e}"))?;
+        let frame = transform_frame(row, index)?;
+        if let Some(ball) = frame.selected_ball {
+            let [x1, y1, x2, y2] = ball.bbox_xyxy_norm;
+            samples.push(volley_core::ball_interpolation::ScoredBallSample {
+                frame: index as usize,
+                point: [(x1 + x2) * 0.5, (y1 + y2) * 0.5],
+                confidence: ball.score as f32,
+            });
+        }
+        if (index + 1) % 4096 == 0 {
+            progress(index + 1, frames)?;
+        }
+    }
+    if reader.line()?.is_some() || reader.finish() != sha {
+        return Err("Changed or extra CPU replay frames during stabilization".into());
+    }
+    let motion =
+        volley_core::ball_interpolation::stabilize_ball_motion(&samples, frames as usize, settings)
+            .map_err(str::to_owned)?;
+    if cancel.load(Ordering::Acquire) {
+        return Err("cancelled".into());
+    }
+    progress(frames, frames)?;
+    Ok(motion)
+}
+
+/// Rewrite only the derived TouchFrame working copy. Synthetic observations
+/// cannot themselves confirm a contact; the emitter checks their provenance.
+fn use_stabilized_ball(
+    block: &mut [TouchFrame],
+    motion: &volley_core::ball_interpolation::StabilizedBallMotion,
+) {
+    for frame in block {
+        let index = frame.frame_index as usize;
+        let Some([x, y]) = motion.points.get(index).copied().flatten() else {
+            frame.selected_ball = None;
+            continue;
+        };
+        if !motion.interpolated[index] && frame.selected_ball.is_some() {
+            continue;
+        }
+        let (half_w, half_h) = frame.selected_ball.as_ref().map_or((0.005, 0.005), |ball| {
+            let [x1, y1, x2, y2] = ball.bbox_xyxy_norm;
+            ((x2 - x1) * 0.5, (y2 - y1) * 0.5)
+        });
+        frame.selected_ball = Some(TouchBall {
+            source_model: "vballnet".into(),
+            score: f64::from(0.55f32),
+            bbox_xyxy_norm: [
+                (x - half_w).max(0.0),
+                (y - half_h).max(0.0),
+                (x + half_w).min(1.0),
+                (y + half_h).min(1.0),
+            ],
+        });
+    }
+}
+
+#[cfg(test)]
+mod ball_stabilizer_postprocessing_tests {
+    use super::*;
+
+    #[test]
+    fn stabilized_cpu_replay_filters_false_ball_interpolates_gap_and_preserves_sha() {
+        let root = std::env::temp_dir().join(format!("volley-stabilizer-cpu-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("tracked_frames.jsonl");
+        let mut bytes = Vec::new();
+        let mut block = Vec::new();
+        for index in 0..63_u64 {
+            let x = if index == 20 {
+                0.92
+            } else {
+                0.2 + index as f64 * 0.003
+            };
+            let score = if index == 6 { 0.49 } else { 0.93 };
+            let ball = if (31..=33).contains(&index) {
+                None
+            } else {
+                Some(json!({"source_model":"vballnet","detection":{
+                    "frame_index":index,"class_name":"ball","score":score,
+                    "bbox_xyxy_norm":[x-0.005,0.4,x+0.005,0.41]
+                }}))
+            };
+            let row = json!({"frame_index":index,"tracked_players":[],
+                "selected_ball":ball,"track_ids_provisional":true,
+                "confirmed_athlete_identities":false,"touches_confirmed":false});
+            bytes.extend(serde_json::to_vec(&row).unwrap());
+            bytes.push(b'\n');
+            block.push(TouchFrame {
+                frame_index: index,
+                players: Vec::new(),
+                selected_ball: ball.map(|v| TouchBall {
+                    source_model: "vballnet".into(),
+                    score: v["detection"]["score"].as_f64().unwrap(),
+                    bbox_xyxy_norm: serde_json::from_value(
+                        v["detection"]["bbox_xyxy_norm"].clone(),
+                    )
+                    .unwrap(),
+                }),
+            });
+        }
+        fs::write(&path, &bytes).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let mut reported = Vec::new();
+        let stopped = AtomicBool::new(false);
+        let motion =
+            stabilize_replay_rows(&path, &sha, 63, Default::default(), &stopped, |a, b| {
+                reported.push((a, b));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(reported.first(), Some(&(0, 63)));
+        assert_eq!(reported.last(), Some(&(63, 63)));
+        assert!(motion.rejected_frames.contains(&20));
+        assert!(motion.interpolated[20]);
+        for i in 31..=33 {
+            assert!(motion.interpolated[i]);
+        }
+        assert!(motion.points[6].is_some());
+        let original = block.clone();
+        use_stabilized_ball(&mut block, &motion);
+        assert!(
+            (original[20].selected_ball.as_ref().unwrap().bbox_xyxy_norm[0] - 0.915).abs() < 1e-9
+        );
+        assert!(block[20].selected_ball.as_ref().unwrap().bbox_xyxy_norm[0] < 0.4);
+        assert!(block[32].selected_ball.is_some());
+        assert!(original[32].selected_ball.is_none());
+        assert_eq!(
+            original[24].selected_ball.as_ref().unwrap().score,
+            block[24].selected_ball.as_ref().unwrap().score
+        );
+        let still_raw = fs::read(&path).unwrap();
+        assert_eq!(
+            still_raw, bytes,
+            "ball stabilizer must not mutate the replay"
+        );
+        let mut changed = bytes;
+        changed[25] = if changed[25] == b'a' { b'b' } else { b'a' };
+        fs::write(&path, changed).unwrap();
+        assert!(stabilize_replay_rows(
+            &path,
+            &sha,
+            63,
+            Default::default(),
+            &stopped,
+            |_, _| Ok(())
+        )
+        .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 /// Postprocessing-only confidence gate. Never changes raw GPU/replay artifacts.
 fn gate_ball_confidence(frames: &mut [TouchFrame], min_score: f64) {
     for frame in frames {
@@ -671,6 +924,7 @@ pub(crate) fn detect_stream(
         None,
         &[],
         None,
+        None,
         &[],
         None,
         None,
@@ -698,6 +952,7 @@ fn detect_stream_with_pose(
     net: Option<[[f64; 2]; 2]>,
     training: &[training_samples::Example],
     ball_mask: Option<&crate::cpu_retrack::ball_track::BallTrackMask>,
+    stabilized: Option<&StabilizedReplay>,
     rally_starts: &[u64],
     preliminary_intervals: Option<&[(u64, u64)]>,
     mut on_progress: Option<&mut dyn FnMut(u64, u64) -> Result<(), String>>,
@@ -775,12 +1030,16 @@ fn detect_stream_with_pose(
             .take(n)
             .cloned()
             .collect::<Vec<_>>();
-        // Filter weak VBallNet proposals only in this derived CPU working
-        // copy; raw GPU and saved CPU tracking snapshots remain immutable.
-        gate_ball_confidence(&mut block, settings.min_ball_score);
-        // A short false localization must not hide several neighboring impacts.
-        // Only the bounded working copy is cleaned; the hashed CPU replay remains immutable.
-        let clean = if let Some(mask) = ball_mask {
+        // Consume the completed postprocessing Ball Stabilizer pass, if present.
+        // Raw GPU/replay evidence remains immutable and SHA-verified.
+        if let Some(stabilized) = stabilized {
+            use_stabilized_ball(&mut block, &stabilized.motion);
+        } else {
+            gate_ball_confidence(&mut block, settings.min_ball_score);
+        }
+        let clean = if stabilized.is_some() {
+            block.clone()
+        } else if let Some(mask) = ball_mask {
             let mut clean = block.clone();
             for frame in &mut clean {
                 if !mask.accepted[frame.frame_index as usize] {
@@ -983,7 +1242,11 @@ fn detect_stream_with_pose(
                 let Some(track_id) = event.provisional_track_id else {
                     continue;
                 };
-                if !source_frame_contains_track(&block, event.frame_index, track_id) {
+                if !source_frame_contains_track(&block, event.frame_index, track_id)
+                    || stabilized.is_some_and(|v| {
+                        v.motion.interpolated.get(event.frame_index as usize) == Some(&true)
+                    })
+                {
                     continue;
                 }
                 motion_candidates += 1;
@@ -1101,6 +1364,7 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -1109,6 +1373,7 @@ pub(crate) fn process_primary_with_progress_cancel(
     req: &TouchRequest,
     rally_settings: volley_core::rally_reconstruction::RallySettings,
     scope: &PrimaryRallyScope,
+    stabilized: &StabilizedReplay,
     report: &mut dyn FnMut(u64, u64) -> Result<(), String>,
     cancel: &AtomicBool,
 ) -> Result<Value, ApiError> {
@@ -1118,17 +1383,20 @@ pub(crate) fn process_primary_with_progress_cancel(
         &[],
         rally_settings,
         Some(scope),
+        Some(stabilized),
         Some(report),
         Some(cancel),
     )
 }
 
+#[expect(clippy::too_many_arguments)]
 fn process_with_ball_scope_and_rally_settings_report(
     state: &AppState,
     req: &TouchRequest,
     rally_starts: &[u64],
     rally_settings: volley_core::rally_reconstruction::RallySettings,
     primary_scope: Option<&PrimaryRallyScope>,
+    stabilized: Option<&StabilizedReplay>,
     mut report: Option<&mut dyn FnMut(u64, u64) -> Result<(), String>>,
     cancel: Option<&AtomicBool>,
 ) -> Result<Value, ApiError> {
@@ -1251,6 +1519,13 @@ fn process_with_ball_scope_and_rally_settings_report(
         .to_owned();
     let source = safe_file(&replay_dir, "tracked_frames.jsonl", MAX_INPUT_BYTES)
         .map_err(storage::bad_request)?;
+    if let Some(stabilized) = stabilized {
+        if stabilized.source_sha256 != sha || stabilized.motion.points.len() as u64 != frames {
+            return Err(storage::conflict(
+                "Ball Stabilizer does not match this CPU replay",
+            ));
+        }
+    }
     let fusion_id = manifest["source_fusion_id"]
         .as_str()
         .filter(|id| opaque_id(id))
@@ -1357,6 +1632,7 @@ fn process_with_ball_scope_and_rally_settings_report(
             court_calibration.as_ref().and_then(|value| value.net),
             &training_examples,
             Some(&ball_mask),
+            stabilized,
             rally_starts,
             preliminary_scope_applied.then_some(preliminary.as_slice()),
             Some(&mut checked_progress),
@@ -1426,6 +1702,9 @@ fn process_with_ball_scope_and_rally_settings_report(
             } else { "unknown_touch_no_pose" },
             "cpu_processing_complete":false,
         });
+        if let Some(stabilized) = stabilized {
+            record["ball_stabilizer"] = stabilized.summary();
+        }
         let preliminary_data = json!({
             "schema":"volley-native-preliminary-continuous-rallies/1",
             "source_replay_id":req.replay_id,
@@ -1560,6 +1839,7 @@ mod tests {
             None,
             None,
             &[],
+            None,
             None,
             &[],
             None,
@@ -1982,6 +2262,7 @@ mod tests {
             None,
             &[],
             None,
+            None,
             &[],
             None,
             None,
@@ -2008,6 +2289,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                None,
                 None,
                 &[240],
                 None,
@@ -2224,6 +2506,7 @@ mod local_tuning_diagnostic {
             None,
             None,
             &[],
+            None,
             None,
             &[],
             None,

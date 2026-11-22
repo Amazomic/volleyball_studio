@@ -895,6 +895,14 @@ pub struct GpuOverlayQuery {
     fusion_id: String,
     start_frame: u64,
     count: u64,
+    #[serde(default)]
+    stabilizer: bool,
+    #[serde(default)]
+    stabilizer_score: Option<f32>,
+    #[serde(default)]
+    stabilizer_gap: Option<usize>,
+    #[serde(default)]
+    stabilizer_max_step: Option<f64>,
 }
 
 fn gpu_raw_frame(frame: &Value, expected: u64) -> Result<Value, String> {
@@ -955,13 +963,26 @@ fn extract_gpu_frames(
     start: u64,
     end: u64,
 ) -> Result<Vec<Value>, String> {
+    extract_gpu_frames_with_stabilizer(path, sha, total, start, end, None)
+}
+
+fn extract_gpu_frames_with_stabilizer(
+    path: &Path,
+    sha: &str,
+    total: u64,
+    start: u64,
+    end: u64,
+    settings: Option<volley_core::ball_interpolation::BallStabilizerSettings>,
+) -> Result<Vec<Value>, String> {
     use crate::pose_inference::interpolation::{interpolate_boxes, FrameBoxes, MAX_GAP_FRAMES};
     use std::collections::VecDeque;
+    use volley_core::ball_interpolation::{stabilize_ball_motion, ScoredBallSample};
 
-    // Read real detections on both sides of an API window. The synthetic
-    // overlay must not change when the player crosses a 180-frame boundary.
-    let context_start = start.saturating_sub(MAX_GAP_FRAMES);
-    let context_end = end.saturating_add(MAX_GAP_FRAMES).min(total);
+    let margin = settings.map_or(MAX_GAP_FRAMES, |v| {
+        MAX_GAP_FRAMES.max((v.max_gap_frames + 18) as u64)
+    });
+    let context_start = start.saturating_sub(margin);
+    let context_end = end.saturating_add(margin).min(total);
     let index = index_for(path, sha, total)?;
     let anchor = context_start / STRIDE * STRIDE;
     let offset = index.offsets[(context_start / STRIDE) as usize];
@@ -971,6 +992,7 @@ fn extract_gpu_frames(
     let mut reader = BufReader::new(file);
     let mut output = Vec::with_capacity((end - start) as usize);
     let mut measured = VecDeque::with_capacity((context_end - context_start) as usize);
+    let mut ball_samples = Vec::new();
     for i in anchor..context_end {
         let line = bounded_line(&mut reader)?.ok_or("GPU frame evidence truncated")?;
         if i < context_start {
@@ -979,6 +1001,19 @@ fn extract_gpu_frames(
         let row: Value =
             serde_json::from_slice(&line).map_err(|_| "Malformed GPU frame evidence")?;
         let raw = gpu_raw_frame(&row, i)?;
+        if settings.is_some() {
+            for ball in raw["balls"].as_array().ok_or("Invalid GPU ball samples")? {
+                let point: [f64; 2] = serde_json::from_value(ball["point"].clone())
+                    .map_err(|_| "Invalid raw ball point")?;
+                let confidence: f32 = serde_json::from_value(ball["score"].clone())
+                    .map_err(|_| "Invalid raw ball confidence")?;
+                ball_samples.push(ScoredBallSample {
+                    frame: (i - context_start) as usize,
+                    point,
+                    confidence,
+                });
+            }
+        }
         measured.push_back(FrameBoxes {
             frame: i,
             boxes: crate::pose_inference::boxes(&row),
@@ -987,8 +1022,26 @@ fn extract_gpu_frames(
             output.push(json!({"frame":i,"raw":raw}));
         }
     }
+    let stabilized = if let Some(settings) = settings {
+        Some(
+            stabilize_ball_motion(
+                &ball_samples,
+                (context_end - context_start) as usize,
+                settings,
+            )
+            .map_err(str::to_owned)?,
+        )
+    } else {
+        None
+    };
     for item in &mut output {
         let current = item["frame"].as_u64().ok_or("Invalid raw frame index")?;
+        if let Some(stabilized) = &stabilized {
+            let index = (current - context_start) as usize;
+            item["stabilized_ball"] = json!(stabilized.points[index]);
+            item["ball_interpolated"] = json!(stabilized.interpolated[index]);
+            item["ball_rejected"] = json!(stabilized.rejected_frames.binary_search(&index).is_ok());
+        }
         let original = measured
             .iter()
             .find(|v| v.frame == current)
@@ -1155,6 +1208,15 @@ pub async fn gpu(
     if query.count == 0 || query.count > MAX_WINDOW {
         return Err(storage::bad_request("Invalid GPU overlay window"));
     }
+    let mut settings = volley_core::ball_interpolation::BallStabilizerSettings::default();
+    if query.stabilizer {
+        settings.min_confidence = query.stabilizer_score.unwrap_or(settings.min_confidence);
+        settings.max_gap_frames = query.stabilizer_gap.unwrap_or(settings.max_gap_frames);
+        settings.max_step_fraction = query
+            .stabilizer_max_step
+            .unwrap_or(settings.max_step_fraction);
+        settings.validate().map_err(storage::bad_request)?;
+    }
     let (path, sha, total, width, height, root, person_detector, analysis_offset) =
         tokio::task::spawn_blocking({
             let state = state.clone();
@@ -1164,6 +1226,10 @@ pub async fn gpu(
                 fusion_id: query.fusion_id.clone(),
                 start_frame: query.start_frame,
                 count: query.count,
+                stabilizer: query.stabilizer,
+                stabilizer_score: query.stabilizer_score,
+                stabilizer_gap: query.stabilizer_gap,
+                stabilizer_max_step: query.stabilizer_max_step,
             };
             move || inspect_gpu_source(&state, &query)
         })
@@ -1176,8 +1242,13 @@ pub async fn gpu(
     let end = start.saturating_add(query.count).min(total);
     let fusion = query.fusion_id.clone();
     let response_sha = sha.clone();
+    let stabilize = query.stabilizer;
     let (frames, pose_run_id) = tokio::task::spawn_blocking(move || {
-        let mut frames = extract_gpu_frames(&path, &sha, total, start, end)?;
+        let mut frames = if stabilize {
+            extract_gpu_frames_with_stabilizer(&path, &sha, total, start, end, Some(settings))?
+        } else {
+            extract_gpu_frames(&path, &sha, total, start, end)?
+        };
         let pose_run_id =
             native_preview_pose::raw_window(&root, &fusion, total, start, end, &mut frames)?;
         Ok::<_, String>((frames, pose_run_id))
@@ -1185,7 +1256,20 @@ pub async fn gpu(
     .await
     .map_err(|e| storage::internal(format!("GPU overlay task: {e}")))?
     .map_err(storage::bad_request)?;
+    let stabilizer_stats = if query.stabilizer {
+        json!({
+            "version":"ball_stabilizer_v1",
+            "settings":settings,
+            "raw":frames.iter().map(|row| row["raw"]["balls"].as_array().map_or(0, Vec::len)).sum::<usize>(),
+            "accepted":frames.iter().filter(|row| row["stabilized_ball"].is_array() && row["ball_interpolated"] == false).count(),
+            "rejected":frames.iter().filter(|row| row["ball_rejected"] == true).count(),
+            "interpolated":frames.iter().filter(|row| row["ball_interpolated"] == true).count()
+        })
+    } else {
+        Value::Null
+    };
     Ok(Json(json!({"schema":"volley-native-gpu-overlay/1",
+        "ball_stabilizer":stabilizer_stats,
         "project_id":query.project_id,"video":query.video,"fusion_id":query.fusion_id,
         "source_fusion_sha256":response_sha,"fps":30,
         "width":width,"height":height,"total_frames":total,"person_detector":person_detector,
@@ -1314,6 +1398,62 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ball_stabilizer_overlay_keeps_raw_and_marks_false_and_interpolated_frames() {
+        let root =
+            std::env::temp_dir().join(format!("volley-ball-stabilizer-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("frames.jsonl");
+        let mut evidence = Vec::new();
+        for frame in 0..63_u64 {
+            let x = if frame == 20 {
+                0.92
+            } else {
+                0.20 + frame as f64 * 0.003
+            };
+            let ball = if (31..=33).contains(&frame) {
+                Vec::new()
+            } else {
+                vec![json!({"source_model":"vballnet","detection":{
+                    "frame_index":frame,"class_name":"ball",
+                    "score":if frame == 6 { 0.49 } else { 0.93 },
+                    "bbox_xyxy_norm":[x-0.005,0.4,x+0.005,0.41]
+                }})]
+            };
+            let row = json!({
+                "frame_index":frame,"player_candidates":[],"ball_candidates":ball,
+                "player_track_ids_confirmed":false,"touches_confirmed":false
+            });
+            evidence.extend(serde_json::to_vec(&row).unwrap());
+            evidence.push(b'\n');
+        }
+        fs::write(&path, &evidence).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&evidence));
+        let raw = extract_gpu_frames(&path, &sha, 63, 10, 45).unwrap();
+        assert!(raw[10].get("stabilized_ball").is_none());
+        let result = extract_gpu_frames_with_stabilizer(
+            &path,
+            &sha,
+            63,
+            10,
+            45,
+            Some(volley_core::ball_interpolation::BallStabilizerSettings::default()),
+        )
+        .unwrap();
+        assert_eq!(result[10]["frame"], 20);
+        assert_eq!(result[10]["raw"]["balls"][0]["score"], 0.93);
+        assert_eq!(result[10]["ball_rejected"], true);
+        assert_eq!(result[10]["ball_interpolated"], true);
+        assert!(result[10]["stabilized_ball"][0].as_f64().unwrap() < 0.4);
+        assert_eq!(result[22]["frame"], 32);
+        assert_eq!(result[22]["ball_interpolated"], true);
+        assert!(result[22]["raw"]["balls"].as_array().unwrap().is_empty());
+        assert_eq!(result[24]["ball_rejected"], false);
+        assert_eq!(result[24]["ball_interpolated"], false);
+        assert!(result[24]["stabilized_ball"].is_array());
         fs::remove_dir_all(root).unwrap();
     }
 

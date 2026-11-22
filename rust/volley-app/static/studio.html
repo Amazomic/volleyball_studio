@@ -347,6 +347,7 @@
                   <div class="video-overlay-modes" role="tablist" aria-label="Режим данных">
                     <button type="button" id="studio-overlay-processed" role="tab" aria-selected="true">Обработанные</button>
                     <button type="button" id="studio-overlay-raw" role="tab" aria-selected="false">Сырые</button>
+                    <button type="button" id="studio-overlay-stabilizer" role="tab" aria-selected="false">Ball Stabilizer · сравнение</button>
                   </div>
                 </div>
                 <fieldset id="studio-overlay-actions" class="video-overlay-actions hidden" aria-label="Типы касаний — оценка CPU">
@@ -362,6 +363,14 @@
                     <legend><label><input id="studio-raw-vball-visible" type="checkbox" checked> VballNet</label></legend>
                     <label><input id="studio-raw-ball-trail" type="checkbox"> След мяча</label>
                     <label>Мяч <input id="studio-raw-ball" type="range" min="0" max="100" value="0"><output id="studio-raw-ball-value">0%</output></label>
+                  </fieldset>
+                  <fieldset id="studio-ball-stabilizer-controls" class="raw-model-control hidden">
+                    <legend>Ball Stabilizer · сравнение на видео</legend>
+                    <small>Голубой — VBallNet, золотой — стабилизированная траектория, штрих — интерполяция, красный × — отброшенная детекция.</small>
+                    <label>Мин. уверенность <input id="studio-debug-stabilizer-score" type="number" min="0.51" max="1" step="0.01" value="0.55"></label>
+                    <label>Пропуск, кадров <input id="studio-debug-stabilizer-gap" type="number" min="1" max="27" step="1" value="12"></label>
+                    <label>Макс. скачок, доля/кадр <input id="studio-debug-stabilizer-step" type="number" min="0.01" max="0.25" step="0.01" value="0.12"></label>
+                    <small id="studio-debug-stabilizer-stats" role="status">Для сравнения выберите сохранённый GPU-анализ.</small>
                   </fieldset>
                   <fieldset class="raw-model-control">
                     <legend><label><input id="studio-raw-people-visible" type="checkbox" checked> <span id="studio-raw-person-model">Детектор игроков + RTMPose</span></label></legend>
@@ -714,6 +723,21 @@
                   <div><label class="field-label analysis-setting-help" for="studio-post-lost-low-iou" tabindex="0" data-analysis-hint="Минимальное IoU между слабой рамкой и прогнозом потерянного ID. 0,30 — стандартная осторожная настройка; большее значение снижает риск перепутать двух игроков, но может оставить разрывы." aria-description="Минимальное IoU между слабой рамкой и прогнозом потерянного ID. 0,30 — стандартная осторожная настройка; большее значение снижает риск перепутать двух игроков, но может оставить разрывы." data-analysis-hint-en="Minimum overlap between a weak detection and the predicted box of a lost player. Default 0.30; higher values reduce accidental player swaps but may leave gaps.">Совпадение рамки потерянного ID, IoU</label><input id="studio-post-lost-low-iou" type="number" min="0.20" max="0.85" step="0.01" value="0.30" data-default="0.30"></div>
                   <div><label class="field-label analysis-setting-help" for="studio-post-min-track-frames" tabindex="0" data-analysis-hint="Минимум измеренных кадров для подтверждения Track ID в CPU-результате. Повышение фильтрует кратковременные ложные треки, но может убрать коротко видимых игроков." aria-description="Минимум измеренных кадров для подтверждения Track ID в CPU-результате. Повышение фильтрует кратковременные ложные треки, но может убрать коротко видимых игроков." data-analysis-hint-en="Minimum number of measured frames needed to confirm a CPU Track ID. Larger values filter fleeting false tracks but may omit short appearances.">Мин. кадров для подтверждения ID</label><input id="studio-post-min-track-frames" type="number" min="6" max="90" step="1" value="12" data-default="12" title="ID с меньшим числом реальных обнаружений удаляется из CPU-результата"></div>
                 </div>
+                <div class="analysis-profile-subtitle">Ball Stabilizer · интерполяция траектории мяча</div>
+              <div class="analysis-profile-fields analysis-post-ball-stabilizer">
+                <div>
+                  <label class="field-label analysis-setting-help" for="studio-post-ball-stabilizer-score" tabindex="0" data-analysis-hint="Удаляет обнаружения VBallNet с уверенностью ниже порога, не меняя исходные данные. Настройка действует только в CPU-постобработке перед касаниями." aria-description="Удаляет обнаружения VBallNet с уверенностью ниже порога, не меняя исходные данные. Настройка действует только в CPU-постобработке перед касаниями." data-analysis-hint-en="Rejects VBallNet detections below the selected confidence while preserving the original data. Applied only during CPU postprocessing, before touch detection.">Ball Stabilizer · порог уверенности VBallNet</label>
+                  <input id="studio-post-ball-stabilizer-score" type="number" min="0.51" max="1" step="0.01" value="0.55" data-default="0.55">
+                </div>
+                <div>
+                  <label class="field-label analysis-setting-help" for="studio-post-ball-stabilizer-gap" tabindex="0" data-analysis-hint="Допустимая длина пробела между реальными позициями мяча, который восстанавливается перед поиском касаний; длинные пропуски остаются пустыми." aria-description="Допустимая длина пробела между реальными позициями мяча, который восстанавливается перед поиском касаний; длинные пропуски остаются пустыми." data-analysis-hint-en="Maximum gap between real ball observations filled before touch detection. Longer gaps remain empty.">Интерполяция · максимальный пропуск, кадров</label>
+                  <input id="studio-post-ball-stabilizer-gap" type="number" min="1" max="27" step="1" value="12" data-default="12">
+                </div>
+                <div>
+                  <label class="field-label analysis-setting-help" for="studio-post-ball-stabilizer-step" tabindex="0" data-analysis-hint="Ограничивает допустимый скачок мяча между соседними кадрами для удаления одиночных ложных точек и коротких ложных серий." aria-description="Ограничивает допустимый скачок мяча между соседними кадрами для удаления одиночных ложных точек и коротких ложных серий." data-analysis-hint-en="Limits plausible frame-to-frame ball travel to filter remote false detections and short false sequences.">Фильтр скачков · доля кадра/кадр</label>
+                  <input id="studio-post-ball-stabilizer-step" type="number" min="0.01" max="0.25" step="0.01" value="0.12" data-default="0.12">
+                </div>
+              </div>
                 <div class="analysis-profile-subtitle">Контакты мяча</div>
                 <div class="analysis-profile-fields">
                   <div><label class="field-label analysis-setting-help" for="studio-post-touch-threshold" tabindex="0" data-analysis-hint="Минимальная вероятность физического контакта, необходимая для сохранения кандидата касания. Больший порог убирает слабые контакты, но может пропустить реальные." aria-description="Минимальная вероятность физического контакта, необходимая для сохранения кандидата касания. Больший порог убирает слабые контакты, но может пропустить реальные." data-analysis-hint-en="Minimum physical-contact score for keeping a touch candidate. Higher values reject weak candidates and may miss real contacts.">Мин. уверенность физического касания</label><input id="studio-post-touch-threshold" type="number" min="0" max="1" step="0.01" value="0.48" data-default="0.48"></div>

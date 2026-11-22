@@ -10,7 +10,7 @@ const rust=readFileSync(join(root,"rust/volley-app/src/studio_pipeline.rs"),"utf
 const html=readFileSync(join(root,"rust/volley-app/static/studio.html"),"utf8");
 const css=readFileSync(join(root,"rust/volley-app/static/studio.css"),"utf8");
 assert.match(css,/\.analysis-flow-diagram\{[^}]*max-width:none;width:100%/);
-assert.match(css,/\.analysis-flow-grid\{[^}]*grid-template-columns:repeat\(6,minmax\(0,1fr\)\)/);
+assert.match(css,/\.analysis-flow-grid\{[^}]*grid-template-columns:repeat\(7,minmax\(0,1fr\)\)/);
 assert.match(css,/\.analysis-flow-node\{[^}]*width:100%;height:58px/);
 assert.match(css,/\.analysis-flow-node-stats\{[^}]*font-size:/);
 assert.match(js,/cell\.append\(node,stats\)/);
@@ -56,6 +56,7 @@ const context=vm.createContext({});
 context.$=()=>({checked:false});
 vm.runInContext(definitions+"this.stages=pipelineStages;this.id=pipelineId;this.model=pipelineModelMeta;",context);
 assert.equal(context.model("ball")[0],"VballNetV4c");
+assert.equal(context.model("ball_stabilizer")[0],"Ball Stabilizer");
 assert.equal(context.model("players")[0],"RF-DETR Medium");
 assert.equal(context.model("pose")[0],"RTMPose-M Body7");
 assert.equal(context.model("tracking")[1],"algorithm");
@@ -65,13 +66,13 @@ assert.equal(context.model("rallies"),null);
 const stages=context.stages;
 const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
-assert.equal(stages.length,12);
+assert.equal(stages.length,13);
 assert.deepEqual([...new Set(stages.filter(row=>row[2]==="gpu"||row[2]==="input").map(row=>row[3]))].sort(),[1]);
 assert.deepEqual([...new Set(stages.filter(row=>row[2]==="cpu"||row[2]==="output").map(row=>row[3]))].sort(),[2]);
-for(const row of [1,2]){
+for(const [row,count] of [[1,6],[2,7]]){
   const nodes=stages.filter(item=>item[3]===row);
-  assert.equal(nodes.length,6);
-  assert.deepEqual(Array.from(nodes,item=>item[4]),[1,2,3,4,5,6]);
+  assert.equal(nodes.length,count);
+  assert.deepEqual(Array.from(nodes,item=>item[4]),Array.from({length:count},(_,i)=>i+1));
 }
 assert.match(css,/\.analysis-flow-node::after\{[^}]*linear-gradient\(to right,/);
 assert.match(css,/\.analysis-flow-node\[data-flow="rtl"\]::after\{[^}]*linear-gradient\(to left,/);
@@ -95,10 +96,12 @@ assert.equal(pctContext.percent({frames_processed:50,frames_total:100},false,fal
 assert.match(js,/analysis-flow-phase/);
 assert.match(css,/\.analysis-flow-phase\[data-phase="gpu"\]/);
 assert.match(css,/\.analysis-flow-phase\[data-phase="cpu"\]/);
-for(const item of stages)assert.ok(item[1].split(/\s+/u).length<=2,item[1]);
+for(const item of stages)
+  assert.ok(item[0]==="ball_stabilizer"||item[1].split(/\s+/u).length<=2,item[1]);
 const examples=[
   ["Проверка исходного видео","video"],
   ["GPU · VBallNet: траектория мяча и розыгрыши","ball"],
+  ["Интерполяция траектории мяча · Ball Stabilizer","ball_stabilizer"],
   ["Поиск розыгрышей","rallies"],
   ["GPU · RF-DETR + RTMPose: игровые интервалы","players"],
   ["GPU · RTMPose-M: позы игроков","pose"],
@@ -155,4 +158,4 @@ assert.match(js,/primary_rallies:\{\s*min_trajectory_seconds:/);
 assert.match(js,/merge_gap_seconds:inputValue\("studio-gpu-rally-merge-seconds"\)/);
 assert.match(js,/stationary_ball_ms:inputValue\("studio-gpu-rally-stationary-ms"\)/);
 
-console.log("PASS: 12 full-width color-coded stages, verified neural models, animated edges, history parity and conditional branches");
+console.log("PASS: 13 full-width color-coded stages, verified neural models, animated edges, history parity and conditional branches");

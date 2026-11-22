@@ -347,10 +347,12 @@
     rallies:$("studio-overlay-rallies"),touches:$("studio-overlay-touches"),
     trajectory:$("studio-overlay-trajectory"),players:$("studio-overlay-players"),
     pose:$("studio-overlay-pose"),court:$("studio-overlay-court"),
-    mode:$("studio-overlay-processed"),rawMode:$("studio-overlay-raw"),rawControls:$("studio-overlay-raw-controls"),actionControls:$("studio-overlay-actions"),
+    mode:$("studio-overlay-processed"),rawMode:$("studio-overlay-raw"),
+    stabilizerMode:$("studio-overlay-stabilizer"),stabilizerControls:$("studio-ball-stabilizer-controls"),
+    stabilizerStats:$("studio-debug-stabilizer-stats"),rawControls:$("studio-overlay-raw-controls"),actionControls:$("studio-overlay-actions"),
     rawBall:$("studio-raw-ball"),rawBallTrail:$("studio-raw-ball-trail"),rawVballVisible:$("studio-raw-vball-visible"),rawPeopleVisible:$("studio-raw-people-visible"),rawPlayer:$("studio-raw-player"),rawPlayerInterpolated:$("studio-raw-player-interpolated"),
     rawPose:$("studio-raw-pose"),rawPoseVisible:$("studio-raw-pose-visible"),
-    raw:false,
+    raw:false,stabilizerView:false,
     actionFlags:{unknown_touch:true,attack:true,block:true,serve:true,overhead_pass:true,dig:true},
     source:null,cache:new Map(),rawFrames:new Map(),rawDetectors:new Map(),rawOffsets:new Map(),presentedTime:null,
     fetching:new Set(),controllers:new Map(),failed:new Map(),loop:0,
@@ -483,7 +485,7 @@
   };
   const overlayWindowStart=frame=>Math.max(0,Math.floor(frame/90)*90-60);
   const overlayWindowKey=(project,run,video,start)=>
-    [project,overlay.raw?"gpu":"cpu",run,video,start,...(!overlay.raw&&overlay.flags.pose?["pose"]:[])].join(":");
+    [project,overlay.raw?(overlay.stabilizerView?"gpu-stabilizer":"gpu"):"cpu",run,video,start,...(!overlay.raw&&overlay.flags.pose?["pose"]:[])].join(":");
   const rawFrameLimit=(project,run,video)=>overlay.rawFrames.get([project,run,video].join(":"));
   // The API returns overlapping 180-frame windows every 90 frames.
   // Keep drawing from a previous window while the next one loads.
@@ -531,7 +533,13 @@
     overlay.fetching.add(key);
     const isRaw=overlay.raw;
     const path=isRaw?url("/api/gpu/native/overlays",{
-      project_id:project,video,fusion_id:run,start_frame:start,count:180
+      project_id:project,video,fusion_id:run,start_frame:start,count:180,
+      ...(overlay.stabilizerView?{
+        stabilizer:true,
+        stabilizer_score:Number($("studio-debug-stabilizer-score").value),
+        stabilizer_gap:Number($("studio-debug-stabilizer-gap").value),
+        stabilizer_max_step:Number($("studio-debug-stabilizer-step").value)
+      }:{})
     }):url("/api/cpu/native/rallies/overlays",{
       project_id:project,rally_run_id:run,start_frame:start,count:180,
       ...(overlay.flags.pose?{pose:true}:{})
@@ -578,6 +586,16 @@
       }
       overlay.cache.set(key,value);
       while(overlay.cache.size>16)overlay.cache.delete(overlay.cache.keys().next().value);
+      if(isRaw&&overlay.stabilizerView){
+        const stats=value.ball_stabilizer;
+        if(stats?.version!=="ball_stabilizer_v1"||
+           value.frames.some(row=>!Object.hasOwn(row,"stabilized_ball")||
+             typeof row.ball_interpolated!=="boolean"||typeof row.ball_rejected!=="boolean"))
+          throw Error("Нет результата Ball Stabilizer");
+        overlay.stabilizerStats.textContent="Окно: "+stats.raw+" сырых, "+
+          stats.accepted+" сохранено, "+stats.rejected+" отброшено, "+
+          stats.interpolated+" интерполировано";
+      }
       overlayMessage((isRaw?overlay.rawPoseVisible.checked:overlay.flags.pose)&&
         value.poses_available===false?
           "RTMPose-M: для выбранного GPU-анализа нет сохранённых поз.":"");
@@ -858,6 +876,42 @@
         ctx.beginPath();ctx.arc(px,py,5,0,Math.PI*2);
         ctx.fillStyle="#47e2ff";ctx.fill();
         ctx.fillText(Math.round(ball.score*100)+"%",px+7,py-6);
+      }
+      if(overlay.stabilizerView){
+        ctx.save();
+        ctx.lineWidth=2.5;
+        ctx.strokeStyle="#f1bd51";ctx.fillStyle="#f1bd51";
+        let previous=null;
+        for(const item of frames){
+          if(item.frame<frame-44||item.frame>frame||!Array.isArray(item.stabilized_ball)){
+            previous=null;
+            continue;
+          }
+          const [sx,sy]=point(item.stabilized_ball);
+          const synthetic=item.ball_interpolated===true;
+          if(previous&&item.frame-previous.frame<=2){
+            ctx.setLineDash(synthetic||previous.synthetic?[5,4]:[]);
+            ctx.beginPath();ctx.moveTo(previous.x,previous.y);ctx.lineTo(sx,sy);ctx.stroke();
+          }
+          if(item.frame===frame){
+            ctx.setLineDash(synthetic?[3,3]:[]);
+            ctx.beginPath();ctx.arc(sx,sy,6,0,2*Math.PI);ctx.stroke();
+            if(!synthetic){ctx.beginPath();ctx.arc(sx,sy,3,0,2*Math.PI);ctx.fill();}
+          }
+          previous={x:sx,y:sy,frame:item.frame,synthetic};
+        }
+        ctx.setLineDash([]);
+        for(const item of frames){
+          if(item.frame<frame-44||item.frame>frame||!item.ball_rejected)continue;
+          for(const ball of item.raw?.balls||[]){
+            if(!Array.isArray(ball.point)||ball.score<Number($("studio-debug-stabilizer-score").value))continue;
+            const [rx,ry]=point(ball.point);
+            ctx.strokeStyle="#ff6473";ctx.lineWidth=2;
+            ctx.beginPath();ctx.moveTo(rx-4,ry-4);ctx.lineTo(rx+4,ry+4);
+            ctx.moveTo(rx+4,ry-4);ctx.lineTo(rx-4,ry+4);ctx.stroke();
+          }
+        }
+        ctx.restore();
       }
       if(overlay.rawPeopleVisible.checked){
         for(const player of raw.players||[]){
@@ -2348,8 +2402,8 @@
       if(training.active)trainingMessage("Пауза → щёлкните по игроку, коснувшемуся мяча.");});
   }
   if(overlay.mode){
-    const selectMode=raw=>{
-      if(overlay.raw===raw&&!training.active)return;
+    const selectMode=(raw,stabilizer=false)=>{
+      if(overlay.raw===raw&&overlay.stabilizerView===stabilizer&&!training.active)return;
       const restoreFilter=training.active?training.previousRallyFilter:null;
       training.active=false;training.track=null;training.frame=null;
       training.previousRallyFilter=null;
@@ -2373,17 +2427,21 @@
       training.selectedId=null;trainingEditorReset();
       overlay.canvas.closest(".video-wrap")?.classList.remove("training-select");
       overlay.raw=raw;
+      overlay.stabilizerView=stabilizer;
       updateRawDetectorLabel();
       overlay.mode.setAttribute("aria-selected",String(!raw));
-      overlay.rawMode.setAttribute("aria-selected",String(raw));
+      overlay.rawMode.setAttribute("aria-selected",String(raw&&!stabilizer));
+      overlay.stabilizerMode.setAttribute("aria-selected",String(stabilizer));
       overlay.rawControls.classList.toggle("hidden",!raw);
+      overlay.stabilizerControls.classList.toggle("hidden",!stabilizer);
       updateOverlayToggles();
       overlay.mode.closest(".video-overlay-toggles").classList.toggle("raw-selected",raw);
       setOverlaySource(raw||s.run?{}:null);
       if(raw&&s.video){ensurePreviewVideo();prefetchOverlayAtFrame(0);}
       if(raw&&!rawFusion())overlayMessage("У выбранного GPU-источника нет сохранённого объединённого fusion.");
       if(!raw&&!s.run)overlayMessage("Для обработанного режима выберите CPU-постобработку.");
-      if(raw)timeline.status.textContent="Сырые GPU-данные · без CPU-разметки";
+      if(stabilizer)timeline.status.textContent="Ball Stabilizer · сравнение VBallNet и интерполяции";
+      else if(raw)timeline.status.textContent="Сырые GPU-данные · без CPU-разметки";
       else if(!s.run)timeline.status.textContent="Выберите CPU-версию";
       else if(timeline.data)timeline.status.textContent=
         timeline.data.rallies.length+" розыгрышей · "+timeline.data.touch_annotations.filter(event=>event.touch_attributed===true||event.contact_verified===true).length+" касаний (CPU)";
@@ -2396,10 +2454,20 @@
     };
     overlay.mode.addEventListener("click",()=>selectMode(false));
     overlay.rawMode.addEventListener("click",()=>selectMode(true));
+    overlay.stabilizerMode.addEventListener("click",()=>selectMode(true,true));
+    for(const id of ["studio-debug-stabilizer-score","studio-debug-stabilizer-gap","studio-debug-stabilizer-step"]){
+      $(id).addEventListener("change",()=>{
+        if(!overlay.stabilizerView)return;
+        for(const controller of overlay.controllers.values())controller?.abort();
+        overlay.controllers.clear();overlay.fetching.clear();overlay.cache.clear();
+        overlay.stabilizerStats.textContent="Перерасчёт для выбранного окна…";
+        drawOverlay();
+      });
+    }
     const selectTrainingMode=()=>{
       if(training.active)return;
       ui.video.pause();
-      overlay.raw=false;training.active=true;training.track=null;training.frame=null;
+      overlay.raw=false;overlay.stabilizerView=false;training.active=true;training.track=null;training.frame=null;
       reference.active=false;reference.epoch++;reference.entries=[];
       updateReferenceModeUi();
       s.current="";s.stopAt=null;s.clipStart=null;s.clipEnd=null;
@@ -2414,6 +2482,8 @@
       overlay.flags.pose=true;overlay.flags.players=true;
       overlay.mode.setAttribute("aria-selected","false");
       overlay.rawMode.setAttribute("aria-selected","false");
+      overlay.stabilizerMode.setAttribute("aria-selected","false");
+      overlay.stabilizerControls.classList.add("hidden");
       overlay.rawControls.classList.add("hidden");
       training.panel.classList.remove("hidden");
       placeTrainingTimeline();

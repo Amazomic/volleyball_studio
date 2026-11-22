@@ -215,6 +215,11 @@
   });
   // Mirrors volley-core's validated native defaults (no JS-only processing).
   const postProfile=()=>({
+    ball_stabilizer:{
+      min_confidence:inputValue("studio-post-ball-stabilizer-score"),
+      max_gap_frames:inputValue("studio-post-ball-stabilizer-gap"),
+      max_step_fraction:inputValue("studio-post-ball-stabilizer-step")
+    },
     interpolate_players:$("studio-gpu-interpolate-players").checked,
     interpolate_pose:$("studio-gpu-interpolate-pose").checked,
     pose_classification:true,
@@ -444,11 +449,12 @@
     ["fusion","Данные GPU","gpu",1,5],
     ["pose","Позы игроков","gpu",1,6],
     ["tracking","Трекинг ID","cpu",2,1],
-    ["touches","Касания","cpu",2,2],
-    ["touch_types","Типы касаний","cpu",2,3],
-    ["publish","Публикация","cpu",2,4],
-    ["identity","Привязка игроков","cpu",2,5],
-    ["material","Результат","output",2,6]
+    ["ball_stabilizer","Интерполяция траектории мяча","cpu",2,2],
+    ["touches","Касания","cpu",2,3],
+    ["touch_types","Типы касаний","cpu",2,4],
+    ["publish","Публикация","cpu",2,5],
+    ["identity","Привязка игроков","cpu",2,6],
+    ["material","Результат","output",2,7]
   ];
   const pipelineNames=new Map(pipelineStages.map(item=>[item[0],item[1]]));
   pipelineNames.set("cache","Кэш GPU");
@@ -457,6 +463,7 @@
       (!run&&$("studio-post-tcn-experimental")?.checked);
     const known={
       ball:["VballNetV4c","model"],
+      ball_stabilizer:["Ball Stabilizer","algorithm"],
       players:["RF-DETR Medium","model"],
       pose:["RTMPose-M Body7","model"],
       tracking:["ByteTrack","algorithm"],
@@ -466,6 +473,7 @@
   };
   const pipelineGlyphs={
     video:[["rect",{x:2,y:5,width:14,height:14,rx:3}],["path",{d:"m16 10 6-4v12l-6-4"}]],
+    ball_stabilizer:[["path",{d:"M2 18l5-5 4 2 5-9 6 4"}],["circle",{cx:7,cy:13,r:2}]],
     ball:[["circle",{cx:12,cy:12,r:10}],["path",{d:"M2.8 7.4c5.2-1 10.7 2.8 11 7.5m5.4-11.1C14 8 12 15 14.6 21.6M4.1 18.2c4.1-4.4 9.2-5.5 17.4-4.5"}]],
     rallies:[["path",{d:"m12 2 10 6-10 6L2 8l10-6Zm-10 11 10 6 10-6M2 18l10 6 10-6"}]],
     players:[["circle",{cx:9,cy:7,r:3}],["path",{d:"M2 21v-2a7 7 0 0 1 14 0v2M17 4a4 4 0 0 1 0 7m4 10v-2a6 6 0 0 0-4-5.7"}]],
@@ -499,6 +507,7 @@
     if(entry?.id&&pipelineNames.has(entry.id))return entry.id;
     const name=String(typeof entry==="string"?entry:entry?.name||"");
     if(/Проверка исходного видео|Подготовка исходного видео/.test(name))return "video";
+    if(/Ball Stabilizer|Интерполяция траектории мяча/.test(name))return "ball_stabilizer";
     if(/Поиск розыгрышей/.test(name))return "rallies";
     if(/GPU.*V[Bb]allNet/.test(name))return "ball";
     if(/RTMPose/.test(name)&&!/RF-DETR/.test(name))return "pose";
@@ -567,7 +576,10 @@
       return "В составе касаний · "+stageTime(duration);
     }
     let result="";
-    if(id==="rallies"&&entry&&Array.isArray(run?.gpu_rally_mask?.merged)){
+    if(id==="ball_stabilizer"&&entry&&run?.ball_stabilizer){
+      const stats=run.ball_stabilizer;
+      result="−"+stats.rejected_frames+" / +"+stats.interpolated_frames+" точек";
+    }else if(id==="rallies"&&entry&&Array.isArray(run?.gpu_rally_mask?.merged)){
       const count=run.gpu_rally_mask.merged.length;
       const noun=count%10===1&&count%100!==11?"розыгрыш":
         count%10>=2&&count%10<=4&&(count%100<12||count%100>14)?"розыгрыша":"розыгрышей";
@@ -597,7 +609,7 @@
   };
   const pipelineEdges=[
     ["video","ball"],["ball","rallies"],["rallies","players"],["players","fusion"],
-    ["fusion","pose"],["pose","tracking"],["tracking","touches"],
+    ["fusion","pose"],["pose","tracking"],["tracking","ball_stabilizer"],["ball_stabilizer","touches"],
     ["touches","touch_types"],["touch_types","publish"],
     ["publish","identity"],["identity","material"],
     ["video","fusion","cache"],["fusion","tracking","no-pose"],["touches","publish","no-types"]
@@ -605,6 +617,7 @@
   const graphSettings={
     video:[".analysis-profile-source","#studio-analysis-editor"],
     ball:["#studio-gpu-stride"],
+    ball_stabilizer:["#studio-post-ball-stabilizer-score","#studio-post-ball-stabilizer-gap","#studio-post-ball-stabilizer-step"],
     rallies:["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds","#studio-gpu-rally-stationary-ms"],
     players:["#studio-gpu-person-stride"],
     pose:["#studio-gpu-pose-enabled","#studio-gpu-interpolate-pose"],
@@ -624,6 +637,7 @@
   const graphDescriptions={
     video:"Выбор видео, интервалов анализа и разметки площадки.",
     ball:"VballNetV4c выполняет нейросетевую детекцию мяча на GPU.",
+    ball_stabilizer:"Ball Stabilizer: удаление ложных VBallNet-позиций и интерполяция коротких пропусков во 2-й фазе перед поиском касаний. Розыгрыши 1-й фазы не меняются.",
     rallies:"Рабочие настройки первичного анализа: длительность траектории, остановка мяча в миллисекундах и объединение без перекрытия удержаний или пропусков детекции от 3 секунд. Эксперименты в «Дебаге» имеют собственные значения и не меняют этот GPU-профиль.",
     players:"RF-DETR Medium ищет игроков только внутри найденных игровых интервалов.",
     pose:"RTMPose-M Body7 получает рамки игроков и исходные пиксели видео.",

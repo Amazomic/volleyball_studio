@@ -103,6 +103,171 @@ pub fn reconstruct_short_ball_motion(
     })
 }
 
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct BallStabilizerSettings {
+    pub min_confidence: f32,
+    pub max_gap_frames: usize,
+    pub max_step_fraction: f64,
+}
+
+impl Default for BallStabilizerSettings {
+    fn default() -> Self {
+        Self {
+            min_confidence: 0.55,
+            max_gap_frames: 12,
+            max_step_fraction: 0.12,
+        }
+    }
+}
+
+impl BallStabilizerSettings {
+    pub fn validate(self) -> Result<(), &'static str> {
+        if !self.min_confidence.is_finite()
+            || !(0.51..=1.0).contains(&self.min_confidence)
+            || !(1..=MAX_MISSING_BALL_FRAMES).contains(&self.max_gap_frames)
+            || !self.max_step_fraction.is_finite()
+            || !(0.01..=0.25).contains(&self.max_step_fraction)
+        {
+            return Err("Invalid Ball Stabilizer settings");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ScoredBallSample {
+    pub frame: usize,
+    pub point: [f64; 2],
+    pub confidence: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct StabilizedBallMotion {
+    pub points: Vec<Option<[f64; 2]>>,
+    pub interpolated: Vec<bool>,
+    pub rejected_frames: Vec<usize>,
+    pub confidence_frames: usize,
+    pub observed_frames: usize,
+}
+
+pub fn stabilize_ball_motion(
+    samples: &[ScoredBallSample],
+    frames: usize,
+    settings: BallStabilizerSettings,
+) -> Result<StabilizedBallMotion, &'static str> {
+    settings.validate()?;
+    if frames == 0 || frames > 48 * 3600 * 30 {
+        return Err("Invalid Ball Stabilizer frame count");
+    }
+    let mut points = vec![None; frames];
+    let mut scores = vec![settings.min_confidence; frames];
+    for sample in samples {
+        if sample.frame >= frames
+            || !sample.confidence.is_finite()
+            || sample
+                .point
+                .iter()
+                .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+        {
+            return Err("Invalid Ball Stabilizer sample");
+        }
+        if sample.confidence >= scores[sample.frame] {
+            points[sample.frame] = Some(sample.point);
+            scores[sample.frame] = sample.confidence;
+        }
+    }
+    let confidence_frames = points.iter().filter(|p| p.is_some()).count();
+    let mut rejected_frames = Vec::new();
+    for index in 0..frames {
+        let Some(point) = points[index] else {
+            continue;
+        };
+        let start = index.saturating_sub(4);
+        let end = (index + 5).min(frames);
+        let mut support = 0;
+        for (neighbor, &candidate) in points.iter().enumerate().take(end).skip(start) {
+            if neighbor == index {
+                continue;
+            }
+            if let Some(other) = candidate {
+                let limit = settings.max_step_fraction * index.abs_diff(neighbor) as f64;
+                if (point[0] - other[0]).hypot(point[1] - other[1]) <= limit {
+                    support += 1;
+                    if support == 2 {
+                        break;
+                    }
+                }
+            }
+        }
+        if support < 2 {
+            rejected_frames.push(index);
+        }
+    }
+    for &index in &rejected_frames {
+        points[index] = None;
+    }
+    let mut segments = Vec::<(usize, usize, usize)>::new();
+    for index in 0..frames {
+        if points[index].is_none() {
+            continue;
+        }
+        if let Some(last) = segments.last_mut() {
+            let gap = index - last.1;
+            let prev = points[last.1].expect("segment end is observed");
+            let current = points[index].expect("anchor is observed");
+            if gap <= 4
+                && (prev[0] - current[0]).hypot(prev[1] - current[1])
+                    <= settings.max_step_fraction * gap as f64
+            {
+                last.1 = index;
+                last.2 += 1;
+                continue;
+            }
+        }
+        segments.push((index, index, 1));
+    }
+    for triple in segments.windows(3) {
+        let (_, before_end, before_count) = triple[0];
+        let (island_start, island_end, island_count) = triple[1];
+        let (after_start, _, after_count) = triple[2];
+        if before_count < 4
+            || after_count < 4
+            || island_count > 4
+            || after_start - before_end > settings.max_gap_frames + 5
+        {
+            continue;
+        }
+        let before = points[before_end].expect("segment end is observed");
+        let after = points[after_start].expect("segment start is observed");
+        if (before[0] - after[0]).hypot(before[1] - after[1])
+            <= settings.max_step_fraction * (after_start - before_end) as f64
+        {
+            for (index, slot) in points
+                .iter_mut()
+                .enumerate()
+                .take(island_end + 1)
+                .skip(island_start)
+            {
+                if slot.take().is_some() {
+                    rejected_frames.push(index);
+                }
+            }
+        }
+    }
+    rejected_frames.sort_unstable();
+    rejected_frames.dedup();
+    let observed_frames = confidence_frames - rejected_frames.len();
+    let interpolated = interpolate_short_gaps_bounded(&mut points, settings.max_gap_frames);
+    Ok(StabilizedBallMotion {
+        points,
+        interpolated,
+        rejected_frames,
+        confidence_frames,
+        observed_frames,
+    })
+}
+
 pub fn interpolate_short_gaps(points: &mut [Option<[f64; 2]>]) -> Vec<bool> {
     interpolate_short_gaps_bounded(points, MAX_MISSING_BALL_FRAMES)
 }
@@ -362,6 +527,104 @@ fn valid_point(point: [f64; 2]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ball_stabilizer_rejects_remote_false_positives_before_interpolation() {
+        let samples: Vec<_> = (0..42)
+            .filter(|&frame| frame != 17 && frame != 18)
+            .map(|frame| ScoredBallSample {
+                frame,
+                point: if frame == 12 || frame == 13 {
+                    [0.92, 0.88]
+                } else {
+                    [0.2 + frame as f64 * 0.003, 0.3]
+                },
+                confidence: if frame == 5 { 0.50 } else { 0.9 },
+            })
+            .collect();
+        let result =
+            stabilize_ball_motion(&samples, 42, BallStabilizerSettings::default()).unwrap();
+        assert!(result.rejected_frames.contains(&12));
+        assert!(result.rejected_frames.contains(&13));
+        assert!(result.points[5].is_some());
+        assert!(result.points[12].is_some());
+        assert!(result.interpolated[12]);
+        assert!(result.interpolated[17]);
+        assert!(result.interpolated[18]);
+        assert!(!result.interpolated[14]);
+        assert!(result.points[41].is_some());
+    }
+
+    #[test]
+    fn ball_stabilizer_rejects_short_consistent_false_island() {
+        let samples = (0..45)
+            .map(|frame| ScoredBallSample {
+                frame,
+                point: if (18..=20).contains(&frame) {
+                    [0.88 + (frame - 18) as f64 * 0.004, 0.8]
+                } else {
+                    [0.20 + frame as f64 * 0.004, 0.4]
+                },
+                confidence: 0.95,
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 45, BallStabilizerSettings::default()).unwrap();
+        for frame in 18..=20 {
+            assert!(result.rejected_frames.contains(&frame));
+            assert!(result.interpolated[frame]);
+            assert!(result.points[frame].unwrap()[0] < 0.4);
+        }
+    }
+
+    #[test]
+    fn ball_stabilizer_keeps_real_turns_and_refuses_long_gaps() {
+        let mut samples = Vec::new();
+        for frame in (0..=80).filter(|f| !(30..=55).contains(f)) {
+            let x = if frame <= 15 {
+                0.20 + frame as f64 * 0.004
+            } else {
+                0.26 - (frame as f64 - 15.0) * 0.003
+            };
+            samples.push(ScoredBallSample {
+                frame,
+                point: [x, 0.35],
+                confidence: 0.95,
+            });
+        }
+        let result =
+            stabilize_ball_motion(&samples, 81, BallStabilizerSettings::default()).unwrap();
+        assert!(result.points[15].is_some());
+        assert!(result.points[40].is_none());
+        assert!(result.points[20].is_some());
+    }
+
+    #[test]
+    fn ball_stabilizer_validates_strict_confidence_and_does_not_extrapolate() {
+        assert!(BallStabilizerSettings {
+            min_confidence: 0.5,
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+        assert!(BallStabilizerSettings {
+            max_gap_frames: 99,
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+        let points = (5..9)
+            .map(|frame| ScoredBallSample {
+                frame,
+                point: [0.25 + frame as f64 * 0.001, 0.4],
+                confidence: 0.9,
+            })
+            .collect::<Vec<_>>();
+        let result = stabilize_ball_motion(&points, 20, BallStabilizerSettings::default()).unwrap();
+        assert_eq!(result.points[0], None);
+        assert_eq!(result.points[19], None);
+        assert_eq!(result.observed_frames, 4);
+    }
 
     #[test]
     fn reconstruction_removes_single_false_ball_and_bridges_short_smooth_gaps() {

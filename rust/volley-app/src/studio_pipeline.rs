@@ -426,6 +426,8 @@ pub struct PostProfile {
     #[serde(default = "default_interpolation_enabled")]
     interpolate_pose: bool,
     tracking: TrackingOptions,
+    #[serde(default)]
+    ball_stabilizer: volley_core::ball_interpolation::BallStabilizerSettings,
     touches: TouchSettings,
     rallies: RallySettings,
     #[serde(default = "default_pose_classification")]
@@ -445,6 +447,7 @@ impl Default for PostProfile {
             interpolate_players: true,
             interpolate_pose: true,
             tracking: TrackingOptions::default(),
+            ball_stabilizer: volley_core::ball_interpolation::BallStabilizerSettings::default(),
             touches: TouchSettings {
                 algorithm: TouchAlgorithm::PoseMotion,
                 require_pose: true,
@@ -554,6 +557,7 @@ impl TryFrom<StartRequestWire> for StartRequest {
         }
         let (gpu, mut post) = decode_profiles(wire.gpu, wire.post)?;
         gpu.primary_rallies.validate()?;
+        post.ball_stabilizer.validate().map_err(str::to_owned)?;
         if !(1..=99).contains(&post.auto_assign_threshold_percent) {
             return Err("Порог сходства для автопривязки должен быть от 1 до 99%".into());
         }
@@ -714,6 +718,8 @@ fn pipeline_stage_id(name: &str) -> &'static str {
     if name.contains("Проверка исходного видео") || name.contains("Подготовка исходного видео")
     {
         "video"
+    } else if name.contains("Ball Stabilizer") {
+        "ball_stabilizer"
     } else if name.contains("Поиск розыгрышей") {
         "rallies"
     } else if name.contains("VBallNet") && name.contains("GPU") {
@@ -1202,6 +1208,11 @@ fn cpu_lineage_valid(
         && rallies["preliminary_rally_scope_applied"] == touches["preliminary_rally_scope_applied"]
         && touches["touch_id"] == touch
         && touches["source_replay_id"] == replay
+        && touches["ball_stabilizer"]["schema"] == "volley-ball-stabilizer/1"
+        && touches["ball_stabilizer"]["version"] == "ball_stabilizer_v1"
+        && touches["ball_stabilizer"]["settings"] == json!(request.post.ball_stabilizer)
+        && touches["ball_stabilizer"]["source_replay_sha256"] == touches["source_replay_sha256"]
+        && saved["ball_stabilizer"] == touches["ball_stabilizer"]
         && touches["project_id"] == request.project_id
         && touches["video"] == request.video
         && touches["court_revision"] == saved["court_revision"]
@@ -2116,6 +2127,47 @@ async fn pipeline(
         return Err("cancelled".into());
     }
 
+    progress(path, status, "Постобработка · Ball Stabilizer", 90.0)?;
+    let stabilized = tokio::task::block_in_place(|| {
+        cpu_touches::stabilize_primary_replay(
+            app,
+            &request.project_id,
+            &request.video,
+            &replay_id,
+            request.post.ball_stabilizer,
+            cancel,
+            |done, total| {
+                progress_with_frames(
+                    path,
+                    status,
+                    "Постобработка · Ball Stabilizer",
+                    90.0 + done as f64 / total.max(1) as f64,
+                    Some((done, total)),
+                )
+            },
+        )
+    })?;
+    status["ball_stabilizer"] = stabilized.summary();
+    save(path, status)?;
+    log_event(
+        path,
+        "Ball Stabilizer",
+        "success",
+        &format!(
+            "Принято={} · отклонено={} · интерполировано={}",
+            stabilized.motion.observed_frames,
+            stabilized.motion.rejected_frames.len(),
+            stabilized
+                .motion
+                .interpolated
+                .iter()
+                .filter(|&&v| v)
+                .count(),
+        ),
+    )?;
+    if cancel.load(Ordering::Acquire) {
+        return Err("cancelled".into());
+    }
     progress(
         path,
         status,
@@ -2140,6 +2192,7 @@ async fn pipeline(
             },
             request.post.rallies,
             &primary,
+            &stabilized,
             &mut |done, total| {
                 progress_with_frames(
                     path,
@@ -2834,6 +2887,10 @@ mod tests {
         assert_eq!(
             pipeline_stage_id("GPU · VBallNet: траектория мяча и розыгрыши"),
             "ball"
+        );
+        assert_eq!(
+            pipeline_stage_id("Интерполяция траектории мяча · Ball Stabilizer"),
+            "ball_stabilizer"
         );
         assert_eq!(pipeline_stage_id("Поиск розыгрышей"), "rallies");
         assert_eq!(
@@ -3692,6 +3749,13 @@ mod branching_tests {
                 "source_replay_id":replay,"method":"vballnet_gravity_player_geometry_pose_contact_v11","sha256":sha,
                 "body_trajectory_intersection_required":true,
                 "settings":{"require_pose":true},
+                "source_replay_sha256":sha,
+                "ball_stabilizer":{
+                    "schema":"volley-ball-stabilizer/1",
+                    "version":"ball_stabilizer_v1",
+                    "source_replay_sha256":sha,
+                    "settings":request.post.ball_stabilizer
+                },
                 "automatic_action_prediction_method":"pose_keypoints_v1_or_unknown_touch",
                 "preliminary_rally_scope_version":"primary_gpu_rally_mask_v1",
                 "preliminary_rally_settings":request.post.rallies,
@@ -3735,6 +3799,12 @@ mod branching_tests {
                 "min_rally_seconds":5.0
             },
             "gpu_rally_mask_sha256":sha,
+            "ball_stabilizer":{
+                "schema":"volley-ball-stabilizer/1",
+                "version":"ball_stabilizer_v1",
+                "source_replay_sha256":sha,
+                "settings":request.post.ball_stabilizer
+            },
             "analysis_id":analysis,"cpu_runs":{"tracking":replay,"touches":touch,"rallies":rally},
             "postprocessing_id":rally
         });
@@ -3813,6 +3883,18 @@ mod branching_tests {
         }
         request.post.interpolate_players = true;
         request.post.interpolate_pose = true;
+        request.post.ball_stabilizer.max_gap_frames = 8;
+        let changed = find_reusable(&state, &request, &identity, &"2".repeat(32));
+        assert!(
+            changed.full.is_none(),
+            "changed Ball Stabilizer must invalidate CPU results"
+        );
+        assert!(
+            changed.gpu.is_some(),
+            "changed Ball Stabilizer must reuse VBallNet GPU"
+        );
+        assert!(!cpu_lineage_valid(&project_dir, &request, &saved, None));
+        request.post.ball_stabilizer = Default::default();
         storage::write_json_atomic(&directory.join("status.json"), &saved).unwrap();
         let mut legacy = saved.clone();
         legacy["gpu_model_stack"] = json!("vballnet_rtmdet_rtmpose_tiled_coco17_v3");

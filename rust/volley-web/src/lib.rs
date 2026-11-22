@@ -257,6 +257,17 @@ const TEXT: &[(&str, &str)] = &[
     ("Удалить", "Delete"),
     ("Загрузка проектов…", "Loading projects…"),
     ("Вернуться к предпросмотру", "Return to preview"),
+    ("Ball Stabilizer · сравнение", "Ball Stabilizer · compare"),
+    ("Ball Stabilizer · сравнение на видео", "Ball Stabilizer · video comparison"),
+    ("Голубой — VBallNet, золотой — стабилизированная траектория, штрих — интерполяция, красный × — отброшенная детекция.", "Cyan — VBallNet, gold — stabilized trajectory, dashed — interpolation, red × — rejected detection."),
+    ("Мин. уверенность", "Min. confidence"),
+    ("Пропуск, кадров", "Gap, frames"),
+    ("Макс. скачок, доля/кадр", "Max. jump, frame fraction/frame"),
+    ("Для сравнения выберите сохранённый GPU-анализ.", "Select a saved GPU analysis for comparison."),
+    ("Ball Stabilizer · порог уверенности VBallNet", "Ball Stabilizer · VBallNet confidence threshold"),
+    ("Интерполяция · максимальный пропуск, кадров", "Interpolation · maximum gap, frames"),
+    ("Фильтр скачков · доля кадра/кадр", "Jump filter · frame fraction/frame"),
+    ("Ball Stabilizer · интерполяция траектории мяча", "Ball Stabilizer · ball trajectory interpolation"),
 ];
 thread_local! {
     static UI:RefCell<UiState>=const{RefCell::new(UiState::initial())};
