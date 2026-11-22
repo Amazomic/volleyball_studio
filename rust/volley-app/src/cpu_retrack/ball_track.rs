@@ -42,6 +42,189 @@ pub(crate) fn merge_continuous_intervals(
     Ok(merged)
 }
 
+pub(crate) const DEFAULT_STATIONARY_BALL_MS: u32 = 1000;
+const STATIONARY_REGION_SIZE: f64 = 0.035;
+const MIN_RALLY_FIELD_TRAVEL: f64 = 0.10;
+
+#[derive(Debug)]
+pub(crate) struct MovingBallIntervals {
+    pub detected: Vec<(u64, u64)>,
+    pub merged: Vec<(u64, u64)>,
+    pub stationary: Vec<(u64, u64)>,
+}
+
+pub(crate) fn stationary_ball_intervals(
+    points: &[Option<[f64; 2]>],
+    stationary_ball_ms: u32,
+) -> Result<Vec<(u64, u64)>, String> {
+    if !(200..=10_000).contains(&stationary_ball_ms) {
+        return Err("Время неподвижности мяча должно быть от 200 до 10000 мс".into());
+    }
+    let window = (u64::from(stationary_ball_ms) * 30).div_ceil(1000) as usize;
+    let mut x_min = std::collections::VecDeque::<(usize, f64)>::new();
+    let mut x_max = std::collections::VecDeque::<(usize, f64)>::new();
+    let mut y_min = std::collections::VecDeque::<(usize, f64)>::new();
+    let mut y_max = std::collections::VecDeque::<(usize, f64)>::new();
+    let mut observations = std::collections::VecDeque::<usize>::new();
+    let mut regions = Vec::<(u64, u64)>::new();
+    for index in 0..points.len() {
+        let point = points[index].filter(|p| p.iter().all(|v| v.is_finite()));
+        let isolated_jump = index > 0
+            && index + 1 < points.len()
+            && point.is_some_and(|p| {
+                points[index - 1]
+                    .zip(points[index + 1])
+                    .is_some_and(|(before, after)| {
+                        (p[0] - before[0]).hypot(p[1] - before[1]) > 0.08
+                            && (after[0] - before[0]).hypot(after[1] - before[1]) < 0.02
+                    })
+            });
+        if let Some([x, y]) = point.filter(|_| !isolated_jump) {
+            observations.push_back(index);
+            while x_min.back().is_some_and(|entry| entry.1 >= x) {
+                x_min.pop_back();
+            }
+            while x_max.back().is_some_and(|entry| entry.1 <= x) {
+                x_max.pop_back();
+            }
+            while y_min.back().is_some_and(|entry| entry.1 >= y) {
+                y_min.pop_back();
+            }
+            while y_max.back().is_some_and(|entry| entry.1 <= y) {
+                y_max.pop_back();
+            }
+            x_min.push_back((index, x));
+            x_max.push_back((index, x));
+            y_min.push_back((index, y));
+            y_max.push_back((index, y));
+        }
+        let start = (index + 1).saturating_sub(window);
+        for deque in [&mut x_min, &mut x_max, &mut y_min, &mut y_max] {
+            while deque.front().is_some_and(|entry| entry.0 < start) {
+                deque.pop_front();
+            }
+        }
+        while observations.front().is_some_and(|frame| *frame < start) {
+            observations.pop_front();
+        }
+        if index + 1 < window
+            || observations.len() * 100 < window * 70
+            || observations.front() != Some(&start)
+            || observations.back() != Some(&index)
+        {
+            continue;
+        }
+        let stable = x_min
+            .front()
+            .zip(x_max.front())
+            .zip(y_min.front().zip(y_max.front()))
+            .is_some_and(|((left, right), (top, bottom))| {
+                right.1 - left.1 <= STATIONARY_REGION_SIZE
+                    && bottom.1 - top.1 <= STATIONARY_REGION_SIZE
+            });
+        if stable {
+            let interval = (start as u64, index as u64);
+            if let Some(last) = regions.last_mut() {
+                if interval.0 <= last.1.saturating_add(1) {
+                    last.1 = interval.1;
+                    continue;
+                }
+            }
+            regions.push(interval);
+        }
+    }
+    Ok(regions)
+}
+
+fn is_field_motion(points: &[Option<[f64; 2]>], start: u64, end: u64) -> bool {
+    let (mut low_x, mut high_x) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut low_y, mut high_y) = (f64::INFINITY, f64::NEG_INFINITY);
+    for p in points[start as usize..=end as usize].iter().flatten() {
+        low_x = low_x.min(p[0]);
+        high_x = high_x.max(p[0]);
+        low_y = low_y.min(p[1]);
+        high_y = high_y.max(p[1]);
+    }
+    (high_x - low_x).max(high_y - low_y) >= MIN_RALLY_FIELD_TRAVEL
+}
+
+pub(crate) fn analyze_moving_ball(
+    points: &[Option<[f64; 2]>],
+    min_seconds: f64,
+    merge_gap_seconds: f64,
+    stationary_ball_ms: u32,
+) -> Result<MovingBallIntervals, String> {
+    let stationary = stationary_ball_intervals(points, stationary_ball_ms)?;
+    let mut moving = points.to_vec();
+    for &(start, end) in &stationary {
+        moving[start as usize..=end as usize].fill(None);
+    }
+    let minimum = (min_seconds * 30.0).ceil() as u64;
+    let mut detected = Vec::new();
+    for (start, end) in continuous_intervals_from_positions(&moving, min_seconds)? {
+        let mut next_start = start;
+        for &(idle_start, idle_end) in &stationary {
+            if idle_end < next_start {
+                continue;
+            }
+            if idle_start > end {
+                break;
+            }
+            if idle_start > next_start {
+                let final_frame = idle_start - 1;
+                if final_frame - next_start + 1 >= minimum
+                    && is_field_motion(&moving, next_start, final_frame)
+                {
+                    detected.push((next_start, final_frame));
+                }
+            }
+            next_start = idle_end.saturating_add(1);
+        }
+        if next_start <= end
+            && end - next_start + 1 >= minimum
+            && is_field_motion(&moving, next_start, end)
+        {
+            detected.push((next_start, end));
+        }
+    }
+    let merged = merge_continuous_intervals_with_pauses(&detected, merge_gap_seconds, &stationary)?;
+    Ok(MovingBallIntervals {
+        detected,
+        merged,
+        stationary,
+    })
+}
+
+pub(crate) fn merge_continuous_intervals_with_pauses(
+    intervals: &[(u64, u64)],
+    gap_seconds: f64,
+    pauses: &[(u64, u64)],
+) -> Result<Vec<(u64, u64)>, String> {
+    let mut merged = merge_continuous_intervals(&[], gap_seconds)?;
+    for &(start, end) in intervals {
+        if start > end {
+            return Err("Invalid continuous rally interval".into());
+        }
+        if let Some(last) = merged.last_mut() {
+            let barrier = pauses.iter().any(|&(pause_start, pause_end)| {
+                pause_start <= start
+                    && pause_end >= last.1
+                    && pause_start <= start.saturating_sub(1)
+                    && pause_end >= last.1.saturating_add(1)
+            });
+            let gap_frames = gap_seconds * 30.0;
+            if !barrier
+                && (start <= last.1.saturating_add(1) || ((start - last.1 - 1) as f64) < gap_frames)
+            {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    Ok(merged)
+}
+
 pub(crate) fn saved_scope(manifest: &serde_json::Value) -> Result<Option<(Vec<u64>, f64)>, String> {
     if manifest["ball_tracking_policy"] == LOCAL_POLICY {
         let starts: Vec<u64> =
@@ -172,6 +355,7 @@ pub(crate) fn continuous_intervals_from_positions(
     Ok(intervals)
 }
 
+#[cfg(test)]
 pub(crate) fn continuous_ball_intervals(
     source: &Path,
     expected_sha: &str,
@@ -189,14 +373,14 @@ pub(crate) fn continuous_ball_intervals(
     )
 }
 
-pub(crate) fn continuous_ball_intervals_with_cancel(
+fn read_continuous_ball_points(
     source: &Path,
     expected_sha: &str,
     frames: u64,
     min_score: f64,
     min_seconds: f64,
     cancel: Option<&AtomicBool>,
-) -> Result<Vec<(u64, u64)>, String> {
+) -> Result<Vec<Option<[f64; 2]>>, String> {
     if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
         return Err("cancelled".into());
     }
@@ -239,7 +423,34 @@ pub(crate) fn continuous_ball_intervals_with_cancel(
         return Err("Continuous ball source SHA-256 mismatch".into());
     }
 
+    Ok(points)
+}
+
+pub(crate) fn continuous_ball_intervals_with_cancel(
+    source: &Path,
+    expected_sha: &str,
+    frames: u64,
+    min_score: f64,
+    min_seconds: f64,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<(u64, u64)>, String> {
+    let points =
+        read_continuous_ball_points(source, expected_sha, frames, min_score, min_seconds, cancel)?;
     continuous_intervals_from_positions(&points, min_seconds)
+}
+
+pub(crate) fn continuous_ball_analysis(
+    source: &Path,
+    expected_sha: &str,
+    frames: u64,
+    min_score: f64,
+    min_seconds: f64,
+    merge_gap_seconds: f64,
+    stationary_ball_ms: u32,
+) -> Result<MovingBallIntervals, String> {
+    let points =
+        read_continuous_ball_points(source, expected_sha, frames, min_score, min_seconds, None)?;
+    analyze_moving_ball(&points, min_seconds, merge_gap_seconds, stationary_ball_ms)
 }
 
 pub(crate) fn preliminary_rally_scope(

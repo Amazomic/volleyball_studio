@@ -984,7 +984,10 @@ fn gpu_lineage_valid(
         && (saved["gpu_rally_mask"]["min_trajectory_seconds"]
             != json!(request.gpu.primary_rallies.min_trajectory_seconds)
             || saved["gpu_rally_mask"]["merge_gap_seconds"]
-                != json!(request.gpu.primary_rallies.merge_gap_seconds))
+                != json!(request.gpu.primary_rallies.merge_gap_seconds)
+            || saved["gpu_rally_mask"]["stationary_ball_ms"]
+                != json!(request.gpu.primary_rallies.stationary_ball_ms)
+            || saved["gpu_rally_mask"]["movement_filter_version"] != "stationary_ball_v1")
     {
         return false;
     }
@@ -3371,6 +3374,7 @@ mod tests {
         .unwrap();
         assert_eq!(request.gpu.primary_rallies.min_trajectory_seconds, 1.5);
         assert_eq!(request.gpu.primary_rallies.merge_gap_seconds, 4.0);
+        assert_eq!(request.gpu.primary_rallies.stationary_ball_ms, 1000);
         let saved = json!({
             "schema":SCHEMA,
             "gpu_model_stack":requested_gpu_model_stack(),
@@ -3384,6 +3388,9 @@ mod tests {
         assert!(!compatible_version(&saved, &request, &identity));
         request.gpu.primary_rallies.min_trajectory_seconds = 1.5;
         request.gpu.primary_rallies.merge_gap_seconds = 2.0;
+        assert!(!compatible_version(&saved, &request, &identity));
+        request.gpu.primary_rallies.merge_gap_seconds = 4.0;
+        request.gpu.primary_rallies.stationary_ball_ms = 1500;
         assert!(!compatible_version(&saved, &request, &identity));
         for invalid in [
             json!({"min_trajectory_seconds":0.0,"merge_gap_seconds":4.0}),
@@ -3695,7 +3702,9 @@ mod branching_tests {
             "gpu_rally_mask":{
                 "schema":"volley-primary-rally-mask/1",
                 "min_trajectory_seconds":request.gpu.primary_rallies.min_trajectory_seconds,
-                "merge_gap_seconds":request.gpu.primary_rallies.merge_gap_seconds
+                "merge_gap_seconds":request.gpu.primary_rallies.merge_gap_seconds,
+                "stationary_ball_ms":request.gpu.primary_rallies.stationary_ball_ms,
+                "movement_filter_version":"stationary_ball_v1"
             },
             "gpu_rally_mask_sha256":sha,
             "analysis_id":analysis,"cpu_runs":{"tracking":replay,"touches":touch,"rallies":rally},

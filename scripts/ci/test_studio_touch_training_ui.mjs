@@ -74,7 +74,7 @@ const ui={video:{currentTime:3.333,addEventListener(){}}};
 let drawn=0;
 const context={
   $,s,timeline,ui,trainingNames:{attack:"Атака",dig:"Приём снизу",overhead_pass:"Передача сверху"},comparison:{data:{trajectory_status:"ready",trajectory_rallies:[{start:95,end:150}]},
-    mode:{value:"continuous"},minSeconds:{value:"1.5"}},
+    mode:{value:"continuous"},minSeconds:{value:"1.5"},stationaryMs:{value:"1000"}},
   comparisonMatches:data=>data?.trajectory_status==="ready",
   trainingGapSeconds:()=>4,
   document:{createElement:()=>new Element()},
@@ -138,7 +138,7 @@ assert.equal(annotation.save.disabled,true);
 await elements.get("studio-annotation-calculate").click();
 assert.equal(calculations.length,1);
 assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].rally)),
-  {mode:"continuous",merge_gap_seconds:4,min_trajectory_seconds:1.5});
+  {mode:"continuous",merge_gap_seconds:4,min_trajectory_seconds:1.5,stationary_ball_ms:1000});
 assert.equal(annotation.prediction.proposals.length,2);
 assert.equal(annotation.prediction.ball_motion_interpolation.result.rejected_outliers,2);
 assert.equal(annotation.prediction.ball_motion_interpolation.result.interpolated_frames,9);

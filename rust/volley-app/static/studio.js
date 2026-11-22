@@ -1663,6 +1663,7 @@
     const rally={mode:comparison.mode.value,merge_gap_seconds:trainingGapSeconds()};
     if(rally.mode==="continuous"){
       rally.min_trajectory_seconds=Number(comparison.minSeconds.value);
+      rally.stationary_ball_ms=Number(comparison.stationaryMs.value);
     }else{
       rally.min_impacts=Number(comparison.minImpacts.value);
       rally.context_frames=Number(comparison.context.value);
@@ -1889,7 +1890,8 @@
     mode:$("studio-comparison-mode"),
     impactSettings:$("studio-comparison-impact-settings"),
     continuousSettings:$("studio-comparison-continuous-settings"),
-    minSeconds:$("studio-comparison-min-seconds")
+    minSeconds:$("studio-comparison-min-seconds"),
+    stationaryMs:$("studio-comparison-stationary-ms")
   };
   const continuousComparisonMode=()=>comparison.mode.value==="continuous";
   const updateComparisonModeSettings=()=>{
@@ -1900,14 +1902,16 @@
   const comparisonMatches=data=>data&&
     data.schema==="volley-rally-training-comparison/1"&&
     data.project_id===s.project&&data.rally_run_id===s.run&&data.video===s.video;
-  const mergeTrainingIntervals=(items,gapFrames)=>{
+  const mergeTrainingIntervals=(items,gapFrames,stops=[])=>{
     const sorted=items.filter(item=>Number.isSafeInteger(item.start)&&
       Number.isSafeInteger(item.end)&&item.start>=0&&item.end>=item.start)
       .sort((a,b)=>a.start-b.start||a.end-b.end);
     const merged=[];
     for(const item of sorted){
       const previous=merged[merged.length-1];
-      if(previous&&(item.start<=previous.end+1||
+      const hold=previous&&stops.some(stop=>Number(stop[0])<item.start&&
+        Number(stop[1])>previous.end);
+      if(previous&&!hold&&(item.start<=previous.end+1||
         item.start-previous.end-1<gapFrames)){
         previous.end=Math.max(previous.end,item.end);
         previous.members.push(...item.members);
@@ -1928,6 +1932,7 @@
     for(const input of [comparison.minImpacts,comparison.context,comparison.duration,comparison.gap])
       input.disabled=!data||continuousComparisonMode();
     comparison.minSeconds.disabled=!data||!continuousComparisonMode();
+    comparison.stationaryMs.disabled=!data||!continuousComparisonMode();
     comparison.recalculate.disabled=!data;
     comparison.calibrate.disabled=!data || continuousComparisonMode() || !data.reference_reviewed;
     if(!data){
@@ -2086,6 +2091,8 @@
       options.mode=selectedMode;
       if(selectedMode==="continuous"){
         options.min_trajectory_seconds=Number(comparison.minSeconds.value);
+        options.merge_gap_seconds=trainingGapSeconds();
+        options.stationary_ball_ms=Number(comparison.stationaryMs.value);
       }else{
         options.min_impacts=Number(comparison.minImpacts.value);
         options.context_frames=Number(comparison.context.value);
@@ -2113,6 +2120,7 @@
       if(data.parameters){
         if(selectedMode==="continuous"){
           comparison.minSeconds.value=data.parameters.min_trajectory_seconds;
+          comparison.stationaryMs.value=data.parameters.stationary_ball_ms;
         }else{
           comparison.minImpacts.value=data.parameters.min_impacts;
           comparison.context.value=data.parameters.context_frames;
@@ -2153,7 +2161,7 @@
     void refreshComparison(true);
   });
   updateComparisonModeSettings();
-  for(const input of [comparison.minSeconds,comparison.minImpacts,comparison.context,
+  for(const input of [comparison.minSeconds,comparison.stationaryMs,comparison.minImpacts,comparison.context,
     comparison.duration,comparison.gap])
     input.addEventListener("change",invalidateTrainingTouchPrediction);
   comparison.recalculate.addEventListener("click",()=>void refreshComparison(true));
@@ -2521,7 +2529,8 @@
     const gapFrames=trainingGapSeconds()*fps();
     return {
       touches:[],
-      ball:mergeTrainingIntervals(ballIntervals,gapFrames)
+      ball:mergeTrainingIntervals(ballIntervals,gapFrames,
+        comparison.data?.parameters?.stationary_intervals||[])
     };
   };
   const trainingRallyNoun=count=>{

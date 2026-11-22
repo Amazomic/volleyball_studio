@@ -209,7 +209,8 @@
       pose_stride:inputValue("studio-gpu-person-stride"),
       primary_rallies:{
         min_trajectory_seconds:inputValue("studio-gpu-rally-min-seconds"),
-        merge_gap_seconds:inputValue("studio-gpu-rally-merge-seconds")
+        merge_gap_seconds:inputValue("studio-gpu-rally-merge-seconds"),
+        stationary_ball_ms:inputValue("studio-gpu-rally-stationary-ms")
       }
   });
   // Mirrors volley-core's validated native defaults (no JS-only processing).
@@ -546,7 +547,7 @@
   const graphSettings={
     video:[".analysis-profile-source","#studio-analysis-editor"],
     ball:["#studio-gpu-stride"],
-    rallies:["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds"],
+    rallies:["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds","#studio-gpu-rally-stationary-ms"],
     players:["#studio-gpu-person-stride"],
     pose:["#studio-gpu-pose-enabled","#studio-gpu-interpolate-pose"],
     fusion:["#studio-gpu-memory","#studio-gpu-threads"],
@@ -565,7 +566,7 @@
   const graphDescriptions={
     video:"Выбор видео, интервалов анализа и разметки площадки.",
     ball:"VballNetV4c выполняет нейросетевую детекцию мяча на GPU.",
-    rallies:"Рабочие настройки первичного анализа: длительность непрерывной траектории и объединение соседних розыгрышей. Эксперименты в «Дебаге» имеют собственные значения и не меняют этот GPU-профиль.",
+    rallies:"Рабочие настройки первичного анализа: длительность траектории, остановка мяча в миллисекундах и объединение без перекрытия остановок. Эксперименты в «Дебаге» имеют собственные значения и не меняют этот GPU-профиль.",
     players:"RF-DETR Medium ищет игроков только внутри найденных игровых интервалов.",
     pose:"RTMPose-M Body7 получает рамки игроков и исходные пиксели видео.",
     fusion:"Сохранение общей версии GPU-наблюдений и повторное использование кэша.",
