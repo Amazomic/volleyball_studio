@@ -268,7 +268,7 @@ impl StabilizedReplay {
     pub(crate) fn summary(&self) -> Value {
         json!({
             "schema":"volley-ball-stabilizer/1",
-            "version":"ball_stabilizer_v1",
+            "version":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
             "source_replay_sha256":self.source_sha256,
             "source_replay_id":self.replay_id,
             "settings":self.settings,
@@ -301,8 +301,11 @@ pub(crate) fn verified_ball_trajectory(
         .as_str()
         .filter(|sha| volley_core::contracts::sha256(sha))
         .ok_or("Missing canonical ball trajectory SHA")?;
+    let version = summary["version"]
+        .as_str()
+        .ok_or("Missing Ball Stabilizer version")?;
     if summary["schema"] != "volley-ball-stabilizer/1"
-        || summary["version"] != "ball_stabilizer_v1"
+        || !matches!(version, "ball_stabilizer_v1" | "ball_stabilizer_v2")
         || summary["source_replay_id"] != replay_id
         || summary["source_replay_sha256"] != replay_sha256
         || summary["trajectory_file"] != BALL_TRAJECTORY_FILE
@@ -327,6 +330,11 @@ pub(crate) fn verified_ball_trajectory(
         || manifest["source_replay_id"] != replay_id
         || manifest["source_replay_sha256"] != replay_sha256
         || manifest["frames"].as_u64() != Some(frames)
+        || (if version == "ball_stabilizer_v1" {
+            !manifest["algorithm_version"].is_null()
+        } else {
+            manifest["algorithm_version"] != version
+        })
         || manifest["settings"] != summary["settings"]
         || manifest["file"] != BALL_TRAJECTORY_FILE
         || manifest["sha256"] != expected_sha
@@ -445,6 +453,7 @@ fn persist_stabilized_replay(
             .map_err(|e| format!("Publish canonical ball trajectory: {e}"))?;
         let manifest = json!({
             "schema":BALL_TRAJECTORY_SCHEMA,
+            "algorithm_version":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
             "state":"complete",
             "project_id":project_id,"video":video,"artifact_id":artifact_id,
             "source_replay_id":replay_id,"source_replay_sha256":sha,
@@ -751,7 +760,7 @@ mod ball_stabilizer_postprocessing_tests {
         )
         .unwrap();
         let summary = json!({
-            "schema":"volley-ball-stabilizer/1","version":"ball_stabilizer_v1",
+             "schema":"volley-ball-stabilizer/1","version":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
             "source_replay_id":"d".repeat(32),"source_replay_sha256":replay_sha,
             "artifact_id":id,"trajectory_file":BALL_TRAJECTORY_FILE,
             "trajectory_sha256":digest,"frames":32,"settings":settings,
@@ -779,6 +788,41 @@ mod ball_stabilizer_postprocessing_tests {
         .unwrap();
         assert_eq!(restored.points, motion.points);
         assert_eq!(restored.interpolated, motion.interpolated);
+        let manifest_path = root
+            .join("native_cpu_ball_stabilizer")
+            .join(&id)
+            .join("manifest.json");
+        let published_manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let mut previous_manifest = published_manifest.clone();
+        previous_manifest
+            .as_object_mut()
+            .unwrap()
+            .remove("algorithm_version");
+        storage::write_json_atomic(&manifest_path, &previous_manifest).unwrap();
+        let mut previous_summary = summary.clone();
+        previous_summary["version"] = json!("ball_stabilizer_v1");
+        assert!(verified_ball_trajectory(
+            &root,
+            &previous_summary,
+            "abc123def456",
+            "match.mp4",
+            &"d".repeat(32),
+            &replay_sha,
+            32,
+        )
+        .is_ok());
+        assert!(verified_ball_trajectory(
+            &root,
+            &summary,
+            "abc123def456",
+            "match.mp4",
+            &"d".repeat(32),
+            &replay_sha,
+            32,
+        )
+        .is_err());
+        storage::write_json_atomic(&manifest_path, &published_manifest).unwrap();
         assert!(verified_ball_trajectory(
             &root,
             &summary,

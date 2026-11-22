@@ -1367,7 +1367,7 @@ pub async fn gpu(
     .map_err(storage::bad_request)?;
     let stabilizer_stats = if query.stabilizer {
         json!({
-            "version":"ball_stabilizer_v1",
+            "version":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
             "settings":settings,
             "raw":frames.iter().map(|row| row["raw"]["balls"].as_array().map_or(0, Vec::len)).sum::<usize>(),
             "accepted":frames.iter().filter(|row| row["stabilized_ball"].is_array() && row["ball_interpolated"] == false).count(),

@@ -151,6 +151,61 @@ pub struct StabilizedBallMotion {
     pub observed_frames: usize,
 }
 
+pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v2";
+
+fn reject_interleaved_outliers(points: &[Option<[f64; 2]>], max_step_fraction: f64) -> Vec<usize> {
+    let mut rejected = Vec::new();
+    let support_radius = max_step_fraction * 1.5;
+    let outlier_radius = max_step_fraction * 1.75;
+    for (index, point) in points.iter().enumerate() {
+        let Some(point) = point else {
+            continue;
+        };
+        let begin = index.saturating_sub(8);
+        let end = (index + 9).min(points.len());
+        let neighbors = points[begin..end]
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, value)| {
+                let frame = begin + offset;
+                (frame != index).then_some((frame, value.as_ref()?))
+            })
+            .collect::<Vec<_>>();
+        if neighbors.len() < 8 {
+            continue;
+        }
+        let mut xs = neighbors.iter().map(|(_, p)| p[0]).collect::<Vec<_>>();
+        let mut ys = neighbors.iter().map(|(_, p)| p[1]).collect::<Vec<_>>();
+        xs.sort_by(f64::total_cmp);
+        ys.sort_by(f64::total_cmp);
+        let mid = xs.len() / 2;
+        let center = if xs.len() % 2 == 0 {
+            [(xs[mid - 1] + xs[mid]) * 0.5, (ys[mid - 1] + ys[mid]) * 0.5]
+        } else {
+            [xs[mid], ys[mid]]
+        };
+        let mut before = 0;
+        let mut after = 0;
+        for &(frame, candidate) in &neighbors {
+            if (candidate[0] - center[0]).hypot(candidate[1] - center[1]) <= support_radius {
+                if frame < index {
+                    before += 1;
+                } else {
+                    after += 1;
+                }
+            }
+        }
+        if before >= 3
+            && after >= 3
+            && before + after >= 8
+            && (point[0] - center[0]).hypot(point[1] - center[1]) > outlier_radius
+        {
+            rejected.push(index);
+        }
+    }
+    rejected
+}
+
 pub fn stabilize_ball_motion(
     samples: &[ScoredBallSample],
     frames: usize,
@@ -206,6 +261,10 @@ pub fn stabilize_ball_motion(
     }
     for &index in &rejected_frames {
         points[index] = None;
+    }
+    for index in reject_interleaved_outliers(&points, settings.max_step_fraction) {
+        points[index] = None;
+        rejected_frames.push(index);
     }
     let mut segments = Vec::<(usize, usize, usize)>::new();
     for index in 0..frames {
@@ -574,6 +633,63 @@ mod tests {
             assert!(result.rejected_frames.contains(&frame));
             assert!(result.interpolated[frame]);
             assert!(result.points[frame].unwrap()[0] < 0.4);
+        }
+    }
+
+    #[test]
+    fn ball_stabilizer_rejects_interleaved_corner_false_detections() {
+        let samples = (0..48)
+            .map(|frame| {
+                let (point, confidence) = match frame {
+                    19 | 20 => ([0.932, 0.576], 0.63),
+                    22 => ([0.934, 0.576], 0.67),
+                    _ => (
+                        [0.42 - frame as f64 * 0.004, 0.43 + frame as f64 * 0.005],
+                        0.68,
+                    ),
+                };
+                ScoredBallSample {
+                    frame,
+                    point,
+                    confidence,
+                }
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 48, BallStabilizerSettings::default()).unwrap();
+        for frame in [19, 20, 22] {
+            assert!(
+                result.rejected_frames.contains(&frame),
+                "false corner detection at frame {frame} survived"
+            );
+            assert!(result.interpolated[frame]);
+            assert!(result.points[frame].unwrap()[0] < 0.5);
+        }
+        for frame in [17, 18, 21, 23, 24] {
+            assert!(!result.rejected_frames.contains(&frame));
+            assert!(!result.interpolated[frame]);
+        }
+    }
+
+    #[test]
+    fn ball_stabilizer_keeps_real_sustained_corner_and_fast_motion() {
+        for fast in [false, true] {
+            let samples = (0..35)
+                .map(|frame| ScoredBallSample {
+                    frame,
+                    point: if fast {
+                        [0.06 + frame as f64 * 0.025, 0.12 + frame as f64 * 0.019]
+                    } else {
+                        [0.86 + frame as f64 * 0.002, 0.73 + frame as f64 * 0.002]
+                    },
+                    confidence: 0.72,
+                })
+                .collect::<Vec<_>>();
+            let result =
+                stabilize_ball_motion(&samples, 35, BallStabilizerSettings::default()).unwrap();
+            assert!(result.rejected_frames.is_empty());
+            assert_eq!(result.observed_frames, 35);
+            assert!(result.interpolated.iter().all(|&value| !value));
         }
     }
 

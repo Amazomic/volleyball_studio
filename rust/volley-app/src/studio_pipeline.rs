@@ -1188,6 +1188,8 @@ fn cpu_lineage_valid(
         return false;
     };
     if trajectory["schema"] != "volley-native-stabilized-ball-trajectory/1"
+        || trajectory["algorithm_version"]
+            != volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION
         || trajectory["state"] != "complete"
         || trajectory["artifact_id"] != artifact_id
         || trajectory["file"] != "trajectory.jsonl"
@@ -1237,7 +1239,7 @@ fn cpu_lineage_valid(
         && touches["touch_id"] == touch
         && touches["source_replay_id"] == replay
         && touches["ball_stabilizer"]["schema"] == "volley-ball-stabilizer/1"
-        && touches["ball_stabilizer"]["version"] == "ball_stabilizer_v1"
+        && touches["ball_stabilizer"]["version"] == volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION
         && touches["ball_stabilizer"]["settings"] == json!(request.post.ball_stabilizer)
         && touches["ball_stabilizer"]["source_replay_sha256"] == touches["source_replay_sha256"]
         && saved["ball_stabilizer"] == touches["ball_stabilizer"]
@@ -3774,6 +3776,7 @@ mod branching_tests {
             "trajectory.jsonl",
             &json!({
                 "schema":"volley-native-stabilized-ball-trajectory/1","state":"complete",
+                "algorithm_version":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
                 "artifact_id":trajectory_id,"project_id":request.project_id,"video":request.video,
                 "source_replay_id":replay,"source_replay_sha256":sha,
                 "frames":100,"settings":request.post.ball_stabilizer,
@@ -3794,7 +3797,7 @@ mod branching_tests {
                 "source_replay_sha256":sha,
                 "ball_stabilizer":{
                     "schema":"volley-ball-stabilizer/1",
-                    "version":"ball_stabilizer_v1",
+                    "version":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
                     "source_replay_sha256":sha,
                     "source_replay_id":replay,
                     "artifact_id":trajectory_id,
@@ -3848,7 +3851,7 @@ mod branching_tests {
             "gpu_rally_mask_sha256":sha,
             "ball_stabilizer":{
                 "schema":"volley-ball-stabilizer/1",
-                "version":"ball_stabilizer_v1",
+                "version":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
                 "source_replay_sha256":sha,
                 "source_replay_id":replay,
                 "artifact_id":trajectory_id,
@@ -3952,6 +3955,27 @@ mod branching_tests {
         legacy["gpu_model_stack"] = json!("vballnet_rtmdet_rtmpose_tiled_coco17_v3");
         assert!(!compatible_version(&legacy, &request, &identity));
         assert!(gpu_lineage_valid(&project_dir, &request, &identity, &saved));
+        assert!(cpu_lineage_valid(&project_dir, &request, &saved, None));
+        let mut old_version = saved.clone();
+        old_version["ball_stabilizer"]["version"] = json!("ball_stabilizer_v1");
+        assert!(
+            !cpu_lineage_valid(&project_dir, &request, &old_version, None),
+            "Previous Ball Stabilizer algorithm must invalidate CPU reuse"
+        );
+        let trajectory_manifest = project_dir
+            .join("native_cpu_ball_stabilizer")
+            .join(&trajectory_id)
+            .join("manifest.json");
+        let current_trajectory: Value =
+            serde_json::from_slice(&fs::read(&trajectory_manifest).unwrap()).unwrap();
+        let mut previous_trajectory = current_trajectory.clone();
+        previous_trajectory["algorithm_version"] = json!("ball_stabilizer_v1");
+        storage::write_json_atomic(&trajectory_manifest, &previous_trajectory).unwrap();
+        assert!(
+            !cpu_lineage_valid(&project_dir, &request, &saved, None),
+            "An old saved trajectory must invalidate CPU reuse"
+        );
+        storage::write_json_atomic(&trajectory_manifest, &current_trajectory).unwrap();
         assert!(cpu_lineage_valid(&project_dir, &request, &saved, None));
         let touch_manifest = project_dir
             .join("native_cpu_touch_runs")
