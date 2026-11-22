@@ -57,7 +57,7 @@ for(const term of ["shutdown_safe","active_jobs","active_job_types"]){
   assert.ok(daemon.includes(term),"Missing lifecycle source ownership: "+term);
 }
 const bash=content("scripts/volley-rust.sh");
-for(const command of ["start|detach|stop|status|restart|doctor|check",
+for(const command of ["start|detach|stop|status|restart|build|doctor|check",
   "shutdown_safe","active_jobs","/proc/$pid/exe","/proc/$pid/cwd",
   "kill -TERM","cargo build --release --locked --offline -p volley-app","exec \"$binary\"",
   "VOLLEY_RUST_DATA_ROOT","ORT_DYLIB_PATH"]){
@@ -74,7 +74,7 @@ const ps=content("scripts/start-volley-rust-dev.ps1");
 assert.match(ps,/Ubuntu-25\.04/);
 assert.match(ps,/127\.0\.0\.1:8875/);
 assert.match(ps,/wsl\.exe -d \$Distro --exec bash/);
-assert.match(ps,/ValidateSet\("Start","Detach","Status","Stop","Restart","Doctor","Check"\)/);
+assert.match(ps,/ValidateSet\("Start","Detach","Status","Stop","Restart","Build","Doctor","Check"\)/);
 assert.doesNotMatch(ps,/Stop-Process|taskkill|python\.exe/);
 const cmd=content("start-volley-ui.cmd");
 for(const action of ["/restart","/status","/stop","/doctor","/check"]){

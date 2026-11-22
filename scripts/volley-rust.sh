@@ -9,7 +9,7 @@ if [[ "$data_root" == __default__ ]];then data_root="$HOME/.cache/volley-rust-sa
 mode="$5"
 ort_lib="$6"
 openvino_lib="$7"
-case "$action" in start|detach|stop|status|restart|doctor|check) ;; *) echo "Unknown action" >&2;exit 2;; esac
+case "$action" in start|detach|stop|status|restart|build|doctor|check) ;; *) echo "Unknown action" >&2;exit 2;; esac
 case "$bind" in 127.0.0.1:*) ;; *) echo "Only localhost IPv4 bind is allowed" >&2;exit 2;; esac
 port="$(printf '%s' "$bind"|cut -d: -f2)"
 if [[ ! "$port" =~ ^[0-9]{4,5}$ ]] || (( 10#$port < 1024 || 10#$port > 65535 ));then
@@ -34,7 +34,7 @@ require_develop_checkout(){
     { echo "Studio launch denied: tracked files have uncommitted changes" >&2;return 3; }
 }
 case "$action" in
-  start|detach|restart) require_develop_checkout;;
+  start|detach|restart|build) require_develop_checkout;;
 esac
 cd "$repo/rust"
 if [[ -f "$HOME/.cargo/env" ]];then source "$HOME/.cargo/env";fi
@@ -226,6 +226,7 @@ check(){
   cargo check --workspace --offline --locked
 }
 case "$action" in
+  build) cargo build --release --locked --offline -p volley-app;;
   doctor) doctor;;
   check) check;;
   status)

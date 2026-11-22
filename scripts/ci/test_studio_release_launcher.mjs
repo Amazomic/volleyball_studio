@@ -8,7 +8,7 @@ assert.match(launcher, /binary="\$repo\/rust\/target\/release\/volley-app"/);
 assert.match(launcher, /cargo build --release --locked --offline -p volley-app/);
 assert.match(launcher, /git -C "\$repo" symbolic-ref --quiet --short HEAD/);
 assert.match(launcher, /git -C "\$repo" rev-parse --verify refs\/remotes\/origin\/develop/);
-assert.match(launcher, /start\|detach\|restart\) require_develop_checkout/);
+assert.match(launcher, /start\|detach\|restart\|build\) require_develop_checkout/);
 assert.match(launcher, /\[\[ "\$branch" == develop \]\]/);
 assert.match(launcher, /git -C "\$repo" -c core\.autocrlf=input diff --quiet --/);
 assert.match(launcher, /git -C "\$repo" diff --cached --quiet --/);

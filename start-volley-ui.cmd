@@ -4,6 +4,7 @@ set "ROOT=%~dp0"
 rem Studio uses localhost port 8875 and never replaces other services.
 if /I "%~1"=="/daemon" goto daemon
 if /I "%~1"=="/restart" goto restart
+if /I "%~1"=="/build" goto build
 if /I "%~1"=="/stop" goto stop
 if /I "%~1"=="/status" goto status
 if /I "%~1"=="/doctor" goto doctor
@@ -12,6 +13,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\start-vol
 exit /b %ERRORLEVEL%
 :daemon
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\start-volley-rust-dev.ps1" -Action Detach
+exit /b %ERRORLEVEL%
+:build
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\start-volley-rust-dev.ps1" -Action Build
 exit /b %ERRORLEVEL%
 :restart
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\start-volley-rust-dev.ps1" -Action Restart

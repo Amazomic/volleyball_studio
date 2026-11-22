@@ -19,6 +19,15 @@ Download both formats from [GitHub Releases](https://github.com/Amazomic/volleyb
 `master` не изменять без прямого указания пользователя. Если активен другой агент, не использовать его дерево. Если `/internal/rewrite-status` сообщает активные задания, запуск небезопасен или скомпилированный SHA отличается — не прерывать Studio и сообщить «Не завершено» вместо заявления о готовом результате. Только после успешной проверки дать ссылку [на локальную Studio](http://127.0.0.1:8875/studio), указав commit SHA. Ссылка предназначена для компьютера с запущенной Studio.
 
 ## Build from source on Windows / WSL (developer workflow)
+### Очередь финальной сборки Studio
+
+После каждого push в `origin/develop` **вместо самостоятельного перезапуска** используйте одну команду (из любого отдельного task-worktree):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-volley-queue.ps1 -DeploymentRoot 'C:\Users\amazomic\AppData\Local\SentinelX\workspace\volley-live-develop-branch-20261122'
+```
+
+`DeploymentRoot` — путь к выделенному чистому клону с веткой `develop`; его можно сохранить в `VOLLEY_STUDIO_DEPLOY_ROOT`. Одновременные вызовы сериализуются через OS mutex, берут только свежий `origin/develop` и пропускают сборку, если точный SHA уже обслуживается. Скрипт сначала собирает `/build`, затем при отсутствии активных задач использует штатные `/stop` и `/daemon` и сверяет SHA на `/studio`. При ошибке не останавливает неизвестные процессы. Прямой `/restart` остаётся аварийной ручной командой, не механизмом штатного завершения задач.
 
 The following `start-volley-ui.cmd` commands apply to a **repository checkout**, not a downloaded beta ZIP. Starting, detaching or restarting the source Studio is allowed only from an independent clean Git clone with checked-out `develop` at the exact `origin/develop` SHA. The Rust native entrypoint also enforces develop, origin/develop and clean tracked content plus staged changes for source checkouts, with CRLF-normalized comparisons when WSL reads a Windows checkout, preventing direct-binary bypass. Standalone release archives without Git metadata remain supported. Feature branches, `master`, detached HEAD and outdated develop are rejected before a build or shutdown; `status`, `stop`, `doctor` and `check` remain available for diagnosis and safe recovery. A separate clone avoids disturbing an existing dirty `develop` worktree. The source launcher compiles as needed and uses the isolated WSL sandbox; its defaults differ from the prebuilt Windows launcher.
 
