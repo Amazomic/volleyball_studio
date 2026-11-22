@@ -69,7 +69,7 @@ const {renderHistory,updateLiveHistory}=runInNewContext(registry+source.slice(fr
 renderHistory();
 const run=ui.historyList.children[0];
 assert.equal(run.querySelector(".analysis-history-stages").children.length,2);
-assert.match(run.querySelector(".analysis-history-stages").textContent,/Поиск мяча.*50 с/);
+assert.match(run.querySelector(".analysis-history-stages").textContent,/Детекция мяча.*50 с/);
 assert.match(run.querySelector(".analysis-history-stages").textContent,/В процессе/);
 assert.match(run.querySelector(".analysis-history-stages").textContent,/120 \/ 400 кадров · 30.0%/);
 const rail=run.querySelector(".analysis-history-stage-rail");

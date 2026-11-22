@@ -435,7 +435,7 @@
 
   const pipelineStages=[
     ["video","Подготовка видео","input",1,1],
-    ["ball","Поиск мяча","gpu",1,2],
+    ["ball","Детекция мяча","gpu",1,2],
     ["rallies","Розыгрыши","gpu",1,3],
     ["players","Поиск игроков","gpu",1,4],
     ["pose","Позы игроков","gpu",2,4],
@@ -443,12 +443,55 @@
     ["tracking","Трекинг ID","cpu",2,2],
     ["touches","Касания","cpu",2,1],
     ["touch_types","Типы касаний","cpu",3,1],
-    ["publish","Результат","cpu",3,2],
+    ["publish","Публикация","cpu",3,2],
     ["identity","Привязка игроков","cpu",3,3],
-    ["material","Разметка","output",3,4]
+    ["material","Результат","output",3,4]
   ];
   const pipelineNames=new Map(pipelineStages.map(item=>[item[0],item[1]]));
   pipelineNames.set("cache","Кэш GPU");
+  const pipelineModelMeta=(id,run)=>{
+    const tcn=run?.profile?.post?.touches?.algorithm==="trajectory_tcn"||
+      (!run&&$("studio-post-tcn-experimental")?.checked);
+    const known={
+      ball:["VballNetV4c","model"],
+      players:["RF-DETR Medium","model"],
+      pose:["RTMPose-M Body7","model"],
+      tracking:["ByteTrack","algorithm"],
+      touch_types:tcn?["Volley3D TCN","model"]:["PoseMotion","algorithm"]
+    };
+    return known[id]||null;
+  };
+  const pipelineGlyphs={
+    video:[["rect",{x:2,y:5,width:14,height:14,rx:3}],["path",{d:"m16 10 6-4v12l-6-4"}]],
+    ball:[["circle",{cx:12,cy:12,r:10}],["path",{d:"M2.8 7.4c5.2-1 10.7 2.8 11 7.5m5.4-11.1C14 8 12 15 14.6 21.6M4.1 18.2c4.1-4.4 9.2-5.5 17.4-4.5"}]],
+    rallies:[["path",{d:"m12 2 10 6-10 6L2 8l10-6Zm-10 11 10 6 10-6M2 18l10 6 10-6"}]],
+    players:[["circle",{cx:9,cy:7,r:3}],["path",{d:"M2 21v-2a7 7 0 0 1 14 0v2M17 4a4 4 0 0 1 0 7m4 10v-2a6 6 0 0 0-4-5.7"}]],
+    pose:[["circle",{cx:12,cy:3,r:2}],["path",{d:"M12 5v7m0 0-7 9m7-9 7 9M5 8l7 4 7-4M5 8l-2 6m16-6 2 6"}]],
+    fusion:[["rect",{x:5,y:5,width:14,height:14,rx:2}],["path",{d:"M9 1v4m6-4v4M9 19v4m6-4v4M1 9h4m-4 6h4m14-6h4m-4 6h4"}]],
+    tracking:[["rect",{x:2,y:3,width:20,height:18,rx:3}],["circle",{cx:8,cy:9,r:2}],["path",{d:"M4 17c1-3 7-3 8 0m4-9h4m-4 5h4m-4 5h3"}]],
+    touches:[["path",{d:"M8 22V11a2 2 0 0 1 4 0V5a2 2 0 0 1 4 0v6a2 2 0 0 1 4 0v5a7 7 0 0 1-7 7h-2a8 8 0 0 1-6-3l-3-4a2 2 0 0 1 3-3l3 3"}]],
+    touch_types:[["circle",{cx:11,cy:13,r:8}],["path",{d:"m5 8 6 2 4-4m-7 9 3-5 8 3m-8 2-4 6m4-11 1 11M19 1v4m-2-2h4"}]],
+    publish:[["path",{d:"M12 16V2m-5 5 5-5 5 5M3 15v6h18v-6"}]],
+    identity:[["path",{d:"M10 13a5 5 0 0 0 7 .5l3-3a5 5 0 0 0-7-7l-2 2m3 5a5 5 0 0 0-7-.5l-3 3a5 5 0 0 0 7 7l2-2"}]],
+    material:[["path",{d:"M4 20V12m5 8V6m5 14v-9m5 9V3M2 22h20"}]]
+  };
+  const pipelineIcon=id=>{
+    const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
+    svg.setAttribute("class","analysis-flow-node-icon");
+    svg.setAttribute("viewBox","0 0 24 24");
+    svg.setAttribute("fill","none");
+    svg.setAttribute("stroke","currentColor");
+    svg.setAttribute("stroke-width","1.7");
+    svg.setAttribute("stroke-linecap","round");
+    svg.setAttribute("stroke-linejoin","round");
+    svg.setAttribute("aria-hidden","true");
+    for(const [tag,attributes] of pipelineGlyphs[id]||[]){
+      const part=document.createElementNS("http://www.w3.org/2000/svg",tag);
+      for(const [key,value] of Object.entries(attributes))part.setAttribute(key,String(value));
+      svg.append(part);
+    }
+    return svg;
+  };
   const pipelineId=entry=>{
     if(entry?.id&&pipelineNames.has(entry.id))return entry.id;
     const name=String(typeof entry==="string"?entry:entry?.name||"");
@@ -496,14 +539,14 @@
   };
   const graphDescriptions={
     video:"Выбор видео, интервалов анализа и разметки площадки.",
-    ball:"VBallNet находит мяч в исходном видеопотоке.",
+    ball:"VballNetV4c выполняет нейросетевую детекцию мяча на GPU.",
     rallies:"Рабочие настройки первичного анализа: длительность непрерывной траектории и объединение соседних розыгрышей. Эксперименты в «Дебаге» имеют собственные значения и не меняют этот GPU-профиль.",
-    players:"RF-DETR ищет игроков только внутри найденных игровых интервалов.",
-    pose:"RTMPose получает рамки игроков и исходные пиксели видео.",
+    players:"RF-DETR Medium ищет игроков только внутри найденных игровых интервалов.",
+    pose:"RTMPose-M Body7 получает рамки игроков и исходные пиксели видео.",
     fusion:"Сохранение общей версии GPU-наблюдений и повторное использование кэша.",
-    tracking:"CPU-сопровождение Track ID и интерполяция.",
+    tracking:"ByteTrack сопровождает Track ID на CPU. Это алгоритм трекинга, а не нейросеть.",
     touches:"Физические касания и определение их типов выполняются в одном CPU-проходе.",
-    touch_types:"Тип касания определяется во время того же CPU-прохода, что и физический контакт. Отдельного запуска GPU нет.",
+    touch_types:"По умолчанию используется алгоритм PoseMotion. Экспериментальная нейросеть Volley3D TCN используется только при включённой опции и наличии модели; отдельного GPU-прохода здесь нет.",
     publish:"Первичные розыгрыши публикуются без повторного определения границ.",
     identity:"Автоматическая привязка Track ID к игрокам из библиотеки.",
     material:"Разметка временной шкалы для предпросмотра и монтажа.",
@@ -605,6 +648,12 @@
       const path=element("path",{d,"class":"analysis-flow-edge"+(kind?" is-branch":""),
         "data-edge":from+"-"+to,"marker-end":"url(#"+markerId+")"});
       svg.append(path);
+      const dot=element("circle",{r:"3.5","class":"analysis-flow-progress-dot",
+        "data-edge":from+"-"+to,"aria-hidden":"true"});
+      dot.append(element("animateMotion",{
+        path:d,dur:"1.4s",repeatCount:"indefinite",calcMode:"linear"
+      }));
+      svg.append(dot);
       if(label){
         const t=element("text",{x:String(label[1]),y:String(label[2]),
           "class":"analysis-flow-edge-label"});
@@ -619,9 +668,21 @@
     svg.setAttribute("class","analysis-flow-lines");svg.setAttribute("aria-hidden","true");
     const grid=make("div","analysis-flow-grid");
     for(const [id,name,kind,row,col] of pipelineStages){
-      const node=make("button","analysis-flow-node",window.VolleyballUi.translate(name));
+      const node=make("button","analysis-flow-node");
       node.type="button";node.dataset.stageId=id;node.dataset.kind=kind;
       node.style.gridRow=row;node.style.gridColumn=col;
+      const heading=make("span","analysis-flow-node-title",window.VolleyballUi.translate(name));
+      const technical=make("span","analysis-flow-node-model");
+      const meta=pipelineModelMeta(id,run);
+      if(meta){
+        technical.textContent=meta[0];
+        technical.dataset.modelKind=meta[1];
+      }else technical.classList.add("hidden");
+      const headingRow=make("span","analysis-flow-node-heading-row");
+      headingRow.append(pipelineIcon(id),heading);
+      node.append(headingRow,technical);
+      node.setAttribute("aria-label",window.VolleyballUi.translate(name)+
+        (meta?" — "+(meta[1]==="model"?"нейросеть ":"алгоритм ")+meta[0]:""));
       node.title=graphDescriptions[id];
       node.addEventListener("click",()=>{
         const entry=run?.stages?.find(item=>pipelineId(item)===(id==="touch_types"?"touches":id));
@@ -662,8 +723,16 @@
         cached&&["ball","rallies","players","pose"].includes(id)&&!entry||
         id==="touch_types"&&!classification);
       node.classList.toggle("is-failed",run?.status==="failed"&&id===currentId);
-      node.title=node.textContent+(entry?.frames_total?
-        " · "+(entry.frames_processed||0)+"/"+entry.frames_total+" кадров":"")+
+      const meta=pipelineModelMeta(id,run);
+      const technical=node.querySelector(".analysis-flow-node-model");
+      if(technical){
+        technical.textContent=meta?.[0]||"";
+        technical.classList.toggle("hidden",!meta);
+        if(meta)technical.dataset.modelKind=meta[1];
+      }
+      const name=pipelineNames.get(id)||id;
+      node.title=name+(meta?" · "+(meta[1]==="model"?"Нейросеть":"Алгоритм")+": "+meta[0]:"")+
+        (entry?.frames_total?" · "+(entry.frames_processed||0)+"/"+entry.frames_total+" кадров":"")+
         (running?" · выполняется":done?" · завершено":reused?" · из кэша":"");
     }
     paintGraphEdges(target,run);
@@ -685,10 +754,13 @@
       const done=branchCache?cached&&complete:selected&&a?.classList.contains("is-complete")&&b?.classList.contains("is-complete");
       const running=selected&&active&&(branchCache?
         currentId==="cache"||(currentId==="tracking"&&cached):
-        b?.classList.contains("is-active")&&a?.classList.contains("is-complete"));
+        b?.classList.contains("is-active")&&
+        (a?.classList.contains("is-complete")||a?.classList.contains("is-active")));
       edge.classList.toggle("is-complete",!!done);
       edge.classList.toggle("is-active",!!running);
       edge.style.opacity=selected?"1":".35";
+      const dot=target.querySelector('.analysis-flow-progress-dot[data-edge="'+from+"-"+to+'"]');
+      dot?.classList.toggle("is-visible",!!running);
     }
   };
   $("analysis-flow-feedback").append(ui.note,ui.profileDelta);
@@ -700,7 +772,8 @@
   window.addEventListener("volley:ui-language",()=>{
     for(const node of ui.analysis.querySelectorAll(".analysis-flow-node")){
       const name=pipelineNames.get(node.dataset.stageId);
-      if(name)node.textContent=window.VolleyballUi.translate(name);
+      const heading=node.querySelector(".analysis-flow-node-title");
+      if(name&&heading)heading.textContent=window.VolleyballUi.translate(name);
     }
     requestAnimationFrame(()=>graphDraw(mainGraph));
   });
@@ -1364,6 +1437,7 @@
   ui.playerRefresh.addEventListener("click",()=>loadPlayers().catch(failure));
   for(const field of allProfileFields())field.addEventListener(field.tagName==="SELECT"||field.type==="checkbox"?"change":"input",()=>{
     updateProfile();saveAnalysisSettings();
+    if(mainGraph?.isConnected)updatePipelineGraph(mainGraph,state.latestPipeline||null);
   });
   ui.reset.addEventListener("click",event=>{event.preventDefault();resetProfile();});
   ui.start.addEventListener("click",()=>state.pipelineId?cancelPipeline():launchPipeline());

@@ -9,7 +9,15 @@ const js=readFileSync(join(root,"rust/volley-app/static/studio_tabs.js"),"utf8")
 const rust=readFileSync(join(root,"rust/volley-app/src/studio_pipeline.rs"),"utf8");
 const html=readFileSync(join(root,"rust/volley-app/static/studio.html"),"utf8");
 const css=readFileSync(join(root,"rust/volley-app/static/studio.css"),"utf8");
-assert.match(css,/\.analysis-flow-node\{[^}]*width:max-content;max-width:100%;justify-self:center/);
+assert.match(css,/\.analysis-flow-diagram\{[^}]*max-width:none;width:100%/);
+assert.match(css,/\.analysis-flow-grid\{[^}]*grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
+assert.match(css,/\.analysis-flow-node\{[^}]*width:100%;height:84px/);
+for(const kind of ["input","gpu","cpu","output"]){
+  assert.match(css,new RegExp('\\.analysis-flow-node\\[data-kind="'+kind+'"\\]\\{background:linear-gradient\\('));
+}
+assert.match(css,/\.analysis-flow-progress-dot\.is-visible\{opacity:1\}/);
+assert.match(js,/dot\.append\(element\("animateMotion"/);
+assert.match(js,/edge\.classList\.toggle\("is-active",!!running\)/);
 
 const extract=(begin,end)=>{
   const start=js.indexOf(begin),stop=js.indexOf(end,start+begin.length);
@@ -18,7 +26,15 @@ const extract=(begin,end)=>{
 };
 const definitions=extract("const pipelineStages=","const pipelineEdges=");
 const context=vm.createContext({});
-vm.runInContext(definitions+"this.stages=pipelineStages;this.id=pipelineId;",context);
+context.$=()=>({checked:false});
+vm.runInContext(definitions+"this.stages=pipelineStages;this.id=pipelineId;this.model=pipelineModelMeta;",context);
+assert.equal(context.model("ball")[0],"VballNetV4c");
+assert.equal(context.model("players")[0],"RF-DETR Medium");
+assert.equal(context.model("pose")[0],"RTMPose-M Body7");
+assert.equal(context.model("tracking")[1],"algorithm");
+assert.equal(context.model("touch_types")[0],"PoseMotion");
+assert.equal(context.model("touch_types",{profile:{post:{touches:{algorithm:"trajectory_tcn"}}}})[0],"Volley3D TCN");
+assert.equal(context.model("rallies"),null);
 const stages=context.stages;
 const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
@@ -67,4 +83,4 @@ assert.match(js,/rallies:\["#studio-gpu-rally-min-seconds","#studio-gpu-rally-me
 assert.match(js,/primary_rallies:\{\s*min_trajectory_seconds:/);
 assert.match(js,/merge_gap_seconds:inputValue\("studio-gpu-rally-merge-seconds"\)/);
 
-console.log("PASS: 12 compact canonical stages, real Rust ids, history parity and conditional graph branches");
+console.log("PASS: 12 full-width color-coded stages, verified neural models, animated edges, history parity and conditional branches");
