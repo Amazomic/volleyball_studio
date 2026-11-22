@@ -22,7 +22,7 @@ pub use trajectory_tcn::{evaluate_tcn_peaks, trajectory_features};
 /// impact inside the bounded (at most ten-frame) missing-ball island.
 /// The touch itself must still reference a real same-frame ball and player.
 pub const MAX_OBSERVED_TOUCH_OFFSET_FRAMES: u64 = 9;
-pub const TRAJECTORY_DETECTOR_VERSION: &str = "piecewise_ballistic_motion_v1";
+pub const TRAJECTORY_DETECTOR_VERSION: &str = "piecewise_ballistic_motion_v2";
 
 use crate::{
     action_prediction::{self, ActionPrediction, CourtContext, PositionEvidence},

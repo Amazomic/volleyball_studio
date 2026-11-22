@@ -240,6 +240,15 @@ fn settled_ball_after(frames: &[TouchFrame], index: usize, width: f64, height: f
     }
     samples >= MIN_SETTLED_SAMPLES && far == 0
 }
+fn strong_forward_speed_impulse(motion: MotionEvidence) -> bool {
+    motion.angle < 25.0
+        && motion.speed_before >= 2.0
+        && motion.speed_after >= 18.0
+        && motion.speed_after >= 2.5 * motion.speed_before
+        && motion.speed_after - motion.speed_before >= 12.0
+        && motion.residual >= 12.0
+}
+
 /// Scan the bounded chunk. Unobserved ball/player frames never become proposals.
 pub(super) fn detect(
     frames: &[TouchFrame],
@@ -279,11 +288,12 @@ pub(super) fn detect(
         {
             continue;
         }
-        // A large speed change without a turn can be tracking noise or a
-        // freely flying ball passing a player. Geometry alone cannot certify
-        // an impact without an observed change in flight direction; the
-        // independent RTMPose/body-contact path may confirm real interceptions.
-        if speed < 2.0 || motion.residual < 8.0_f64.max(0.45 * speed) || motion.angle < 5.0 {
+        let acceleration_impulse = strong_forward_speed_impulse(motion);
+        if speed < 2.0
+            || motion.residual < 8.0_f64.max(0.45 * speed)
+            || (motion.angle < 5.0 && !acceleration_impulse)
+            || (acceleration_impulse && motion_window_has_outlier(frames, index, width, height))
+        {
             continue;
         }
         let box_ = ball.bbox_xyxy_norm;
@@ -977,6 +987,73 @@ mod gap_tests {
             hits.iter().any(|hit| (939..=944).contains(&hit.frame_index)
                 && hit.provisional_track_id == Some(12)),
             "real observed turn must create a player-linked proposal: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn near_straight_acceleration_at_21_7s_is_a_touch_only_near_player() {
+        let make_frames = |speed_out: f64| -> Vec<TouchFrame> {
+            (0..27u64)
+                .map(|i| {
+                    let y = if i <= 12 {
+                        490.0 + (12.0 - i as f64) * 4.0
+                    } else {
+                        490.0 - (i as f64 - 12.0) * speed_out
+                    };
+                    TouchFrame {
+                        frame_index: 639 + i,
+                        players: vec![TouchPlayer {
+                            track_id: 11,
+                            score: 0.90,
+                            touch_probability: None,
+                            bbox_xyxy_norm: [0.47, 0.48, 0.54, 0.76],
+                        }],
+                        selected_ball: Some(TouchBall {
+                            source_model: "vballnet".into(),
+                            score: 0.80,
+                            bbox_xyxy_norm: [
+                                (960.0 - 8.0) / 1920.0,
+                                (y - 8.0) / 1080.0,
+                                (960.0 + 8.0) / 1920.0,
+                                (y + 8.0) / 1080.0,
+                            ],
+                        }),
+                    }
+                })
+                .collect()
+        };
+        let accelerated = make_frames(28.0);
+        let events =
+            evaluate_block(&accelerated, 1920, 1080, 639, 666, TouchSettings::default()).unwrap();
+        assert!(
+            events.iter().any(|e| {
+                (649..=654).contains(&e.frame_index)
+                    && e.provisional_track_id == Some(11)
+                    && e.speed_after_px_frame > e.speed_before_px_frame * 2.5
+                    && e.direction_change_deg < 5.0
+            }),
+            "near-straight hand acceleration must be proposed: {events:?}"
+        );
+        let mut no_player = accelerated.clone();
+        for frame in &mut no_player {
+            frame.players.clear();
+        }
+        assert!(
+            evaluate_block(&no_player, 1920, 1080, 639, 666, TouchSettings::default())
+                .unwrap()
+                .is_empty()
+        );
+        let continuous = make_frames(4.0);
+        assert!(
+            evaluate_block(&continuous, 1920, 1080, 639, 666, TouchSettings::default())
+                .unwrap()
+                .is_empty()
+        );
+        let slowing = make_frames(0.8);
+        assert!(
+            evaluate_block(&slowing, 1920, 1080, 639, 666, TouchSettings::default())
+                .unwrap()
+                .is_empty()
         );
     }
 
