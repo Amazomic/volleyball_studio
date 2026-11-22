@@ -453,6 +453,42 @@ fn conflicting_automatic_owner_yields_to_explicit_confirmation() {
 }
 
 #[test]
+fn manual_assignment_displaces_overlapping_automatic_id_without_distinct_pair() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    ctx.roster
+        .insert("123456abcdef".into(), "Другой игрок".into());
+    ctx.tracks.insert(12, ctx.tracks[&7].clone());
+    let mut unrelated = ctx.tracks[&7].clone();
+    unrelated.first += 100;
+    unrelated.last += 100;
+    unrelated.visible_spans = vec![(110, 114)];
+    ctx.tracks.insert(13, unrelated);
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 12, 13]).unwrap();
+    let reviewed = BTreeMap::from([(7, "abcdef012345".to_owned())]);
+    let previous = json!({"12":"abcdef012345","13":"123456abcdef"});
+    assert!(tracks_co_visible(&ctx.tracks[&7], &ctx.tracks[&12]));
+    assert_eq!(measured_conflict_frame(&ctx, 7, 12), None);
+    assert_eq!(
+        conflicting_automatic_links(&ctx, &reviewed, &previous),
+        BTreeSet::from([12]),
+        "manual confirmation must replace an overlapping provisional auto ID"
+    );
+    let mut doc = base_document(&ctx);
+    doc["assignments"] = json!({"7":"abcdef012345"});
+    doc["automatic_assignments"] = json!({"13":"123456abcdef"});
+    doc["automatic_suppressed_ids"] = json!([12]);
+    doc["automatic_identity_evidence"] = json!({
+        "photo_sample_policy":"three_observations_v1",
+        "matches":{"13":[{"player_id":"123456abcdef","cosine_similarity":0.83,"samples_used":3}]}
+    });
+    reconcile_automatic_photo_links(&ctx, &mut doc).unwrap();
+    assert_eq!(doc["automatic_assignments"], json!({"13":"123456abcdef"}));
+    assert!(validated(Some(&serde_json::to_vec(&doc).unwrap()), &ctx).is_ok());
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
 fn single_distinct_pair_frame_is_not_conclusive_manual_conflict() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
