@@ -348,7 +348,7 @@
     trajectory:$("studio-overlay-trajectory"),players:$("studio-overlay-players"),
     pose:$("studio-overlay-pose"),court:$("studio-overlay-court"),
     mode:$("studio-overlay-processed"),rawMode:$("studio-overlay-raw"),
-    stabilizerMode:$("studio-overlay-stabilizer"),stabilizerControls:$("studio-ball-stabilizer-controls"),
+    stabilizerMode:$("studio-debug-stabilizer-compare"),stabilizerControls:$("studio-ball-stabilizer-controls"),
     stabilizerStats:$("studio-debug-stabilizer-stats"),rawControls:$("studio-overlay-raw-controls"),actionControls:$("studio-overlay-actions"),
     rawBall:$("studio-raw-ball"),rawBallTrail:$("studio-raw-ball-trail"),rawVballVisible:$("studio-raw-vball-visible"),rawPeopleVisible:$("studio-raw-people-visible"),rawPlayer:$("studio-raw-player"),rawPlayerInterpolated:$("studio-raw-player-interpolated"),
     rawPose:$("studio-raw-pose"),rawPoseVisible:$("studio-raw-pose-visible"),
@@ -2418,8 +2418,8 @@
       if(training.active)trainingMessage("Пауза → щёлкните по игроку, коснувшемуся мяча.");});
   }
   if(overlay.mode){
-    const selectMode=(raw,stabilizer=false)=>{
-      if(overlay.raw===raw&&overlay.stabilizerView===stabilizer&&!training.active)return;
+    const selectMode=raw=>{
+      if(overlay.raw===raw&&!overlay.stabilizerView&&!training.active)return;
       const restoreFilter=training.active?training.previousRallyFilter:null;
       training.active=false;training.track=null;training.frame=null;
       training.previousRallyFilter=null;
@@ -2443,13 +2443,13 @@
       training.selectedId=null;trainingEditorReset();
       overlay.canvas.closest(".video-wrap")?.classList.remove("training-select");
       overlay.raw=raw;
-      overlay.stabilizerView=stabilizer;
+      overlay.stabilizerView=false;
       updateRawDetectorLabel();
       overlay.mode.setAttribute("aria-selected",String(!raw));
-      overlay.rawMode.setAttribute("aria-selected",String(raw&&!stabilizer));
-      overlay.stabilizerMode.setAttribute("aria-selected",String(stabilizer));
+      overlay.rawMode.setAttribute("aria-selected",String(raw));
+      overlay.stabilizerMode.setAttribute("aria-pressed","false");
       overlay.rawControls.classList.toggle("hidden",!raw);
-      overlay.stabilizerControls.classList.toggle("hidden",!stabilizer);
+      overlay.stabilizerControls.classList.add("hidden");
       overlay.debugTrajectorySwitch.classList.add("hidden");
       updateOverlayToggles();
       overlay.mode.closest(".video-overlay-toggles").classList.toggle("raw-selected",raw);
@@ -2457,8 +2457,7 @@
       if(raw&&s.video){ensurePreviewVideo();prefetchOverlayAtFrame(0);}
       if(raw&&!rawFusion())overlayMessage("У выбранного GPU-источника нет сохранённого объединённого fusion.");
       if(!raw&&!s.run)overlayMessage("Для обработанного режима выберите CPU-постобработку.");
-      if(stabilizer)timeline.status.textContent="Ball Stabilizer · сравнение VBallNet и интерполяции";
-      else if(raw)timeline.status.textContent="Сырые GPU-данные · без CPU-разметки";
+      if(raw)timeline.status.textContent="Сырые GPU-данные · без CPU-разметки";
       else if(!s.run)timeline.status.textContent="Выберите CPU-версию";
       else if(timeline.data)timeline.status.textContent=
         timeline.data.rallies.length+" розыгрышей · "+timeline.data.touch_annotations.filter(event=>event.touch_attributed===true||event.contact_verified===true).length+" касаний (CPU)";
@@ -2471,9 +2470,38 @@
     };
     overlay.mode.addEventListener("click",()=>selectMode(false));
     overlay.rawMode.addEventListener("click",()=>selectMode(true));
-    overlay.stabilizerMode.addEventListener("click",()=>selectMode(true,true));
+    const selectDebugComparison=comparison=>{
+      if(!training.active)return;
+      if(comparison&&!rawFusion()){
+        overlayMessage("Для сравнения нужен сохранённый GPU-анализ.");
+        return;
+      }
+      overlay.raw=comparison;
+      overlay.stabilizerView=comparison;
+      overlay.stabilizerMode.setAttribute("aria-pressed",String(comparison));
+      overlay.debugBefore.setAttribute("aria-pressed",String(!comparison&&overlay.trajectoryVariant==="before"));
+      overlay.debugAfter.setAttribute("aria-pressed",String(!comparison&&overlay.trajectoryVariant==="after"));
+      overlay.rawControls.classList.toggle("hidden",!comparison);
+      overlay.stabilizerControls.classList.toggle("hidden",!comparison);
+      overlay.mode.closest(".video-overlay-toggles").classList.toggle("raw-selected",comparison);
+      updateOverlayToggles();
+      setOverlaySource(comparison||s.run?{}:null);
+      if(comparison&&s.video){
+        ensurePreviewVideo();
+        prefetchOverlayAtFrame(0);
+      }
+      if(comparison)timeline.status.textContent="Ball Stabilizer · сравнение VBallNet и интерполяции";
+      else if(!s.run)timeline.status.textContent="Выберите CPU-версию";
+      else if(timeline.data)timeline.status.textContent=
+        "Розыгрыши по мячу: "+trainingRallyGroups().ball.length+
+        " · пауза < "+trainingGapSeconds()+" с";
+      drawTimeline();
+      drawOverlay();
+    };
+    overlay.stabilizerMode.addEventListener("click",()=>selectDebugComparison(!overlay.stabilizerView));
     const selectTrajectoryVariant=variant=>{
       overlay.trajectoryVariant=variant;
+      if(overlay.stabilizerView)selectDebugComparison(false);
       overlay.flags.trajectory=true;
       updateOverlayToggles();
       overlay.debugBefore.setAttribute("aria-pressed",String(variant==="before"));
@@ -2512,7 +2540,10 @@
       overlay.flags.pose=true;overlay.flags.players=true;
       overlay.mode.setAttribute("aria-selected","false");
       overlay.rawMode.setAttribute("aria-selected","false");
-      overlay.stabilizerMode.setAttribute("aria-selected","false");
+      overlay.stabilizerMode.setAttribute("aria-pressed","false");
+      overlay.debugBefore.setAttribute("aria-pressed",String(overlay.trajectoryVariant==="before"));
+      overlay.debugAfter.setAttribute("aria-pressed",String(overlay.trajectoryVariant==="after"));
+      overlay.mode.closest(".video-overlay-toggles").classList.remove("raw-selected");
       overlay.stabilizerControls.classList.add("hidden");
       overlay.debugTrajectorySwitch.classList.remove("hidden");
       overlay.rawControls.classList.add("hidden");

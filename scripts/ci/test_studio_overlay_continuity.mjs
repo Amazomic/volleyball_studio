@@ -4,6 +4,10 @@ import {runInNewContext} from "node:vm";
 
 const js=readFileSync(new URL("../../rust/volley-app/static/studio.js",import.meta.url),"utf8");
 const html=readFileSync(new URL("../../rust/volley-app/static/studio.html",import.meta.url),"utf8");
+const css=readFileSync(new URL("../../rust/volley-app/static/studio.css",import.meta.url),"utf8");
+assert.doesNotMatch(html,/id="studio-overlay-stabilizer"/);
+assert.match(html,/id="studio-debug-stabilizer-compare"[^>]*aria-pressed="false"/);
+assert.match(css,/#studio-preview-view:not\(\.training-workspace\) #studio-debug-stabilizer-compare\{display:none\}/);
 assert.match(js,/\["ball_stabilizer_v3","ball_stabilizer_v4","ball_stabilizer_v5"\]\.includes\(stats\?\.version\)/,
   "Debug comparison must keep reading historical V3/V4 results alongside V5");
 assert.match(html,/id="studio-overlay-processed"[^>]*role="tab"/);
@@ -173,6 +177,7 @@ const checkbox={dataset:{overlayAction:"attack"},checked:false,addEventListener:
 const input={addEventListener(){}};
 const controls={querySelectorAll:()=>[checkbox],classList:{toggle(){},remove(){},add(){}}};
 const tab=()=>({attributes:{},closest:()=>controls,addEventListener(name,fn){this[name]=fn;},setAttribute(name,value){this.attributes[name]=value;}});
+const trainingMode={active:false,panel:{classList:{add(){}}}};
 const initOverlay={mode:tab(),rawMode:tab(),stabilizerMode:tab(),stabilizerControls:controls,
   debugTrajectorySwitch:controls,debugBefore:tab(),debugAfter:tab(),
   rawControls:controls,actionControls:controls,canvas:{closest:()=>controls},
@@ -181,7 +186,7 @@ const initOverlay={mode:tab(),rawMode:tab(),stabilizerMode:tab(),stabilizerContr
   flags:{touches:true},actionFlags:{attack:true,unknown_touch:true}};
 runInNewContext(js.slice(initStart,initEnd),{
   overlay:initOverlay,$:()=>({classList:{remove(){}},disabled:false,addEventListener(){},value:"0.55"}),window:{addEventListener(){}},
-  training:{active:false,panel:{classList:{add(){}}}},reference:{active:false,epoch:0,entries:[],picker:{classList:{add(){}}},analysis:{setAttribute(){}},toggle:{setAttribute(){}}},comparison:{epoch:0},
+  training:trainingMode,reference:{active:false,epoch:0,entries:[],picker:{classList:{add(){}}},analysis:{setAttribute(){}},toggle:{setAttribute(){}}},comparison:{epoch:0},
   annotation:{lane:{querySelectorAll:()=>[]}},hideAnnotationContext(){},trainingEditorReset(){},
   updateRawDetectorLabel(){},updateReferenceModeUi(){},placeTrainingTimeline(){},
   drawOverlay:()=>{redraws++;},drawTimeline:()=>{timelineRedraws++;},
@@ -202,6 +207,21 @@ assert.equal(initOverlay.rawMode.attributes["aria-selected"],"true");
 initOverlay.mode.click();
 assert.equal(initOverlay.raw,false);
 assert.equal(initOverlay.mode.attributes["aria-selected"],"true");
+initOverlay.stabilizerMode.click();
+assert.notEqual(initOverlay.stabilizerView,true,
+  "The normal preview must not enter Ball Stabilizer comparison");
+trainingMode.active=true;
+initOverlay.stabilizerMode.click();
+assert.equal(trainingMode.active,true,"Debug comparison must not leave Debug");
+assert.equal(initOverlay.raw,true,"Debug comparison must request raw GPU observations");
+assert.equal(initOverlay.stabilizerView,true);
+assert.equal(initOverlay.stabilizerMode.attributes["aria-pressed"],"true");
+initOverlay.debugAfter.click();
+assert.equal(trainingMode.active,true);
+assert.equal(initOverlay.raw,false,"After stabilization must restore CPU observations");
+assert.equal(initOverlay.stabilizerView,false);
+assert.equal(initOverlay.stabilizerMode.attributes["aria-pressed"],"false");
+trainingMode.active=false;
 assert.match(html,/id="studio-debug-trajectory-before"[^>]*aria-pressed="false"/);
 assert.match(html,/id="studio-debug-trajectory-after"[^>]*aria-pressed="true"/);
 initOverlay.debugBefore.click();

@@ -913,12 +913,14 @@ body[data-ui-theme="light"] #studio-preview-view .rallies-panel-head span{color:
 }
 #studio-preview-view .video-overlay-toggle:hover{border-color:#b8ddff}
 #studio-preview-view .video-overlay-toggle:focus-visible{outline:2px solid #fff;outline-offset:2px}
-#studio-preview-view .video-overlay-trajectory-switch{display:flex;align-items:center;gap:5px;width:max-content;max-width:100%;padding:4px 5px;border:1px solid #667d98;border-radius:9px;background:rgba(11,21,37,.93);pointer-events:auto}
+#studio-preview-view .video-overlay-trajectory-switch{display:flex;align-items:center;flex-wrap:wrap;gap:5px;width:max-content;max-width:100%;padding:4px 5px;border:1px solid #667d98;border-radius:9px;background:rgba(11,21,37,.93);pointer-events:auto}
 #studio-preview-view .video-overlay-trajectory-switch.hidden{display:none}
 #studio-preview-view .video-overlay-trajectory-switch span{padding:0 5px;color:#b5c7db;font-size:11px}
 #studio-preview-view .video-overlay-trajectory-switch button{padding:6px 10px;border:1px solid transparent;border-radius:6px;background:transparent;color:#b5c7db;font-size:11px;font-weight:700}
 #studio-preview-view #studio-debug-trajectory-before[aria-pressed="true"]{border-color:#47e2ff;color:#47e2ff;background:#16364c}
 #studio-preview-view #studio-debug-trajectory-after[aria-pressed="true"]{border-color:#f1bd51;color:#f1bd51;background:#46361a}
+#studio-preview-view #studio-debug-stabilizer-compare[aria-pressed="true"]{border-color:#f1bd51;color:#f1bd51;background:#46361a}
+#studio-preview-view:not(.training-workspace) #studio-debug-stabilizer-compare{display:none}
 #studio-preview-view .video-overlay-modes{display:flex;gap:3px;padding:3px;justify-self:end;pointer-events:auto;background:#0c1727;border:1px solid #8aaacc;border-radius:11px;box-shadow:0 3px 20px rgba(0,0,0,.4)}
 #studio-preview-view .video-overlay-modes button{padding:8px 14px;border:0;border-radius:8px;background:transparent;color:#a9b9cd;font-size:13px;font-weight:750}
 #studio-preview-view .video-overlay-modes button[aria-selected="true"]{background:#326ba5;color:#fff;box-shadow:0 0 13px rgba(69,160,251,.3)}
