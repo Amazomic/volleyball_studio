@@ -6,6 +6,7 @@ import {join} from "node:path";
 const root=fileURLToPath(new URL("../..",import.meta.url));
 const html=readFileSync(join(root,"rust/volley-app/static/studio.html"),"utf8");
 const css=readFileSync(join(root,"rust/volley-app/static/studio.css"),"utf8");
+const tracks=readFileSync(join(root,"rust/volley-app/static/studio_tracks.js"),"utf8");
 assert.doesNotMatch(html,/Анализ матчей и монтаж|Данные исходного анализа не изменяются|Классификация игровых действий требует ручного подтверждения/);
 assert.doesNotMatch(html,/class="sidebar-foot"/);
 assert.match(css,/\.shell\{display:flex;width:100%;height:100vh;height:100dvh;min-height:0;overflow:hidden\}/);
@@ -17,4 +18,9 @@ assert.match(css,/@media \(max-width:650px\)\{[\s\S]*?\.sidebar \.menu\{display:
 const rail=html.match(/<aside class="rallies-panel"[^>]*>([\s\S]*?)<\/aside>/)?.[1]??"";
 assert.match(rail,/id="studio-rallies"[\s\S]*id="studio-debug-reference-picker"[\s\S]*class="studio-debug-mode-row"/,"debug modes must be anchored after the scrollable rally list in the right rail");
 assert.match(css,/#studio-preview-view\.training-workspace \.studio-debug-mode-row\{[\s\S]*?flex:0 0 auto/,"debug mode footer must not scroll with rally cards");
+assert.match(tracks,/viewBar\.append\(viewBack\)/,"player back button must remain in the mode navigation");
+assert.match(tracks,/filterBar\.append\(conflictToggle,excludedToggle\)/,"conflict and excluded toggles must share the lower filter group");
+assert.match(tracks,/autoAssignControls\.prepend\(filterBar\)/,"filter group must be inside the auto-assign toolbar");
+assert.doesNotMatch(tracks,/viewBar\.append\([^)]*(?:conflictToggle|excludedToggle)/,"filter toggles must not occupy the mode navigation");
+assert.match(css,/\.track-filter-buttons\{[^}]*margin-right:auto/,"filters must align left of the similarity controls");
 console.log("PASS: no footer disclaimer; viewport shell, flexible cards, invisible upload input, compact mobile navigation and debug mode footer are constrained");
