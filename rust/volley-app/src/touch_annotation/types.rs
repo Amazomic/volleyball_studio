@@ -217,7 +217,7 @@ pub async fn calculate(
         }
         let intervals =
             crate::rally_training_comparison::touch_rally_scope(&state, &run, &req.rally)?;
-        let scores = trajectory::scan_collision_trajectory(&run, &intervals, req.impact)?;
+        let (scores, _) = trajectory::scan_collision_trajectory(&run, &intervals, req.impact)?;
         let expected = trajectory::collision_frames(&scores, run.frames);
         if expected != req.frames {
             return Err(storage::conflict(

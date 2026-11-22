@@ -168,14 +168,28 @@ pub(crate) fn full_video_ball_suggestions_scoped(
     run: &crate::native_rally_evidence::ValidatedRun,
     scope: &[(u64, u64)],
 ) -> Result<(Vec<(u64, f64)>, usize), String> {
-    full_video_ball_suggestions_impl(run, scope, None)
+    let result = full_video_ball_suggestions_impl(run, scope, None)?;
+    Ok((result.events, result.observed))
 }
 
-pub(crate) fn full_video_ball_impacts_scoped(
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct BallReconstructionStats {
+    pub raw_observations: usize,
+    pub rejected_outliers: usize,
+    pub interpolated_frames: usize,
+}
+
+pub(crate) struct BallImpactScan {
+    pub events: Vec<(u64, f64)>,
+    pub observed: usize,
+    pub reconstruction: BallReconstructionStats,
+}
+
+pub(crate) fn full_video_ball_impacts_with_reconstruction(
     run: &crate::native_rally_evidence::ValidatedRun,
     scope: &[(u64, u64)],
     config: volley_core::motion::DirectionBreakConfig,
-) -> Result<(Vec<(u64, f64)>, usize), String> {
+) -> Result<BallImpactScan, String> {
     if !config.valid() {
         return Err("Invalid ball direction change parameters".into());
     }
@@ -186,7 +200,7 @@ fn full_video_ball_suggestions_impl(
     run: &crate::native_rally_evidence::ValidatedRun,
     scope: &[(u64, u64)],
     impact: Option<volley_core::motion::DirectionBreakConfig>,
-) -> Result<(Vec<(u64, f64)>, usize), String> {
+) -> Result<BallImpactScan, String> {
     if scope
         .iter()
         .any(|&(start, end)| start > end || end >= run.frames)
@@ -213,22 +227,50 @@ fn full_video_ball_suggestions_impl(
     let mut points = Vec::<BallObservation>::new();
     let mut candidates = Vec::<(u64, f64)>::new();
     let mut observations = 0usize;
+    let mut reconstruction = BallReconstructionStats::default();
     let mut scope_index = 0usize;
     fn emit(
         points: &[BallObservation],
         candidates: &mut Vec<(u64, f64)>,
         impact: Option<volley_core::motion::DirectionBreakConfig>,
+        width: u32,
+        height: u32,
+        reconstruction: &mut BallReconstructionStats,
     ) -> Result<(), String> {
-        if points.len() < 9 {
+        let prepared = if let Some(config) = impact {
+            reconstruction.raw_observations += points.len();
+            let restored = volley_core::ball_interpolation::reconstruct_short_ball_motion(
+                points,
+                width,
+                height,
+                config.max_join_error_px,
+            )?;
+            reconstruction.rejected_outliers += restored.rejected_frames.len();
+            reconstruction.interpolated_frames += restored.interpolated_frames.len();
+            Some(restored)
+        } else {
+            None
+        };
+        let prepared_points = prepared
+            .as_ref()
+            .map_or(points, |restored| restored.observations.as_slice());
+        if prepared_points.len() < 9 {
             return Ok(());
         }
         let breaks = if let Some(config) = impact {
-            volley_core::motion::trajectory_direction_breaks(points, config)
+            volley_core::motion::trajectory_direction_breaks(prepared_points, config)
         } else {
             volley_core::motion::trajectory_breaks(points)
         };
         for b in breaks {
-            if b.frame >= 0 {
+            if b.frame >= 0
+                && !prepared.as_ref().is_some_and(|reconstructed| {
+                    reconstructed
+                        .interpolated_frames
+                        .binary_search(&b.frame)
+                        .is_ok()
+                })
+            {
                 let score = if impact.is_some() {
                     b.motion.angle / (1.0 + b.fit_error)
                 } else {
@@ -256,7 +298,14 @@ fn full_video_ball_suggestions_impl(
             return Err("Ball source frame state differs from saved replay".into());
         }
         while scope.get(scope_index).is_some_and(|&(_, end)| end < frame) {
-            emit(&points, &mut candidates, impact)?;
+            emit(
+                &points,
+                &mut candidates,
+                impact,
+                run.width,
+                run.height,
+                &mut reconstruction,
+            )?;
             points.clear();
             scope_index += 1;
         }
@@ -268,7 +317,14 @@ fn full_video_ball_suggestions_impl(
         }
         let Some(ball) = row.selected_ball else {
             if !points.is_empty() && frame as i64 - points.last().unwrap().frame > 4 {
-                emit(&points, &mut candidates, impact)?;
+                emit(
+                    &points,
+                    &mut candidates,
+                    impact,
+                    run.width,
+                    run.height,
+                    &mut reconstruction,
+                )?;
                 points.clear();
             }
             continue;
@@ -285,7 +341,14 @@ fn full_video_ball_suggestions_impl(
         }
         let b = ball.detection.bbox_xyxy_norm;
         if points.last().is_some_and(|p| frame as i64 - p.frame > 4) {
-            emit(&points, &mut candidates, impact)?;
+            emit(
+                &points,
+                &mut candidates,
+                impact,
+                run.width,
+                run.height,
+                &mut reconstruction,
+            )?;
             points.clear();
         }
         points.push(BallObservation {
@@ -295,11 +358,25 @@ fn full_video_ball_suggestions_impl(
         });
         observations += 1;
         if points.len() >= 900 {
-            emit(&points, &mut candidates, impact)?;
+            emit(
+                &points,
+                &mut candidates,
+                impact,
+                run.width,
+                run.height,
+                &mut reconstruction,
+            )?;
             points = points.split_off(points.len() - 24);
         }
     }
-    emit(&points, &mut candidates, impact)?;
+    emit(
+        &points,
+        &mut candidates,
+        impact,
+        run.width,
+        run.height,
+        &mut reconstruction,
+    )?;
     if reader.line()?.is_some() || reader.finish() != run.replay_sha {
         return Err("Ball replay SHA-256 differs from saved source".into());
     }
@@ -321,7 +398,12 @@ fn full_video_ball_suggestions_impl(
     if dedup.len() > 32768 {
         return Err("Too many ball trajectory events".into());
     }
-    Ok((dedup, observations))
+    reconstruction.raw_observations = observations;
+    Ok(BallImpactScan {
+        events: dedup,
+        observed: observations,
+        reconstruction,
+    })
 }
 
 #[cfg(test)]
@@ -338,7 +420,9 @@ mod scored_trajectory_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut bytes = Vec::new();
         for frame in 0_u64..50 {
-            let x = if frame <= 25 {
+            let x = if frame == 30 {
+                0.95
+            } else if frame <= 25 {
                 0.15 + frame as f64 * 0.01
             } else {
                 0.40 - (frame - 25) as f64 * 0.01
@@ -354,7 +438,9 @@ mod scored_trajectory_tests {
             };
             let row = json!({
                 "frame_index":frame,"tracked_players":[],
-                "selected_ball":{"source_model":"vballnet","detection":ball},
+                "selected_ball":if frame==31 { Value::Null } else {
+                    json!({"source_model":"vballnet","detection":ball})
+                },
                 "track_ids_provisional":true,
                 "confirmed_athlete_identities":false,"touches_confirmed":false
             });
@@ -390,21 +476,23 @@ mod scored_trajectory_tests {
             min_ball_score: 0.35,
         };
         let (events, observed) = full_video_ball_suggestions(&run).unwrap();
-        assert_eq!(observed, 50);
+        assert_eq!(observed, 49);
         assert!(!events.is_empty());
         assert!(events.iter().all(|(f, score)| *f < 50 && score.is_finite()));
         let (scoped, observed) = full_video_ball_suggestions_scoped(&run, &[(20, 30)]).unwrap();
         assert_eq!(observed, 11);
         assert!(scoped.iter().all(|(frame, _)| (20..=30).contains(frame)));
-        let (impacts, _) = full_video_ball_impacts_scoped(
+        let impacts = full_video_ball_impacts_with_reconstruction(
             &run,
             &[(0, 49)],
             volley_core::motion::DirectionBreakConfig::default(),
         )
         .unwrap();
-        assert_eq!(impacts.len(), 1, "{impacts:?}");
-        assert!(impacts[0].0.abs_diff(25) <= 2);
-        let (strong_turn, _) = full_video_ball_impacts_scoped(
+        assert_eq!(impacts.events.len(), 1);
+        assert!(impacts.events[0].0.abs_diff(25) <= 2);
+        assert_eq!(impacts.reconstruction.rejected_outliers, 1);
+        assert!(impacts.reconstruction.interpolated_frames >= 1);
+        let strong_turn = full_video_ball_impacts_with_reconstruction(
             &run,
             &[(0, 49)],
             volley_core::motion::DirectionBreakConfig {
@@ -413,7 +501,7 @@ mod scored_trajectory_tests {
             },
         )
         .unwrap();
-        assert_eq!(strong_turn.len(), 1);
+        assert_eq!(strong_turn.events.len(), 1);
         let (no_rallies, observed) = full_video_ball_suggestions_scoped(&run, &[]).unwrap();
         assert_eq!(observed, 0);
         assert!(no_rallies.is_empty());

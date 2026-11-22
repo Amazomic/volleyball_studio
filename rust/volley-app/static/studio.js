@@ -1624,7 +1624,7 @@
     if(!impact){annotationNotice("Проверьте параметры поиска столкновений.",true);return;}
     const epoch=annotation.epoch,project=s.project,run=s.run,video=s.video;
     annotation.busy=true;drawAnnotation();
-    window.VolleyballTasks?.set("training-trajectory",{label:"Дебаг",stage:"Поиск касаний по траектории VBallNet",progress:null});
+    window.VolleyballTasks?.set("training-trajectory",{label:"Дебаг",stage:"Интерполяция мяча → поиск изломов",progress:null});
     annotationNotice("Ищем столкновения по отклонению от параболического полёта внутри розыгрышей, без GPU…");
     const rally=trainingTouchRallySettings();
     const settingsKey=JSON.stringify({rally,impact});
@@ -1641,6 +1641,9 @@
           result.project_id!==project||result.video!==video||result.rally_run_id!==run||
           !Array.isArray(result.proposals)||!Number.isSafeInteger(result.total_frames)||
           result.method!=="piecewise_ballistic_direction_v3"||
+          result.ball_motion_interpolation?.stage!=="ball_motion_interpolation_v1"||
+          !Number.isSafeInteger(result.ball_motion_interpolation?.result?.rejected_outliers)||
+          !Number.isSafeInteger(result.ball_motion_interpolation?.result?.interpolated_frames)||
           Object.entries(impact).some(([key,value])=>result.impact_settings?.[key]!==value)||
           !Array.isArray(result.rally_intervals)||
           result.rally_count!==result.rally_intervals.length||
@@ -1656,7 +1659,9 @@
       drawTimeline();drawOverlay();
       await refreshComparison(true);
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run||video!==s.video)return;
-      annotationNotice("Внутри "+result.rally_count+" розыгрышей по мячу найдено "+
+      annotationNotice("Интерполяция мяча: отброшено "+result.ball_motion_interpolation.result.rejected_outliers+
+        " ложных точек, восстановлено "+result.ball_motion_interpolation.result.interpolated_frames+
+        " пропущенных кадров. Внутри "+result.rally_count+" розыгрышей найдено "+
         result.proposals.length+" кандидатов касаний. Вне розыгрышей поиск не выполняется. "+
         "Результаты отображаются в плеере и на шкале; препятствие может быть игроком, сеткой или полом.");
     }catch(error){

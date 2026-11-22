@@ -288,8 +288,8 @@ pub fn trajectory_direction_breaks(
     for at in times {
         let left_end = points.partition_point(|point| point.frame < at);
         let right_begin = points.partition_point(|point| point.frame <= at);
-        let left = &points[left_end.saturating_sub(7)..left_end];
-        let right = &points[right_begin..(right_begin + 7).min(points.len())];
+        let mut left = &points[left_end.saturating_sub(7)..left_end];
+        let mut right = &points[right_begin..(right_begin + 7).min(points.len())];
         if left.len() < 4
             || right.len() < 4
             || left.last().is_none_or(|point| at - point.frame > 3)
@@ -303,9 +303,25 @@ pub fn trajectory_direction_breaks(
         {
             continue;
         }
-        let (Some(before), Some(after)) = (fit(left, at), fit(right, at)) else {
+        let (Some(mut before), Some(mut after)) = (fit(left, at), fit(right, at)) else {
             continue;
         };
+        if before.error > config.max_fit_error_px && left.len() > 5 {
+            if let Some(shorter) = fit(&left[1..], at) {
+                if shorter.error < before.error {
+                    left = &left[1..];
+                    before = shorter;
+                }
+            }
+        }
+        if after.error > config.max_fit_error_px && right.len() > 5 {
+            if let Some(shorter) = fit(&right[..right.len() - 1], at) {
+                if shorter.error < after.error {
+                    right = &right[..right.len() - 1];
+                    after = shorter;
+                }
+            }
+        }
         let error = before.error.max(after.error);
         if error > config.max_fit_error_px {
             continue;
@@ -523,6 +539,59 @@ mod tests {
             ..settings
         }
         .valid());
+    }
+
+    #[test]
+    fn direction_break_survives_isolated_false_ball_and_one_missing_detection() {
+        let samples: Vec<_> = (0..84)
+            .filter(|frame| *frame != 41)
+            .map(|frame| {
+                let t = frame as f64 - 40.0;
+                let turn = t.max(0.0);
+                let jitter = (frame % 5) as f64 - 2.0;
+                BallObservation {
+                    frame,
+                    x: 400.0 - 4.0 * t
+                        + 11.0 * turn
+                        + jitter * 0.8
+                        + if frame == 45 { 1100.0 } else { 0.0 },
+                    y: 540.0 + 12.0 * t - 26.0 * turn
+                        + 0.15 * t * t
+                        + jitter * 1.1
+                        + if frame == 45 { 80.0 } else { 0.0 },
+                }
+            })
+            .collect();
+        let cleaned =
+            crate::ball_interpolation::reconstruct_short_ball_motion(&samples, 1920, 1080, 28.0)
+                .unwrap();
+        assert_eq!(cleaned.rejected_frames, [45]);
+        let events =
+            trajectory_direction_breaks(&cleaned.observations, DirectionBreakConfig::default());
+        assert_eq!(
+            events.len(),
+            1,
+            "unreliable single frame masked or duplicated the contact: {events:?}"
+        );
+        assert!((events[0].frame - 40).abs() <= 2, "{events:?}");
+    }
+
+    #[test]
+    fn isolated_ball_jump_is_not_a_touch_in_smooth_gravity_flight() {
+        let samples: Vec<_> = (0..84)
+            .map(|frame| {
+                let t = frame as f64 - 42.0;
+                BallObservation {
+                    frame,
+                    x: 300.0 + 5.0 * t + if frame == 45 { 1200.0 } else { 0.0 },
+                    y: 250.0 + 0.19 * t * t,
+                }
+            })
+            .collect();
+        assert!(
+            trajectory_direction_breaks(&samples, DirectionBreakConfig::default()).is_empty(),
+            "An isolated false ball detection is not an impact"
+        );
     }
 
     #[test]

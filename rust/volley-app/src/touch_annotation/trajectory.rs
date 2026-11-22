@@ -171,20 +171,29 @@ pub(super) fn scan_collision_trajectory(
     run: &ValidatedRun,
     intervals: &[(u64, u64)],
     impact: volley_core::motion::DirectionBreakConfig,
-) -> Result<Vec<TrajectoryCandidate>, ApiError> {
+) -> Result<
+    (
+        Vec<TrajectoryCandidate>,
+        crate::native_player_tracks::BallReconstructionStats,
+    ),
+    ApiError,
+> {
     if !impact.valid() {
         return Err(storage::bad_request("Invalid collision detector settings"));
     }
-    let (events, _) =
-        crate::native_player_tracks::full_video_ball_impacts_scoped(run, intervals, impact)
-            .map_err(storage::bad_request)?;
-    Ok(events
+    let scan = crate::native_player_tracks::full_video_ball_impacts_with_reconstruction(
+        run, intervals, impact,
+    )
+    .map_err(storage::bad_request)?;
+    let candidates = scan
+        .events
         .into_iter()
         .map(|(frame, score)| TrajectoryCandidate {
             frame,
             score: score.clamp(0.0, 10000.0),
         })
-        .collect())
+        .collect();
+    Ok((candidates, scan.reconstruction))
 }
 
 pub(super) fn collision_frames(scores: &[TrajectoryCandidate], total: u64) -> Vec<u64> {
@@ -245,7 +254,7 @@ pub async fn calculate(
             frames.sort_unstable();
             frames
         });
-        let scores = scan_collision_trajectory(&run, &intervals, req.impact)?;
+        let (scores, preprocessing) = scan_collision_trajectory(&run, &intervals, req.impact)?;
         let selected = collision_frames(&scores, run.frames);
         let calibration = TrajectoryProfile {
             min_score: 0.0,
@@ -266,6 +275,7 @@ pub async fn calculate(
             "rally_intervals":intervals.iter().map(|&(start,end)| json!({"start":start,"end":end})).collect::<Vec<_>>(),
             "rally_count":intervals.len(),
             "calibration":calibration,"impact_settings":req.impact,
+            "ball_motion_interpolation":{"stage":"ball_motion_interpolation_v1","result":preprocessing},
             "metrics_on_labeled_video":metrics,
             "gpu_rerun":false,"player_pose_required":false,
             "method":"piecewise_ballistic_direction_v3"}))

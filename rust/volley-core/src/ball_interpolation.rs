@@ -14,7 +14,103 @@ const MAX_VERTICAL_ACCEL: f64 = 0.010;
 /// in-frame curve are required when enough evidence exists. Missing endpoint
 /// velocities fall back to a straight chord, never to unsupported model boxes or extrapolation
 /// beyond the last real observation.
+#[derive(Clone, Debug, Default)]
+pub struct BallMotionReconstruction {
+    pub observations: Vec<crate::motion::BallObservation>,
+    pub rejected_frames: Vec<i64>,
+    pub interpolated_frames: Vec<i64>,
+}
+
+pub fn reconstruct_short_ball_motion(
+    observations: &[crate::motion::BallObservation],
+    width: u32,
+    height: u32,
+    max_join_error_px: f64,
+) -> Result<BallMotionReconstruction, &'static str> {
+    if width < 64
+        || height < 64
+        || !max_join_error_px.is_finite()
+        || max_join_error_px < 1.0
+        || observations.windows(2).any(|w| w[1].frame <= w[0].frame)
+        || observations.iter().any(|p| {
+            p.frame < 0
+                || !p.x.is_finite()
+                || !p.y.is_finite()
+                || p.x < 0.0
+                || p.x > f64::from(width)
+                || p.y < 0.0
+                || p.y > f64::from(height)
+        })
+    {
+        return Err("Invalid observed ball motion coordinates");
+    }
+    if observations.is_empty() {
+        return Ok(BallMotionReconstruction::default());
+    }
+    let first = observations[0].frame;
+    let last = observations[observations.len() - 1].frame;
+    let size = usize::try_from(last - first + 1).map_err(|_| "Ball motion span overflow")?;
+    if size > 1200 {
+        return Err("Ball motion reconstruction exceeds bounded scan window");
+    }
+    let mut retained = Vec::with_capacity(observations.len());
+    let mut rejected_frames = Vec::new();
+    for (index, &point) in observations.iter().enumerate() {
+        if index > 0 && index + 1 < observations.len() {
+            let previous = observations[index - 1];
+            let next = observations[index + 1];
+            let span = next.frame - previous.frame;
+            if span <= 4 {
+                let fraction = (point.frame - previous.frame) as f64 / span as f64;
+                let x = previous.x + fraction * (next.x - previous.x);
+                let y = previous.y + fraction * (next.y - previous.y);
+                let deviation = (point.x - x).hypot(point.y - y);
+                let chord = (next.x - previous.x).hypot(next.y - previous.y);
+                if deviation > (4.0 * max_join_error_px).max(3.0 * chord) {
+                    rejected_frames.push(point.frame);
+                    continue;
+                }
+            }
+        }
+        retained.push(point);
+    }
+    let mut points = vec![None; size];
+    for point in retained {
+        let index = (point.frame - first) as usize;
+        points[index] = Some([point.x / f64::from(width), point.y / f64::from(height)]);
+    }
+    let synthetic = interpolate_short_gaps_bounded(&mut points, 2);
+    let mut interpolated_frames = Vec::new();
+    let observations = points
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, point)| {
+            let point = point?;
+            if synthetic[index] {
+                interpolated_frames.push(first + index as i64);
+            }
+            Some(crate::motion::BallObservation {
+                frame: first + index as i64,
+                x: point[0] * f64::from(width),
+                y: point[1] * f64::from(height),
+            })
+        })
+        .collect();
+    Ok(BallMotionReconstruction {
+        observations,
+        rejected_frames,
+        interpolated_frames,
+    })
+}
+
 pub fn interpolate_short_gaps(points: &mut [Option<[f64; 2]>]) -> Vec<bool> {
+    interpolate_short_gaps_bounded(points, MAX_MISSING_BALL_FRAMES)
+}
+
+fn interpolate_short_gaps_bounded(
+    points: &mut [Option<[f64; 2]>],
+    max_missing_frames: usize,
+) -> Vec<bool> {
     let mut synthetic = vec![false; points.len()];
     let mut previous: Option<usize> = None;
     for right in 0..points.len() {
@@ -26,7 +122,7 @@ pub fn interpolate_short_gaps(points: &mut [Option<[f64; 2]>]) -> Vec<bool> {
         };
         if let Some(left) = previous {
             let missing = right - left - 1;
-            if (1..=MAX_MISSING_BALL_FRAMES).contains(&missing) {
+            if (1..=max_missing_frames.min(MAX_MISSING_BALL_FRAMES)).contains(&missing) {
                 let begin = points[left].expect("observed left anchor");
                 let duration = (right - left) as f64;
                 let delta = [end[0] - begin[0], end[1] - begin[1]];
@@ -266,6 +362,76 @@ fn valid_point(point: [f64; 2]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconstruction_removes_single_false_ball_and_bridges_short_smooth_gaps() {
+        let raw: Vec<_> = (0..65)
+            .filter(|frame| ![27, 28].contains(frame))
+            .map(|frame| {
+                let t = frame as f64 - 32.0;
+                crate::motion::BallObservation {
+                    frame,
+                    x: 580.0 + 4.0 * t + if frame == 18 { 1100.0 } else { 0.0 },
+                    y: 230.0 + 0.16 * t * t,
+                }
+            })
+            .collect();
+        let restored = reconstruct_short_ball_motion(&raw, 1920, 1080, 28.0).unwrap();
+        assert_eq!(restored.rejected_frames, [18]);
+        assert!(restored.interpolated_frames.contains(&27));
+        assert!(restored.interpolated_frames.contains(&28));
+        assert!(restored.observations.iter().any(|p| p.frame == 18));
+        assert!(restored.observations.iter().all(|p| p.x < 1000.0));
+        for &frame in &[17, 19, 26, 29] {
+            let before = raw.iter().find(|p| p.frame == frame).unwrap();
+            let after = restored
+                .observations
+                .iter()
+                .find(|p| p.frame == frame)
+                .unwrap();
+            assert!((before.x - after.x).abs() < 1e-9);
+            assert!((before.y - after.y).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn reconstruction_never_extrapolates_or_bridges_an_unobserved_large_gap() {
+        let raw: Vec<_> = (0..44)
+            .filter(|frame| ![0, 22, 23, 24, 43].contains(frame))
+            .map(|frame| crate::motion::BallObservation {
+                frame,
+                x: 450.0 + 2.0 * frame as f64,
+                y: 240.0,
+            })
+            .collect();
+        let restored = reconstruct_short_ball_motion(&raw, 1920, 1080, 28.0).unwrap();
+        assert!(restored
+            .interpolated_frames
+            .iter()
+            .all(|frame| ![0, 22, 23, 24, 43].contains(frame)));
+        assert!(restored
+            .observations
+            .iter()
+            .all(|p| ![0, 22, 23, 24, 43].contains(&p.frame)));
+    }
+
+    #[test]
+    fn reconstruction_does_not_splice_two_flights_across_a_contact() {
+        let raw: Vec<_> = (0..80)
+            .filter(|frame| *frame != 41)
+            .map(|frame| {
+                let t = frame as f64 - 40.0;
+                let rebound = t.max(0.0);
+                crate::motion::BallObservation {
+                    frame,
+                    x: 900.0 - 3.0 * t,
+                    y: 600.0 + 6.0 * t - 15.0 * rebound + 0.06 * t * t,
+                }
+            })
+            .collect();
+        let restored = reconstruct_short_ball_motion(&raw, 1920, 1080, 28.0).unwrap();
+        assert!(!restored.interpolated_frames.contains(&41));
+    }
 
     #[test]
     fn fills_only_interior_gaps_preserving_observations() {

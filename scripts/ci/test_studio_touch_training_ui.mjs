@@ -24,7 +24,8 @@ for(const id of ["studio-annotation-calculate","studio-annotation-seed-trajector
 assert.match(server,/\/api\/training\/trajectory\/calculate"[\s\S]{0,90}touch_annotation::trajectory::calculate/);
 assert.ok(rust.includes("scan_collision_trajectory(&run, &intervals, req.impact)"));
 assert.ok(!rust.includes('method":"vballnet_trajectory_breaks_and_motion_extrema"'));
-assert.ok(scanner.includes("full_video_ball_impacts_scoped"));
+assert.ok(scanner.includes("full_video_ball_impacts_with_reconstruction"));
+assert.ok(scanner.includes("reconstruct_short_ball_motion"));
 assert.ok(typesRust.includes("scan_collision_trajectory(&run, &intervals, req.impact)"));
 assert.match(server,/\/api\/training\/trajectory\/types"[\s\S]{0,100}touch_annotation::types::calculate/);
 assert.ok(typesRust.includes("observed_pose_motion")&&typesRust.includes("refine_with_motion"));
@@ -99,6 +100,8 @@ const context={
         rally_count:1,rally_intervals:[{start:95,end:150}],
         proposals:[{frame:100,score:9},{frame:140,score:3}],
         method:"piecewise_ballistic_direction_v3",
+        ball_motion_interpolation:{stage:"ball_motion_interpolation_v1",
+          result:{raw_observations:1400,rejected_outliers:2,interpolated_frames:9}},
         impact_settings:Object.fromEntries(Object.entries(payload.impact).reverse()),
         calibration:{min_score:0,shift_frames:0,training_videos:0},
         metrics_on_labeled_video:null};
@@ -137,6 +140,8 @@ assert.equal(calculations.length,1);
 assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].rally)),
   {mode:"continuous",merge_gap_seconds:4,min_trajectory_seconds:1.5});
 assert.equal(annotation.prediction.proposals.length,2);
+assert.equal(annotation.prediction.ball_motion_interpolation.result.rejected_outliers,2);
+assert.equal(annotation.prediction.ball_motion_interpolation.result.interpolated_frames,9);
 assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].impact)),{
   min_turn_angle_deg:45,max_join_error_px:28,
   max_fit_error_px:4,min_separation_frames:6
