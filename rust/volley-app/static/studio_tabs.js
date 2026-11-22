@@ -615,7 +615,7 @@
   ];
   const graphSettings={
     video:[".analysis-profile-source","#studio-analysis-editor"],
-    ball:["#studio-gpu-stride"],
+    ball:["#studio-gpu-stride","#studio-gpu-memory","#studio-gpu-threads"],
     ball_stabilizer:["#studio-post-ball-stabilizer-score","#studio-post-ball-stabilizer-gap","#studio-post-ball-stabilizer-step"],
     rallies:["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds","#studio-gpu-rally-stationary-ms"],
     players:["#studio-gpu-person-stride"],
@@ -635,7 +635,7 @@
   };
   const graphDescriptions={
     video:"Выбор видео, интервалов анализа и разметки площадки.",
-    ball:"VballNetV4c выполняет нейросетевую детекцию мяча на GPU.",
+    ball:"VBallNetV4c работает с фиксированным окном из 9 кадров. Память CUDA и потоки CPU — общие настройки нейросетей 1-й фазы. Порог уверенности и интерполяция мяча настраиваются отдельно во 2-й фазе (Ball Stabilizer).",
     ball_stabilizer:"Ball Stabilizer: удаление ложных VBallNet-позиций и интерполяция коротких пропусков во 2-й фазе перед поиском касаний. Розыгрыши 1-й фазы не меняются.",
     rallies:"Рабочие настройки первичного анализа: длительность траектории, остановка мяча в миллисекундах и объединение без перекрытия удержаний или пропусков детекции от 3 секунд. Эксперименты в «Дебаге» имеют собственные значения и не меняют этот GPU-профиль.",
     players:"RF-DETR Medium ищет игроков только внутри найденных игровых интервалов.",
@@ -694,7 +694,7 @@
       if(wasOpen!==null)node.open=wasOpen;
     }
     graphMoved=[];dialog.classList.add("hidden");
-    dialog.querySelector(".analysis-flow-dialog-panel").classList.remove("is-editor");
+    dialog.querySelector(".analysis-flow-dialog-panel").classList.remove("is-editor","is-compact");
     if(graphFocus?.isConnected)graphFocus.focus({preventScroll:true});
   };
   const openGraphSettings=id=>{
@@ -715,9 +715,19 @@
       body.append(item);
       if(item.tagName==="DETAILS")item.open=true;
     }
+    if(id==="ball"){
+      const related=make("div","analysis-flow-dialog-related");
+      const title=make("span","field-label","Порог и интерполяция · 2 фаза");
+      const link=make("button","secondary","Открыть Ball Stabilizer");
+      link.type="button";
+      link.addEventListener("click",()=>openGraphSettings("ball_stabilizer"));
+      related.append(title,link);
+      body.append(related);
+    }
     if(!body.children.length)body.append(make("p","panel-note","Дополнительных параметров нет."));
     const panel=$("analysis-flow-dialog").querySelector(".analysis-flow-dialog-panel");
     panel.classList.toggle("is-editor",id==="video");
+    panel.classList.toggle("is-compact",id!=="video"&&body.children.length<=4);
     $("analysis-flow-dialog").classList.remove("hidden");
     $("analysis-flow-dialog-close").focus();
   };

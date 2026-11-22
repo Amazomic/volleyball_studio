@@ -2017,9 +2017,11 @@ body[data-ui-theme="light"] .analysis-flow-result-title{color:#285e9a}
 .analysis-flow-dialog.hidden{display:none}
 .analysis-flow-dialog-panel{width:min(1040px,100%);max-height:calc(100dvh - 32px);background:#15243a;border:1px solid #55769d;border-radius:12px;box-shadow:0 20px 70px #000b;display:flex;flex-direction:column;overflow:hidden}
 .analysis-flow-dialog-panel.is-editor{width:min(1200px,100%)}
+.analysis-flow-dialog-panel.is-compact{width:min(780px,100%)}
+.analysis-flow-dialog-panel.is-compact .analysis-flow-dialog-body{overflow:visible;scrollbar-gutter:auto}
 .analysis-flow-dialog-panel>header{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 16px;border-bottom:1px solid #314862;flex:none}
 .analysis-flow-dialog-panel>header h2{font-size:16px;margin:0}
-.analysis-flow-dialog-body{min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;padding:14px 16px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-content:start;align-items:start;gap:10px 22px}
+.analysis-flow-dialog-body{min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:auto;padding:14px 16px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-content:start;align-items:start;gap:10px 22px}
 .analysis-flow-dialog-body>*{min-width:0}
 .analysis-flow-dialog-body>div:not(.analysis-profile-toggle):not(.analysis-editor){display:grid;grid-template-columns:minmax(0,1fr) minmax(95px,138px);align-items:center;gap:12px}
 .analysis-flow-dialog-body .analysis-profile-fields{display:contents}
@@ -2035,18 +2037,21 @@ body[data-ui-theme="light"] .analysis-flow-result-title{color:#285e9a}
 .analysis-flow-dialog-body .analysis-profile-toggle{display:flex;align-items:center;gap:8px;min-width:0;padding:4px 0}
 .analysis-flow-dialog-body .analysis-profile-toggle>label{display:flex;flex-direction:row-reverse;justify-content:space-between;align-items:center;gap:10px;flex:1;min-width:0;font-size:12px;line-height:1.4}
 .analysis-flow-dialog-body .analysis-profile-toggle input[type="checkbox"]{flex:none}
+.analysis-flow-dialog-body .analysis-flow-dialog-related button{min-width:0;padding:8px 10px;font-size:12px;line-height:1.25;text-align:center}
+.analysis-flow-dialog-body .analysis-flow-dialog-related .field-label{color:#adbfda;font-weight:600}
 .analysis-flow-dialog-panel>footer{padding:10px 16px;border-top:1px solid #314862;display:flex;align-items:center;justify-content:space-between;gap:20px;flex:none}
 .analysis-flow-dialog-panel>footer .panel-note{margin:0;flex:1;min-width:0;font-size:12px;line-height:1.45;color:#a8b9d0}
 .analysis-flow-dialog-panel>footer button{flex:none}
 #studio-analysis-view .analysis-flow-dialog .analysis-setting-help:is(:hover,:focus-visible)::after{display:none}
 
-#studio-analysis-view .analysis-flow-dialog .analysis-help>.analysis-tooltip{visibility:hidden;opacity:0;pointer-events:none}
+#studio-analysis-view .analysis-flow-dialog .analysis-help>.analysis-tooltip{display:none}
 .analysis-flow-stage-hint{position:fixed;z-index:3;box-sizing:border-box;width:340px;max-width:calc(100vw - 24px);border:1px solid #607c9e;border-radius:9px;padding:11px 13px;background:#0c1727;color:#edf5ff;box-shadow:0 8px 25px #0009;font-size:12px;font-weight:500;line-height:1.5;letter-spacing:0;text-align:left;white-space:normal;pointer-events:none;overflow-wrap:anywhere}
 .analysis-flow-stage-hint.hidden{display:none}
 body[data-ui-theme="light"] .analysis-flow-stage-hint{background:#f7fbff;color:#243b56;border-color:#9cb6ce;box-shadow:0 6px 20px #243b5630}
 @media(max-width:1100px){.analysis-flow{overflow-x:auto}.analysis-flow-diagram{min-width:950px}}
 @media(max-width:900px){.analysis-flow-dialog-body .analysis-editor-grid{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:700px){.analysis-flow{padding:10px 8px;overflow-x:auto}.analysis-flow-diagram{min-width:950px;padding:28px 12px 22px}.analysis-flow-toolbar{align-items:stretch}.analysis-flow-actions button{padding:7px 9px;font-size:11px}.analysis-flow-dialog{padding:7px}.analysis-flow-dialog-panel{max-height:calc(100dvh - 14px)}.analysis-flow-dialog-body{grid-template-columns:minmax(0,1fr);padding:10px;gap:8px}.analysis-flow-dialog-panel>header,.analysis-flow-dialog-panel>footer{padding:7px 10px}}
+@media(max-height:540px){.analysis-flow-dialog-panel.is-compact .analysis-flow-dialog-body{overflow:auto}}
 @media(prefers-reduced-motion:reduce){.analysis-flow-edge.is-active{animation:none}.analysis-flow-progress-dot{display:none}}
 
 .analysis-flow-feedback{margin-top:9px}.analysis-flow-feedback .panel-note{margin:5px 0;font-size:11px}
