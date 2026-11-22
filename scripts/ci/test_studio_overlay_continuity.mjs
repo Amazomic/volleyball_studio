@@ -154,7 +154,7 @@ const comparisonRecord={
   frames:[
     {frame:44,raw:{balls:[{source:"vballnet",point:[0.2,0.25],score:0.2}]},
       stabilized_ball:[0.3,0.3],ball_interpolated:false,ball_rejected:false},
-    {frame:45,raw:{balls:[{source:"vballnet",point:[0.22,0.3],score:0.2}]},
+    {frame:45,raw:{balls:[{source:"vballnet",point:[0.92,0.86],score:0.2}]},
       stabilized_ball:[0.32,0.35],ball_interpolated:true,ball_rejected:false}
   ]
 };
@@ -167,7 +167,10 @@ overlay.rawPoseVisible.checked=true;
 ui.video.currentTime=45/30;
 actionColors.length=0;ballColors.length=0;poseFills.length=0;
 scope.drawOverlay();
-assert.ok(actionColors.includes("#47e2ff"),"Both draws the cyan raw VBallNet trajectory even if the raw trail is disabled");
+assert.equal(actionColors.filter(color=>color==="#47e2ff").length,0,
+  "Both must not connect raw VBallNet detections, even across consecutive frames or a teleport");
+assert.equal(ballColors.filter(color=>color==="#47e2ff").length,2,
+  "Both displays exactly the two measured VBallNet observations as cyan dots");
 assert.ok(actionColors.includes("#f1bd51"),"Both draws the gold stabilized trajectory in the same frame");
 assert.ok(ballColors.includes("#47e2ff"),"Both displays unfiltered raw detections below the raw confidence slider");
 assert.deepEqual(poseFills,[],"Both compares ball trajectories without unrelated RTMPose skeletons");
