@@ -3961,6 +3961,8 @@ mod branching_tests {
             "ball_stabilizer_v1",
             "ball_stabilizer_v2",
             "ball_stabilizer_v3",
+            "ball_stabilizer_v4",
+            "ball_stabilizer_v5",
         ] {
             let mut old_version = saved.clone();
             old_version["ball_stabilizer"]["version"] = json!(version);

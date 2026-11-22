@@ -312,6 +312,7 @@ pub(crate) fn verified_ball_trajectory(
                 | "ball_stabilizer_v3"
                 | "ball_stabilizer_v4"
                 | "ball_stabilizer_v5"
+                | "ball_stabilizer_v6"
         )
         || summary["source_replay_id"] != replay_id
         || summary["source_replay_sha256"] != replay_sha256
@@ -658,7 +659,7 @@ mod ball_stabilizer_postprocessing_tests {
         let mut bytes = Vec::new();
         let mut block = Vec::new();
         for index in 0..63_u64 {
-            let x = if index == 20 {
+            let x = if index == 20 || (42..=49).contains(&index) {
                 0.92
             } else {
                 0.2 + index as f64 * 0.003
@@ -704,6 +705,10 @@ mod ball_stabilizer_postprocessing_tests {
         assert_eq!(reported.last(), Some(&(63, 63)));
         assert!(motion.rejected_frames.contains(&20));
         assert!(motion.interpolated[20]);
+        for frame in 42..=49 {
+            assert!(motion.rejected_frames.contains(&frame));
+            assert!(motion.interpolated[frame]);
+        }
         for i in 31..=33 {
             assert!(motion.interpolated[i]);
         }
@@ -883,6 +888,23 @@ mod ball_stabilizer_postprocessing_tests {
             32,
         )
         .is_err());
+        for version in ["ball_stabilizer_v4", "ball_stabilizer_v5"] {
+            let mut older_manifest = published_manifest.clone();
+            older_manifest["algorithm_version"] = json!(version);
+            storage::write_json_atomic(&manifest_path, &older_manifest).unwrap();
+            let mut older_summary = summary.clone();
+            older_summary["version"] = json!(version);
+            assert!(verified_ball_trajectory(
+                &root,
+                &older_summary,
+                "abc123def456",
+                "match.mp4",
+                &"d".repeat(32),
+                &replay_sha,
+                32,
+            )
+            .is_ok());
+        }
         storage::write_json_atomic(&manifest_path, &published_manifest).unwrap();
         assert!(verified_ball_trajectory(
             &root,

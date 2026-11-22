@@ -176,7 +176,111 @@ pub struct StabilizedBallMotion {
     pub observed_frames: usize,
 }
 
-pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v5";
+pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v6";
+
+fn reject_unlinked_motion(
+    points: &mut [Option<[f64; 2]>],
+    settings: BallStabilizerSettings,
+) -> Vec<usize> {
+    let mut rejected = Vec::new();
+    let mut previous: Option<(usize, [f64; 2])> = None;
+    let mut latest: Option<(usize, [f64; 2])> = None;
+    for frame in 0..points.len() {
+        let Some(point) = points[frame] else {
+            continue;
+        };
+        let Some((last_frame, last_point)) = latest else {
+            latest = Some((frame, point));
+            continue;
+        };
+        let delta_frames = frame - last_frame;
+        if delta_frames > settings.max_gap_frames + 1 {
+            previous = None;
+            latest = Some((frame, point));
+            continue;
+        }
+        let velocity = previous
+            .filter(|(previous_frame, _)| last_frame - previous_frame <= 4)
+            .map(|(previous_frame, previous_point)| {
+                let dt = (last_frame - previous_frame) as f64;
+                [
+                    (last_point[0] - previous_point[0]) / dt,
+                    (last_point[1] - previous_point[1]) / dt,
+                ]
+            });
+        let dt = delta_frames as f64;
+        let predicted = velocity.map_or(last_point, |v| {
+            [last_point[0] + v[0] * dt, last_point[1] + v[1] * dt]
+        });
+        let limit = if let Some(v) = velocity {
+            (0.012
+                + settings.max_step_fraction * 0.30
+                + v[0].hypot(v[1]) * 0.65
+                + settings.max_step_fraction * 0.08 * (dt.sqrt() - 1.0))
+                .min(settings.max_step_fraction * 0.80)
+        } else {
+            settings.max_step_fraction * dt
+        };
+        let deviation = (point[0] - predicted[0]).hypot(point[1] - predicted[1]);
+        if deviation > limit {
+            let plausible_step = (point[0] - last_point[0]).hypot(point[1] - last_point[1])
+                <= settings.max_step_fraction * dt;
+            let supported_turn = velocity.is_some_and(|old_velocity| {
+                if !plausible_step {
+                    return false;
+                }
+                let new_velocity = [
+                    (point[0] - last_point[0]) / dt,
+                    (point[1] - last_point[1]) / dt,
+                ];
+                let mut confirmations = 0;
+                for (future_frame, future) in points
+                    .iter()
+                    .enumerate()
+                    .take((frame + 4).min(points.len()))
+                    .skip(frame + 1)
+                {
+                    let Some(future) = future else {
+                        continue;
+                    };
+                    let elapsed = (future_frame - frame) as f64;
+                    let expected = [
+                        point[0] + new_velocity[0] * elapsed,
+                        point[1] + new_velocity[1] * elapsed,
+                    ];
+                    if (future[0] - expected[0]).hypot(future[1] - expected[1]) <= limit {
+                        confirmations += 1;
+                    }
+                }
+                if confirmations < 2 {
+                    return false;
+                }
+                ((frame + 1)..(frame + settings.max_gap_frames + 2).min(points.len()))
+                    .filter(|&candidate_frame| {
+                        points[candidate_frame].is_some_and(|future| {
+                            let offset = (candidate_frame - last_frame) as f64;
+                            let old = [
+                                last_point[0] + old_velocity[0] * offset,
+                                last_point[1] + old_velocity[1] * offset,
+                            ];
+                            (future[0] - old[0]).hypot(future[1] - old[1]) <= limit * 1.35
+                        })
+                    })
+                    .take(2)
+                    .count()
+                    < 2
+            });
+            if !supported_turn {
+                points[frame] = None;
+                rejected.push(frame);
+                continue;
+            }
+        }
+        previous = latest;
+        latest = Some((frame, point));
+    }
+    rejected
+}
 
 fn reject_interleaved_outliers(points: &[Option<[f64; 2]>], max_step_fraction: f64) -> Vec<usize> {
     let mut rejected = Vec::new();
@@ -450,6 +554,7 @@ pub fn stabilize_ball_motion(
             }
         }
     }
+    rejected_frames.extend(reject_unlinked_motion(&mut points, settings));
     rejected_frames.sort_unstable();
     rejected_frames.dedup();
     let observed_frames = confidence_frames - rejected_frames.len();
@@ -722,6 +827,111 @@ fn valid_point(point: [f64; 2]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ball_stabilizer_keeps_lock_through_long_false_detection_burst() {
+        let samples = (0..66)
+            .map(|frame| ScoredBallSample {
+                frame,
+                point: if (24..=31).contains(&frame) {
+                    [0.84 + (frame - 24) as f64 * 0.004, 0.82]
+                } else {
+                    [0.20 + frame as f64 * 0.004, 0.36]
+                },
+                confidence: if (24..=31).contains(&frame) {
+                    0.99
+                } else {
+                    0.07
+                },
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 66, BallStabilizerSettings::default()).unwrap();
+        for frame in 24..=31 {
+            assert!(result.rejected_frames.contains(&frame), "frame {frame}");
+            assert!(result.interpolated[frame], "frame {frame}");
+            assert!(
+                (result.points[frame].unwrap()[0] - (0.20 + frame as f64 * 0.004)).abs() < 0.01
+            );
+        }
+        assert_eq!(result.confidence_frames, 66);
+        assert_eq!(result.observed_frames, 58);
+    }
+
+    #[test]
+    fn ball_stabilizer_rejects_physically_reachable_false_detour_that_rejoins() {
+        let samples = (0..62)
+            .map(|frame| ScoredBallSample {
+                frame,
+                point: if (22..=29).contains(&frame) {
+                    [0.18 + frame as f64 * 0.003, 0.48]
+                } else {
+                    [0.18 + frame as f64 * 0.003, 0.39]
+                },
+                confidence: 0.85,
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 62, BallStabilizerSettings::default()).unwrap();
+        for frame in 22..=29 {
+            assert!(result.rejected_frames.contains(&frame), "frame {frame}");
+            assert!(result.interpolated[frame], "frame {frame}");
+        }
+        assert!(result.rejected_frames.iter().all(|f| (22..=29).contains(f)));
+        assert_eq!(result.observed_frames, 54);
+    }
+
+    #[test]
+    fn ball_stabilizer_keeps_touch_when_ball_crosses_old_prediction_once() {
+        let y_after = [0.36, 0.42, 0.48, 0.37, 0.26, 0.15, 0.04];
+        let samples = (0..28)
+            .map(|frame| ScoredBallSample {
+                frame,
+                point: [
+                    0.38,
+                    if frame <= 20 {
+                        0.30
+                    } else {
+                        y_after[frame - 21]
+                    },
+                ],
+                confidence: 0.12,
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 28, BallStabilizerSettings::default()).unwrap();
+        assert!(
+            result.rejected_frames.is_empty(),
+            "{:?}",
+            result.rejected_frames
+        );
+        assert!(result.interpolated.iter().all(|flag| !flag));
+        assert_eq!(result.points[25], Some([0.38, 0.26]));
+    }
+
+    #[test]
+    fn ball_stabilizer_retains_supported_abrupt_touch_direction_change() {
+        let samples = (0..29)
+            .map(|frame| ScoredBallSample {
+                frame,
+                point: if frame <= 17 {
+                    [0.15 + frame as f64 * 0.027, 0.27]
+                } else {
+                    [0.15 + 17.0 * 0.027 - (frame - 17) as f64 * 0.047, 0.27]
+                },
+                confidence: 0.11,
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 42, BallStabilizerSettings::default()).unwrap();
+        assert!(
+            result.rejected_frames.is_empty(),
+            "{:?}",
+            result.rejected_frames
+        );
+        assert_eq!(result.observed_frames, 29);
+        assert_eq!(result.points[18], Some([0.15 + 17.0 * 0.027 - 0.047, 0.27]));
+    }
 
     #[test]
     fn ball_stabilizer_rejects_remote_false_positives_before_interpolation() {

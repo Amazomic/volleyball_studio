@@ -8,8 +8,8 @@ const css=readFileSync(new URL("../../rust/volley-app/static/studio.css",import.
 assert.doesNotMatch(html,/id="studio-overlay-stabilizer"/);
 assert.match(html,/id="studio-debug-stabilizer-compare"[^>]*aria-pressed="false"/);
 assert.match(css,/#studio-preview-view:not\(\.training-workspace\) #studio-debug-stabilizer-compare\{display:none\}/);
-assert.match(js,/\["ball_stabilizer_v3","ball_stabilizer_v4","ball_stabilizer_v5"\]\.includes\(stats\?\.version\)/,
-  "Debug comparison must keep reading historical V3/V4 results alongside V5");
+assert.match(js,/\["ball_stabilizer_v3","ball_stabilizer_v4","ball_stabilizer_v5","ball_stabilizer_v6"\]\.includes\(stats\?\.version\)/,
+  "Debug comparison must read historical V3/V4/V5 results alongside V6");
 assert.match(html,/id="studio-overlay-processed"[^>]*role="tab"/);
 assert.match(html,/id="studio-overlay-raw"[^>]*role="tab"/);
 assert.match(html,/id="studio-raw-people-visible"/);
