@@ -206,7 +206,11 @@
       cpu_threads:inputValue("studio-gpu-threads"),
       pose_enabled:$("studio-gpu-pose-enabled").value==="1",
       pose_mode:"photo",
-      pose_stride:inputValue("studio-gpu-person-stride")
+      pose_stride:inputValue("studio-gpu-person-stride"),
+      primary_rallies:{
+        min_trajectory_seconds:inputValue("studio-gpu-rally-min-seconds"),
+        merge_gap_seconds:inputValue("studio-gpu-rally-merge-seconds")
+      }
   });
   // Mirrors volley-core's validated native defaults (no JS-only processing).
   const postProfile=()=>({
@@ -474,6 +478,7 @@
   const graphSettings={
     video:[".analysis-profile-source","#studio-analysis-editor"],
     ball:["#studio-gpu-stride"],
+    rallies:["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds"],
     players:["#studio-gpu-person-stride"],
     pose:["#studio-gpu-pose-enabled","#studio-gpu-interpolate-pose"],
     fusion:["#studio-gpu-memory","#studio-gpu-threads"],
@@ -492,7 +497,7 @@
   const graphDescriptions={
     video:"Выбор видео, интервалов анализа и разметки площадки.",
     ball:"VBallNet находит мяч в исходном видеопотоке.",
-    rallies:"Границы розыгрышей определяются только по траектории мяча. Настройки алгоритма находятся в режиме «Дебаг».",
+    rallies:"Рабочие настройки первичного анализа: длительность непрерывной траектории и объединение соседних розыгрышей. Эксперименты в «Дебаге» имеют собственные значения и не меняют этот GPU-профиль.",
     players:"RF-DETR ищет игроков только внутри найденных игровых интервалов.",
     pose:"RTMPose получает рамки игроков и исходные пиксели видео.",
     fusion:"Сохранение общей версии GPU-наблюдений и повторное использование кэша.",

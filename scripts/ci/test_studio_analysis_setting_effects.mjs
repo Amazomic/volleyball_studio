@@ -12,7 +12,7 @@ const view=markup.slice(beginning,finish);
 
 // All parameter names have visible hover/focus explanations and a11y descriptions.
 const labels=[...view.matchAll(/<label\b([^>]*data-analysis-hint="([^"]+)"[^>]*)>([\s\S]*?)<\/label>/g)];
-assert.equal(labels.length,36,"Tooltip inventory changed: audit new setting labels");
+assert.equal(labels.length,38,"Tooltip inventory changed: audit new setting labels");
 const ids=new Set();
 for(const [,attrs,hint,body] of labels){
   assert.ok(hint.length>=50,"Explanations must state the effect, not only repeat the title");
@@ -46,7 +46,7 @@ const controls=[...view.matchAll(/<(input|select)\b([^>]*\bdata-default="([^"]+)
     assert.ok(id);
     return {id,kind,baseline,min,max,check:attributes.includes('type="checkbox"')};
   });
-assert.equal(controls.length,33,"Unexpected primary and CPU profile controls");
+assert.equal(controls.length,35,"Unexpected primary and CPU profile controls");
 const state=new Map(controls.map(c=>[c.id,c.baseline]));
 const node=id=>({value:state.get(id),checked:state.get(id)==="1"});
 const scope={

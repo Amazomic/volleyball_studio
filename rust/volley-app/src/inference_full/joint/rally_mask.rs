@@ -1,15 +1,42 @@
 use super::super::RawDetection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const CONTEXT_FRAMES: u64 = 30;
 const MIN_DETECTIONS: usize = 45;
 
-fn merge_rally_intervals(intervals: &[(u64, u64)]) -> Vec<(u64, u64)> {
-    crate::cpu_retrack::ball_track::merge_continuous_intervals(
-        intervals,
-        crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
-    )
-    .expect("validated continuous rally merge gap")
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct PrimaryRallySettings {
+    pub min_trajectory_seconds: f64,
+    pub merge_gap_seconds: f64,
+}
+impl Default for PrimaryRallySettings {
+    fn default() -> Self {
+        Self {
+            min_trajectory_seconds: crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
+            merge_gap_seconds: crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
+        }
+    }
+}
+impl PrimaryRallySettings {
+    pub fn validate(self) -> Result<(), String> {
+        if !self.min_trajectory_seconds.is_finite()
+            || !(0.1..=120.0).contains(&self.min_trajectory_seconds)
+        {
+            return Err(
+                "Минимальная непрерывная траектория должна быть от 0,1 до 120 секунд".into(),
+            );
+        }
+        if !self.merge_gap_seconds.is_finite() || !(0.0..=60.0).contains(&self.merge_gap_seconds) {
+            return Err("Объединение розыгрышей должно быть от 0 до 60 секунд".into());
+        }
+        Ok(())
+    }
+}
+
+fn merge_rally_intervals(intervals: &[(u64, u64)], gap_seconds: f64) -> Vec<(u64, u64)> {
+    crate::cpu_retrack::ball_track::merge_continuous_intervals(intervals, gap_seconds)
+        .expect("validated continuous rally merge gap")
 }
 
 #[derive(Debug, Serialize)]
@@ -28,7 +55,12 @@ pub(super) struct RallyMask {
 }
 
 impl RallyMask {
-    pub fn from_ball_samples(samples: &[RawDetection], frames: u64) -> Result<Self, String> {
+    pub fn from_ball_samples(
+        samples: &[RawDetection],
+        frames: u64,
+        settings: PrimaryRallySettings,
+    ) -> Result<Self, String> {
+        settings.validate()?;
         let len = usize::try_from(frames).map_err(|_| "Rally mask frame count overflow")?;
         if len == 0 || len > 48 * 3600 * 30 {
             return Err("Rally mask video duration out of range".into());
@@ -60,9 +92,9 @@ impl RallyMask {
         let observed_ball_frames = points.iter().filter(|point| point.is_some()).count();
         let detected = crate::cpu_retrack::ball_track::continuous_intervals_from_positions(
             &points,
-            crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
+            settings.min_trajectory_seconds,
         )?;
-        let merged = merge_rally_intervals(&detected);
+        let merged = merge_rally_intervals(&detected, settings.merge_gap_seconds);
         let mut selected = Vec::<(u64, u64)>::new();
         for &(start, end) in &merged {
             let start = start.saturating_sub(CONTEXT_FRAMES);
@@ -129,8 +161,8 @@ impl RallyMask {
         Ok(Self {
             schema: "volley-primary-rally-mask/1",
             source_frame_count: frames,
-            min_trajectory_seconds: crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
-            merge_gap_seconds: crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
+            min_trajectory_seconds: settings.min_trajectory_seconds,
+            merge_gap_seconds: settings.merge_gap_seconds,
             context_seconds: CONTEXT_FRAMES as f64 / 30.0,
             observed_ball_frames,
             detected,
@@ -185,7 +217,7 @@ mod tests {
 
     #[test]
     fn missing_ball_falls_back_to_full_analysis() {
-        let mask = RallyMask::from_ball_samples(&[], 600).unwrap();
+        let mask = RallyMask::from_ball_samples(&[], 600, PrimaryRallySettings::default()).unwrap();
         assert_eq!(mask.fallback_reason, Some("insufficient_ball_observations"));
         assert_eq!(mask.included_frames(), 600);
         assert!(mask.includes(599));
@@ -195,7 +227,8 @@ mod tests {
     #[test]
     fn moving_ball_selects_padded_intervals_without_changing_detected_bounds() {
         let samples = moving_samples(80, 180);
-        let mask = RallyMask::from_ball_samples(&samples, 900).unwrap();
+        let mask =
+            RallyMask::from_ball_samples(&samples, 900, PrimaryRallySettings::default()).unwrap();
         assert_eq!(mask.fallback_reason, None);
         assert_eq!(mask.detected.len(), 1);
         let (start, end) = mask.detected[0];
@@ -211,7 +244,8 @@ mod tests {
     fn separate_play_intervals_leave_long_pauses_outside_gpu_person_scope() {
         let mut samples = moving_samples(60, 150);
         samples.extend(moving_samples(450, 540));
-        let mask = RallyMask::from_ball_samples(&samples, 900).unwrap();
+        let mask =
+            RallyMask::from_ball_samples(&samples, 900, PrimaryRallySettings::default()).unwrap();
         assert_eq!(mask.detected.len(), 2);
         assert_eq!(mask.merged.len(), 2);
         assert!(mask.includes(100));
@@ -228,24 +262,62 @@ mod tests {
     #[test]
     fn merging_is_strictly_less_than_four_seconds() {
         assert_eq!(
-            merge_rally_intervals(&[(30, 100), (221, 300)]),
+            merge_rally_intervals(&[(30, 100), (221, 300)], 4.0),
             vec![(30, 100), (221, 300)]
         );
         assert_eq!(
-            merge_rally_intervals(&[(30, 100), (220, 300)]),
+            merge_rally_intervals(&[(30, 100), (220, 300)], 4.0),
             vec![(30, 300)]
         );
         assert_eq!(
-            merge_rally_intervals(&[(30, 100), (101, 200)]),
+            merge_rally_intervals(&[(30, 100), (101, 200)], 4.0),
             vec![(30, 200)]
         );
+    }
+
+    #[test]
+    fn primary_mask_uses_its_own_thresholds_and_saves_them() {
+        let samples = moving_samples(60, 155);
+        let defaults =
+            RallyMask::from_ball_samples(&samples, 450, PrimaryRallySettings::default()).unwrap();
+        assert_eq!(defaults.detected.len(), 1);
+        let tuned = PrimaryRallySettings {
+            min_trajectory_seconds: 4.0,
+            merge_gap_seconds: 1.0,
+        };
+        let mask = RallyMask::from_ball_samples(&samples, 450, tuned).unwrap();
+        assert!(mask.detected.is_empty());
+        assert_eq!(
+            mask.fallback_reason,
+            Some("no_reliable_moving_ball_intervals")
+        );
+        let serialized = serde_json::to_value(&mask).unwrap();
+        assert_eq!(serialized["min_trajectory_seconds"], 4.0);
+        assert_eq!(serialized["merge_gap_seconds"], 1.0);
+        assert_eq!(
+            merge_rally_intervals(&[(30, 100), (175, 245)], 1.0).len(),
+            2,
+        );
+        assert_eq!(
+            merge_rally_intervals(&[(30, 100), (175, 245)], 4.0).len(),
+            1,
+        );
+        for seconds in [f64::NAN, f64::INFINITY, 0.0, 121.0] {
+            assert!(PrimaryRallySettings {
+                min_trajectory_seconds: seconds,
+                ..PrimaryRallySettings::default()
+            }
+            .validate()
+            .is_err());
+        }
     }
 
     #[test]
     fn short_ambiguous_flight_is_scanned_but_not_confirmed_as_rally() {
         let mut samples = moving_samples(70, 180);
         samples.extend(moving_samples(580, 605));
-        let mask = RallyMask::from_ball_samples(&samples, 1000).unwrap();
+        let mask =
+            RallyMask::from_ball_samples(&samples, 1000, PrimaryRallySettings::default()).unwrap();
         assert_eq!(mask.detected.len(), 1);
         assert!(mask
             .uncertain
@@ -268,7 +340,8 @@ mod tests {
                 head_point_norm: None,
             })
             .collect::<Vec<_>>();
-        let mask = RallyMask::from_ball_samples(&samples, 450).unwrap();
+        let mask =
+            RallyMask::from_ball_samples(&samples, 450, PrimaryRallySettings::default()).unwrap();
         assert_eq!(
             mask.fallback_reason,
             Some("no_reliable_moving_ball_intervals")

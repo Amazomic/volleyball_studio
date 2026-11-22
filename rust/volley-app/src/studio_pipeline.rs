@@ -398,6 +398,8 @@ pub struct GpuProfile {
     /// Shared sampling interval for person detection and RTMPose at 30 FPS.
     /// The historical API name pose_stride is retained for saved profiles.
     pose_stride: usize,
+    #[serde(default)]
+    primary_rallies: inference_full::PrimaryRallySettings,
 }
 const fn default_interpolation_enabled() -> bool {
     true
@@ -411,6 +413,7 @@ impl Default for GpuProfile {
             pose_enabled: true,
             pose_mode: crate::pose_inference::PoseInputMode::Photo,
             pose_stride: volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES,
+            primary_rallies: inference_full::PrimaryRallySettings::default(),
         }
     }
 }
@@ -549,6 +552,7 @@ impl TryFrom<StartRequestWire> for StartRequest {
             );
         }
         let (gpu, mut post) = decode_profiles(wire.gpu, wire.post)?;
+        gpu.primary_rallies.validate()?;
         if !(1..=99).contains(&post.auto_assign_threshold_percent) {
             return Err("Порог сходства для автопривязки должен быть от 1 до 99%".into());
         }
@@ -973,6 +977,14 @@ fn gpu_lineage_valid(
     };
     if request.mode == PipelineMode::Full
         && saved["gpu_rally_mask"]["schema"] != "volley-primary-rally-mask/1"
+    {
+        return false;
+    }
+    if saved["gpu_rally_mask"]["schema"] == "volley-primary-rally-mask/1"
+        && (saved["gpu_rally_mask"]["min_trajectory_seconds"]
+            != json!(request.gpu.primary_rallies.min_trajectory_seconds)
+            || saved["gpu_rally_mask"]["merge_gap_seconds"]
+                != json!(request.gpu.primary_rallies.merge_gap_seconds))
     {
         return false;
     }
@@ -1840,6 +1852,7 @@ async fn pipeline(
                         "person_stride":request.gpu.pose_stride,
                         "mode":"shared_nvdec_primary_v1",
                         "pose_enabled":request.gpu.pose_enabled,
+                        "primary_rallies":request.gpu.primary_rallies,
                     }),
                 )?;
                 // A single permit covers both persistent model sessions. It
@@ -1892,6 +1905,7 @@ async fn pipeline(
                         full_resolution_pose,
                         request.gpu.gpu_memory_limit_mb,
                         request.gpu.cpu_threads,
+                        request.gpu.primary_rallies,
                         cancel,
                         |fraction, processed, total, rally_mask| {
                             if let Some((mask, decoded_frames)) = rally_mask {
@@ -3367,6 +3381,43 @@ mod tests {
     }
 
     #[test]
+    fn primary_rally_gpu_settings_are_validated_versioned_and_defaulted() {
+        let identity = json!({"bytes":1234,"mtime_ns":5678});
+        let mut request: StartRequest = serde_json::from_value(json!({
+            "project_id":"abc123def456","video":"match.mp4"
+        }))
+        .unwrap();
+        assert_eq!(request.gpu.primary_rallies.min_trajectory_seconds, 1.5);
+        assert_eq!(request.gpu.primary_rallies.merge_gap_seconds, 4.0);
+        let saved = json!({
+            "schema":SCHEMA,
+            "gpu_model_stack":requested_gpu_model_stack(),
+            "project_id":request.project_id,
+            "video":request.video,
+            "profile":{"gpu":request.gpu},
+            "source_identity":identity
+        });
+        assert!(compatible_version(&saved, &request, &identity));
+        request.gpu.primary_rallies.min_trajectory_seconds = 2.5;
+        assert!(!compatible_version(&saved, &request, &identity));
+        request.gpu.primary_rallies.min_trajectory_seconds = 1.5;
+        request.gpu.primary_rallies.merge_gap_seconds = 2.0;
+        assert!(!compatible_version(&saved, &request, &identity));
+        for invalid in [
+            json!({"min_trajectory_seconds":0.0,"merge_gap_seconds":4.0}),
+            json!({"min_trajectory_seconds":1.5,"merge_gap_seconds":65.0}),
+            json!({"min_trajectory_seconds":"x","merge_gap_seconds":4.0}),
+            json!({"min_trajectory_seconds":1.5,"merge_gap_seconds":4.0,"unknown":true}),
+        ] {
+            assert!(serde_json::from_value::<StartRequest>(json!({
+                "project_id":"abc123def456","video":"match.mp4",
+                "gpu":{"primary_rallies":invalid}
+            }))
+            .is_err());
+        }
+    }
+
+    #[test]
     fn shared_player_pose_stride_changes_gpu_cache_identity() {
         let identity = json!({"bytes":1234,"mtime_ns":5678});
         let mut request: StartRequest = serde_json::from_value(json!({
@@ -3659,7 +3710,11 @@ mod branching_tests {
             "gpu_model_stack":requested_gpu_model_stack(),
             "profile":{"gpu":request.gpu,"post":request.post},
             "gpu_jobs":{"ball":gpu_ball,"players":gpu_players},
-            "gpu_rally_mask":{"schema":"volley-primary-rally-mask/1"},
+            "gpu_rally_mask":{
+                "schema":"volley-primary-rally-mask/1",
+                "min_trajectory_seconds":request.gpu.primary_rallies.min_trajectory_seconds,
+                "merge_gap_seconds":request.gpu.primary_rallies.merge_gap_seconds
+            },
             "gpu_rally_mask_sha256":sha,
             "analysis_id":analysis,"cpu_runs":{"tracking":replay,"touches":touch,"rallies":rally},
             "postprocessing_id":rally

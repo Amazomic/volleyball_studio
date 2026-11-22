@@ -4,6 +4,7 @@ use super::*;
 mod rally_mask;
 mod zero_copy;
 use crate::pose_inference::{GpuPoseStage, PendingPose, PoseStream};
+pub(crate) use rally_mask::PrimaryRallySettings;
 use rally_mask::RallyMask;
 use std::cell::RefCell;
 use std::sync::OnceLock;
@@ -285,12 +286,14 @@ pub(crate) fn run_joint_pair(
     pose_enabled: bool,
     gpu_memory_limit_mb: u64,
     cpu_threads: usize,
+    rally_settings: PrimaryRallySettings,
     cancelled: &AtomicBool,
     mut report: impl FnMut(f64, u64, u64, Option<(&Value, u64)>) -> Result<(), String>,
 ) -> Result<JointPair, String> {
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
+    rally_settings.validate()?;
     if !state.writes_enabled || !(1..=30).contains(&person_stride) {
         return Err("Invalid shared GPU job or person sampling interval".into());
     }
@@ -470,6 +473,7 @@ pub(crate) fn run_joint_pair(
         let mask = RallyMask::from_ball_samples(
             ball_writer.ball_samples.as_deref().unwrap_or(&[]),
             ball_scan.decode.decoded_frames,
+            rally_settings,
         )?;
         ball_writer.ball_samples = None;
         let selected_frames = mask.included_frames();

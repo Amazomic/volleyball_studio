@@ -14,7 +14,7 @@ use axum::{
     Json,
 };
 #[cfg(any(unix, windows))]
-pub(crate) use joint::run_joint_pair;
+pub(crate) use joint::{run_joint_pair, PrimaryRallySettings};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};

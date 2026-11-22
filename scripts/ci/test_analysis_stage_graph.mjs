@@ -51,4 +51,20 @@ assert.match(rust,/rows\.push\(json!\(\{"name":stage_name,"id":stage_id/);
 assert.match(rust,/status\["stage_id"\] = json!\(stage_id\)/);
 assert.match(html,/id="analysis-flow-diagram"/);
 assert.match(html,/id="analysis-flow-dialog"/);
+const debugSource=readFileSync(join(root,"rust/volley-app/static/studio.js"),"utf8");
+const gpuRallyFields=["studio-gpu-rally-min-seconds","studio-gpu-rally-merge-seconds"];
+const debugRallyFields=["studio-comparison-min-seconds"];
+for(const id of gpuRallyFields){
+  assert.match(html,new RegExp('id="'+id+'"[^>]*data-default='));
+  assert.match(js,new RegExp('inputValue\\("'+id+'"\\)'));
+  assert.doesNotMatch(debugSource,new RegExp(id));
+}
+for(const id of debugRallyFields){
+  assert.match(html,new RegExp('id="'+id+'"'));
+  assert.doesNotMatch(js,new RegExp('inputValue\\("'+id+'"\\)'));
+}
+assert.match(js,/rallies:\["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds"\]/);
+assert.match(js,/primary_rallies:\{\s*min_trajectory_seconds:/);
+assert.match(js,/merge_gap_seconds:inputValue\("studio-gpu-rally-merge-seconds"\)/);
+
 console.log("PASS: 12 compact canonical stages, real Rust ids, history parity and conditional graph branches");
