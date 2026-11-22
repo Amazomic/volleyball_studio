@@ -4,6 +4,8 @@ import {runInNewContext} from "node:vm";
 
 const js=readFileSync(new URL("../../rust/volley-app/static/studio.js",import.meta.url),"utf8");
 const html=readFileSync(new URL("../../rust/volley-app/static/studio.html",import.meta.url),"utf8");
+assert.match(js,/\["ball_stabilizer_v3","ball_stabilizer_v4"\]\.includes\(stats\?\.version\)/,
+  "Debug comparison must keep reading historical V3 results alongside V4");
 assert.match(html,/id="studio-overlay-processed"[^>]*role="tab"/);
 assert.match(html,/id="studio-overlay-raw"[^>]*role="tab"/);
 assert.match(html,/id="studio-raw-people-visible"/);

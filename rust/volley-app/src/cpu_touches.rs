@@ -307,7 +307,10 @@ pub(crate) fn verified_ball_trajectory(
     if summary["schema"] != "volley-ball-stabilizer/1"
         || !matches!(
             version,
-            "ball_stabilizer_v1" | "ball_stabilizer_v2" | "ball_stabilizer_v3"
+            "ball_stabilizer_v1"
+                | "ball_stabilizer_v2"
+                | "ball_stabilizer_v3"
+                | "ball_stabilizer_v4"
         )
         || summary["source_replay_id"] != replay_id
         || summary["source_replay_sha256"] != replay_sha256
@@ -704,6 +707,7 @@ mod ball_stabilizer_postprocessing_tests {
             assert!(motion.interpolated[i]);
         }
         assert!(motion.points[6].is_some());
+        assert!(motion.interpolated[6]);
         let original = block.clone();
         use_stabilized_ball(&mut block, &motion);
         assert!(
@@ -834,6 +838,32 @@ mod ball_stabilizer_postprocessing_tests {
         assert!(verified_ball_trajectory(
             &root,
             &v2_summary,
+            "abc123def456",
+            "match.mp4",
+            &"d".repeat(32),
+            &replay_sha,
+            32,
+        )
+        .is_ok());
+        assert!(verified_ball_trajectory(
+            &root,
+            &summary,
+            "abc123def456",
+            "match.mp4",
+            &"d".repeat(32),
+            &replay_sha,
+            32,
+        )
+        .is_err());
+        storage::write_json_atomic(&manifest_path, &published_manifest).unwrap();
+        let mut v3_manifest = published_manifest.clone();
+        v3_manifest["algorithm_version"] = json!("ball_stabilizer_v3");
+        storage::write_json_atomic(&manifest_path, &v3_manifest).unwrap();
+        let mut v3_summary = summary.clone();
+        v3_summary["version"] = json!("ball_stabilizer_v3");
+        assert!(verified_ball_trajectory(
+            &root,
+            &v3_summary,
             "abc123def456",
             "match.mp4",
             &"d".repeat(32),
