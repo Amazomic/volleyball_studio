@@ -828,6 +828,22 @@ fn progress_with_frames(
     }
     save(path, status)
 }
+fn shared_pose_metrics(status: &Value, pose: &Value) -> Value {
+    let player = status["stages"]
+        .as_array()
+        .and_then(|stages| stages.iter().rev().find(|stage| stage["id"] == "players"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    json!({
+        "source_stage_id": "players",
+        "sampled_frames": pose["sampled_frames"],
+        "player_poses": pose["player_poses"],
+        "started_ms": player["started_ms"],
+        "finished_ms": player["finished_ms"],
+        "duration_ms": player["duration_ms"]
+    })
+}
+
 fn publish_primary_rally_mask(
     path: &Path,
     status: &mut Value,
@@ -1703,6 +1719,7 @@ async fn pipeline(
         status["analysis_id"] = source["analysis_id"].clone();
         status["analysis_range"] = source["analysis_range"].clone();
         status["gpu_jobs"] = source["gpu_jobs"].clone();
+        status["shared_pose"] = source["shared_pose"].clone();
         let (gpu, _) = decode_profiles(source["profile"]["gpu"].clone(), empty_profile())?;
         status["profile"]["gpu"] = json!(gpu);
         status["gpu_reused"] = json!(true);
@@ -1739,6 +1756,7 @@ async fn pipeline(
     }) {
         status["analysis_id"] = existing["analysis_id"].clone();
         status["gpu_jobs"] = existing["gpu_jobs"].clone();
+        status["shared_pose"] = existing["shared_pose"].clone();
         status["gpu_rally_mask"] = existing["gpu_rally_mask"].clone();
         status["gpu_rally_mask_sha256"] = existing["gpu_rally_mask_sha256"].clone();
         status["cpu_runs"] = existing["cpu_runs"].clone();
@@ -1767,6 +1785,7 @@ async fn pipeline(
         if let Some(existing) = reusable.gpu {
             status["analysis_id"] = existing["analysis_id"].clone();
             status["gpu_jobs"] = existing["gpu_jobs"].clone();
+            status["shared_pose"] = existing["shared_pose"].clone();
             status["gpu_rally_mask"] = existing["gpu_rally_mask"].clone();
             status["gpu_rally_mask_sha256"] = existing["gpu_rally_mask_sha256"].clone();
             status["gpu_reused"] = json!(true);
@@ -2022,6 +2041,7 @@ async fn pipeline(
                 // source and SHA-bound fusion are both immutable and verified.
                 let pose = pending.publish(&fusion, cancel)?;
                 status["gpu_jobs"]["pose"] = pose["pose_run_id"].clone();
+                status["shared_pose"] = shared_pose_metrics(status, &pose);
                 save(path, status)?;
                 log_event(
                     path,
@@ -2827,6 +2847,22 @@ pub async fn cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_pose_reports_published_counts_and_shared_gpu_stage_duration() {
+        let pipeline = json!({"stages":[
+            {"id":"players","started_ms":1000,"finished_ms":37000,"duration_ms":36000},
+            {"id":"fusion","started_ms":37000,"finished_ms":38000,"duration_ms":1000}
+        ]});
+        let pose = json!({"sampled_frames":175,"player_poses":612});
+        let metrics = shared_pose_metrics(&pipeline, &pose);
+        assert_eq!(metrics["source_stage_id"], "players");
+        assert_eq!(metrics["sampled_frames"], 175);
+        assert_eq!(metrics["player_poses"], 612);
+        assert_eq!(metrics["duration_ms"], 36000);
+        assert_eq!(metrics["started_ms"], 1000);
+        assert_eq!(metrics["finished_ms"], 37000);
+    }
 
     #[test]
     fn pipeline_stage_ids_are_stable() {

@@ -27,6 +27,14 @@ assert.equal(format("rallies",{started_ms:1000,finished_ms:3662000,duration_ms:3
 assert.equal(format("rallies",null,{status:"complete",gpu_rally_mask:{merged:[]}},0,false,false),"—");
 assert.equal(format("video",{duration_ms:423000,finished_ms:500000},{status:"complete"},0,true,false),"Готово · 00:07:03");
 assert.equal(format("touches",null,null,0,false,false),"—");
+const sharedPose={gpu_jobs:{pose:"pose-run"},stages:[{id:"players",duration_ms:36000}],
+  shared_pose:{source_stage_id:"players",sampled_frames:175,player_poses:612,duration_ms:36000}};
+assert.equal(format("pose",null,sharedPose,0,true,false),
+  "175 кадр. · 612 поз · 00:00:36 (общ.)");
+assert.equal(format("pose",null,{gpu_jobs:{pose:"pose-run"},stages:[{id:"players",name:"GPU · RF-DETR + RTMPose",duration_ms:36000}]},0,true,false),
+  "С RF-DETR · 00:00:36");
+assert.equal(format("pose",null,{gpu_jobs:{pose:"pose-run"},stages:[]},0,true,false),
+  "Позы сохранены · время не измерено");
 for(const kind of ["input","gpu","cpu","output"]){
   assert.match(css,new RegExp('\\.analysis-flow-node\\[data-kind="'+kind+'"\\]\\{background:linear-gradient\\('));
 }
@@ -54,6 +62,11 @@ const stages=context.stages;
 const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
 assert.equal(stages.length,12);
+assert.deepEqual([...new Set(stages.filter(row=>row[2]==="gpu"||row[2]==="input").map(row=>row[3]))].sort(),[1,2]);
+assert.deepEqual([...new Set(stages.filter(row=>row[2]==="cpu"||row[2]==="output").map(row=>row[3]))].sort(),[3,4]);
+assert.match(js,/analysis-flow-phase/);
+assert.match(css,/\.analysis-flow-phase\[data-phase="gpu"\]/);
+assert.match(css,/\.analysis-flow-phase\[data-phase="cpu"\]/);
 for(const item of stages)assert.ok(item[1].split(/\s+/u).length<=2,item[1]);
 const examples=[
   ["Проверка исходного видео","video"],
@@ -71,6 +84,7 @@ const examples=[
 for(const [name,id] of examples)assert.equal(context.id(name),id,name);
 const edges=vm.runInNewContext(extract("const pipelineEdges=","const graphSettings=")
   .replace("const pipelineEdges=","").replace(/;\s*$/u,""));
+assert.deepEqual(Array.from(edges.find(row=>row[2]==="no-pose")).slice(0,2),["fusion","tracking"]);
 for(const [from,to] of edges){
   assert.ok(ids.includes(from)&&ids.includes(to),from+" -> "+to);
   assert.ok(ids.indexOf(from)<ids.indexOf(to),from+" -> "+to);
@@ -92,6 +106,8 @@ assert.match(timeline,/make\("span","analysis-history-stage-name",pipelineLabel\
 assert.match(js,/updatePipelineGraph\(mainGraph,status\)/);
 assert.match(rust,/rows\.push\(json!\(\{"name":stage_name,"id":stage_id/);
 assert.match(rust,/status\["stage_id"\] = json!\(stage_id\)/);
+assert.match(rust,/status\["shared_pose"\] = shared_pose_metrics\(status, &pose\)/);
+assert.match(rust,/status\["shared_pose"\] = source\["shared_pose"\]\.clone\(\)/);
 assert.match(html,/id="analysis-flow-diagram"/);
 assert.match(html,/id="analysis-flow-dialog"/);
 const debugSource=readFileSync(join(root,"rust/volley-app/static/studio.js"),"utf8");
