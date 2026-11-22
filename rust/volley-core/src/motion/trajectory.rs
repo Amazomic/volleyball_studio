@@ -322,7 +322,7 @@ fn sustained_down_to_up_rebounds(
             continue;
         }
         let contact = window[4];
-        let displacement_needed = 20.0 * config.max_fit_error_px;
+        let displacement_needed = 10.0 * config.max_fit_error_px;
         if contact.y - window[0].y < displacement_needed
             || contact.y - window[8].y < displacement_needed
             || window[..5]
@@ -832,6 +832,48 @@ mod tests {
         let found = trajectory_direction_breaks(&points, DirectionBreakConfig::default());
         assert_eq!(found.len(), 1, "{found:?}");
         assert!((found[0].frame - 50).abs() <= 1);
+    }
+
+    #[test]
+    fn moderate_rebound_with_short_quantized_pause_is_still_a_contact() {
+        let raw: Vec<_> = (0..68)
+            .map(|frame| {
+                let t = frame as f64 - 30.0;
+                let x = if frame < 28 {
+                    600.0 + 7.0 * t
+                } else if frame <= 30 {
+                    600.0
+                } else {
+                    600.0 - 5.0 * t
+                };
+                let y = if frame < 28 {
+                    450.0 + 11.0 * t + 0.05 * t * t
+                } else if frame <= 30 {
+                    450.0 - if frame == 29 { 4.0 } else { 0.0 }
+                } else {
+                    450.0 - 12.0 * t + 0.06 * t * t
+                };
+                BallObservation {
+                    frame,
+                    x: (x / 3.75).round() * 3.75,
+                    y: (y / 3.75).round() * 3.75,
+                }
+            })
+            .collect();
+        let cleaned =
+            crate::ball_interpolation::reconstruct_short_ball_motion(&raw, 1920, 1080, 28.0)
+                .unwrap();
+        let impacts =
+            trajectory_direction_breaks(&cleaned.observations, DirectionBreakConfig::default());
+        assert!(
+            impacts.iter().any(|impact| impact.frame.abs_diff(30) <= 1),
+            "A sustained direction reversal was rejected: {impacts:?}"
+        );
+        assert_eq!(
+            impacts.len(),
+            1,
+            "Unexpected duplicate contacts: {impacts:?}"
+        );
     }
 
     #[test]
