@@ -576,6 +576,96 @@ fn real_simultaneous_owner_assignments_are_reported_as_conflicts() {
 }
 
 #[test]
+fn overlapping_duplicate_boxes_do_not_block_high_confidence_photo_links() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    let mut first = ctx.tracks[&7].clone();
+    let mut second = first.clone();
+    first.visible_spans = vec![(1, 8)];
+    second.visible_spans = vec![(4, 10)];
+    let pair = (7, 8);
+    let duplicate = PairGeometry {
+        same_position: 3,
+        distinct_position: 2,
+        first_distinct_frame: Some(7),
+    };
+    first.observed_pairs.insert(pair, duplicate.clone());
+    second.observed_pairs.insert(pair, duplicate);
+    ctx.tracks.insert(7, first);
+    ctx.tracks.insert(8, second);
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
+    assert!(!tracks_co_visible(&ctx.tracks[&7], &ctx.tracks[&8]));
+    assert_eq!(measured_conflict_frame(&ctx, 7, 8), None);
+    let matches = json!({
+        "7":[{"player_id":"abcdef012345","cosine_similarity":0.87,"samples_used":3}],
+        "8":[{"player_id":"abcdef012345","cosine_similarity":0.85,"samples_used":3}]
+    });
+    let chosen = choose_automatic_photo_links(&ctx, &base_document(&ctx), &matches).unwrap();
+    assert_eq!(chosen.len(), 2);
+    let mut doc = base_document(&ctx);
+    doc["automatic_assignments"] = json!({"7":"abcdef012345"});
+    doc["automatic_identity_evidence"]["matches"] = matches;
+    doc["automatic_identity_evidence"]["photo_sample_policy"] = json!("three_observations_v1");
+    reconcile_automatic_photo_links(&ctx, &mut doc).unwrap();
+    assert_eq!(
+        doc["automatic_assignments"],
+        json!({
+            "7":"abcdef012345","8":"abcdef012345"
+        })
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn measured_distinct_players_remain_incompatible_despite_photo_similarity() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    let mut first = ctx.tracks[&7].clone();
+    let mut second = first.clone();
+    first.visible_spans = vec![(1, 8)];
+    second.visible_spans = vec![(4, 10)];
+    let pair = (7, 8);
+    let distinct = PairGeometry {
+        same_position: 0,
+        distinct_position: 4,
+        first_distinct_frame: Some(4),
+    };
+    first.observed_pairs.insert(pair, distinct.clone());
+    second.observed_pairs.insert(pair, distinct);
+    ctx.tracks.insert(7, first);
+    ctx.tracks.insert(8, second);
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
+    assert!(tracks_co_visible(&ctx.tracks[&7], &ctx.tracks[&8]));
+    assert_eq!(measured_conflict_frame(&ctx, 7, 8), Some(4));
+    let matches = json!({
+        "7":[{"player_id":"abcdef012345","cosine_similarity":0.91,"samples_used":3}],
+        "8":[{"player_id":"abcdef012345","cosine_similarity":0.89,"samples_used":3}]
+    });
+    assert_eq!(
+        choose_automatic_photo_links(&ctx, &base_document(&ctx), &matches)
+            .unwrap()
+            .len(),
+        1
+    );
+    let mut doc = base_document(&ctx);
+    doc["automatic_assignments"] = json!({"7":"abcdef012345"});
+    doc["automatic_identity_evidence"]["matches"] = matches;
+    let page = filtered_page(&ctx, &doc, "rev", 0, 20, Some("unassigned"), None).unwrap();
+    assert_eq!(page["unassigned_track_ids"], json!([8]));
+    assert_eq!(
+        page["tracks"][0]["automatic_conflicting_track_ids"],
+        json!([7])
+    );
+    assert_eq!(
+        page["tracks"][0]["automatic_unassigned_reason"],
+        "identity_conflict_or_ambiguity"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn photo_links_join_lost_tracks_without_real_co_visibility() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();

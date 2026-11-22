@@ -23,7 +23,7 @@
     playerMatches:{},similarityStatus:"not_calculated",libraryPlayers:[],projectPlayerIds:new Set(),playerTrackCounts:{},
     rosterEpoch:0,rosterBusy:false,rosterLoaded:false,tracksLoaded:false,loadingKey:null,grouping:false,
     photoIndices:new Map(),groupNavigation:new Map(),viewPlayer:"",viewConflicts:false,viewExcluded:false,filteredTotal:0,unassignedIds:new Set(),excludedIds:new Set(),identityConflictIds:new Set(),comparisonIds:new Set(),
-    photoScoreLoading:false,autoThresholdScope:"",autoAssignPending:null
+    photoScoreLoading:false,autoThresholdScope:"",autoAssignPending:null,pendingEditFailure:""
   };
   const node=(tag,klass,text)=>{
     const n=document.createElement(tag);if(klass)n.className=klass;
@@ -47,6 +47,10 @@
     return body;
   };
   const note=(value,error=false)=>{
+    if(state.pendingEditFailure&&!error){
+      value=state.pendingEditFailure;
+      error=true;
+    }
     ui.status.textContent=String(value);
     ui.status.classList.toggle("track-error",error);
   };
@@ -239,7 +243,7 @@
     state.groups=[];state.grouped.clear();state.groupLoaded=false;
     state.groupShown=24;state.singleCount=0;state.playerMatches={};state.similarityStatus="not_calculated";
     state.viewPlayer="";state.viewConflicts=false;state.viewExcluded=false;state.filteredTotal=0;state.unassignedIds.clear();state.excludedIds.clear();state.identityConflictIds.clear();
-    state.comparisonIds.clear();state.autoAssignPending=null;
+    state.comparisonIds.clear();state.autoAssignPending=null;state.pendingEditFailure="";
     updateUnassignedLabel();viewBack.hidden=true;groupsMode.hidden=false;playerMode.hidden=true;setMode("singles");
     state.rosterEpoch++;state.libraryPlayers=[];state.projectPlayerIds.clear();state.playerTrackCounts={};
     state.rosterLoaded=false;state.rosterBusy=false;
@@ -559,6 +563,22 @@
     link.addEventListener("click",()=>bindSelected(ids,select.value));
     controls.append(select,link);
     updateLink();
+    const blocked=ids.flatMap(id=>{
+      const row=(state.rows||[]).find(item=>Number(item.track_id)===Number(id));
+      return Array.isArray(row?.automatic_conflicting_track_ids)?
+        row.automatic_conflicting_track_ids.map(other=>"ID "+other):[];
+    });
+    const pending=ids.map(id=>(state.rows||[]).find(row=>Number(row.track_id)===Number(id))).
+      filter(Boolean);
+    let reason="";
+    if(blocked.length)reason="Автопривязка заблокирована: разные игроки одновременно видны под "+[...new Set(blocked)].join(", ")+". Проверьте игрока перед ручной привязкой.";
+    else if(pending.some(row=>row.automatic_unassigned_reason==="manually_suppressed"))
+      reason="Автопривязка отключена после ручного снятия. Вы можете снова привязать ID вручную.";
+    else if(pending.some(row=>row.automatic_unassigned_reason==="below_similarity_threshold"))
+      reason="Сходство ниже установленного порога автопривязки "+galleryAutoThreshold.value+"%.";
+    else if(pending.some(row=>row.automatic_unassigned_reason==="insufficient_observations"))
+      reason="Недостаточно независимых кадров для автоматического подтверждения.";
+    if(reason)panel.append(node("small","track-match-score track-auto-warning",reason));
     panel.append(similarity,controls);
     card.append(panel);
   };
@@ -690,8 +710,21 @@
         rally_run_id:state.rallyRun,
         action,track_ids:ids,expected_revision:revision,offset,limit:state.limit};
       if(action==="assign")payload.player_id=owner;
-      const result=await post("/api/players/native/tracks",payload);
+      let result;
+      try{
+        result=await post("/api/players/native/tracks",payload);
+      }catch(error){
+        if(!String(error.message).includes("Track bindings changed; refresh the revision"))throw error;
+        const refreshed=await read(path("/api/players/native/tracks",{
+          project_id:project,video,replay_id:replay,rally_run_id:state.rallyRun,
+          offset:0,limit:1,view:"unassigned"
+        }));
+        if(project!==state.project||video!==state.video||replay!==state.replay)return false;
+        payload.expected_revision=String(refreshed.revision);
+        result=await post("/api/players/native/tracks",payload);
+      }
       if(project!==state.project||video!==state.video||replay!==state.replay)return false;
+      state.pendingEditFailure="";
       state.revision=String(result.revision);
       state.lastDisplacedAutomatic=Array.isArray(result.displaced_automatic_track_ids)?
         result.displaced_automatic_track_ids.map(Number):[];
@@ -704,8 +737,10 @@
       note("Привязки сохранены. Обновляем карточки без блокировки.");
       return true;
     }catch(e){
-      if(project===state.project&&video===state.video&&replay===state.replay)
-        note(e.message,true);
+      if(project===state.project&&video===state.video&&replay===state.replay){
+        state.pendingEditFailure="ID "+ids.join(", ")+": "+e.message;
+        note(state.pendingEditFailure,true);
+      }
       return false;
     }finally{
       // Only the assignment POST owns the global mutation lock. Heavy

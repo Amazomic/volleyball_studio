@@ -29,20 +29,22 @@ pub(crate) fn conflicting_frame_tracks(
         .collect()
 }
 
-/// An overlap of lifespan ranges is not evidence of co-visibility:
-/// the same athlete may have a lost/reacquired track during those ranges.
+fn measured_pair_is_distinct(evidence: &PairGeometry) -> bool {
+    evidence.distinct_position > evidence.same_position
+}
+
 pub(super) fn tracks_co_visible(a: &Aggregate, b: &Aggregate) -> bool {
+    if let Some(evidence) = a.observed_pairs.iter().find_map(|(pair, evidence)| {
+        (b.observed_pairs.get(pair) == Some(evidence)).then_some(evidence)
+    }) {
+        return measured_pair_is_distinct(evidence);
+    }
     let (mut i, mut j) = (0, 0);
     while i < a.visible_spans.len() && j < b.visible_spans.len() {
         let (a0, a1) = a.visible_spans[i];
         let (b0, b1) = b.visible_spans[j];
         if a0 <= b1 && b0 <= a1 {
-            let same_athlete_duplicate = a.observed_pairs.iter().any(|(pair, evidence)| {
-                evidence.same_position >= 2
-                    && evidence.distinct_position == 0
-                    && b.observed_pairs.get(pair) == Some(evidence)
-            });
-            return !same_athlete_duplicate;
+            return true;
         }
         if a1 < b1 {
             i += 1;
@@ -63,7 +65,7 @@ pub(super) fn measured_conflict_frame(ctx: &Inputs, a: u64, b: u64) -> Option<u6
         .observed_pairs
         .get(&pair)
         .or_else(|| ctx.tracks.get(&b)?.observed_pairs.get(&pair))?;
-    (evidence.distinct_position >= 2)
+    (evidence.distinct_position >= 2 && measured_pair_is_distinct(evidence))
         .then_some(evidence.first_distinct_frame)
         .flatten()
 }
@@ -441,16 +443,42 @@ pub(super) fn reconcile_automatic_photo_links(ctx: &Inputs, doc: &mut Value) -> 
         &doc["automatic_identity_evidence"]["identity_groups"],
         saved_automatic_photo_threshold(doc),
     )?;
-    let safe = saved
+    let mut safe = saved
         .iter()
         .filter_map(|(id, owner)| {
             let id_number = id.parse::<u64>().ok()?;
             let player = owner.as_str()?;
             (expected.get(&id_number).map(String::as_str) == Some(player))
-                .then(|| (id.clone(), player.to_owned()))
+                .then(|| (id_number, player.to_owned()))
         })
         .collect::<BTreeMap<_, _>>();
-    doc["automatic_assignments"] = json!(safe);
+    let suggestions = choose_automatic_photo_links_with_groups(
+        ctx,
+        doc,
+        &Value::Object(matches.clone()),
+        &doc["automatic_identity_evidence"]["identity_groups"],
+        saved_automatic_photo_threshold(doc),
+    )?;
+    for (id, owner) in suggestions {
+        if saved.contains_key(&id.to_string()) || safe.contains_key(&id) {
+            continue;
+        }
+        let conflicts = safe.iter().any(|(other, existing_owner)| {
+            existing_owner == &owner
+                && ctx
+                    .tracks
+                    .get(&id)
+                    .zip(ctx.tracks.get(other))
+                    .is_some_and(|(candidate, existing)| tracks_co_visible(candidate, existing))
+        });
+        if !conflicts {
+            safe.insert(id, owner);
+        }
+    }
+    doc["automatic_assignments"] = json!(safe
+        .into_iter()
+        .map(|(id, owner)| (id.to_string(), owner))
+        .collect::<BTreeMap<_, _>>());
     Ok(())
 }
 
@@ -716,6 +744,36 @@ pub(super) fn filtered_page(
         .take(limit)
     {
         let owner = owners.get(id).map(String::as_str);
+        let pending = owner.is_none() && !excluded.contains(id);
+        let photo_rows = doc["automatic_identity_evidence"]["matches"][id.to_string()].as_array();
+        let likely_player = photo_rows.and_then(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let player = row["player_id"].as_str()?;
+                    let score = row["cosine_similarity"].as_f64()?;
+                    (row["samples_used"].as_u64() == Some(3)
+                        && score >= saved_automatic_photo_threshold(doc))
+                    .then_some((score, player))
+                })
+                .max_by(|left, right| left.0.total_cmp(&right.0))
+                .map(|(_, player)| player)
+        });
+        let blocking_ids = if pending {
+            likely_player
+                .map(|player| {
+                    owners
+                        .iter()
+                        .filter_map(|(other_id, other_owner)| {
+                            (other_owner == player
+                                && measured_conflict_frame(ctx, *id, *other_id).is_some())
+                            .then_some(*other_id)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         rows.push(json!({
             "track_id":id,"first_frame":info.first,"last_frame":info.last,
             "observations":info.observed,"best_frame":info.best_frame,
@@ -724,6 +782,11 @@ pub(super) fn filtered_page(
             "assigned_player_name":owner.and_then(|v|ctx.roster.get(v)),
             "excluded":excluded.contains(id),
             "identity_conflict":actual_conflicts.contains(id),
+            "automatic_unassigned_reason":pending.then(||
+                automatic_unassigned_reason(
+                    *id, doc, &doc["automatic_identity_evidence"]["matches"],
+                    saved_automatic_photo_threshold(doc))),
+            "automatic_conflicting_track_ids":blocking_ids,
             "identity_source":if reviewed.owners.contains_key(id){"manual"}else if owner.is_some(){"automatic_photo"}else{"none"},
             "track_id_provisional":true,
         }));

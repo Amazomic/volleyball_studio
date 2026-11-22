@@ -526,10 +526,10 @@ fn boxes_co_located(a: [f64; 4], b: [f64; 4]) -> bool {
     let iou = intersection / (area_a + area_b - intersection);
     let center_x = ((a[0] + a[2]) - (b[0] + b[2])).abs() * 0.5;
     let center_y = ((a[1] + a[3]) - (b[1] + b[3])).abs() * 0.5;
-    iou >= 0.62
+    iou >= 0.58
         && area_a.min(area_b) / area_a.max(area_b) >= 0.55
-        && center_x <= 0.2 * width_a.min(width_b)
-        && center_y <= 0.2 * height_a.min(height_b)
+        && center_x <= 0.25 * width_a.min(width_b)
+        && center_y <= 0.25 * height_a.min(height_b)
 }
 
 fn record_observed_pairs(tracks: &mut TrackObservations, frame: u64, boxes: &[(u64, [f64; 4])]) {
@@ -1066,6 +1066,15 @@ mod spatial_duplicate_tests {
     }
 
     #[test]
+    fn slightly_shifted_same_player_boxes_are_not_false_conflicts() {
+        let indexed = observed_pair(&[[0.21, 0.225, 0.41, 0.825]], false);
+        let geometry = &indexed[&7].observed_pairs[&(7, 8)];
+        assert_eq!(geometry.same_position, 1);
+        assert_eq!(geometry.distinct_position, 0);
+        assert!(!tracks_co_visible(&indexed[&7], &indexed[&8]));
+    }
+
+    #[test]
     fn spatially_distinct_players_still_conflict() {
         let boxes = [[0.60, 0.1, 0.80, 0.7]; 4];
         let indexed = observed_pair(&boxes, false);
@@ -1074,9 +1083,9 @@ mod spatial_duplicate_tests {
     }
 
     #[test]
-    fn brief_or_inconsistent_overlap_does_not_suppress_identity_conflict() {
+    fn duplicate_detections_do_not_create_false_identity_conflicts() {
         let short = observed_pair(&[[0.2, 0.1, 0.4, 0.7]], false);
-        assert!(tracks_co_visible(&short[&7], &short[&8]));
+        assert!(!tracks_co_visible(&short[&7], &short[&8]));
         let mixed = observed_pair(
             &[
                 [0.2, 0.1, 0.4, 0.7],
@@ -1085,7 +1094,9 @@ mod spatial_duplicate_tests {
             ],
             false,
         );
-        assert!(tracks_co_visible(&mixed[&7], &mixed[&8]));
+        assert!(!tracks_co_visible(&mixed[&7], &mixed[&8]));
+        let separate = observed_pair(&[[0.6, 0.1, 0.8, 0.7]], false);
+        assert!(tracks_co_visible(&separate[&7], &separate[&8]));
     }
 
     #[test]

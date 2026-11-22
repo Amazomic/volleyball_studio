@@ -130,3 +130,44 @@ assert.deepEqual(refreshRequests,["/api/players/native/references/refresh"]);
 assert.match(refreshStatus.textContent,/Сопоставлено ID: 3/);
 
 console.log("Group assignment preserves links, bounds photo enrollment and handles reference failures: OK");
+
+const editStart=source.indexOf("  const edit=async");
+const editEnd=source.indexOf("  // Multiple photo saves",editStart);
+assert.ok(editStart>0&&editEnd>editStart);
+const editState={project:"p",video:"v",replay:"r",rallyRun:"run",revision:"old",
+  busy:false,selected:new Set(),offset:0,limit:24,pendingEditFailure:""};
+const editCalls=[],editNotes=[];
+let editReloads=0;
+const editContext={state:editState,ui:{player:{value:"player"}},
+  read:async()=>({revision:"fresh"}),
+  path:(_,args)=>JSON.stringify(args),
+  post:async(_,payload)=>{
+    editCalls.push({...payload});
+    if(payload.expected_revision==="old")throw Error("Track bindings changed; refresh the revision");
+    return {revision:"saved",unassigned_track_ids:[],displaced_automatic_track_ids:[]};
+  },
+  note:(message,error)=>editNotes.push({message,error}),
+  unlock:()=>{},applyLocalTrackEdit:()=>{},
+  loadPage:async()=>{editReloads++;},
+  window:{dispatchEvent(){}},CustomEvent:class{constructor(){}}
+};
+runInNewContext(source.slice(editStart,editEnd)+"\nthis.edit=edit;",editContext);
+assert.equal(await editContext.edit("assign",[13],"player"),true);
+assert.deepEqual(editCalls.map(call=>call.expected_revision),["old","fresh"],
+  "A concurrent auto-assignment must not reject manual confirmation on a stale revision");
+assert.equal(editState.revision,"saved");
+assert.equal(editState.pendingEditFailure,"");
+assert.equal(editReloads,1);
+
+editContext.post=async()=>{throw Error("Identity constraint: ID 7 conflicts with ID 3");};
+assert.equal(await editContext.edit("assign",[7],"player"),false);
+assert.match(editState.pendingEditFailure,/ID 7: Identity constraint: ID 7 conflicts with ID 3/);
+const noteStart=source.indexOf("  const note=(value,error=false)=>{");
+const noteEnd=source.indexOf("  const options=(",noteStart);
+const stickyStatus={textContent:"",classList:{toggle(_,error){this.error=error;}}};
+const stickyContext={state:editState,ui:{status:stickyStatus}};
+runInNewContext(source.slice(noteStart,noteEnd)+"\nthis.note=note;",stickyContext);
+stickyContext.note("New gallery results");
+assert.match(stickyStatus.textContent,/ID 7: Identity constraint/);
+assert.equal(stickyStatus.classList.error,true,
+  "The gallery refresh must not erase the last manual assignment failure");
