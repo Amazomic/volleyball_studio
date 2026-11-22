@@ -981,36 +981,23 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
             }
         }
     }
-    let prefilter = !matches!(
-        std::env::var("VOLLEY_PRIMARY_RALLY_PREFILTER")
-            .ok()
-            .as_deref(),
-        Some("0" | "false")
+    let mask = pair
+        .rally_filter
+        .as_ref()
+        .ok_or("Primary GPU scan did not publish a rally mask")?;
+    if mask["schema"] != "volley-primary-rally-mask/1" {
+        return Err("Primary GPU mask schema mismatch".into());
+    }
+    println!(
+        "RALLY MASK: ball_frames={} detected={} uncertain={} fallback={}",
+        mask["observed_ball_frames"],
+        mask["detected"].as_array().map_or(0, Vec::len),
+        mask["uncertain"].as_array().map_or(0, Vec::len),
+        mask["fallback_reason"]
     );
-    let selected = if prefilter {
-        let mask = pair
-            .rally_filter
-            .as_ref()
-            .ok_or("Primary GPU scan did not publish a rally mask")?;
-        if mask["schema"] != "volley-primary-rally-mask/1" {
-            return Err("Primary GPU mask schema mismatch".into());
-        }
-        println!(
-            "RALLY MASK: ball_frames={} detected={} uncertain={} fallback={}",
-            mask["observed_ball_frames"],
-            mask["detected"].as_array().map_or(0, Vec::len),
-            mask["uncertain"].as_array().map_or(0, Vec::len),
-            mask["fallback_reason"]
-        );
-        mask["selected_frames"]
-            .as_u64()
-            .ok_or("Primary GPU mask has no selected frame count")?
-    } else {
-        if pair.rally_filter.is_some() {
-            return Err("Legacy primary run unexpectedly published a rally mask".into());
-        }
-        pair.decoded_frames
-    };
+    let selected = mask["selected_frames"]
+        .as_u64()
+        .ok_or("Primary GPU mask has no selected frame count")?;
     if selected == 0 || selected > pair.decoded_frames {
         return Err("Primary GPU mask selected-frame count is out of bounds".into());
     }
@@ -1025,8 +1012,8 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
     }
     let elapsed = started.elapsed().as_secs_f64();
     println!(
-        "PRIMARY GPU MASK: prefilter={} zero_copy={} person_stride={} frames={} selected={} windows={} elapsed={elapsed:.3}s",
-        prefilter, pair.zero_copy, person_stride, pair.decoded_frames, selected, pair.windows
+        "PRIMARY GPU MASK: zero_copy={} person_stride={} frames={} selected={} windows={} elapsed={elapsed:.3}s",
+        pair.zero_copy, person_stride, pair.decoded_frames, selected, pair.windows
     );
     let ball_sha = model_hash(&app.data_root, &pair.ball_job_id)?;
     println!("PRIMARY GPU BALL SHA256: {ball_sha}");

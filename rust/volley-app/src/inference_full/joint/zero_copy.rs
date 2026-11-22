@@ -8,7 +8,6 @@ use volley_media::nvdec::{
 
 #[derive(Clone, Copy)]
 pub(super) enum ScanPass<'a> {
-    Both,
     BallOnly,
     PlayersOnly(&'a rally_mask::RallyMask),
 }
@@ -133,7 +132,7 @@ pub(super) fn run(
     let keep_pose = pose.is_some() && !matches!(pass, ScanPass::BallOnly);
     let selection = match pass {
         ScanPass::PlayersOnly(mask) => mask.selected.clone(),
-        ScanPass::Both | ScanPass::BallOnly => vec![(0, target_frames.saturating_sub(1))],
+        ScanPass::BallOnly => vec![(0, target_frames.saturating_sub(1))],
     };
     let whole_source = start == 0.0 && range.is_none() && !matches!(pass, ScanPass::PlayersOnly(_));
     let decode_windows = plan_decode_windows(
@@ -156,7 +155,6 @@ pub(super) fn run(
             gpu.ball_input(source, input, frame_slot)?;
         }
         let include_person = match pass {
-            ScanPass::Both => true,
             ScanPass::BallOnly => false,
             ScanPass::PlayersOnly(mask) => mask.includes(frame_index),
         };

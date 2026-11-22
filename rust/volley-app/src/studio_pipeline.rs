@@ -1868,26 +1868,11 @@ async fn pipeline(
                 } else {
                     false
                 };
-                let gpu_label = if full_resolution_pose {
-                    "GPU · общий поток VBallNet + игроки + RTMPose"
-                } else {
-                    "GPU · общий поток VBallNet + игроки"
-                };
-                let primary_prefilter = !matches!(
-                    std::env::var("VOLLEY_PRIMARY_RALLY_PREFILTER")
-                        .ok()
-                        .as_deref(),
-                    Some("0" | "false")
-                );
                 let total = status["gpu_total_frames"].as_u64().unwrap_or(0);
                 progress_with_frames(
                     path,
                     status,
-                    if primary_prefilter {
-                        "GPU · VBallNet: траектория мяча и розыгрыши"
-                    } else {
-                        gpu_label
-                    },
+                    "GPU · VBallNet: траектория мяча и розыгрыши",
                     8.0,
                     Some((0, total)),
                 )?;
@@ -1911,9 +1896,7 @@ async fn pipeline(
                             if let Some((mask, decoded_frames)) = rally_mask {
                                 publish_primary_rally_mask(path, status, mask, decoded_frames)?;
                             }
-                            let label = if !primary_prefilter {
-                                gpu_label
-                            } else if fraction < 0.4 {
+                            let label = if fraction < 0.4 {
                                 "GPU · VBallNet: траектория мяча и розыгрыши"
                             } else if full_resolution_pose {
                                 "GPU · RF-DETR + RTMPose: игровые интервалы"
@@ -1941,8 +1924,7 @@ async fn pipeline(
                     "Общий GPU",
                     "success",
                     &format!(
-                        "GPU-проходов={}: {:?}, окон={}, кадров={}, zero_copy={}, fallback={}",
-                        if primary_prefilter { 2 } else { 1 },
+                        "GPU-проходов=2: {:?}, окон={}, кадров={}, zero_copy={}, fallback={}",
                         result.backend,
                         result.windows,
                         result.decoded_frames,

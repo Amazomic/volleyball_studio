@@ -25,7 +25,6 @@ export VOLLEY_AB_SAMPLE_START_SEC=0
 export VOLLEY_AB_SAMPLE_DURATION_SEC=3
 export VOLLEY_AB_PERSON_STRIDE=8
 export VOLLEY_ZERO_COPY_PRIMARY=1
-export VOLLEY_PRIMARY_RALLY_PREFILTER=1
 cd "$repo/rust"
 cargo test -p volley-inference cuda_p016_rotation_preserves_expected_luma_in_device_memory --offline --locked -- --nocapture
 cargo test -p volley-media bounded_nvdec_demux_preserves_original_frame_pixels --offline --locked -- --nocapture

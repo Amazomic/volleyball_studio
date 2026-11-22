@@ -21,7 +21,6 @@ export VOLLEY_AB_VARIANT="$(printenv VOLLEY_AB_VARIANT || echo pipeline)"
 export VOLLEY_AB_SAMPLE_START_SEC="$(printenv VOLLEY_AB_SAMPLE_START_SEC || echo 28)"
 export VOLLEY_AB_SAMPLE_DURATION_SEC="$(printenv VOLLEY_AB_SAMPLE_DURATION_SEC || echo 4)"
 export VOLLEY_ZERO_COPY_PRIMARY=1
-export VOLLEY_PRIMARY_RALLY_PREFILTER=1
 export VOLLEY_PERSON_DETECTOR=rfdetr-medium
 cd "$repo/rust"
 cargo test -p volley-app original_pose_single_decode_benchmark --offline --locked -- --ignored --nocapture

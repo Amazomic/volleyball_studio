@@ -390,18 +390,10 @@ pub(crate) fn run_joint_pair(
         None
     });
     let mut gpu_pose = None;
-    let mut rally_filter = None;
-    let mut player_target = total_frames;
-    let prefilter = !matches!(
-        std::env::var("VOLLEY_PRIMARY_RALLY_PREFILTER")
-            .ok()
-            .as_deref(),
-        Some("0" | "false")
-    );
-    if prefilter {
-        ball_writer.ball_samples = Some(Vec::new());
-    }
-    let summary = if prefilter {
+    let rally_filter;
+    let player_target;
+    ball_writer.ball_samples = Some(Vec::new());
+    let summary = {
         let ball_scan = if let Some(source_info) = zero_copy_codec.clone() {
             let decode = zero_copy::run(
                 original,
@@ -608,94 +600,6 @@ pub(crate) fn run_joint_pair(
             return Err("Primary ball and people scans disagree on video timeline".into());
         }
         people_scan
-    } else if let Some(source_info) = zero_copy_codec {
-        if pose_enabled {
-            gpu_pose = Some(GpuPoseStage::new(
-                state,
-                project_id,
-                video,
-                pose_original,
-                pose_source,
-                person_stride,
-                session_memory,
-                cpu_threads,
-            )?);
-        }
-        let decode = zero_copy::run(
-            original,
-            source_info,
-            range,
-            &mut ball_engine,
-            &mut person_engine,
-            gpu_pose.as_ref(),
-            Some(&mut ball_writer),
-            Some(&mut person_writer),
-            zero_copy::ScanPass::Both,
-            &ball,
-            &players,
-            person_stride,
-            duration,
-            cancelled,
-            |fraction, frames| report(fraction, frames, total_frames, None),
-        )?;
-        PrimaryDecodeSummary {
-            decode,
-            backend: DecodeBackend::Nvdec,
-            fallback_reason: None,
-        }
-    } else {
-        volley_media::raw_decoder::decode_full_video_shared_with_native_and_tail_in_range(
-            original,
-            9,
-            backend_preference()?,
-            cpu_threads,
-            range,
-            cancelled,
-            pose_enabled,
-            |batch| {
-                if cancelled.load(Ordering::Acquire) {
-                    return Err("cancelled".into());
-                }
-                let balls = detect_ball_window(
-                    &mut ball_engine,
-                    &batch.gray,
-                    batch.first_frame,
-                    cancelled,
-                )?;
-                let persons = detect_player_window(
-                    &mut person_engine,
-                    &batch.rgb,
-                    batch.first_frame,
-                    person_stride as u64,
-                    cancelled,
-                )?;
-                ball_writer.push(batch.first_frame, &balls)?;
-                person_writer.push(batch.first_frame, &persons)?;
-                if let Some(stage) = pose.borrow_mut().as_mut() {
-                    stage.observe(&batch, &persons, None, cancelled)?;
-                }
-                if ball_writer.count % 10 == 0 {
-                    let frames = batch.first_frame + 9;
-                    update_progress(&ball.status, ball_writer.count, frames, estimated);
-                    update_progress(&players.status, person_writer.count, frames, estimated);
-                    persist(&ball.folder, &snapshot(&ball.status))?;
-                    persist(&players.folder, &snapshot(&players.status))?;
-                    report(
-                        (frames as f64 / estimated).clamp(0.0, 0.99),
-                        frames,
-                        total_frames,
-                        None,
-                    )?;
-                }
-                Ok(())
-            },
-            |tail, decoded| {
-                if let Some(stage) = pose.borrow_mut().as_mut() {
-                    stage.tail(tail, decoded, cancelled)?;
-                }
-                Ok(())
-            },
-        )?
     };
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
@@ -741,12 +645,7 @@ pub(crate) fn run_joint_pair(
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
-    let final_total = if prefilter {
-        player_target
-    } else {
-        total_frames
-    };
-    report(1.0, final_total, final_total, None)?;
+    report(1.0, player_target, player_target, None)?;
     pending.committed = true;
     Ok(JointPair {
         ball_job_id: ball.id,

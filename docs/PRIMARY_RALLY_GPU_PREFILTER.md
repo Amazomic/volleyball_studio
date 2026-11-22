@@ -68,11 +68,11 @@ CPU endpoints retain their existing snapshot-specific behavior.
 
 ## Control / safety
 
-`VOLLEY_PRIMARY_RALLY_PREFILTER=0` (or `false`) retains the original
-one-pass full-video primary GPU inference. The default is two-pass filtering
-on the compatible shared primary path. Other existing GPU paths retain their
-previous behavior. The selected mask deliberately includes ambiguous ball
-motion to limit missed gameplay.
+The shared primary GPU path always executes two passes: VBallNet first,
+then RF-DETR / RTMPose limited by its verified rally mask. There is no
+one-pass opt-out. Other standalone GPU compatibility paths remain separate.
+The selected mask deliberately includes ambiguous ball motion to limit
+missed gameplay.
 
 ## Remaining acceptance work
 
@@ -171,8 +171,8 @@ test contains a stationary background and a volleyball scene:
 The CUDA FFmpeg-vs-GPU image-preprocessing evidence SHA mismatch in the
 older strict legacy-to-shared A/B test is still an open, independent
 numerical parity issue. Do not relabel byte-level differences as parity.
-This branch provides a documented opt-out using
-VOLLEY_PRIMARY_RALLY_PREFILTER=0 and does not change published master.
+The original one-pass diagnostic opt-out was removed on 2026-11-22;
+historical A/B measurements above remain valid experimental records.
 
 ## NVDEC bounded demux acceptance (2026-11-21)
 
