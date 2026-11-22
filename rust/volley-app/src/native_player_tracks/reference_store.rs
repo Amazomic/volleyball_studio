@@ -96,6 +96,9 @@ pub(super) fn references_doc(raw: Option<&[u8]>, player_id: &str) -> Result<Valu
                 .as_str()
                 .is_none_or(|v| !valid_sha(v))
             || photo["manually_enrolled"] != true
+            || photo
+                .get("reid_active")
+                .is_some_and(|enabled| !enabled.is_boolean())
             || photo["track_id"].as_u64().is_none_or(|n| n == 0)
         {
             return Err(storage::bad_request("Invalid saved reference photo"));
