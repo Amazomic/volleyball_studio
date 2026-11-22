@@ -13,6 +13,7 @@ use volley_inference::reid_openvino::{DIMENSIONS, MODEL_NAME, PREPROCESS};
 
 const MAX_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_FEATURES: usize = crate::native_player_tracks::MAX_TRACKS;
+pub(crate) const MAX_CACHE_BATCH_TRACKS: usize = 48;
 const SCHEMA: &str = "volley-native-reid-embeddings/1";
 
 #[derive(Clone, Debug)]
@@ -191,7 +192,7 @@ fn merge_inner(
 ) -> Result<usize, String> {
     scope_valid(scope)?;
     if generated.is_empty()
-        || generated.len() > 8
+        || generated.len() > MAX_CACHE_BATCH_TRACKS
         || generated
             .iter()
             .any(|(id, v)| *id == 0 || !normal_vector(v))
@@ -382,6 +383,52 @@ mod tests {
         let after = read(&root, &src).unwrap();
         assert_eq!(after.vectors.len(), 1025);
         assert_eq!(after.provenance.get(&1025), Some(&crop));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inference_batch_of_48_cached_with_exact_crop_provenance() {
+        let root = folder();
+        let src = source();
+        let generated = (1..=48_u64)
+            .map(|id| (id, vector((id - 1) as usize)))
+            .collect::<Vec<_>>();
+        let crops = generated
+            .iter()
+            .map(|(id, _)| {
+                (
+                    *id,
+                    CropProvenance {
+                        frame: id * 9,
+                        crop: [10, 12, 64, 128],
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            merge_with_crops(&root, &src, &generated, &crops).unwrap(),
+            48
+        );
+        let saved = read(&root, &src).unwrap();
+        assert_eq!(saved.vectors.len(), 48);
+        assert_eq!(saved.provenance, crops);
+        let extra = (1..=49_u64)
+            .map(|id| (id, vector((id - 1) as usize)))
+            .collect::<Vec<_>>();
+        let extra_crops = extra
+            .iter()
+            .map(|(id, _)| {
+                (
+                    *id,
+                    CropProvenance {
+                        frame: id * 9,
+                        crop: [10, 12, 64, 128],
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert!(merge_with_crops(&root, &src, &extra, &extra_crops).is_err());
+        assert_eq!(read(&root, &src).unwrap().vectors.len(), 48);
         fs::remove_dir_all(root).unwrap();
     }
 
