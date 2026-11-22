@@ -527,6 +527,18 @@
         </section>
         <section id="studio-analysis-view" class="hidden tab-workspace" aria-labelledby="studio-analysis-heading">
           <p id="studio-analysis-heading" class="eyebrow">02 / ПОЛНЫЙ ЦИКЛ</p>
+          <section id="studio-analysis-flow" class="analysis-flow" aria-label="Граф стадий анализа">
+            <div class="analysis-flow-toolbar">
+              <strong>Конвейер анализа</strong>
+              <div class="analysis-flow-actions">
+                <button id="analysis-flow-gpu-start" type="button" class="secondary">▶ GPU</button>
+                <button id="analysis-flow-cpu-start" type="button" class="secondary">▶ CPU</button>
+                <button id="analysis-flow-full-start" type="button" class="primary">▶ Полный анализ</button>
+              </div>
+            </div>
+            <div id="analysis-flow-diagram" class="analysis-flow-diagram" aria-live="polite"></div>
+            <div id="analysis-flow-feedback" class="analysis-flow-feedback"></div>
+          </section>
           <div class="analysis-profile-grid">
             <section class="analysis-profile-card analysis-primary" aria-labelledby="studio-primary-heading">
               <div class="analysis-profile-heading">
@@ -671,6 +683,14 @@
               </div>
               <p id="studio-analysis-profile-delta" class="panel-note">Эталонный профиль активен.</p>
               <p id="studio-analysis-note" class="panel-note" role="status" aria-live="polite">Выберите видео и параметры. При совпадении GPU используется существующая версия; CPU-настройки создают отдельную постобработку.</p>
+            </div>
+          </div>
+          <div id="analysis-flow-dialog" class="analysis-flow-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="analysis-flow-dialog-title">
+            <div class="analysis-flow-dialog-panel">
+              <header><h2 id="analysis-flow-dialog-title">Настройки стадии</h2><button id="analysis-flow-dialog-close" class="secondary" type="button" aria-label="Закрыть настройки">✕</button></header>
+              <p id="analysis-flow-dialog-description" class="panel-note"></p>
+              <div id="analysis-flow-dialog-body" class="analysis-flow-dialog-body"></div>
+              <footer><button id="analysis-flow-dialog-ok" class="primary" type="button">Готово</button></footer>
             </div>
           </div>
           <div id="studio-analysis-live-host" class="hidden">

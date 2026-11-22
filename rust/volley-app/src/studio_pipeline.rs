@@ -705,6 +705,48 @@ fn finish_timed_stage(status: &mut Value) {
     status["finished_ms"] = json!(now);
 }
 
+fn pipeline_stage_id(name: &str) -> &'static str {
+    if name.contains("Проверка исходного видео") || name.contains("Подготовка исходного видео")
+    {
+        "video"
+    } else if name.contains("Поиск розыгрышей") {
+        "rallies"
+    } else if name.contains("VBallNet") && name.contains("GPU") {
+        "ball"
+    } else if name.contains("RTMPose") && !name.contains("RF-DETR") {
+        "pose"
+    } else if name.contains("RF-DETR") || name.contains("рамки игроков") {
+        if name.starts_with("Объединение") {
+            "fusion"
+        } else {
+            "players"
+        }
+    } else if name.contains("общий поток") {
+        "ball"
+    } else if name.contains("Объединение") || name.contains("GPU-анализ завершён")
+    {
+        "fusion"
+    } else if name.contains("Track ID") {
+        "tracking"
+    } else if name.contains("касания в первичных") || name.contains("физические касания")
+    {
+        "touches"
+    } else if name.contains("Публикация розыгрышей") {
+        "publish"
+    } else if name.contains("автоматическая привязка") {
+        "identity"
+    } else if name.contains("Монтажная временная разметка") {
+        "material"
+    } else if name.contains("сохранённые версии")
+        || name.contains("Сохранённый GPU-анализ")
+        || name.contains("сохранённый GPU-анализ")
+    {
+        "cache"
+    } else {
+        "other"
+    }
+}
+
 fn progress(path: &Path, status: &mut Value, stage: &str, percent: f64) -> Result<(), String> {
     progress_with_frames(path, status, stage, percent, None)
 }
@@ -717,10 +759,13 @@ fn progress_with_frames(
     frames: Option<(u64, u64)>,
 ) -> Result<(), String> {
     let stage_name = stage.split_once(": ").map_or(stage, |(name, _)| name);
+    let stage_id = pipeline_stage_id(stage_name);
     let previous = status["stage"].as_str().unwrap_or("");
     let previous_name = previous.split_once(": ").map_or(previous, |(name, _)| name);
     let now = epoch_ms();
-    if stage_name != previous_name {
+    if stage_id != pipeline_stage_id(previous_name)
+        || (stage_id == "other" && stage_name != previous_name)
+    {
         log_entry(
             path,
             "info",
@@ -740,7 +785,7 @@ fn progress_with_frames(
                     last["duration_ms"] = json!(now.saturating_sub(start));
                 }
             }
-            rows.push(json!({"name":stage_name,"started_ms":now,
+            rows.push(json!({"name":stage_name,"id":stage_id,"started_ms":now,
                 "finished_ms":null,"duration_ms":null}));
         }
         status["stage_samples"] = json!([]);
@@ -765,6 +810,7 @@ fn progress_with_frames(
     }
     status["status"] = json!("running");
     status["stage"] = json!(stage);
+    status["stage_id"] = json!(stage_id);
     status["progress_percent"] = json!(percent.clamp(0.0, 99.9));
     if let Some((processed, total)) = frames.filter(|(_, total)| *total > 0) {
         if let Some(last) = status["stages"]
@@ -2150,6 +2196,7 @@ async fn pipeline(
         return Err("cancelled".into());
     }
 
+    progress(path, status, "Публикация розыгрышей", 96.0)?;
     log_native(
         path,
         "Первичные розыгрыши",
@@ -2776,6 +2823,39 @@ pub async fn cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pipeline_stage_ids_are_stable() {
+        assert_eq!(pipeline_stage_id("Проверка исходного видео"), "video");
+        assert_eq!(
+            pipeline_stage_id("GPU · VBallNet: траектория мяча и розыгрыши"),
+            "ball"
+        );
+        assert_eq!(pipeline_stage_id("Поиск розыгрышей"), "rallies");
+        assert_eq!(
+            pipeline_stage_id("GPU · RF-DETR + RTMPose: игровые интервалы"),
+            "players"
+        );
+        assert_eq!(pipeline_stage_id("GPU · RTMPose-M: позы игроков"), "pose");
+        assert_eq!(
+            pipeline_stage_id("Объединение · VBallNet и рамки игроков"),
+            "fusion"
+        );
+        assert_eq!(pipeline_stage_id("Постобработка · Track ID"), "tracking");
+        assert_eq!(
+            pipeline_stage_id("Постобработка · касания в первичных розыгрышах"),
+            "touches"
+        );
+        assert_eq!(pipeline_stage_id("Публикация розыгрышей"), "publish");
+        assert_eq!(
+            pipeline_stage_id("Постобработка · автоматическая привязка игроков"),
+            "identity"
+        );
+        assert_eq!(
+            pipeline_stage_id("Монтажная временная разметка"),
+            "material"
+        );
+    }
 
     #[test]
     fn accepted_late_cancel_overrides_success_and_failure() {

@@ -5,6 +5,8 @@ import {readFileSync} from "node:fs";
 import {runInNewContext} from "node:vm";
 
 const source=readFileSync(new URL("../../rust/volley-app/static/studio_tabs.js",import.meta.url),"utf8");
+const registry=source.slice(source.indexOf("  const pipelineStages="),
+  source.indexOf("  const pipelineEdges="));
 const from=source.indexOf("  const liveHistory=()=>{");
 const to=source.indexOf("  const loadHistory=async(append=false)=>{",from);
 assert.ok(from>=0&&to>from,"Live-history logic must be present");
@@ -59,9 +61,11 @@ const helpers={
   $:getId,make:(tag,klass,text)=>new Node(tag,klass,text),
   clear:node=>node.textContent="",
   historyDuration:()=> "—",
-  historyLog:async()=>true
+  historyLog:async()=>true,
+  window:{VolleyballUi:{translate:x=>x}},updatePipelineGraph:()=>{},
+  requestAnimationFrame:()=>{}
 };
-const result=runInNewContext(source.slice(from,to)+
+const result=runInNewContext(registry+source.slice(from,to)+
   "\n({renderHistory,updateLiveHistory,liveHistory})",helpers);
 const id="a".repeat(32);
 const current={

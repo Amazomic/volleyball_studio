@@ -5,6 +5,8 @@ import {readFileSync} from "node:fs";
 import {runInNewContext} from "node:vm";
 
 const source=readFileSync(new URL("../../rust/volley-app/static/studio_tabs.js",import.meta.url),"utf8");
+const registry=source.slice(source.indexOf("  const pipelineStages="),
+  source.indexOf("  const pipelineEdges="));
 const from=source.indexOf("  const liveHistory=()=>{");
 const to=source.indexOf("  const loadHistory=async(append=false)=>{",from);
 assert.ok(from>=0&&to>from);
@@ -55,17 +57,19 @@ const current={
   status:"running",progress_percent:67.5,elapsed_ms:91000,remaining_ms:110000,stages
 };
 const state={latestPipeline:current,historyRows:[],historyFilter:"all",historyStatusAt:now,historyOffset:0};
-const {renderHistory,updateLiveHistory}=runInNewContext(source.slice(from,to)+
+const {renderHistory,updateLiveHistory}=runInNewContext(registry+source.slice(from,to)+
   "\n({renderHistory,updateLiveHistory})",{
     state,ui,projectId:()=>"project", $:key=>key==="studio-analysis-live-host"?host:null,
     make:(tag,klass,text)=>new Node(tag,klass,text),
     clear:node=>node.textContent="",historyDuration:ms=>ms===null?"—":Math.floor(ms/1000)+" с",
-    historyLog:async()=>true
+    historyLog:async()=>true,
+    window:{VolleyballUi:{translate:x=>x}},updatePipelineGraph:()=>{},
+    requestAnimationFrame:()=>{}
   });
 renderHistory();
 const run=ui.historyList.children[0];
 assert.equal(run.querySelector(".analysis-history-stages").children.length,2);
-assert.match(run.querySelector(".analysis-history-stages").textContent,/GPU · VballNet.*50 с/);
+assert.match(run.querySelector(".analysis-history-stages").textContent,/Поиск мяча.*50 с/);
 assert.match(run.querySelector(".analysis-history-stages").textContent,/В процессе/);
 assert.match(run.querySelector(".analysis-history-stages").textContent,/120 \/ 400 кадров · 30.0%/);
 const rail=run.querySelector(".analysis-history-stage-rail");

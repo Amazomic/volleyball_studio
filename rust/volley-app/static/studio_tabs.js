@@ -337,6 +337,15 @@
     }
     ui.gpuOnly.disabled=blocked||!gpuValid;
     ui.postOnly.disabled=blocked||!postValid||!selectedGpuSource();
+    for(const [id,button] of [["analysis-flow-gpu-start",ui.gpuOnly],
+      ["analysis-flow-cpu-start",ui.postOnly],["analysis-flow-full-start",ui.start]]){
+      const node=$(id);
+      node.disabled=button.disabled;
+      if(id==="analysis-flow-full-start"){
+        node.textContent=running?ui.start.textContent:"▶ Полный анализ";
+        node.classList.toggle("is-stop",running);
+      }
+    }
     ui.postOnly.title=selectedGpuSource()?
       "Создать новый CPU-вариант выбранного GPU-анализа без повторного GPU":
       "Сначала выберите объединённый GPU-анализ в шапке";
@@ -355,7 +364,8 @@
     const date=new Date(Number(entry.timestamp_ms));
     const time=Number.isFinite(date.getTime())?date.toLocaleTimeString("ru-RU",{hour12:false}):"--:--:--";
     const label=String(entry.level||"info").toUpperCase();
-    const stage=String(entry.stage||"Обработка");
+    const stage=pipelineNames.get(pipelineId(String(entry.stage||"")))||
+      String(entry.stage||"Обработка");
     const message=String(entry.message||"");
     const heading="["+time+"] "+label+" ["+stage+"] "+message;
     const call=entry.call;
@@ -418,6 +428,286 @@
     if(pending&&pending.project_id===projectId())await loadLog(pending);
     else if(more&&state.logKey===key)await loadLog(status);
   };
+
+  const pipelineStages=[
+    ["video","Подготовка видео","input",1,1],
+    ["ball","Поиск мяча","gpu",1,2],
+    ["rallies","Розыгрыши","gpu",1,3],
+    ["players","Поиск игроков","gpu",1,4],
+    ["pose","Позы игроков","gpu",2,4],
+    ["fusion","Данные GPU","gpu",2,3],
+    ["tracking","Трекинг ID","cpu",2,2],
+    ["touches","Касания","cpu",2,1],
+    ["touch_types","Типы касаний","cpu",3,1],
+    ["publish","Результат","cpu",3,2],
+    ["identity","Привязка игроков","cpu",3,3],
+    ["material","Разметка","output",3,4]
+  ];
+  const pipelineNames=new Map(pipelineStages.map(item=>[item[0],item[1]]));
+  pipelineNames.set("cache","Кэш GPU");
+  const pipelineId=entry=>{
+    if(entry?.id&&pipelineNames.has(entry.id))return entry.id;
+    const name=String(typeof entry==="string"?entry:entry?.name||"");
+    if(/Проверка исходного видео|Подготовка исходного видео/.test(name))return "video";
+    if(/Поиск розыгрышей/.test(name))return "rallies";
+    if(/GPU.*V[Bb]allNet/.test(name))return "ball";
+    if(/RTMPose/.test(name)&&!/RF-DETR/.test(name))return "pose";
+    if(/Объединение/.test(name))return "fusion";
+    if(/RF-DETR|RTMDet|игровые интервалы|общий поток/.test(name))return "players";
+    if(/GPU-анализ завершён/.test(name))return "fusion";
+    if(/Track ID/.test(name))return "tracking";
+    if(/касания в первичных|физические касания/.test(name))return "touches";
+    if(/Публикация розыгрышей/.test(name))return "publish";
+    if(/автоматическая привязка/.test(name))return "identity";
+    if(/Монтажная временная разметка/.test(name))return "material";
+    if(/сохранённые версии|Сохранённый GPU-анализ|сохранённый GPU-анализ/.test(name))return "cache";
+    return "";
+  };
+  const pipelineLabel=entry=>window.VolleyballUi.translate(pipelineNames.get(pipelineId(entry))||String(entry?.name||"Стадия"));
+  const pipelineEdges=[
+    ["video","ball"],["ball","rallies"],["rallies","players"],["players","pose"],
+    ["pose","fusion"],["fusion","tracking"],["tracking","touches"],
+    ["touches","touch_types"],["touch_types","publish"],
+    ["publish","identity"],["identity","material"],
+    ["video","fusion","cache"],["players","fusion","no-pose"],["touches","publish","no-types"]
+  ];
+  const graphSettings={
+    video:[".analysis-profile-source","#studio-analysis-editor"],
+    ball:["#studio-gpu-stride"],
+    players:["#studio-gpu-person-stride"],
+    pose:["#studio-gpu-pose-enabled","#studio-gpu-interpolate-pose"],
+    fusion:["#studio-gpu-memory","#studio-gpu-threads"],
+    tracking:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap",
+      "#studio-post-min-track-frames","#studio-post-nms","#studio-post-assignment","#studio-post-margin"],
+    touches:["#studio-post-touch-threshold","#studio-post-pose-confidence",
+      "#studio-post-pose-distance","#studio-post-occluded-turn","#studio-post-touch-gap",
+      "#studio-post-reach","#studio-post-smooth","#studio-post-interval",
+      "#studio-post-ball-score","#studio-post-ball-gap",
+      "#studio-post-idle","#studio-post-stationary","#studio-post-rally-min",
+      "#studio-post-coverage","#studio-post-samples","#studio-post-min-touches",
+      "#studio-post-no-touch","#studio-post-context"],
+    touch_types:["#studio-post-tcn-experimental"],
+    identity:["#studio-post-auto-assign-threshold"]
+  };
+  const graphDescriptions={
+    video:"Выбор видео, интервалов анализа и разметки площадки.",
+    ball:"VBallNet находит мяч в исходном видеопотоке.",
+    rallies:"Границы розыгрышей определяются только по траектории мяча. Настройки алгоритма находятся в режиме «Дебаг».",
+    players:"RF-DETR ищет игроков только внутри найденных игровых интервалов.",
+    pose:"RTMPose получает рамки игроков и исходные пиксели видео.",
+    fusion:"Сохранение общей версии GPU-наблюдений и повторное использование кэша.",
+    tracking:"CPU-сопровождение Track ID и интерполяция.",
+    touches:"Физические касания и определение их типов выполняются в одном CPU-проходе.",
+    touch_types:"Тип касания определяется во время того же CPU-прохода, что и физический контакт. Отдельного запуска GPU нет.",
+    publish:"Первичные розыгрыши публикуются без повторного определения границ.",
+    identity:"Автоматическая привязка Track ID к игрокам из библиотеки.",
+    material:"Разметка временной шкалы для предпросмотра и монтажа.",
+    cache:"Готовый GPU-анализ переиспользуется при совместимых настройках."
+  };
+  let graphMoved=[],graphFocus=null;
+  const closeGraphSettings=()=>{
+    const dialog=$("analysis-flow-dialog");
+    if(dialog.classList.contains("hidden"))return;
+    for(const [node,placeholder] of graphMoved)placeholder.replaceWith(node);
+    graphMoved=[];dialog.classList.add("hidden");
+    if(graphFocus?.isConnected)graphFocus.focus({preventScroll:true});
+  };
+  const openGraphSettings=(id,historyEntry=null)=>{
+    closeGraphSettings();
+    graphFocus=document.activeElement;
+    $("analysis-flow-dialog-title").textContent=pipelineNames.get(id)||"Стадия";
+    $("analysis-flow-dialog-description").textContent=graphDescriptions[id]||"";
+    const body=$("analysis-flow-dialog-body");clear(body);
+    if(historyEntry){
+      const t=historyEntry.duration_ms;
+      body.append(make("div","", "Время: "+(Number.isFinite(t)?historyDuration(t):"—")));
+      const count=Number(historyEntry.frames_processed),total=Number(historyEntry.frames_total);
+      if(Number.isSafeInteger(count)&&Number.isSafeInteger(total)&&total>0)
+        body.append(make("div","",count.toLocaleString("ru-RU")+
+          " / "+total.toLocaleString("ru-RU")+" кадров"));
+      body.append(make("div","", "Техническая стадия: "+String(historyEntry.name||"—")));
+    }else{
+      for(const selector of graphSettings[id]||[]){
+        const control=ui.analysis.querySelector(selector);
+        if(!control)continue;
+        const item=control.matches("input,select")?
+          control.closest(".analysis-profile-toggle")||control.parentElement:control;
+        if(!item||graphMoved.some(([node])=>node===item))continue;
+        const mark=document.createComment("stage-settings");
+        item.before(mark);body.append(item);graphMoved.push([item,mark]);
+        if(item.tagName==="DETAILS")item.open=true;
+      }
+      if(!body.children.length)body.append(make("p","panel-note","Дополнительных параметров нет."));
+    }
+    $("analysis-flow-dialog").classList.remove("hidden");
+    $("analysis-flow-dialog-close").focus();
+  };
+  $("analysis-flow-dialog-close").addEventListener("click",closeGraphSettings);
+  $("analysis-flow-dialog-ok").addEventListener("click",closeGraphSettings);
+  $("analysis-flow-dialog").addEventListener("click",event=>{
+    if(event.target.id==="analysis-flow-dialog")closeGraphSettings();
+  });
+  document.addEventListener("keydown",event=>{
+    if(event.key==="Escape"&&!$("analysis-flow-dialog").classList.contains("hidden"))
+      closeGraphSettings();
+  });
+  let graphSequence=0;
+  const graphBounds=(node,root)=>{
+    const a=node.getBoundingClientRect(),b=root.getBoundingClientRect();
+    return {l:a.left-b.left,r:a.right-b.left,t:a.top-b.top,b:a.bottom-b.top,
+      cx:(a.left+a.right)/2-b.left,cy:(a.top+a.bottom)/2-b.top};
+  };
+  const graphDraw=target=>{
+    const svg=target.querySelector(".analysis-flow-lines");
+    if(!svg||!target.isConnected||!target.offsetWidth)return;
+    const byId=new Map([...target.querySelectorAll(".analysis-flow-node")].map(n=>
+      [n.dataset.stageId,graphBounds(n,target)]));
+    svg.replaceChildren();
+    svg.setAttribute("viewBox","0 0 "+target.clientWidth+" "+target.clientHeight);
+    if(!target.dataset.graphArrow)target.dataset.graphArrow="flow-arrow-"+(++graphSequence);
+    const markerId=target.dataset.graphArrow;
+    const element=(tag,attrs)=>{
+      const el=document.createElementNS("http://www.w3.org/2000/svg",tag);
+      for(const [key,value] of Object.entries(attrs))el.setAttribute(key,value);
+      return el;
+    };
+    const defs=element("defs",{}),marker=element("marker",{
+      id:markerId,markerWidth:"7",markerHeight:"7",refX:"6",refY:"3.5",
+      orient:"auto",markerUnits:"strokeWidth"});
+    marker.append(element("path",{d:"M 0 0 L 7 3.5 L 0 7 Z",fill:"#7ba0c9"}));
+    defs.append(marker);svg.append(defs);
+    for(const [from,to,kind] of pipelineEdges){
+      const a=byId.get(from),b=byId.get(to);if(!a||!b)continue;
+      let d="",label=null;
+      if(kind==="no-types"){
+        const y=b.t-11;
+        d="M "+a.cx+" "+a.b+" L "+a.cx+" "+y+" L "+b.cx+" "+y+" L "+b.cx+" "+b.t;
+        label=["Без типов",(a.cx+b.cx)/2,y-3];
+      }else if(kind==="cache"){
+        const y=(a.b+b.t)/2;
+        d="M "+a.l+" "+a.cy+" L 5 "+a.cy+" L 5 "+y+" L "+b.cx+" "+y+" L "+b.cx+" "+b.t;
+        label=["Кэш GPU",target.clientWidth*.15,y-3];
+      }else if(kind==="no-pose"){
+        const y=b.t-13;
+        d="M "+a.cx+" "+a.t+" L "+a.cx+" "+y+" L "+b.cx+" "+y+" L "+b.cx+" "+b.t;
+        label=["Без поз",(a.cx+b.cx)/2,y-3];
+      }else if(Math.abs(a.cy-b.cy)<8){
+        d=a.cx<b.cx?"M "+a.r+" "+a.cy+" L "+b.l+" "+b.cy:
+          "M "+a.l+" "+a.cy+" L "+b.r+" "+b.cy;
+      }else{
+        d="M "+a.cx+" "+a.b+" L "+b.cx+" "+b.t;
+      }
+      const path=element("path",{d,"class":"analysis-flow-edge"+(kind?" is-branch":""),
+        "data-edge":from+"-"+to,"marker-end":"url(#"+markerId+")"});
+      svg.append(path);
+      if(label){
+        const t=element("text",{x:String(label[1]),y:String(label[2]),
+          "class":"analysis-flow-edge-label"});
+        t.textContent=label[0];svg.append(t);
+      }
+    }
+    paintGraphEdges(target,target._graphRun);
+  };
+  const createPipelineGraph=(target,run)=>{
+    clear(target);
+    const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
+    svg.setAttribute("class","analysis-flow-lines");svg.setAttribute("aria-hidden","true");
+    const grid=make("div","analysis-flow-grid");
+    for(const [id,name,kind,row,col] of pipelineStages){
+      const node=make("button","analysis-flow-node",window.VolleyballUi.translate(name));
+      node.type="button";node.dataset.stageId=id;node.dataset.kind=kind;
+      node.style.gridRow=row;node.style.gridColumn=col;
+      node.title=graphDescriptions[id];
+      node.addEventListener("click",()=>{
+        const entry=run?.stages?.find(item=>pipelineId(item)===(id==="touch_types"?"touches":id));
+        openGraphSettings(id,run?entry||{name}:null);
+      });
+      grid.append(node);
+    }
+    target.append(svg,grid);
+    requestAnimationFrame(()=>graphDraw(target));
+  };
+  const updatePipelineGraph=(target,run)=>{
+    target._graphRun=run;
+    if(!target.querySelector(".analysis-flow-grid"))createPipelineGraph(target,run);
+    const stages=Array.isArray(run?.stages)?run.stages:[];
+    const seen=new Map();
+    for(const item of stages){const id=pipelineId(item);if(id)seen.set(id,item);}
+    const active=run&&["queued","running","cancelling"].includes(run.status);
+    const currentId=pipelineNames.has(run?.stage_id)?run.stage_id:pipelineId(run?.stage);
+    const cached=run?.gpu_reused===true;
+    const complete=run?.status==="complete";
+    for(const node of target.querySelectorAll(".analysis-flow-node")){
+      const id=node.dataset.stageId,entry=seen.get(id==="touch_types"?"touches":id);
+      const classification=run?.profile?.post?.pose_classification!==false;
+      const combinedPose=id==="pose"&&currentId==="players"&&
+        /RTMPose/.test(String(run?.stage||""));
+      const concurrentTypes=id==="touch_types"&&currentId==="touches"&&classification;
+      const running=active&&(id===currentId||combinedPose||concurrentTypes||
+        entry?.finished_ms==null&&entry===stages.at(-1));
+      const done=!!entry&&(entry.finished_ms!=null||complete&&!running)&&
+        (id!=="touch_types"||classification)||
+        (id==="pose"&&!!run?.gpu_jobs?.pose&&
+        (seen.has("players")||seen.has("fusion"))&&!running);
+      const reused=cached&&id==="fusion"&&!done;
+      node.classList.toggle("is-active",!!running);
+      node.classList.toggle("is-complete",done);
+      node.classList.toggle("is-reused",reused);
+      node.classList.toggle("is-skipped",
+        cached&&["ball","rallies","players","pose"].includes(id)&&!entry||
+        id==="touch_types"&&!classification);
+      node.classList.toggle("is-failed",run?.status==="failed"&&id===currentId);
+      node.title=node.textContent+(entry?.frames_total?
+        " · "+(entry.frames_processed||0)+"/"+entry.frames_total+" кадров":"")+
+        (running?" · выполняется":done?" · завершено":reused?" · из кэша":"");
+    }
+    paintGraphEdges(target,run);
+  };
+  const paintGraphEdges=(target,run)=>{
+    const active=run&&["queued","running","cancelling"].includes(run.status);
+    const currentId=pipelineNames.has(run?.stage_id)?run.stage_id:pipelineId(run?.stage);
+    const cached=run?.gpu_reused===true,complete=run?.status==="complete";
+    for(const edge of target.querySelectorAll(".analysis-flow-edge")){
+      const [from,to]=edge.dataset.edge.split("-");
+      const a=target.querySelector('[data-stage-id="'+from+'"]');
+      const b=target.querySelector('[data-stage-id="'+to+'"]');
+      const branchCache=from==="video"&&to==="fusion";
+      const branchSkip=from==="players"&&to==="fusion";
+      const branchTypes=from==="touches"&&to==="publish";
+      const classification=run?.profile?.post?.pose_classification!==false;
+      const selected=branchCache?cached:branchSkip?run?.profile?.gpu?.pose_enabled===false:
+        branchTypes?!classification:!cached;
+      const done=branchCache?cached&&complete:selected&&a?.classList.contains("is-complete")&&b?.classList.contains("is-complete");
+      const running=selected&&active&&(branchCache?
+        currentId==="cache"||(currentId==="tracking"&&cached):
+        b?.classList.contains("is-active")&&a?.classList.contains("is-complete"));
+      edge.classList.toggle("is-complete",!!done);
+      edge.classList.toggle("is-active",!!running);
+      edge.style.opacity=selected?"1":".35";
+    }
+  };
+  $("analysis-flow-feedback").append(ui.note,ui.profileDelta);
+  const mainGraph=$("analysis-flow-diagram");
+  if(mainGraph&&typeof mainGraph.querySelector==="function"){
+    updatePipelineGraph(mainGraph,null);
+    window.addEventListener("resize",()=>requestAnimationFrame(()=>graphDraw(mainGraph)));
+  }
+  window.addEventListener("volley:ui-language",()=>{
+    for(const node of ui.analysis.querySelectorAll(".analysis-flow-node")){
+      const name=pipelineNames.get(node.dataset.stageId);
+      if(name)node.textContent=window.VolleyballUi.translate(name);
+    }
+    requestAnimationFrame(()=>graphDraw(mainGraph));
+  });
+  if(typeof ResizeObserver!=="undefined"){
+    const observer=new ResizeObserver(()=>requestAnimationFrame(()=>graphDraw(mainGraph)));
+    observer.observe(mainGraph);
+  }
+  for(const [id,button] of [["analysis-flow-gpu-start",ui.gpuOnly],
+    ["analysis-flow-cpu-start",ui.postOnly],["analysis-flow-full-start",ui.start]]){
+    $(id).addEventListener("click",()=>button.click());
+  }
+  if(mainGraph&&typeof mainGraph.querySelector==="function")ui.analysis.classList.add("analysis-flow-ready");
   const historyDuration=ms=>{
     if(!Number.isFinite(ms)||ms<0)return "—";
     const seconds=Math.floor(ms/1000),hours=Math.floor(seconds/3600);
@@ -448,7 +738,7 @@
   };
   const liveHistoryLine=status=>{
     const pct=Number(status.progress_percent);
-    return String(status.stage||"Обработка")+" · "+
+    return (pipelineNames.get(status.stage_id)||pipelineNames.get(pipelineId(status.stage))||String(status.stage||"Обработка"))+" · "+
       (Number.isFinite(pct)?Math.max(0,Math.min(pct,100)).toFixed(1)+"%":"—");
   };
   const historyClock=status=>{
@@ -480,11 +770,19 @@
   };
   const renderStageTimeline=(target,row,current)=>{
     clear(target);
+    const graph=make("div","analysis-flow-diagram analysis-flow-history");
+    target.append(graph);
+    updatePipelineGraph(graph,current||row);
+    const details=make("details","analysis-flow-details");
+    details.append(make("summary","","Время и кадры по стадиям"));
+    const stageList=make("div","analysis-flow-details-list");
+    details.append(stageList);
     const stages=(Array.isArray(current?.stages)&&current.stages.length)?
       current.stages:(Array.isArray(row?.stages)?row.stages:[]);
     if(!stages.length){
-      target.append(make("div","analysis-history-no-stages",
+      stageList.append(make("div","analysis-history-no-stages",
         current?"Стадии появятся после запуска.":"Данные о стадиях отсутствуют."));
+      target.append(details);
       return;
     }
     const now=Date.now();
@@ -496,7 +794,7 @@
         entry.duration_ms==null?null:Number(entry.duration_ms);
       const stateLabel=live?"В процессе":entry.duration_ms==null?"Без времени":"Готово";
       const line=make("div","analysis-history-stage"+(live?" is-running":""));
-      const name=make("span","analysis-history-stage-name",String(entry.name||"Стадия"));
+      const name=make("span","analysis-history-stage-name",pipelineLabel(entry));
       const done=entry.frames_processed==null?NaN:Number(entry.frames_processed);
       const total=entry.frames_total==null?NaN:Number(entry.frames_total);
       if(Number.isSafeInteger(done)&&Number.isSafeInteger(total)&&total>0&&done>=0){
@@ -519,14 +817,20 @@
         name,
         make("span","analysis-history-stage-state",stateLabel),
         make("span","analysis-history-stage-duration",historyDuration(elapsed)));
-      target.append(line);
+      stageList.append(line);
     }
+    target.append(details);
   };
   const renderHistory=()=>{
     // Preserve the existing streaming log/progress nodes when history is refreshed.
     $("studio-analysis-live-host").append(ui.progress,ui.logPanel);
     clear(ui.historyList);
     const latest=liveHistory();
+    if(typeof updatePipelineGraph==="function"&&typeof mainGraph!=="undefined"&&
+      mainGraph&&typeof mainGraph.querySelector==="function"){
+      updatePipelineGraph(mainGraph,latest||state.historyRows[0]||null);
+      requestAnimationFrame(()=>graphDraw(mainGraph));
+    }
     const active=latest&&["queued","running","cancelling"].includes(latest.status);
     const rows=state.historyRows.filter(row=>state.historyFilter==="all"||
       row.mode===state.historyFilter||!row.mode||row.mode==="full"||
@@ -556,6 +860,12 @@
       if(current)summary.append(make("span","analysis-history-live-stage",liveHistoryLine(current)));
       if(current)summary.append(make("span","analysis-history-eta",historyEtaLine(current)));
       details.append(summary);
+      details.addEventListener("toggle",()=>{
+        if(details.open&&!liveHistory()){
+          updatePipelineGraph(mainGraph,row);
+          requestAnimationFrame(()=>graphDraw(mainGraph));
+        }
+      });
       const body=make("div","analysis-history-detail"),stages=make("div","analysis-history-stages");
       renderStageTimeline(stages,row,current);
       body.append(stages);
@@ -581,6 +891,11 @@
   const updateLiveHistory=status=>{
     if(status.project_id!==projectId()||!status.id||status.status==="idle")return;
     state.latestPipeline=status;
+    if(typeof updatePipelineGraph==="function"&&typeof mainGraph!=="undefined"&&
+      mainGraph&&typeof mainGraph.querySelector==="function"){
+      updatePipelineGraph(mainGraph,status);
+      requestAnimationFrame(()=>graphDraw(mainGraph));
+    }
     let item=[...ui.historyList.children].find(node=>node.dataset?.runId===status.id);
     if(!item){renderHistory();item=[...ui.historyList.children].find(node=>node.dataset?.runId===status.id);}
     if(!item)return;
@@ -653,6 +968,11 @@
     if(!status||status.schema!=="volley-studio-pipeline/1")return;
     const percent=Number(status.progress_percent);
     ui.progress.value=Number.isFinite(percent)?Math.max(0,Math.min(percent,100)):0;
+    if(typeof updatePipelineGraph==="function"&&typeof mainGraph!=="undefined"&&
+      mainGraph&&typeof mainGraph.querySelector==="function"){
+      updatePipelineGraph(mainGraph,status);
+      requestAnimationFrame(()=>graphDraw(mainGraph));
+    }
     const active=["queued","running","cancelling"].includes(status.status);
     if(status.status==="cancelling")state.stopRequested=true;
     const stage=String(status.stage||"Обработка");
@@ -1064,6 +1384,7 @@
   ui.project.addEventListener("change",()=>{
     $("studio-analysis-live-host").append(ui.progress,ui.logPanel);
     state.latestPipeline=null;
+    if(mainGraph&&typeof mainGraph.querySelector==="function")updatePipelineGraph(mainGraph,null);
     resetLog();
     state.historyEpoch++;state.historyRows=[];state.historyOffset=0;ui.historyMore.classList.add("hidden");ui.historyList.textContent="Выберите проект.";
     state.analysisGeneration++;

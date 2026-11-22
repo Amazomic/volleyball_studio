@@ -589,3 +589,20 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Детекция розыгрышей по траектории мяча	Ball trajectory rally detection
 
 Автопривязка игроков, сходство от (%)	Auto-assign players, similarity from (%)
+Конвейер анализа	Analysis pipeline
+Настройки стадии	Stage settings
+Готово	Done
+Граф стадий анализа	Analysis stage graph
+Закрыть настройки	Close settings
+Подготовка видео	Video preparation
+Поиск мяча	Ball detection
+Поиск игроков	Player detection
+Позы игроков	Player poses
+Данные GPU	GPU evidence
+Трекинг ID	ID tracking
+Результат	Result
+Привязка игроков	Player linking
+Разметка	Timeline
+Кэш GPU	GPU cache
+Время и кадры по стадиям	Stage times and frames
+Типы касаний	Touch types
