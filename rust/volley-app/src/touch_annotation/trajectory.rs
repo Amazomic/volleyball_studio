@@ -8,7 +8,7 @@ pub(crate) struct CalculateRequest {
     rally_run_id: String,
     rally: crate::rally_training_comparison::TouchRallyFilter,
     #[serde(default)]
-    impact: volley_core::motion::TrajectoryBreakConfig,
+    impact: volley_core::motion::DirectionBreakConfig,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -170,7 +170,7 @@ pub(super) fn scan_trajectory(run: &ValidatedRun) -> Result<Vec<TrajectoryCandid
 pub(super) fn scan_collision_trajectory(
     run: &ValidatedRun,
     intervals: &[(u64, u64)],
-    impact: volley_core::motion::TrajectoryBreakConfig,
+    impact: volley_core::motion::DirectionBreakConfig,
 ) -> Result<Vec<TrajectoryCandidate>, ApiError> {
     if !impact.valid() {
         return Err(storage::bad_request("Invalid collision detector settings"));
@@ -251,7 +251,7 @@ pub async fn calculate(
             min_score: 0.0,
             shift_frames: 0,
             training_videos: 0,
-            detector_version: "piecewise_ballistic_impacts_v2",
+            detector_version: "piecewise_ballistic_direction_v3",
         };
         let proposals = scores
             .iter()
@@ -268,7 +268,7 @@ pub async fn calculate(
             "calibration":calibration,"impact_settings":req.impact,
             "metrics_on_labeled_video":metrics,
             "gpu_rerun":false,"player_pose_required":false,
-            "method":"piecewise_ballistic_impacts_v2"}))
+            "method":"piecewise_ballistic_direction_v3"}))
     })
     .await
     .map_err(|e| storage::internal(format!("Trajectory worker: {e}")))??;

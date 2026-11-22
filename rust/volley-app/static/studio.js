@@ -1476,9 +1476,9 @@
     if(annotation.prediction){
       const p=annotation.prediction;
       annotation.metrics.textContent+=" | По мячу "+p.proposals.length+" кандидатов"+
-        (p.method==="piecewise_ballistic_impacts_v2"?
-          " · порог скачка "+p.impact_settings.min_velocity_jump_px_frame+" пикс./кадр"+
-          " · допуск параболы "+p.impact_settings.max_fit_error_px+" пикс.":
+        (p.method==="piecewise_ballistic_direction_v3"?
+          " · угол излома "+p.impact_settings.min_turn_angle_deg+"°"+
+          " · разрыв дуг до "+p.impact_settings.max_join_error_px+" пикс.":
           " · обучающих видео "+p.calibration.training_videos+
           " · порог "+p.calibration.min_score+
           " · сдвиг "+p.calibration.shift_frames+" кадра");
@@ -1580,19 +1580,19 @@
     annotationNotice("Черновик изменён. Сохраните данные касаний, затем повторите расчёт по траектории.");
   };
   const impactInputIds=[
-    "studio-impact-min-jump","studio-impact-relative-jump",
+    "studio-impact-angle","studio-impact-join",
     "studio-impact-fit-error","studio-impact-min-separation"
   ];
   const impactSettingsFromPlayer=()=>{
-    const [jump,relative,fit,separation]=impactInputIds.map(id=>Number($(id).value));
-    if(!Number.isFinite(jump)||jump<2||jump>60||
-      !Number.isFinite(relative)||relative<0||relative>150||
+    const [angle,join,fit,separation]=impactInputIds.map(id=>Number($(id).value));
+    if(!Number.isFinite(angle)||angle<15||angle>170||
+      !Number.isFinite(join)||join<8||join>80||
       !Number.isFinite(fit)||fit<1||fit>20||
       !Number.isSafeInteger(separation)||separation<3||separation>30||
       impactInputIds.some(id=>$(id).value.trim()===""))return null;
     return {
-      min_velocity_jump_px_frame:jump,
-      relative_velocity_jump:relative/100,
+      min_turn_angle_deg:angle,
+      max_join_error_px:join,
       max_fit_error_px:fit,
       min_separation_frames:separation
     };
@@ -1640,7 +1640,7 @@
       if(result.schema!=="volley-trajectory-touch-proposals/1"||
           result.project_id!==project||result.video!==video||result.rally_run_id!==run||
           !Array.isArray(result.proposals)||!Number.isSafeInteger(result.total_frames)||
-          result.method!=="piecewise_ballistic_impacts_v2"||
+          result.method!=="piecewise_ballistic_direction_v3"||
           Object.entries(impact).some(([key,value])=>result.impact_settings?.[key]!==value)||
           !Array.isArray(result.rally_intervals)||
           result.rally_count!==result.rally_intervals.length||

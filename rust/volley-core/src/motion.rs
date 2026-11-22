@@ -5,7 +5,8 @@
 mod trajectory;
 pub use trajectory::{
     downward_to_upward_breaks, trajectory_breaks, trajectory_breaks_configured,
-    trajectory_breaks_in_rallies, TrajectoryBreak, TrajectoryBreakConfig,
+    trajectory_breaks_in_rallies, trajectory_direction_breaks, DirectionBreakConfig,
+    TrajectoryBreak, TrajectoryBreakConfig,
 };
 
 #[repr(C)]

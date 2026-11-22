@@ -15,7 +15,7 @@ pub(crate) struct ClassifyRequest {
     source_replay_sha256: String,
     rally: crate::rally_training_comparison::TouchRallyFilter,
     #[serde(default)]
-    impact: volley_core::motion::TrajectoryBreakConfig,
+    impact: volley_core::motion::DirectionBreakConfig,
     frames: Vec<u64>,
 }
 

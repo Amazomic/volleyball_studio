@@ -29,6 +29,35 @@ impl TrajectoryBreakConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectionBreakConfig {
+    pub min_turn_angle_deg: f64,
+    pub max_join_error_px: f64,
+    pub max_fit_error_px: f64,
+    pub min_separation_frames: i64,
+}
+
+impl Default for DirectionBreakConfig {
+    fn default() -> Self {
+        Self {
+            min_turn_angle_deg: 45.0,
+            max_join_error_px: 20.0,
+            max_fit_error_px: 4.0,
+            min_separation_frames: 6,
+        }
+    }
+}
+
+impl DirectionBreakConfig {
+    pub fn valid(self) -> bool {
+        (15.0..=170.0).contains(&self.min_turn_angle_deg)
+            && (8.0..=80.0).contains(&self.max_join_error_px)
+            && (1.0..=20.0).contains(&self.max_fit_error_px)
+            && (3..=30).contains(&self.min_separation_frames)
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct TrajectoryBreak {
     pub frame: i64,
@@ -231,6 +260,114 @@ pub fn trajectory_breaks_configured(
     found
 }
 
+pub fn trajectory_direction_breaks(
+    points: &[BallObservation],
+    config: DirectionBreakConfig,
+) -> Vec<TrajectoryBreak> {
+    if !config.valid()
+        || points.len() < 9
+        || points.windows(2).any(|pair| pair[1].frame <= pair[0].frame)
+        || points.iter().any(|point| {
+            point.frame < 0
+                || point.frame > i32::MAX as i64
+                || !point.x.is_finite()
+                || !point.y.is_finite()
+        })
+    {
+        return Vec::new();
+    }
+    let mut found: Vec<TrajectoryBreak> = Vec::new();
+    let mut times = std::collections::BTreeSet::new();
+    for i in 4..points.len() - 4 {
+        times.insert(points[i].frame);
+        let gap = points[i + 1].frame - points[i].frame;
+        if (2..=4).contains(&gap) {
+            times.insert(points[i].frame + gap / 2);
+        }
+    }
+    for at in times {
+        let left_end = points.partition_point(|point| point.frame < at);
+        let right_begin = points.partition_point(|point| point.frame <= at);
+        let left = &points[left_end.saturating_sub(7)..left_end];
+        let right = &points[right_begin..(right_begin + 7).min(points.len())];
+        if left.len() < 4
+            || right.len() < 4
+            || left.last().is_none_or(|point| at - point.frame > 3)
+            || right.first().is_none_or(|point| point.frame - at > 3)
+            || left.first().is_none_or(|point| at - point.frame > 12)
+            || right.last().is_none_or(|point| point.frame - at > 12)
+            || left
+                .windows(2)
+                .chain(right.windows(2))
+                .any(|pair| pair[1].frame - pair[0].frame > 4)
+        {
+            continue;
+        }
+        let (Some(before), Some(after)) = (fit(left, at), fit(right, at)) else {
+            continue;
+        };
+        let error = before.error.max(after.error);
+        if error > config.max_fit_error_px {
+            continue;
+        }
+        let join = (before.x[0] - after.x[0]).hypot(before.y[0] - after.y[0]);
+        if join > config.max_join_error_px {
+            continue;
+        }
+        let (bx, by) = (before.x[1], before.y[1]);
+        let (ax, ay) = (after.x[1], after.y[1]);
+        let before_length = bx.hypot(by);
+        let after_length = ax.hypot(ay);
+        if before_length < 1e-6 || after_length < 1e-6 {
+            continue;
+        }
+        let cosine = ((bx * ax + by * ay) / (before_length * after_length)).clamp(-1.0, 1.0);
+        let angle = cosine.acos().to_degrees();
+        if angle < config.min_turn_angle_deg {
+            continue;
+        }
+        let joined: Vec<_> = left.iter().chain(right).copied().collect();
+        let Some(smooth) = fit(&joined, at) else {
+            continue;
+        };
+        if smooth.error < 2.0 || error > smooth.error * 0.65 {
+            continue;
+        }
+        let candidate = TrajectoryBreak {
+            frame: at,
+            position: [
+                (before.x[0] + after.x[0]) * 0.5,
+                (before.y[0] + after.y[0]) * 0.5,
+            ],
+            motion: MotionEvidence {
+                motion_frame: at,
+                speed_before: before_length,
+                speed_after: after_length,
+                angle,
+                residual: (ax - bx).hypot(ay - by),
+            },
+            fit_error: error + join * 0.25,
+            before_frames: left.iter().map(|point| point.frame).collect(),
+            after_frames: right.iter().map(|point| point.frame).collect(),
+            contact_observed: points
+                .binary_search_by_key(&at, |point| point.frame)
+                .is_ok(),
+        };
+        let quality = |event: &TrajectoryBreak| event.motion.angle / (1.0 + event.fit_error);
+        if let Some(previous) = found
+            .last_mut()
+            .filter(|prior| at - prior.frame <= config.min_separation_frames)
+        {
+            if quality(&candidate) > quality(previous) {
+                *previous = candidate;
+            }
+        } else {
+            found.push(candidate);
+        }
+    }
+    found
+}
+
 pub fn downward_to_upward_breaks(points: &[BallObservation]) -> Vec<TrajectoryBreak> {
     trajectory_breaks(points)
         .into_iter()
@@ -316,6 +453,62 @@ mod tests {
             ..TrajectoryBreakConfig::default()
         }
         .valid());
+    }
+
+    #[test]
+    fn directional_turn_is_detected_without_velocity_threshold() {
+        let settings = DirectionBreakConfig::default();
+        let smooth = flight(false);
+        assert!(trajectory_direction_breaks(&smooth, settings).is_empty());
+        let mut quantized = smooth.clone();
+        for point in &mut quantized {
+            point.x = (point.x / 2.0).round() * 2.0;
+            point.y = (point.y / 3.0).round() * 3.0;
+        }
+        assert!(trajectory_direction_breaks(&quantized, settings).is_empty());
+        let collision = trajectory_direction_breaks(&flight(true), settings);
+        assert_eq!(collision.len(), 1, "{collision:?}");
+        assert!((collision[0].frame - 30).abs() <= 1);
+        assert!(collision[0].motion.angle >= 45.0);
+        let stricter = DirectionBreakConfig {
+            min_turn_angle_deg: 170.0,
+            ..settings
+        };
+        assert!(trajectory_direction_breaks(&flight(true), stricter).is_empty());
+        assert!(!DirectionBreakConfig {
+            max_join_error_px: f64::NAN,
+            ..settings
+        }
+        .valid());
+    }
+
+    #[test]
+    fn direction_break_survives_moderate_extrapolation_gap() {
+        let points: Vec<_> = (0..100)
+            .map(|frame| {
+                let t = frame as f64 - 50.0;
+                let dy = 9.0 * t + 0.13 * t * t - 21.0 * t.max(0.0);
+                BallObservation {
+                    frame,
+                    x: 420.0 + 2.0 * t - 3.0 * t.max(0.0),
+                    y: 310.0 + dy,
+                }
+            })
+            .collect();
+        assert!(
+            trajectory_direction_breaks(
+                &points,
+                DirectionBreakConfig {
+                    max_join_error_px: 8.0,
+                    ..DirectionBreakConfig::default()
+                }
+            )
+            .len()
+                <= 1
+        );
+        let found = trajectory_direction_breaks(&points, DirectionBreakConfig::default());
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!((found[0].frame - 50).abs() <= 1);
     }
 
     #[test]

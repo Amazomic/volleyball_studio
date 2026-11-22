@@ -174,10 +174,10 @@ pub(crate) fn full_video_ball_suggestions_scoped(
 pub(crate) fn full_video_ball_impacts_scoped(
     run: &crate::native_rally_evidence::ValidatedRun,
     scope: &[(u64, u64)],
-    config: volley_core::motion::TrajectoryBreakConfig,
+    config: volley_core::motion::DirectionBreakConfig,
 ) -> Result<(Vec<(u64, f64)>, usize), String> {
     if !config.valid() {
-        return Err("Invalid ball impact sensitivity parameters".into());
+        return Err("Invalid ball direction change parameters".into());
     }
     full_video_ball_suggestions_impl(run, scope, Some(config))
 }
@@ -185,7 +185,7 @@ pub(crate) fn full_video_ball_impacts_scoped(
 fn full_video_ball_suggestions_impl(
     run: &crate::native_rally_evidence::ValidatedRun,
     scope: &[(u64, u64)],
-    impact: Option<volley_core::motion::TrajectoryBreakConfig>,
+    impact: Option<volley_core::motion::DirectionBreakConfig>,
 ) -> Result<(Vec<(u64, f64)>, usize), String> {
     if scope
         .iter()
@@ -217,19 +217,24 @@ fn full_video_ball_suggestions_impl(
     fn emit(
         points: &[BallObservation],
         candidates: &mut Vec<(u64, f64)>,
-        impact: Option<volley_core::motion::TrajectoryBreakConfig>,
+        impact: Option<volley_core::motion::DirectionBreakConfig>,
     ) -> Result<(), String> {
         if points.len() < 9 {
             return Ok(());
         }
         let breaks = if let Some(config) = impact {
-            volley_core::motion::trajectory_breaks_configured(points, config)
+            volley_core::motion::trajectory_direction_breaks(points, config)
         } else {
             volley_core::motion::trajectory_breaks(points)
         };
         for b in breaks {
             if b.frame >= 0 {
-                candidates.push((b.frame as u64, b.motion.residual / (1.0 + b.fit_error)));
+                let score = if impact.is_some() {
+                    b.motion.angle / (1.0 + b.fit_error)
+                } else {
+                    b.motion.residual / (1.0 + b.fit_error)
+                };
+                candidates.push((b.frame as u64, score));
             }
         }
         if impact.is_none() {
@@ -394,21 +399,21 @@ mod scored_trajectory_tests {
         let (impacts, _) = full_video_ball_impacts_scoped(
             &run,
             &[(0, 49)],
-            volley_core::motion::TrajectoryBreakConfig::default(),
+            volley_core::motion::DirectionBreakConfig::default(),
         )
         .unwrap();
         assert_eq!(impacts.len(), 1, "{impacts:?}");
         assert!(impacts[0].0.abs_diff(25) <= 2);
-        let (suppressed, _) = full_video_ball_impacts_scoped(
+        let (strong_turn, _) = full_video_ball_impacts_scoped(
             &run,
             &[(0, 49)],
-            volley_core::motion::TrajectoryBreakConfig {
-                min_velocity_jump_px_frame: 50.0,
-                ..volley_core::motion::TrajectoryBreakConfig::default()
+            volley_core::motion::DirectionBreakConfig {
+                min_turn_angle_deg: 170.0,
+                ..volley_core::motion::DirectionBreakConfig::default()
             },
         )
         .unwrap();
-        assert!(suppressed.is_empty());
+        assert_eq!(strong_turn.len(), 1);
         let (no_rallies, observed) = full_video_ball_suggestions_scoped(&run, &[]).unwrap();
         assert_eq!(observed, 0);
         assert!(no_rallies.is_empty());

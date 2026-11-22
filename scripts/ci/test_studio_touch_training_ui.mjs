@@ -17,7 +17,7 @@ assert.ok(html.indexOf('id="studio-impact-settings"') < html.indexOf('class="vid
 for(const id of ["studio-annotation-calculate","studio-annotation-seed-trajectory",
   "studio-annotation-save","studio-training-method","studio-annotation-hide-extra",
   "studio-annotation-review","studio-annotation-rallies",
-  "studio-impact-min-jump","studio-impact-relative-jump","studio-impact-fit-error",
+  "studio-impact-angle","studio-impact-join","studio-impact-fit-error",
   "studio-impact-min-separation"]){
   assert.ok(html.includes('id="'+id+'"'),id);
 }
@@ -55,7 +55,7 @@ const $=id=>{
 };
 const logs=[],writeActions=[],calculations=[],classifications=[];
 for(const [id,value] of [
-  ["studio-impact-min-jump","8"],["studio-impact-relative-jump","45"],
+  ["studio-impact-angle","45"],["studio-impact-join","20"],
   ["studio-impact-fit-error","4"],["studio-impact-min-separation","6"]
 ])elements.set(id,Object.assign(new Element(),{value}));
 const original={
@@ -98,7 +98,7 @@ const context={
         source_replay_sha256:"a".repeat(64),
         rally_count:1,rally_intervals:[{start:95,end:150}],
         proposals:[{frame:100,score:9},{frame:140,score:3}],
-        method:"piecewise_ballistic_impacts_v2",
+        method:"piecewise_ballistic_direction_v3",
         impact_settings:Object.fromEntries(Object.entries(payload.impact).reverse()),
         calibration:{min_score:0,shift_frames:0,training_videos:0},
         metrics_on_labeled_video:null};
@@ -138,7 +138,7 @@ assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].rally)),
   {mode:"continuous",merge_gap_seconds:4,min_trajectory_seconds:1.5});
 assert.equal(annotation.prediction.proposals.length,2);
 assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].impact)),{
-  min_velocity_jump_px_frame:8,relative_velocity_jump:0.45,
+  min_turn_angle_deg:45,max_join_error_px:20,
   max_fit_error_px:4,min_separation_frames:6
 });
 assert.equal(annotation.classify.disabled,false,"Type stage requires ball candidates");
@@ -181,11 +181,11 @@ assert.equal(calculations.length,2);
 assert.equal(annotation.prediction.calibration.shift_frames,0);
 assert.equal(annotation.prediction.calibration.training_videos,0);
 assert.equal(annotation.prediction.proposals[0].frame,100);
-elements.get("studio-impact-min-jump").value="12";
-elements.get("studio-impact-min-jump").listeners.change();
-assert.equal(annotation.prediction,null,"Changing collision sensitivity invalidates stale candidates");
+elements.get("studio-impact-angle").value="75";
+elements.get("studio-impact-angle").listeners.change();
+assert.equal(annotation.prediction,null,"Changing direction sensitivity invalidates stale candidates");
 await elements.get("studio-annotation-calculate").click();
-assert.equal(calculations[2].impact.min_velocity_jump_px_frame,12);
+assert.equal(calculations[2].impact.min_turn_angle_deg,75);
 invalidateTrainingTouchPrediction();
 assert.equal(annotation.prediction,null,"Changing rally settings must invalidate old touch candidates");
 assert.ok(drawn>=4);

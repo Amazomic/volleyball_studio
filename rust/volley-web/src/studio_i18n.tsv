@@ -614,9 +614,9 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 ⚙ Параметры касаний	⚙ Touch settings
 Поиск столкновений по траектории	Trajectory-based collision search
 Столкновения по траектории VBallNet	VBallNet trajectory collisions
-Плавная дуга полёта под действием гравитации игнорируется. Резкий скачок скорости — кандидат столкновения, не подтверждённое касание игрока.	Smooth gravitational flight is ignored. A sudden velocity jump is a collision candidate, not a confirmed player touch.
-Минимальный скачок скорости, пикс./кадр	Minimum velocity jump, px/frame
-Относительный скачок скорости, %	Relative velocity jump, %
+Плавная параболическая дуга полёта игнорируется. Резкий излом направления между двумя участками траектории — кандидат столкновения, а не подтверждённое касание игрока.	Smooth parabolic flight is ignored. A sudden change of direction between two flight arcs is a collision candidate, not a confirmed player touch.
+Минимальный угол излома траектории, °	Minimum trajectory turn angle, °
+Допустимый разрыв дуг, пикс.	Maximum arc join mismatch, px
 Допустимая ошибка параболы, пикс.	Maximum ballistic fit error, px
 Минимальный интервал между столкновениями, кадры	Minimum spacing between collisions, frames
 Параметры действуют только в «Дебаге». Для проверки изменений нажмите «Рассчитать касания».	Settings apply only in Debug. Recalculate touches to test a change.
