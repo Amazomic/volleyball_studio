@@ -586,14 +586,14 @@ impl ByteTracker {
                 .collect::<Vec<_>>();
             let mut available = scores.iter().filter_map(|v| *v).collect::<Vec<_>>();
             available.sort_by(|a, b| b.total_cmp(a));
-            let independent_crossing = observations.iter().enumerate().any(|(other, row)| {
-                other != index
-                    && self.independently_tracked_bodies(frame, &observation.box_, &row.box_)
-            });
-            if available.len() > 1
-                && available[0] - available[1] < self.config.ambiguity_margin
-                && !independent_crossing
-            {
+            let is_ambiguous =
+                available.len() > 1 && available[0] - available[1] < self.config.ambiguity_margin;
+            let independently_tracked_crossing = is_ambiguous
+                && observations.iter().enumerate().any(|(other, row)| {
+                    other != index
+                        && self.independently_tracked_bodies(frame, &observation.box_, &row.box_)
+                });
+            if is_ambiguous && !independently_tracked_crossing {
                 ambiguous += 1;
                 blocked.push(matrix.len());
                 matrix.push(vec![None; indices.len()]);
