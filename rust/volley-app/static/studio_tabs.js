@@ -452,12 +452,12 @@
     ["ball_stabilizer","Интерполяция траектории мяча","cpu",2,2],
     ["touches","Касания","cpu",2,3],
     ["touch_types","Типы касаний","cpu",2,4],
-    ["publish","Публикация","cpu",2,5],
-    ["identity","Привязка игроков","cpu",2,6],
-    ["material","Результат","output",2,7]
+    ["identity","Привязка игроков","cpu",2,5],
   ];
   const pipelineNames=new Map(pipelineStages.map(item=>[item[0],item[1]]));
   pipelineNames.set("cache","Кэш GPU");
+  pipelineNames.set("publish","Публикация");
+  pipelineNames.set("material","Результат");
   const pipelineModelMeta=(id,run)=>{
     const tcn=run?.profile?.post?.touches?.algorithm==="trajectory_tcn"||
       (!run&&$("studio-post-tcn-experimental")?.checked);
@@ -482,9 +482,7 @@
     tracking:[["rect",{x:2,y:3,width:20,height:18,rx:3}],["circle",{cx:8,cy:9,r:2}],["path",{d:"M4 17c1-3 7-3 8 0m4-9h4m-4 5h4m-4 5h3"}]],
     touches:[["path",{d:"M8 22V11a2 2 0 0 1 4 0V5a2 2 0 0 1 4 0v6a2 2 0 0 1 4 0v5a7 7 0 0 1-7 7h-2a8 8 0 0 1-6-3l-3-4a2 2 0 0 1 3-3l3 3"}]],
     touch_types:[["circle",{cx:11,cy:13,r:8}],["path",{d:"m5 8 6 2 4-4m-7 9 3-5 8 3m-8 2-4 6m4-11 1 11M19 1v4m-2-2h4"}]],
-    publish:[["path",{d:"M12 16V2m-5 5 5-5 5 5M3 15v6h18v-6"}]],
     identity:[["path",{d:"M10 13a5 5 0 0 0 7 .5l3-3a5 5 0 0 0-7-7l-2 2m3 5a5 5 0 0 0-7-.5l-3 3a5 5 0 0 0 7 7l2-2"}]],
-    material:[["path",{d:"M4 20V12m5 8V6m5 14v-9m5 9V3M2 22h20"}]]
   };
   const pipelineIcon=id=>{
     const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
@@ -610,9 +608,8 @@
   const pipelineEdges=[
     ["video","ball"],["ball","rallies"],["rallies","players"],["players","fusion"],
     ["fusion","pose"],["pose","tracking"],["tracking","ball_stabilizer"],["ball_stabilizer","touches"],
-    ["touches","touch_types"],["touch_types","publish"],
-    ["publish","identity"],["identity","material"],
-    ["video","fusion","cache"],["fusion","tracking","no-pose"],["touches","publish","no-types"]
+    ["touches","touch_types"],["touch_types","identity"],
+    ["video","fusion","cache"],["fusion","tracking","no-pose"],["touches","identity","no-types"]
   ];
   const graphSettings={
     video:[".analysis-profile-source","#studio-analysis-editor"],
@@ -645,9 +642,7 @@
     tracking:"ByteTrack сопровождает Track ID на CPU. Это алгоритм трекинга, а не нейросеть.",
     touches:"Физические касания и определение их типов выполняются в одном CPU-проходе.",
     touch_types:"По умолчанию используется алгоритм PoseMotion. Экспериментальная нейросеть Volley3D TCN используется только при включённой опции и наличии модели; отдельного GPU-прохода здесь нет.",
-    publish:"Первичные розыгрыши публикуются без повторного определения границ.",
     identity:"Автоматическая привязка Track ID к игрокам из библиотеки.",
-    material:"Разметка временной шкалы для предпросмотра и монтажа.",
     cache:"Готовый GPU-анализ переиспользуется при совместимых настройках."
   };
   let graphMoved=[],graphFocus=null;
@@ -884,7 +879,7 @@
       const b=target.querySelector('[data-stage-id="'+to+'"]');
       const branchCache=from==="video"&&to==="fusion";
       const branchSkip=from==="fusion"&&to==="tracking";
-      const branchTypes=from==="touches"&&to==="publish";
+      const branchTypes=from==="touches"&&to==="identity";
       const classification=run?.profile?.post?.pose_classification!==false;
       const selected=branchCache?cached:branchSkip?run?.profile?.gpu?.pose_enabled===false:
         branchTypes?!classification:!cached;

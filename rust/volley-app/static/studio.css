@@ -1957,7 +1957,7 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 .analysis-flow-actions{display:flex;gap:7px;flex-wrap:wrap}
 .analysis-flow-actions button{padding:8px 12px}
 .analysis-flow-diagram{max-width:none;width:100%;margin:0;position:relative;padding:30px clamp(12px,1.3vw,22px) 25px}
-.analysis-flow-grid{position:relative;display:grid;grid-template-columns:repeat(7,minmax(0,1fr));column-gap:clamp(12px,1.3vw,21px);row-gap:54px}
+.analysis-flow-grid{position:relative;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));column-gap:clamp(12px,1.3vw,21px);row-gap:54px}
 .analysis-flow-phase{position:relative;z-index:0;margin:-20px -9px -13px;border:1px solid;border-radius:13px;pointer-events:none}
 .analysis-flow-phase[data-phase="gpu"]{background:linear-gradient(145deg,#122e37a8,#1126389c);border-color:#2b6d74}
 .analysis-flow-phase[data-phase="cpu"]{background:linear-gradient(145deg,#152c4c9c,#17243baf);border-color:#37658d}
