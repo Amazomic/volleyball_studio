@@ -477,9 +477,11 @@ pub(crate) fn list_runs(state: &AppState, id: &str) -> Result<Vec<Value>, storag
         });
         runs.push(run);
     }
-    for run in runs.clone() {
-        runs.extend(legacy_postprocessing_runs(state, id, &run));
-    }
+    let legacy_runs = runs
+        .iter()
+        .flat_map(|run| legacy_postprocessing_runs(state, id, run))
+        .collect::<Vec<_>>();
+    runs.extend(legacy_runs);
     let entries = optional_record(&root.join("runs/header_entries.json"));
     let deleted: HashSet<&str> = entries["deleted"]
         .as_array()

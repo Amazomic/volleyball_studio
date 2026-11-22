@@ -226,7 +226,22 @@ fn store_index(
     Ok(())
 }
 
-static TRACK_INDEX_GATES: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+static TRACK_INDEX_GATES: OnceLock<Mutex<BTreeMap<PathBuf, std::sync::Weak<Mutex<()>>>>> =
+    OnceLock::new();
+
+fn track_index_gate(path: &Path) -> Result<Arc<Mutex<()>>, String> {
+    let store = TRACK_INDEX_GATES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut paths = store
+        .lock()
+        .map_err(|_| "Track index gate map lock is poisoned")?;
+    paths.retain(|_, gate| gate.strong_count() > 0);
+    if let Some(gate) = paths.get(path).and_then(std::sync::Weak::upgrade) {
+        return Ok(gate);
+    }
+    let gate = Arc::new(Mutex::new(()));
+    paths.insert(path.to_owned(), Arc::downgrade(&gate));
+    Ok(gate)
+}
 
 pub(crate) fn prepare_replay_index(path: &Path, sha: &str, frames: u64) -> Result<(), String> {
     let tracks = index_replay(path, sha, frames)?;
@@ -310,16 +325,7 @@ fn index_with_scope(
     if scope.is_some_and(|(sha, _)| !valid_sha(sha)) {
         return Err("Invalid selected rally SHA-256".into());
     }
-    let gate = {
-        let store = TRACK_INDEX_GATES.get_or_init(|| Mutex::new(BTreeMap::new()));
-        let mut paths = store
-            .lock()
-            .map_err(|_| "Track index gate lock is poisoned")?;
-        paths
-            .entry(path.to_owned())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    };
+    let gate = track_index_gate(path)?;
     let _gate = gate
         .lock()
         .map_err(|_| "Track index build lock is poisoned")?;
@@ -1196,6 +1202,21 @@ mod spatial_duplicate_tests {
 mod persistent_index_tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn track_index_gate_reuses_active_locks_and_releases_inactive_paths() {
+        let root = std::env::temp_dir().join(format!("volley-track-gate-{}", Uuid::new_v4()));
+        let same = track_index_gate(&root).unwrap();
+        let reused = track_index_gate(&root).unwrap();
+        assert!(Arc::ptr_eq(&same, &reused));
+        let dropped = Arc::downgrade(&same);
+        drop(same);
+        drop(reused);
+        assert!(dropped.upgrade().is_none());
+        let fresh = track_index_gate(&root).unwrap();
+        assert!(dropped.upgrade().is_none());
+        assert_eq!(Arc::strong_count(&fresh), 1);
+    }
 
     #[test]
     fn multiple_covisible_players_are_persisted_with_json_pair_keys() {

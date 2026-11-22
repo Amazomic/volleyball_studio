@@ -106,14 +106,11 @@ pub struct LogQuery {
     #[serde(default)]
     after: usize,
 }
-pub async fn log(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<LogQuery>,
-) -> ApiResult<Value> {
+fn log_rows(state: &AppState, query: &LogQuery) -> ApiResult<Value> {
     if query.after > MAX_LOG_ENTRIES {
         return Err(storage::bad_request("Недопустимый курсор журнала"));
     }
-    let root = folder(&state, &query.project_id, false)?;
+    let root = folder(state, &query.project_id, false)?;
     let status_file = status_path(&root, &query.id)?;
     let status = read(&status_file)?;
     if status["schema"] != SCHEMA
@@ -159,6 +156,15 @@ pub async fn log(
     })))
 }
 
+pub async fn log(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<LogQuery>,
+) -> ApiResult<Value> {
+    tokio::task::spawn_blocking(move || log_rows(&state, &query))
+        .await
+        .map_err(|error| storage::internal(format!("Read pipeline log worker: {error}")))?
+}
+
 #[derive(Deserialize)]
 pub struct HistoryQuery {
     project_id: String,
@@ -186,20 +192,19 @@ fn hidden_history(root: &Path) -> Result<BTreeSet<String>, ApiError> {
     Ok(ids)
 }
 
-fn clear_history_rows(
+fn collect_history_rows(
     state: &AppState,
     project_id: &str,
-    active: Option<&str>,
-) -> Result<usize, ApiError> {
+) -> Result<(PathBuf, BTreeSet<String>), ApiError> {
     let root = folder(state, project_id, false)?;
     if !root.exists() {
-        return Ok(0);
+        return Ok((root, BTreeSet::new()));
     }
     let mut ids = BTreeSet::new();
     for entry in fs::read_dir(&root).map_err(|e| storage::internal(format!("Read history: {e}")))? {
         let entry = entry.map_err(|e| storage::internal(format!("Read history entry: {e}")))?;
         let id = entry.file_name().to_string_lossy().into_owned();
-        if !valid_id(&id) || active == Some(id.as_str()) {
+        if !valid_id(&id) {
             continue;
         }
         let meta = fs::symlink_metadata(entry.path())
@@ -211,9 +216,33 @@ fn clear_history_rows(
             return Err(storage::bad_request("Слишком много запусков анализа"));
         }
     }
+    Ok((root, ids))
+}
+
+fn persist_hidden_history(
+    root: &Path,
+    mut ids: BTreeSet<String>,
+    active: Option<&str>,
+) -> Result<usize, ApiError> {
+    if !root.exists() {
+        return Ok(0);
+    }
+    if let Some(active) = active {
+        ids.remove(active);
+    }
     storage::write_json_atomic(&root.join("history_hidden.json"), &json!(ids))
         .map_err(|e| storage::internal(format!("Save history visibility: {e:?}")))?;
     Ok(ids.len())
+}
+
+#[cfg(test)]
+fn clear_history_rows(
+    state: &AppState,
+    project_id: &str,
+    active: Option<&str>,
+) -> Result<usize, ApiError> {
+    let (root, ids) = collect_history_rows(state, project_id)?;
+    persist_hidden_history(&root, ids, active)
 }
 
 #[derive(Deserialize)]
@@ -234,13 +263,19 @@ pub async fn clear_history(
         ));
     }
     storage::project_id(&request.project_id)?;
+    let scan_state = state.clone();
+    let scan_project = request.project_id.clone();
+    let (root, ids) =
+        tokio::task::spawn_blocking(move || collect_history_rows(&scan_state, &scan_project))
+            .await
+            .map_err(|e| storage::internal(format!("Scan pipeline history worker: {e}")))??;
     let slot = manager().lock().await;
     let _guard = project_guard::write_guard(&state, &request.project_id)?;
     let active = slot
         .as_ref()
         .filter(|run| run.project_id == request.project_id)
         .map(|run| run.id.as_str());
-    let count = clear_history_rows(&state, &request.project_id, active)?;
+    let count = persist_hidden_history(&root, ids, active)?;
     Ok(Json(
         json!({"project_id":request.project_id,"hidden":count}),
     ))
@@ -614,31 +649,50 @@ pub(crate) async fn has_active_for_project(project_id: &str) -> bool {
 
 /// Protect only artifacts used by the running studio pipeline; unrelated saved
 /// analyses can be renamed or deleted without interrupting GPU/CPU processing.
+fn status_uses_analysis(status: &Value, video: &str, artifact_id: &str) -> bool {
+    if status["video"] != video {
+        return false;
+    }
+    ["source_analysis_id", "analysis_id", "reused_from_id"]
+        .iter()
+        .any(|key| status[*key].as_str() == Some(artifact_id))
+        || ["gpu_jobs", "cpu_runs"]
+            .iter()
+            .filter_map(|key| status[*key].as_object())
+            .flat_map(|values| values.values())
+            .any(|value| value.as_str() == Some(artifact_id))
+}
+
 pub(crate) async fn uses_analysis(
     state: &AppState,
     project_id: &str,
     video: &str,
     artifact_id: &str,
 ) -> Result<bool, ApiError> {
-    let slot = manager().lock().await;
-    let Some(running) = slot.as_ref().filter(|job| job.project_id == project_id) else {
+    let running_id = {
+        let slot = manager().lock().await;
+        slot.as_ref()
+            .filter(|job| job.project_id == project_id)
+            .map(|job| job.id.clone())
+    };
+    let Some(running_id) = running_id else {
         return Ok(false);
     };
     let root = folder(state, project_id, false)?;
-    let status = read(&status_path(&root, &running.id)?)?;
-    if status["video"] != video {
-        return Ok(false);
+    let running_path = status_path(&root, &running_id)?;
+    let status = tokio::task::spawn_blocking(move || read(&running_path))
+        .await
+        .map_err(|e| storage::internal(format!("Read active pipeline worker: {e}")))??;
+    let slot = manager().lock().await;
+    if !slot
+        .as_ref()
+        .is_some_and(|job| job.project_id == project_id && job.id == running_id)
+    {
+        return Ok(true);
     }
-    let directly_used = ["source_analysis_id", "analysis_id", "reused_from_id"]
-        .iter()
-        .any(|key| status[*key].as_str() == Some(artifact_id));
-    let nested_used = ["gpu_jobs", "cpu_runs"]
-        .iter()
-        .filter_map(|key| status[*key].as_object())
-        .flat_map(|values| values.values())
-        .any(|value| value.as_str() == Some(artifact_id));
-    Ok(directly_used || nested_used)
+    Ok(status_uses_analysis(&status, video, artifact_id))
 }
+
 fn reason(error: ApiError) -> String {
     error.1 .0["error"]
         .as_str()
@@ -2773,17 +2827,16 @@ fn stage_aware_remaining(current: &Value, history: &Value, now: u64) -> Option<u
     (remaining <= 7 * 24 * 3_600_000).then_some(remaining.max(1000))
 }
 
-pub async fn status(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<StatusQuery>,
-) -> ApiResult<Value> {
-    let root = folder(&state, &query.project_id, false)?;
-    let id = match query.id {
-        Some(id) => id,
+fn status_snapshot(
+    state: &AppState,
+    query: &StatusQuery,
+) -> Result<Option<(String, Value)>, ApiError> {
+    let root = folder(state, &query.project_id, false)?;
+    let id = match query.id.as_deref() {
+        Some(id) => id.to_owned(),
         None => {
             if !root.join("latest.json").exists() {
-                return Ok(Json(json!({"schema":SCHEMA,"status":"idle",
-                    "project_id":query.project_id})));
+                return Ok(None);
             }
             let latest = read(&root.join("latest.json"))?;
             latest["id"]
@@ -2793,16 +2846,33 @@ pub async fn status(
                 .to_owned()
         }
     };
-    let mut result = read(&status_path(&root, &id)?)?;
+    let result = read(&status_path(&root, &id)?)?;
     if result["schema"] != SCHEMA || result["project_id"] != query.project_id || result["id"] != id
     {
         return Err(storage::bad_request("Статус принадлежит другому проекту"));
     }
+    Ok(Some((id, result)))
+}
+
+pub async fn status(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<StatusQuery>,
+) -> ApiResult<Value> {
+    let project_id = query.project_id.clone();
+    let read_state = state.clone();
+    let snapshot = tokio::task::spawn_blocking(move || status_snapshot(&read_state, &query))
+        .await
+        .map_err(|e| storage::internal(format!("Read pipeline status worker: {e}")))??;
+    let Some((id, mut result)) = snapshot else {
+        return Ok(Json(
+            json!({"schema":SCHEMA,"status":"idle","project_id":project_id}),
+        ));
+    };
     if result["status"] == "running" || result["status"] == "queued" {
         let slot = manager().lock().await;
         match slot
             .as_ref()
-            .filter(|entry| entry.id == id && entry.project_id == query.project_id)
+            .filter(|entry| entry.id == id && entry.project_id == project_id)
         {
             Some(entry) if entry.cancel.load(Ordering::Acquire) => {
                 result["status"] = json!("cancelling");
@@ -2830,7 +2900,7 @@ pub async fn status(
             .is_some_and(|items| !items.is_empty())
     {
         let app = state.clone();
-        let project = query.project_id.clone();
+        let project = project_id.clone();
         let run = id.clone();
         if let Ok(Ok(history)) =
             tokio::task::spawn_blocking(move || eta_reference_history(&app, &project, &run)).await
@@ -2888,6 +2958,50 @@ pub async fn cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_analysis_sources_match_only_the_requested_video_and_artifact() {
+        let status = json!({
+            "video":"match.mp4",
+            "source_analysis_id":"primary",
+            "analysis_id":"fusion",
+            "reused_from_id":"previous",
+            "gpu_jobs":{"ball":"ball-run","players":"person-run"},
+            "cpu_runs":{"tracking":"track-run"}
+        });
+        for artifact in [
+            "primary",
+            "fusion",
+            "previous",
+            "ball-run",
+            "person-run",
+            "track-run",
+        ] {
+            assert!(status_uses_analysis(&status, "match.mp4", artifact));
+            assert!(!status_uses_analysis(&status, "other.mp4", artifact));
+        }
+        assert!(!status_uses_analysis(&status, "match.mp4", "unrelated"));
+    }
+
+    #[test]
+    fn clear_history_excludes_active_run_after_background_scan() {
+        let root =
+            std::env::temp_dir().join(format!("volley-history-lock-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let mut ids = BTreeSet::new();
+        ids.insert("a".repeat(32));
+        ids.insert("b".repeat(32));
+        let active = "b".repeat(32);
+        assert_eq!(
+            persist_hidden_history(&root, ids, Some(&active)).unwrap(),
+            1
+        );
+        assert_eq!(
+            hidden_history(&root).unwrap(),
+            BTreeSet::from(["a".repeat(32)])
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn only_shared_rally_scoped_pose_sources_can_be_reused() {
@@ -4223,6 +4337,17 @@ mod branching_tests {
             )
             .unwrap();
         }
+        let indexed_status = status_snapshot(
+            &handler_state,
+            &StatusQuery {
+                project_id: "abc123def456".into(),
+                id: Some(format!("{:032x}", 0)),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(indexed_status.0, format!("{:032x}", 0));
+        assert_eq!(indexed_status.1["status"], "complete");
         let page = history_rows(&handler_state, "abc123def456", 0).unwrap();
         assert_eq!(page["runs"].as_array().unwrap().len(), 25);
         assert_eq!(page["next_offset"], 25);
