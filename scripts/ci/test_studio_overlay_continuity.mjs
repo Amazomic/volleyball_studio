@@ -28,8 +28,8 @@ assert.match(trajectoryModes,/id="studio-debug-trajectory-legend"[^>]*hidden/);
 assert.match(css,/\.trajectory-raw\{background:#47e2ff\}/);
 assert.match(css,/\.trajectory-stabilized\{background:#f1bd51\}/);
 assert.match(css,/#studio-preview-view:not\(\.training-workspace\) #studio-debug-stabilizer-compare\{display:none\}/);
-assert.match(js,/\["ball_stabilizer_v3","ball_stabilizer_v4","ball_stabilizer_v5","ball_stabilizer_v6"\]\.includes\(stats\?\.version\)/,
-  "Debug comparison must read historical V3/V4/V5 results alongside V6");
+assert.match(js,/\["ball_stabilizer_v3","ball_stabilizer_v4","ball_stabilizer_v5","ball_stabilizer_v6","ball_stabilizer_v7"\]\.includes\(stats\?\.version\)/,
+  "Debug comparison must read historical V3/V4/V5 results alongside V6/V7");
 assert.match(html,/id="studio-overlay-processed"[^>]*role="tab"/);
 assert.match(html,/id="studio-overlay-raw"[^>]*role="tab"/);
 assert.match(html,/id="studio-raw-people-visible"/);

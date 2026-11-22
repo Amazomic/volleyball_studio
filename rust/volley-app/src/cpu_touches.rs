@@ -313,6 +313,7 @@ pub(crate) fn verified_ball_trajectory(
                 | "ball_stabilizer_v4"
                 | "ball_stabilizer_v5"
                 | "ball_stabilizer_v6"
+                | "ball_stabilizer_v7"
         )
         || summary["source_replay_id"] != replay_id
         || summary["source_replay_sha256"] != replay_sha256
