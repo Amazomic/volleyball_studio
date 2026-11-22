@@ -171,7 +171,9 @@ const checkbox={dataset:{overlayAction:"attack"},checked:false,addEventListener:
 const input={addEventListener(){}};
 const controls={querySelectorAll:()=>[checkbox],classList:{toggle(){},remove(){},add(){}}};
 const tab=()=>({attributes:{},closest:()=>controls,addEventListener(name,fn){this[name]=fn;},setAttribute(name,value){this.attributes[name]=value;}});
-const initOverlay={mode:tab(),rawMode:tab(),stabilizerMode:tab(),stabilizerControls:controls,rawControls:controls,actionControls:controls,canvas:{closest:()=>controls},
+const initOverlay={mode:tab(),rawMode:tab(),stabilizerMode:tab(),stabilizerControls:controls,
+  debugTrajectorySwitch:controls,debugBefore:tab(),debugAfter:tab(),
+  rawControls:controls,actionControls:controls,canvas:{closest:()=>controls},
   rawBall:input,rawVballVisible:input,rawPeopleVisible:input,
   rawPlayer:input,rawPose:input,rawPoseVisible:input,
   flags:{touches:true},actionFlags:{attack:true,unknown_touch:true}};
@@ -198,6 +200,14 @@ assert.equal(initOverlay.rawMode.attributes["aria-selected"],"true");
 initOverlay.mode.click();
 assert.equal(initOverlay.raw,false);
 assert.equal(initOverlay.mode.attributes["aria-selected"],"true");
+assert.match(html,/id="studio-debug-trajectory-before"[^>]*aria-pressed="false"/);
+assert.match(html,/id="studio-debug-trajectory-after"[^>]*aria-pressed="true"/);
+initOverlay.debugBefore.click();
+assert.equal(initOverlay.trajectoryVariant,"before");
+assert.equal(initOverlay.debugBefore.attributes["aria-pressed"],"true");
+initOverlay.debugAfter.click();
+assert.equal(initOverlay.trajectoryVariant,"after");
+assert.equal(initOverlay.debugAfter.attributes["aria-pressed"],"true");
 // The actual presented timestamp wins over currentTime while decoding.
 overlay.presentedTime=90/30;
 ui.video.currentTime=180/30;

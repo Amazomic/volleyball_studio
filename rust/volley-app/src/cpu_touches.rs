@@ -13,14 +13,14 @@ use axum::{
     http::HeaderMap,
     Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
     fs::{self, OpenOptions},
     io::{BufWriter, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -47,6 +47,8 @@ const MAX_MANIFEST_BYTES: u64 = 16384;
 const CHUNK: usize = 240;
 const HALO: usize = 96;
 const OUTPUT_FILE: &str = "touch_candidates.jsonl";
+const BALL_TRAJECTORY_FILE: &str = "trajectory.jsonl";
+const BALL_TRAJECTORY_SCHEMA: &str = "volley-native-stabilized-ball-trajectory/1";
 
 #[cfg(test)]
 fn pose_frames(root: &Path, fusion: &str, frames: &[TouchFrame]) -> Result<Vec<PoseFrame>, String> {
@@ -225,11 +227,41 @@ fn transform_frame(item: TrackedFrame, expected: u64) -> Result<TouchFrame, Stri
     })
 }
 
-/// Per-postprocessing-run trajectory. Original GPU and tracked-frame evidence remains immutable.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CanonicalBallFrame {
+    pub frame: u64,
+    pub ball: Option<[f64; 2]>,
+    pub interpolated: bool,
+    pub rejected: bool,
+}
+
+impl CanonicalBallFrame {
+    pub(crate) fn validate(&self, expected: u64) -> Result<(), String> {
+        if self.frame != expected
+            || self.ball.is_some_and(|[x, y]| {
+                !x.is_finite()
+                    || !y.is_finite()
+                    || !(0.0..=1.0).contains(&x)
+                    || !(0.0..=1.0).contains(&y)
+            })
+            || (self.interpolated && self.ball.is_none())
+        {
+            return Err("Invalid canonical Ball Stabilizer trajectory frame".into());
+        }
+        Ok(())
+    }
+}
+
 pub(crate) struct StabilizedReplay {
     pub source_sha256: String,
     pub motion: volley_core::ball_interpolation::StabilizedBallMotion,
     pub settings: volley_core::ball_interpolation::BallStabilizerSettings,
+    pub artifact_id: String,
+    pub trajectory_sha256: String,
+    pub frames: u64,
+    pub project_root: PathBuf,
+    pub replay_id: String,
 }
 
 impl StabilizedReplay {
@@ -238,7 +270,12 @@ impl StabilizedReplay {
             "schema":"volley-ball-stabilizer/1",
             "version":"ball_stabilizer_v1",
             "source_replay_sha256":self.source_sha256,
+            "source_replay_id":self.replay_id,
             "settings":self.settings,
+            "artifact_id":self.artifact_id,
+            "trajectory_file":BALL_TRAJECTORY_FILE,
+            "trajectory_sha256":self.trajectory_sha256,
+            "frames":self.frames,
             "confidence_frames":self.motion.confidence_frames,
             "observed_frames":self.motion.observed_frames,
             "rejected_frames":self.motion.rejected_frames.len(),
@@ -247,7 +284,190 @@ impl StabilizedReplay {
     }
 }
 
-/// A verified, cancellable CPU-only stage which runs before touch inference.
+pub(crate) fn verified_ball_trajectory(
+    project_root: &Path,
+    summary: &Value,
+    project_id: &str,
+    video: &str,
+    replay_id: &str,
+    replay_sha256: &str,
+    frames: u64,
+) -> Result<(PathBuf, String), String> {
+    let artifact_id = summary["artifact_id"]
+        .as_str()
+        .filter(|id| opaque_id(id))
+        .ok_or("Missing Ball Stabilizer artifact ID")?;
+    let expected_sha = summary["trajectory_sha256"]
+        .as_str()
+        .filter(|sha| volley_core::contracts::sha256(sha))
+        .ok_or("Missing canonical ball trajectory SHA")?;
+    if summary["schema"] != "volley-ball-stabilizer/1"
+        || summary["version"] != "ball_stabilizer_v1"
+        || summary["source_replay_id"] != replay_id
+        || summary["source_replay_sha256"] != replay_sha256
+        || summary["trajectory_file"] != BALL_TRAJECTORY_FILE
+        || summary["frames"].as_u64() != Some(frames)
+    {
+        return Err("Ball Stabilizer lineage does not match selected replay".into());
+    }
+    let root = project_root.join("native_cpu_ball_stabilizer");
+    safe_folder(&root)?;
+    let folder = root.join(artifact_id);
+    safe_folder(&folder)?;
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(safe_file(&folder, "manifest.json", MAX_MANIFEST_BYTES)?)
+            .map_err(|e| format!("Read canonical ball manifest: {e}"))?,
+    )
+    .map_err(|e| format!("Parse canonical ball manifest: {e}"))?;
+    if manifest["schema"] != BALL_TRAJECTORY_SCHEMA
+        || manifest["state"] != "complete"
+        || manifest["project_id"] != project_id
+        || manifest["video"] != video
+        || manifest["artifact_id"] != artifact_id
+        || manifest["source_replay_id"] != replay_id
+        || manifest["source_replay_sha256"] != replay_sha256
+        || manifest["frames"].as_u64() != Some(frames)
+        || manifest["settings"] != summary["settings"]
+        || manifest["file"] != BALL_TRAJECTORY_FILE
+        || manifest["sha256"] != expected_sha
+        || manifest["confidence_frames"] != summary["confidence_frames"]
+        || manifest["observed_frames"] != summary["observed_frames"]
+        || manifest["rejected_frames"] != summary["rejected_frames"]
+        || manifest["interpolated_frames"] != summary["interpolated_frames"]
+    {
+        return Err("Canonical Ball Stabilizer manifest mismatch".into());
+    }
+    let path = safe_file(&folder, BALL_TRAJECTORY_FILE, MAX_INPUT_BYTES)?;
+    Ok((path, expected_sha.to_owned()))
+}
+
+fn read_canonical_ball_motion(
+    path: &Path,
+    sha256: &str,
+    frames: u64,
+    confidence_frames: usize,
+    observed_frames: usize,
+) -> Result<volley_core::ball_interpolation::StabilizedBallMotion, String> {
+    let mut reader = BoundedReader::open(path)?;
+    let mut points = Vec::with_capacity(frames as usize);
+    let mut interpolated = Vec::with_capacity(frames as usize);
+    let mut rejected_frames = Vec::new();
+    for index in 0..frames {
+        let line = reader
+            .line()?
+            .ok_or("Canonical ball trajectory truncated")?;
+        let row: CanonicalBallFrame = serde_json::from_slice(&line)
+            .map_err(|e| format!("Invalid canonical ball frame: {e}"))?;
+        row.validate(index)?;
+        points.push(row.ball);
+        interpolated.push(row.interpolated);
+        if row.rejected {
+            rejected_frames.push(index as usize);
+        }
+    }
+    if reader.line()?.is_some() || reader.finish() != sha256 {
+        return Err("Canonical Ball Stabilizer SHA or frame count mismatch".into());
+    }
+    let motion = volley_core::ball_interpolation::StabilizedBallMotion {
+        points,
+        interpolated,
+        rejected_frames,
+        confidence_frames,
+        observed_frames,
+    };
+    if motion.observed_frames
+        != motion
+            .points
+            .iter()
+            .zip(&motion.interpolated)
+            .filter(|(point, inferred)| point.is_some() && !**inferred)
+            .count()
+    {
+        return Err("Canonical Ball Stabilizer observed count mismatch".into());
+    }
+    Ok(motion)
+}
+
+fn persist_stabilized_replay(
+    project: &Path,
+    source: (&str, &str, &str),
+    sha: &str,
+    settings: volley_core::ball_interpolation::BallStabilizerSettings,
+    motion: &volley_core::ball_interpolation::StabilizedBallMotion,
+    cancel: &AtomicBool,
+) -> Result<(String, String), String> {
+    let (project_id, video, replay_id) = source;
+    let root = project.join("native_cpu_ball_stabilizer");
+    fs::create_dir_all(&root).map_err(|e| format!("Create Ball Stabilizer root: {e}"))?;
+    safe_folder(&root)?;
+    let artifact_id = Uuid::new_v4().simple().to_string();
+    let folder = root.join(&artifact_id);
+    fs::create_dir(&folder).map_err(|e| format!("Create Ball Stabilizer artifact: {e}"))?;
+    let result = (|| -> Result<String, String> {
+        let part = folder.join("trajectory.jsonl.partial");
+        let output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&part)
+            .map_err(|e| format!("Create canonical ball trajectory: {e}"))?;
+        let mut writer = BufWriter::new(output);
+        let mut digest = Sha256::new();
+        let rejected: std::collections::HashSet<usize> =
+            motion.rejected_frames.iter().copied().collect();
+        for (index, point) in motion.points.iter().enumerate() {
+            if cancel.load(Ordering::Acquire) {
+                return Err("cancelled".into());
+            }
+            let row = CanonicalBallFrame {
+                frame: index as u64,
+                ball: *point,
+                interpolated: motion.interpolated[index],
+                rejected: rejected.contains(&index),
+            };
+            row.validate(index as u64)?;
+            let mut line = serde_json::to_vec(&row).map_err(|e| e.to_string())?;
+            line.push(b'\n');
+            writer
+                .write_all(&line)
+                .map_err(|e| format!("Write canonical ball frame: {e}"))?;
+            digest.update(&line);
+        }
+        writer
+            .flush()
+            .map_err(|e| format!("Flush canonical ball trajectory: {e}"))?;
+        writer
+            .get_ref()
+            .sync_all()
+            .map_err(|e| format!("Sync canonical ball trajectory: {e}"))?;
+        drop(writer);
+        let checksum = format!("{:x}", digest.finalize());
+        fs::rename(&part, folder.join(BALL_TRAJECTORY_FILE))
+            .map_err(|e| format!("Publish canonical ball trajectory: {e}"))?;
+        let manifest = json!({
+            "schema":BALL_TRAJECTORY_SCHEMA,
+            "state":"complete",
+            "project_id":project_id,"video":video,"artifact_id":artifact_id,
+            "source_replay_id":replay_id,"source_replay_sha256":sha,
+            "settings":settings,"frames":motion.points.len(),
+            "file":BALL_TRAJECTORY_FILE,"sha256":checksum,
+            "confidence_frames":motion.confidence_frames,
+            "observed_frames":motion.observed_frames,
+            "rejected_frames":motion.rejected_frames.len(),
+            "interpolated_frames":motion.interpolated.iter().filter(|&&v|v).count()
+        });
+        storage::write_json_atomic(&folder.join("manifest.json"), &manifest)
+            .map_err(|e| format!("Write canonical Ball Stabilizer manifest: {e:?}"))?;
+        Ok(checksum)
+    })();
+    match result {
+        Ok(sha) => Ok((artifact_id, sha)),
+        Err(error) => {
+            let _ = fs::remove_dir_all(&folder);
+            Err(error)
+        }
+    }
+}
+
 pub(crate) fn stabilize_primary_replay(
     state: &AppState,
     project_id: &str,
@@ -258,6 +478,9 @@ pub(crate) fn stabilize_primary_replay(
     mut progress: impl FnMut(u64, u64) -> Result<(), String>,
 ) -> Result<StabilizedReplay, String> {
     settings.validate().map_err(str::to_owned)?;
+    if !state.writes_enabled {
+        return Err("Ball Stabilizer needs an isolated writable runtime".into());
+    }
     storage::project_id(project_id).map_err(|e| format!("{e:?}"))?;
     storage::video_name(video).map_err(|e| format!("{e:?}"))?;
     if !opaque_id(replay_id) {
@@ -297,11 +520,35 @@ pub(crate) fn stabilize_primary_replay(
         return Err("Incompatible CPU replay for Ball Stabilizer".into());
     }
     let path = safe_file(&replay, "tracked_frames.jsonl", MAX_INPUT_BYTES)?;
-    let motion = stabilize_replay_rows(&path, &sha, frames, settings, cancel, &mut progress)?;
+    let computed = stabilize_replay_rows(&path, &sha, frames, settings, cancel, &mut progress)?;
+    let (artifact_id, trajectory_sha256) = persist_stabilized_replay(
+        &project,
+        (project_id, video, replay_id),
+        &sha,
+        settings,
+        &computed,
+        cancel,
+    )?;
+    let artifact_path = project
+        .join("native_cpu_ball_stabilizer")
+        .join(&artifact_id)
+        .join(BALL_TRAJECTORY_FILE);
+    let motion = read_canonical_ball_motion(
+        &artifact_path,
+        &trajectory_sha256,
+        frames,
+        computed.confidence_frames,
+        computed.observed_frames,
+    )?;
     Ok(StabilizedReplay {
         source_sha256: sha,
         motion,
         settings,
+        artifact_id,
+        trajectory_sha256,
+        frames,
+        project_root: project,
+        replay_id: replay_id.to_owned(),
     })
 }
 
@@ -472,6 +719,86 @@ mod ball_stabilizer_postprocessing_tests {
             Default::default(),
             &stopped,
             |_, _| Ok(())
+        )
+        .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn canonical_trajectory_is_immutable_sha_verified_and_source_bound() {
+        let root = std::env::temp_dir().join(format!("volley-canonical-ball-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let samples = (0..32usize)
+            .filter(|&i| i != 11 && i != 12)
+            .map(|i| volley_core::ball_interpolation::ScoredBallSample {
+                frame: i,
+                point: [0.3 + i as f64 * 0.002, 0.4],
+                confidence: 0.95,
+            })
+            .collect::<Vec<_>>();
+        let settings = volley_core::ball_interpolation::BallStabilizerSettings::default();
+        let motion =
+            volley_core::ball_interpolation::stabilize_ball_motion(&samples, 32, settings).unwrap();
+        assert!(motion.interpolated[11]);
+        let cancel = AtomicBool::new(false);
+        let replay_sha = "a".repeat(64);
+        let (id, digest) = persist_stabilized_replay(
+            &root,
+            ("abc123def456", "match.mp4", &"d".repeat(32)),
+            &replay_sha,
+            settings,
+            &motion,
+            &cancel,
+        )
+        .unwrap();
+        let summary = json!({
+            "schema":"volley-ball-stabilizer/1","version":"ball_stabilizer_v1",
+            "source_replay_id":"d".repeat(32),"source_replay_sha256":replay_sha,
+            "artifact_id":id,"trajectory_file":BALL_TRAJECTORY_FILE,
+            "trajectory_sha256":digest,"frames":32,"settings":settings,
+            "confidence_frames":motion.confidence_frames,"observed_frames":motion.observed_frames,
+            "rejected_frames":motion.rejected_frames.len(),
+            "interpolated_frames":motion.interpolated.iter().filter(|&&v|v).count()
+        });
+        let (path, sha) = verified_ball_trajectory(
+            &root,
+            &summary,
+            "abc123def456",
+            "match.mp4",
+            &"d".repeat(32),
+            &replay_sha,
+            32,
+        )
+        .unwrap();
+        let restored = read_canonical_ball_motion(
+            &path,
+            &sha,
+            32,
+            motion.confidence_frames,
+            motion.observed_frames,
+        )
+        .unwrap();
+        assert_eq!(restored.points, motion.points);
+        assert_eq!(restored.interpolated, motion.interpolated);
+        assert!(verified_ball_trajectory(
+            &root,
+            &summary,
+            "abc123def456",
+            "other.mp4",
+            &"d".repeat(32),
+            &replay_sha,
+            32,
+        )
+        .is_err());
+        let original = fs::read(&path).unwrap();
+        let mut tampered = original.clone();
+        tampered[2] = if tampered[2] == b'a' { b'b' } else { b'a' };
+        fs::write(&path, tampered).unwrap();
+        assert!(read_canonical_ball_motion(
+            &path,
+            &sha,
+            32,
+            motion.confidence_frames,
+            motion.observed_frames,
         )
         .is_err());
         fs::remove_dir_all(root).unwrap();
@@ -1520,7 +1847,11 @@ fn process_with_ball_scope_and_rally_settings_report(
     let source = safe_file(&replay_dir, "tracked_frames.jsonl", MAX_INPUT_BYTES)
         .map_err(storage::bad_request)?;
     if let Some(stabilized) = stabilized {
-        if stabilized.source_sha256 != sha || stabilized.motion.points.len() as u64 != frames {
+        if stabilized.source_sha256 != sha
+            || stabilized.motion.points.len() as u64 != frames
+            || stabilized.replay_id != req.replay_id
+            || stabilized.project_root != project_dir
+        {
             return Err(storage::conflict(
                 "Ball Stabilizer does not match this CPU replay",
             ));
@@ -1564,19 +1895,23 @@ fn process_with_ball_scope_and_rally_settings_report(
         } else {
             None
         };
-        let ball_mask = crate::cpu_retrack::ball_track::read_with_cancel(
-            &source,
-            &sha,
-            frames,
-            (dimensions.width, dimensions.height),
-            settings.min_ball_score,
-            if primary_scope.is_some() {
-                &[]
-            } else {
-                rally_starts
-            },
-            cancel,
-        )?;
+        let ball_mask = if stabilized.is_none() {
+            Some(crate::cpu_retrack::ball_track::read_with_cancel(
+                &source,
+                &sha,
+                frames,
+                (dimensions.width, dimensions.height),
+                settings.min_ball_score,
+                if primary_scope.is_some() {
+                    &[]
+                } else {
+                    rally_starts
+                },
+                cancel,
+            )?)
+        } else {
+            None
+        };
         if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
             return Err("cancelled".into());
         }
@@ -1611,6 +1946,36 @@ fn process_with_ball_scope_and_rally_settings_report(
             }
             Ok(())
         };
+        let persisted = if let Some(stabilized) = stabilized {
+            let (path, file_sha) = verified_ball_trajectory(
+                &project_dir,
+                &stabilized.summary(),
+                &req.project_id,
+                &req.video,
+                &req.replay_id,
+                &sha,
+                frames,
+            )?;
+            let motion = read_canonical_ball_motion(
+                &path,
+                &file_sha,
+                frames,
+                stabilized.motion.confidence_frames,
+                stabilized.motion.observed_frames,
+            )?;
+            Some(StabilizedReplay {
+                motion,
+                source_sha256: sha.clone(),
+                settings: stabilized.settings,
+                artifact_id: stabilized.artifact_id.clone(),
+                trajectory_sha256: file_sha,
+                frames,
+                project_root: project_dir.clone(),
+                replay_id: req.replay_id.clone(),
+            })
+        } else {
+            None
+        };
         let (digest, events, raw) = detect_stream_with_pose(
             tcn.as_mut(),
             &source,
@@ -1631,8 +1996,8 @@ fn process_with_ball_scope_and_rally_settings_report(
                 .and_then(|value| value.transform.as_ref()),
             court_calibration.as_ref().and_then(|value| value.net),
             &training_examples,
-            Some(&ball_mask),
-            stabilized,
+            ball_mask.as_deref(),
+            persisted.as_ref(),
             rally_starts,
             preliminary_scope_applied.then_some(preliminary.as_slice()),
             Some(&mut checked_progress),

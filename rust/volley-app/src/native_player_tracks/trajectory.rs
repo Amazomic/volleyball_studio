@@ -5,6 +5,8 @@ pub struct BallTrajectoryRequest {
     pub(super) project_id: String,
     pub(super) video: String,
     pub(super) replay_id: String,
+    #[serde(default)]
+    pub(super) rally_run_id: Option<String>,
     pub(super) expected_source_sha256: String,
     pub(super) start_frame: u64,
     #[serde(default = "trajectory_count")]
@@ -120,6 +122,9 @@ pub async fn ball_trajectory(
         let frames = header["frames"]
             .as_u64()
             .ok_or_else(|| storage::bad_request("Native ball manifest lacks frame count"))?;
+        if req.start_frame.checked_add(req.count).is_none_or(|end| end>frames) {
+            return Err(storage::bad_request("Selected ball window is out of range"));
+        }
         let plan = preparation::plan_for(&worker, &req.project_id, &req.video)?;
         let prepared = plan.ready_path().ok_or_else(|| {
             storage::bad_request("Prepared video unavailable for trajectory dimensions")
@@ -127,16 +132,60 @@ pub async fn ball_trajectory(
         let dimensions = volley_media::probe(prepared).map_err(storage::bad_request)?;
         let input = safe_file(&project, "tracked_frames.jsonl", MAX_EVIDENCE)
             .map_err(storage::bad_request)?;
-        let (samples, source_model) = extract_native_ball_trajectory(
-            &input,
-            frames,
-            &ctx.source_sha,
-            req.start_frame,
-            req.count,
-            dimensions.width,
-            dimensions.height,
-        )
-        .map_err(storage::bad_request)?;
+        let canonical = if let Some(rally_id) = req.rally_run_id.as_deref() {
+            let run=crate::native_rally_evidence::inspect_project(
+                &worker,&req.project_id,rally_id,
+            )?;
+            if run.replay_id != req.replay_id || run.replay_sha != ctx.source_sha
+                || run.video != req.video || run.frames != frames
+            {
+                return Err(storage::conflict("Selected ball trajectory and postprocessing differ"));
+            }
+            let touch_dir=run.touch_file.parent()
+                .ok_or_else(||storage::bad_request("Missing selected Touch manifest"))?;
+            let manifest:Value=serde_json::from_slice(
+                &fs::read(safe_file(touch_dir,"manifest.json",MAX_MANIFEST)
+                    .map_err(storage::bad_request)?)
+                    .map_err(|e|storage::bad_request(format!("Read Touch lineage: {e}")))?,
+            ).map_err(|e|storage::bad_request(format!("Parse Touch lineage: {e}")))?;
+            if manifest.get("ball_stabilizer").is_some() {
+                Some(crate::cpu_touches::verified_ball_trajectory(
+                    &projects::project_root(&worker).join(&req.project_id),
+                    &manifest["ball_stabilizer"],&req.project_id,&req.video,
+                    &req.replay_id,&ctx.source_sha,frames,
+                ).map_err(storage::bad_request)?)
+            } else { None }
+        } else { None };
+        let (samples, source_model) = if let Some((path,sha))=canonical.as_ref() {
+            let mut reader=BoundedReader::open(path).map_err(storage::bad_request)?;
+            let mut points=Vec::new();
+            for frame in 0..frames {
+                let bytes=reader.line().map_err(storage::bad_request)?
+                    .ok_or_else(||storage::bad_request("Truncated stabilized trajectory"))?;
+                let row:crate::cpu_touches::CanonicalBallFrame=serde_json::from_slice(&bytes)
+                    .map_err(|e|storage::bad_request(format!("Invalid stabilized frame: {e}")))?;
+                row.validate(frame).map_err(storage::bad_request)?;
+                if frame>=req.start_frame && frame<req.start_frame.saturating_add(req.count) {
+                    if let Some([x,y])=row.ball {
+                        points.push(BallObservation{
+                            frame:frame as i64,x:x*dimensions.width as f64,
+                            y:y*dimensions.height as f64,
+                        });
+                    }
+                }
+            }
+            if reader.line().map_err(storage::bad_request)?.is_some()
+                || reader.finish()!=*sha
+            {
+                return Err(storage::bad_request("Canonical ball extrema source SHA mismatch"));
+            }
+            (points,Some("vballnet_stabilized".to_owned()))
+        } else {
+            extract_native_ball_trajectory(
+                &input,frames,&ctx.source_sha,req.start_frame,req.count,
+                dimensions.width,dimensions.height,
+            ).map_err(storage::bad_request)?
+        };
         let extrema = ball_motion_extrema(&samples, 8).map_err(storage::bad_request)?;
         let trajectory_breaks = volley_core::motion::trajectory_breaks(&samples);
         Ok(json!({
@@ -144,6 +193,7 @@ pub async fn ball_trajectory(
             "project_id":req.project_id,"video":req.video,"replay_id":req.replay_id,
             "source_replay_sha256":ctx.source_sha,
             "selected_ball_source":source_model,
+            "ball_trajectory_source":if canonical.is_some(){"ball_stabilizer_file_v1"}else{"legacy_cpu_replay_v1"},
             "window_start_frame":req.start_frame,"window_frames":req.count,
             "observations":samples.len(),"motion_extrema":extrema,
             "trajectory_breaks":trajectory_breaks,
@@ -221,33 +271,79 @@ fn full_video_ball_suggestions_impl(
         .and_then(|p| p.parent())
         .and_then(|p| p.parent())
         .ok_or("Invalid saved rally directory")?;
-    let replay_dir = project.join("native_cpu_replays").join(&run.replay_id);
-    let input = safe_file(&replay_dir, "tracked_frames.jsonl", MAX_EVIDENCE)?;
+    let touch_dir = run
+        .touch_file
+        .parent()
+        .ok_or("Missing Touch source directory")?;
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(safe_file(touch_dir, "manifest.json", 16 * 1024)?)
+            .map_err(|e| format!("Read Touch trajectory lineage: {e}"))?,
+    )
+    .map_err(|e| format!("Invalid Touch trajectory lineage: {e}"))?;
+    let canonical_source = if manifest.get("ball_stabilizer").is_some() {
+        Some(crate::cpu_touches::verified_ball_trajectory(
+            project,
+            &manifest["ball_stabilizer"],
+            &run.project_id,
+            &run.video,
+            &run.replay_id,
+            &run.replay_sha,
+            run.frames,
+        )?)
+    } else {
+        None
+    };
+    let (input, expected_sha) = if let Some((path, sha)) = &canonical_source {
+        (path.clone(), sha.clone())
+    } else {
+        let replay_dir = project.join("native_cpu_replays").join(&run.replay_id);
+        (
+            safe_file(&replay_dir, "tracked_frames.jsonl", MAX_EVIDENCE)?,
+            run.replay_sha.clone(),
+        )
+    };
+    let canonical = canonical_source.is_some();
     let mut reader = BoundedReader::open(&input)?;
     let mut points = Vec::<BallObservation>::new();
     let mut candidates = Vec::<(u64, f64)>::new();
     let mut observations = 0usize;
     let mut reconstruction = BallReconstructionStats::default();
+    if canonical {
+        reconstruction.rejected_outliers = manifest["ball_stabilizer"]["rejected_frames"]
+            .as_u64()
+            .ok_or("Missing stabilized rejection count")?
+            as usize;
+        reconstruction.interpolated_frames = manifest["ball_stabilizer"]["interpolated_frames"]
+            .as_u64()
+            .ok_or("Missing stabilized interpolation count")?
+            as usize;
+    }
+    let mut synthetic = std::collections::HashSet::<i64>::new();
     let mut scope_index = 0usize;
     fn emit(
         points: &[BallObservation],
         candidates: &mut Vec<(u64, f64)>,
-        impact: Option<volley_core::motion::DirectionBreakConfig>,
-        width: u32,
-        height: u32,
+        options: (Option<volley_core::motion::DirectionBreakConfig>, u32, u32),
         reconstruction: &mut BallReconstructionStats,
+        canonical: bool,
+        synthetic: &std::collections::HashSet<i64>,
     ) -> Result<(), String> {
-        let prepared = if let Some(config) = impact {
-            reconstruction.raw_observations += points.len();
-            let restored = volley_core::ball_interpolation::reconstruct_short_ball_motion(
-                points,
-                width,
-                height,
-                config.max_join_error_px,
-            )?;
-            reconstruction.rejected_outliers += restored.rejected_frames.len();
-            reconstruction.interpolated_frames += restored.interpolated_frames.len();
-            Some(restored)
+        let (impact, width, height) = options;
+        let prepared = if !canonical {
+            impact
+                .map(|config| -> Result<_, String> {
+                    reconstruction.raw_observations += points.len();
+                    let restored = volley_core::ball_interpolation::reconstruct_short_ball_motion(
+                        points,
+                        width,
+                        height,
+                        config.max_join_error_px,
+                    )?;
+                    reconstruction.rejected_outliers += restored.rejected_frames.len();
+                    reconstruction.interpolated_frames += restored.interpolated_frames.len();
+                    Ok(restored)
+                })
+                .transpose()?
         } else {
             None
         };
@@ -264,6 +360,7 @@ fn full_video_ball_suggestions_impl(
         };
         for b in breaks {
             if b.frame >= 0
+                && !synthetic.contains(&b.frame)
                 && !prepared.as_ref().is_some_and(|reconstructed| {
                     reconstructed
                         .interpolated_frames
@@ -281,30 +378,70 @@ fn full_video_ball_suggestions_impl(
         }
         if impact.is_none() {
             for b in ball_motion_extrema(points, 5)? {
-                candidates.push((b.frame_index, b.velocity_residual_px_frame * 0.4));
+                if !synthetic.contains(&(b.frame_index as i64)) {
+                    candidates.push((b.frame_index, b.velocity_residual_px_frame * 0.4));
+                }
             }
         }
         Ok(())
     }
     for frame in 0..run.frames {
-        let bytes = reader.line()?.ok_or("Saved ball replay is truncated")?;
-        let row: Frame = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("Invalid ball replay frame: {e}"))?;
-        if row.frame_index != frame
-            || !row.track_ids_provisional
-            || row.confirmed_athlete_identities
-            || row.touches_confirmed
-        {
-            return Err("Ball source frame state differs from saved replay".into());
+        let bytes = reader.line()?.ok_or("Saved ball trajectory is truncated")?;
+        let (position, inferred) = if canonical {
+            let row: crate::cpu_touches::CanonicalBallFrame = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("Invalid saved stabilized ball frame: {e}"))?;
+            row.validate(frame)?;
+            (
+                row.ball.map(|[x, y]| BallObservation {
+                    frame: frame as i64,
+                    x: x * run.width as f64,
+                    y: y * run.height as f64,
+                }),
+                row.interpolated,
+            )
+        } else {
+            let row: Frame = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("Invalid ball replay frame: {e}"))?;
+            if row.frame_index != frame
+                || !row.track_ids_provisional
+                || row.confirmed_athlete_identities
+                || row.touches_confirmed
+            {
+                return Err("Ball source frame state differs from saved replay".into());
+            }
+            let candidate = match row.selected_ball {
+                Some(ball) => {
+                    if ball.source_model != "vballnet"
+                        || ball.detection.class_name != "ball"
+                        || ball.detection.frame_index != frame
+                    {
+                        return Err("Unsupported saved ball detection".into());
+                    }
+                    ball.detection.validate(frame - frame % 9, "ball")?;
+                    (ball.detection.score >= run.min_ball_score).then(|| {
+                        let b = ball.detection.bbox_xyxy_norm;
+                        BallObservation {
+                            frame: frame as i64,
+                            x: (b[0] + b[2]) * run.width as f64 * 0.5,
+                            y: (b[1] + b[3]) * run.height as f64 * 0.5,
+                        }
+                    })
+                }
+                None => None,
+            };
+            (candidate, false)
+        };
+        if inferred {
+            synthetic.insert(frame as i64);
         }
         while scope.get(scope_index).is_some_and(|&(_, end)| end < frame) {
             emit(
                 &points,
                 &mut candidates,
-                impact,
-                run.width,
-                run.height,
+                (impact, run.width, run.height),
                 &mut reconstruction,
+                canonical,
+                &synthetic,
             )?;
             points.clear();
             scope_index += 1;
@@ -315,56 +452,41 @@ fn full_video_ball_suggestions_impl(
         {
             continue;
         }
-        let Some(ball) = row.selected_ball else {
+        let Some(ball) = position else {
             if !points.is_empty() && frame as i64 - points.last().unwrap().frame > 4 {
                 emit(
                     &points,
                     &mut candidates,
-                    impact,
-                    run.width,
-                    run.height,
+                    (impact, run.width, run.height),
                     &mut reconstruction,
+                    canonical,
+                    &synthetic,
                 )?;
                 points.clear();
             }
             continue;
         };
-        if ball.source_model != "vballnet"
-            || ball.detection.class_name != "ball"
-            || ball.detection.frame_index != frame
-        {
-            return Err("Unsupported saved ball detection".into());
-        }
-        ball.detection.validate(frame - frame % 9, "ball")?;
-        if ball.detection.score < run.min_ball_score {
-            continue;
-        }
-        let b = ball.detection.bbox_xyxy_norm;
         if points.last().is_some_and(|p| frame as i64 - p.frame > 4) {
             emit(
                 &points,
                 &mut candidates,
-                impact,
-                run.width,
-                run.height,
+                (impact, run.width, run.height),
                 &mut reconstruction,
+                canonical,
+                &synthetic,
             )?;
             points.clear();
         }
-        points.push(BallObservation {
-            frame: frame as i64,
-            x: (b[0] + b[2]) * run.width as f64 * 0.5,
-            y: (b[1] + b[3]) * run.height as f64 * 0.5,
-        });
+        points.push(ball);
         observations += 1;
         if points.len() >= 900 {
             emit(
                 &points,
                 &mut candidates,
-                impact,
-                run.width,
-                run.height,
+                (impact, run.width, run.height),
                 &mut reconstruction,
+                canonical,
+                &synthetic,
             )?;
             points = points.split_off(points.len() - 24);
         }
@@ -372,13 +494,13 @@ fn full_video_ball_suggestions_impl(
     emit(
         &points,
         &mut candidates,
-        impact,
-        run.width,
-        run.height,
+        (impact, run.width, run.height),
         &mut reconstruction,
+        canonical,
+        &synthetic,
     )?;
-    if reader.line()?.is_some() || reader.finish() != run.replay_sha {
-        return Err("Ball replay SHA-256 differs from saved source".into());
+    if reader.line()?.is_some() || reader.finish() != expected_sha {
+        return Err("Saved trajectory SHA-256 differs from selected source".into());
     }
     candidates.sort_by_key(|(f, _)| *f);
     // Local maxima from the two existing estimators refer to the same impact.
@@ -450,6 +572,9 @@ mod scored_trajectory_tests {
         let replay = dir.join("tracked_frames.jsonl");
         std::fs::write(&replay, &bytes).unwrap();
         let digest = format!("{:x}", Sha256::digest(&bytes));
+        let touch_dir = root.join("native_cpu_touch_runs").join("c".repeat(24));
+        std::fs::create_dir_all(&touch_dir).unwrap();
+        std::fs::write(touch_dir.join("manifest.json"), b"{}").unwrap();
         let run = crate::native_rally_evidence::ValidatedRun {
             project_id: "project".into(),
             video: "match.mp4".into(),
@@ -459,7 +584,7 @@ mod scored_trajectory_tests {
                 .join("native_cpu_rallies")
                 .join(&rally_id)
                 .join("rally_candidates.jsonl"),
-            touch_file: root.join("touch.jsonl"),
+            touch_file: touch_dir.join("touch_candidates.jsonl"),
             replay_id,
             replay_sha: digest,
             touch_id: "c".repeat(24),

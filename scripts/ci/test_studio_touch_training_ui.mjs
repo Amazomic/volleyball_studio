@@ -31,7 +31,9 @@ assert.match(server,/\/api\/training\/trajectory\/types"[\s\S]{0,100}touch_annot
 assert.ok(typesRust.includes("observed_pose_motion")&&typesRust.includes("refine_with_motion"));
 assert.ok(typesRust.includes("expected != req.frames"),"Types must never invent a second touch detector");
 assert.ok(rust.includes("saved_manual_timing_calibrates_recalculation"));
-assert.ok(scanner.includes("reader.finish() != run.replay_sha"));
+assert.ok(scanner.includes("reader.finish() != expected_sha")&&
+  scanner.includes("verified_ball_trajectory"),
+  "Touch training must verify the selected canonical trajectory checksum");
 assert.ok(annotationSource.includes('"save" => {'));
 
 class Element {
