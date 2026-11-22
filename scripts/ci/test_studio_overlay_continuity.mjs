@@ -7,6 +7,16 @@ const html=readFileSync(new URL("../../rust/volley-app/static/studio.html",impor
 const css=readFileSync(new URL("../../rust/volley-app/static/studio.css",import.meta.url),"utf8");
 assert.doesNotMatch(html,/id="studio-overlay-stabilizer"/);
 assert.match(html,/id="studio-debug-stabilizer-compare"[^>]*aria-pressed="false"[^>]*>Оба<\/button>/);
+for(const id of ["studio-ball-stabilizer-controls","studio-debug-stabilizer-gap",
+  "studio-debug-stabilizer-step","studio-debug-stabilizer-stats"]){
+  assert.ok(!html.includes('id="'+id+'"'),
+    "Both must not render any Ball Stabilizer settings panel: "+id);
+}
+assert.ok(!js.includes("stabilizer_gap:Number("));
+assert.ok(!js.includes("stabilizer_max_step:Number("));
+assert.match(js,/stabilizer:true/,"Both must request filtering from the Rust algorithm without custom settings");
+assert.ok(!css.includes("#studio-ball-stabilizer-controls"),
+  "Both must have no dedicated settings layout");
 const trajectoryModes=html.match(/<div id="studio-debug-trajectory-switch"[\s\S]*?<\/div>/)?.[0]||"";
 assert.deepEqual([...trajectoryModes.matchAll(/<button[^>]*id="([^"]+)"[^>]*>([^<]+)<\/button>/g)]
   .map(match=>[match[1],match[2]]),[
@@ -209,11 +219,16 @@ let changed,redraws=0,timelineRedraws=0,cardRedraws=0;
 const checkbox={dataset:{overlayAction:"attack"},checked:false,addEventListener:(name,fn)=>{if(name==="change")changed=fn;}};
 const input={addEventListener(){}};
 const controls={querySelectorAll:()=>[checkbox],classList:{toggle(){},remove(){},add(){}}};
+const rawClasses=new Set(["hidden"]);
+const rawControls={classList:{
+  toggle(name,force){if(force===false)rawClasses.delete(name);else if(force===true)rawClasses.add(name);else if(rawClasses.has(name))rawClasses.delete(name);else rawClasses.add(name);},
+  add(name){rawClasses.add(name);},remove(name){rawClasses.delete(name);}
+}};
 const tab=()=>({attributes:{},closest:()=>controls,addEventListener(name,fn){this[name]=fn;},setAttribute(name,value){this.attributes[name]=value;}});
 const trainingMode={active:false,panel:{classList:{add(){}}}};
-const initOverlay={mode:tab(),rawMode:tab(),stabilizerMode:tab(),stabilizerControls:controls,
+const initOverlay={mode:tab(),rawMode:tab(),stabilizerMode:tab(),
   debugTrajectorySwitch:controls,debugTrajectoryLegend:controls,debugBefore:tab(),debugAfter:tab(),
-  rawControls:controls,actionControls:controls,canvas:{closest:()=>controls},
+  rawControls,actionControls:controls,canvas:{closest:()=>controls},
   rawBall:input,rawVballVisible:input,rawPeopleVisible:input,
   rawPlayer:input,rawPose:input,rawPoseVisible:input,
   flags:{touches:true},actionFlags:{attack:true,unknown_touch:true}};
@@ -249,6 +264,8 @@ assert.equal(trainingMode.active,true,"Debug comparison must not leave Debug");
 assert.equal(initOverlay.raw,true,"Debug comparison must request raw GPU observations");
 assert.equal(initOverlay.stabilizerView,true);
 assert.equal(initOverlay.stabilizerMode.attributes["aria-pressed"],"true");
+assert.equal(rawClasses.has("hidden"),true,
+  "Both must keep the GPU controls panel hidden");
 assert.equal(initOverlay.debugBefore.attributes["aria-pressed"],"false");
 assert.equal(initOverlay.debugAfter.attributes["aria-pressed"],"false");
 initOverlay.debugAfter.click();

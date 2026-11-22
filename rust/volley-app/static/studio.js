@@ -348,8 +348,8 @@
     trajectory:$("studio-overlay-trajectory"),players:$("studio-overlay-players"),
     pose:$("studio-overlay-pose"),court:$("studio-overlay-court"),
     mode:$("studio-overlay-processed"),rawMode:$("studio-overlay-raw"),
-    stabilizerMode:$("studio-debug-stabilizer-compare"),stabilizerControls:$("studio-ball-stabilizer-controls"),
-    stabilizerStats:$("studio-debug-stabilizer-stats"),rawControls:$("studio-overlay-raw-controls"),actionControls:$("studio-overlay-actions"),
+    stabilizerMode:$("studio-debug-stabilizer-compare"),
+    rawControls:$("studio-overlay-raw-controls"),actionControls:$("studio-overlay-actions"),
     rawBall:$("studio-raw-ball"),rawBallTrail:$("studio-raw-ball-trail"),rawVballVisible:$("studio-raw-vball-visible"),rawPeopleVisible:$("studio-raw-people-visible"),rawPlayer:$("studio-raw-player"),rawPlayerInterpolated:$("studio-raw-player-interpolated"),
     rawPose:$("studio-raw-pose"),rawPoseVisible:$("studio-raw-pose-visible"),
     raw:false,stabilizerView:false,trajectoryVariant:"after",
@@ -537,11 +537,7 @@
     const isRaw=overlay.raw;
     const path=isRaw?url("/api/gpu/native/overlays",{
       project_id:project,video,fusion_id:run,start_frame:start,count:180,
-      ...(overlay.stabilizerView?{
-        stabilizer:true,
-        stabilizer_gap:Number($("studio-debug-stabilizer-gap").value),
-        stabilizer_max_step:Number($("studio-debug-stabilizer-step").value)
-      }:{})
+      ...(overlay.stabilizerView?{stabilizer:true}:{})
     }):url("/api/cpu/native/rallies/overlays",{
       project_id:project,rally_run_id:run,start_frame:start,count:180,
       ...(overlay.flags.pose?{pose:true}:{})
@@ -598,9 +594,6 @@
            value.frames.some(row=>!Object.hasOwn(row,"stabilized_ball")||
              typeof row.ball_interpolated!=="boolean"||typeof row.ball_rejected!=="boolean"))
           throw Error("Нет результата Ball Stabilizer");
-        overlay.stabilizerStats.textContent="Окно: "+stats.raw+" сырых, "+
-          stats.accepted+" сохранено, "+stats.rejected+" отброшено, "+
-          stats.interpolated+" интерполировано";
       }
       overlayMessage((isRaw?overlay.rawPoseVisible.checked:overlay.flags.pose)&&
         value.poses_available===false?
@@ -912,16 +905,6 @@
           previous={x:sx,y:sy,frame:item.frame,synthetic};
         }
         ctx.setLineDash([]);
-        for(const item of frames){
-          if(item.frame<frame-44||item.frame>frame||!item.ball_rejected)continue;
-          for(const ball of item.raw?.balls||[]){
-            if(!Array.isArray(ball.point))continue;
-            const [rx,ry]=point(ball.point);
-            ctx.strokeStyle="#ff6473";ctx.lineWidth=2;
-            ctx.beginPath();ctx.moveTo(rx-4,ry-4);ctx.lineTo(rx+4,ry+4);
-            ctx.moveTo(rx+4,ry-4);ctx.lineTo(rx-4,ry+4);ctx.stroke();
-          }
-        }
         ctx.restore();
       }
       if(!overlay.stabilizerView&&overlay.rawPeopleVisible.checked){
@@ -2451,7 +2434,6 @@
       overlay.stabilizerMode.setAttribute("aria-pressed","false");
       overlay.debugTrajectoryLegend.classList.add("hidden");
       overlay.rawControls.classList.toggle("hidden",!raw);
-      overlay.stabilizerControls.classList.add("hidden");
       overlay.debugTrajectorySwitch.classList.add("hidden");
       updateOverlayToggles();
       overlay.mode.closest(".video-overlay-toggles").classList.toggle("raw-selected",raw);
@@ -2485,8 +2467,7 @@
       if(comparison)overlay.flags.trajectory=true;
       overlay.debugBefore.setAttribute("aria-pressed",String(!comparison&&overlay.trajectoryVariant==="before"));
       overlay.debugAfter.setAttribute("aria-pressed",String(!comparison&&overlay.trajectoryVariant==="after"));
-      overlay.rawControls.classList.toggle("hidden",!comparison);
-      overlay.stabilizerControls.classList.toggle("hidden",!comparison);
+      overlay.rawControls.classList.add("hidden");
       overlay.mode.closest(".video-overlay-toggles").classList.remove("raw-selected");
       updateOverlayToggles();
       setOverlaySource(comparison||s.run?{}:null);
@@ -2517,15 +2498,6 @@
     };
     overlay.debugBefore.addEventListener("click",()=>selectTrajectoryVariant("before"));
     overlay.debugAfter.addEventListener("click",()=>selectTrajectoryVariant("after"));
-    for(const id of ["studio-debug-stabilizer-gap","studio-debug-stabilizer-step"]){
-      $(id).addEventListener("change",()=>{
-        if(!overlay.stabilizerView)return;
-        for(const controller of overlay.controllers.values())controller?.abort();
-        overlay.controllers.clear();overlay.fetching.clear();overlay.cache.clear();
-        overlay.stabilizerStats.textContent="Перерасчёт для выбранного окна…";
-        drawOverlay();
-      });
-    }
     const selectTrainingMode=()=>{
       if(training.active)return;
       ui.video.pause();
@@ -2549,7 +2521,6 @@
       overlay.debugBefore.setAttribute("aria-pressed",String(overlay.trajectoryVariant==="before"));
       overlay.debugAfter.setAttribute("aria-pressed",String(overlay.trajectoryVariant==="after"));
       overlay.mode.closest(".video-overlay-toggles").classList.remove("raw-selected");
-      overlay.stabilizerControls.classList.add("hidden");
       overlay.debugTrajectorySwitch.classList.remove("hidden");
       overlay.rawControls.classList.add("hidden");
       training.panel.classList.remove("hidden");

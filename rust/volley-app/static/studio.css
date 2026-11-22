@@ -926,7 +926,6 @@ body[data-ui-theme="light"] #studio-preview-view .rallies-panel-head span{color:
 #studio-preview-view .video-overlay-trajectory-legend i{display:inline-block;width:7px;height:7px;border-radius:50%}
 #studio-preview-view .video-overlay-trajectory-legend .trajectory-raw{background:#47e2ff}
 #studio-preview-view .video-overlay-trajectory-legend .trajectory-stabilized{background:#f1bd51}
-#studio-preview-view.training-workspace .video-overlay-raw-controls>.raw-model-control:not(#studio-ball-stabilizer-controls){display:none}
 #studio-preview-view:not(.training-workspace) #studio-debug-stabilizer-compare{display:none}
 #studio-preview-view .video-overlay-modes{display:flex;gap:3px;padding:3px;justify-self:end;pointer-events:auto;background:#0c1727;border:1px solid #8aaacc;border-radius:11px;box-shadow:0 3px 20px rgba(0,0,0,.4)}
 #studio-preview-view .video-overlay-modes button{padding:8px 14px;border:0;border-radius:8px;background:transparent;color:#a9b9cd;font-size:13px;font-weight:750}
@@ -2197,8 +2196,3 @@ body[data-ui-theme="light"] .montage-clip-title{color:#1b344f}
 body[data-ui-theme="light"] .montage-clip-detail{color:#546b86}
 body[data-ui-theme="light"] .montage-assembly-meta{background:#edf4fb;color:#34516e}
 @media(max-width:690px){.montage-assembly-actions{width:100%}.montage-assembly-actions button{flex:1}.montage-assembly-library{grid-template-columns:repeat(2,minmax(0,1fr))}.montage-assembly-viewer video{aspect-ratio:16/9}}
-
-#studio-ball-stabilizer-controls{flex:1 1 260px;min-width:220px}
-#studio-ball-stabilizer-controls label{display:flex;align-items:center;gap:5px;justify-content:space-between;font-size:11px}
-#studio-ball-stabilizer-controls label input{max-width:85px;min-width:66px;padding:5px}
-#studio-ball-stabilizer-controls small{display:block;color:#b3c3dc;font-size:10px;line-height:1.4}
