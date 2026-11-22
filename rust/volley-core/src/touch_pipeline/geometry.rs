@@ -631,9 +631,23 @@ pub(super) fn detect_gap_rebounds(
             }
             Some(velocity)
         };
-        let (Some(v_before), Some(v_after)) =
-            (fit_velocity(before, true), fit_velocity(after, false))
-        else {
+        let Some(v_after) = fit_velocity(after, false) else {
+            continue;
+        };
+        let v_before = fit_velocity(before, true).or_else(|| {
+            let previous = before.checked_sub(1)?;
+            if v_after[1] > -15.0 {
+                return None;
+            }
+            let velocity = fit_velocity(previous, true)?;
+            if velocity[1] < 18.0 {
+                return None;
+            }
+            let last = center_px(previous)?;
+            let deviation = (a[0] - last[0] - velocity[0]).hypot(a[1] - last[1] - velocity[1]);
+            (deviation <= (velocity[0].hypot(velocity[1]) * 1.15).max(16.0)).then_some(velocity)
+        });
+        let Some(v_before) = v_before else {
             continue;
         };
         let speed_before = v_before[0].hypot(v_before[1]);
@@ -699,6 +713,55 @@ pub(super) fn detect_gap_rebounds(
             // athlete that disappears at impact AND reappears on the
             // outbound flight can support this weaker proposal.
             witnessed_strike_before_gap(frames, before, after, predicted, radius, width, height)
+        } else if after - before <= 10
+            && impact <= before + 2
+            && v_before[1] >= 18.0
+            && v_after[1] <= -15.0
+            && angle >= 130.0
+            && residual >= 35.0
+            && (b[0] - a[0]).abs() <= (radius * 10.0).max(85.0)
+        {
+            touching_player(
+                frames,
+                before,
+                ReachEvidence {
+                    width,
+                    height,
+                    ball_x: a[0],
+                    ball_y: a[1],
+                    ball_radius: radius,
+                    max_reach_ratio,
+                    strong_reversal: true,
+                },
+            )
+            .and_then(|(track_id, cost, score)| {
+                let player = frames[before]
+                    .players
+                    .iter()
+                    .find(|player| player.track_id == track_id)?;
+                let bbox = pixel_bbox(player.bbox_xyxy_norm, width, height);
+                let player_height = bbox[3] - bbox[1];
+                let observed_player_frames = frames[before.saturating_sub(2)..=after]
+                    .iter()
+                    .filter(|frame| {
+                        frame
+                            .players
+                            .iter()
+                            .any(|player| player.track_id == track_id)
+                    })
+                    .count();
+                if a[1] > bbox[1] + 0.45 * player_height
+                    || error > 0.90 * player_height.max(100.0)
+                    || observed_player_frames < 6
+                    || !frames[after]
+                        .players
+                        .iter()
+                        .any(|player| player.track_id == track_id)
+                {
+                    return None;
+                }
+                Some((before, track_id, cost, score))
+            })
         } else {
             None
         };
@@ -1517,5 +1580,114 @@ mod gap_tests {
             .unwrap()
             .source_model = "unsupported".into();
         assert!(detect_gap_rebounds(&frames, 1280.0, 720.0, 0.70).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod stabilized_gap_rebound_tests {
+    use super::*;
+    use crate::touch_pipeline::{evaluate_block, TouchBall, TouchPlayer, TouchSettings};
+
+    fn interrupted_overhead_rebound(with_player: bool, reversal: bool) -> Vec<TouchFrame> {
+        (407..=440_u64)
+            .map(|frame_index| {
+                let y = if frame_index <= 418 {
+                    Some(500.0 + 26.0 * (frame_index as f64 - 418.0))
+                } else if frame_index == 419 {
+                    Some(500.0)
+                } else if frame_index < 428 {
+                    None
+                } else if reversal {
+                    Some(250.0 - 18.0 * (frame_index as f64 - 428.0))
+                } else {
+                    Some(250.0 + 18.0 * (frame_index as f64 - 428.0))
+                };
+                TouchFrame {
+                    frame_index,
+                    players: if with_player {
+                        vec![TouchPlayer {
+                            track_id: 6,
+                            score: 0.90,
+                            touch_probability: None,
+                            bbox_xyxy_norm: [
+                                630.0 / 1280.0,
+                                505.0 / 720.0,
+                                710.0 / 1280.0,
+                                700.0 / 720.0,
+                            ],
+                        }]
+                    } else {
+                        vec![]
+                    },
+                    selected_ball: y.map(|y| TouchBall {
+                        source_model: "vballnet".into(),
+                        score: 0.7,
+                        bbox_xyxy_norm: [
+                            (650.0 - 7.0) / 1280.0,
+                            (y - 7.0) / 720.0,
+                            (650.0 + 7.0) / 1280.0,
+                            (y + 7.0) / 720.0,
+                        ],
+                    }),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn overhead_rebound_survives_ball_stabilizer_gap_near_14_seconds() {
+        let frames = interrupted_overhead_rebound(true, true);
+        let witness = touching_player(
+            &frames,
+            12,
+            ReachEvidence {
+                width: 1280.0,
+                height: 720.0,
+                ball_x: 650.0,
+                ball_y: 500.0,
+                ball_radius: 7.0,
+                max_reach_ratio: 0.75,
+                strong_reversal: true,
+            },
+        );
+        assert!(
+            witness.is_some(),
+            "Expected observed body near the rebound: {witness:?}"
+        );
+        let contacts = detect_gap_rebounds(&frames, 1280.0, 720.0, 0.75);
+        assert_eq!(
+            contacts.len(),
+            1,
+            "Gap must retain the physical rebound: {contacts:?}"
+        );
+        assert_eq!(contacts[0].frame, 12);
+        assert_eq!(contacts[0].motion.motion_frame, 13);
+        assert_eq!(contacts[0].track_id, 6);
+        assert!(
+            evaluate_block(&frames, 1280, 720, 407, 441, TouchSettings::default())
+                .unwrap()
+                .iter()
+                .any(|contact| contact.frame_index == 419 && contact.motion_frame_index == 420)
+        );
+        assert!(detect_gap_rebounds(
+            &interrupted_overhead_rebound(false, true),
+            1280.0,
+            720.0,
+            0.75
+        )
+        .is_empty());
+        assert!(detect_gap_rebounds(
+            &interrupted_overhead_rebound(true, false),
+            1280.0,
+            720.0,
+            0.75
+        )
+        .is_empty());
+        let mut foot_level = interrupted_overhead_rebound(true, true);
+        for frame in &mut foot_level {
+            frame.players[0].bbox_xyxy_norm =
+                [630.0 / 1280.0, 290.0 / 720.0, 710.0 / 1280.0, 600.0 / 720.0];
+        }
+        assert!(detect_gap_rebounds(&foot_level, 1280.0, 720.0, 0.75).is_empty());
     }
 }
