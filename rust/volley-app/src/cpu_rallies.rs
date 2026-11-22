@@ -1103,6 +1103,7 @@ fn process_inner(
                 crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
             )
         })
+        .map(crate::cpu_retrack::ball_track::filter_short_rallies)
         .map_err(storage::bad_request)?;
         if intervals != computed {
             return Err(storage::bad_request(

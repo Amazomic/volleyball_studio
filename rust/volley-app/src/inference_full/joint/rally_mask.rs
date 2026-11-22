@@ -49,6 +49,7 @@ pub(super) struct RallyMask {
     source_frame_count: u64,
     min_trajectory_seconds: f64,
     merge_gap_seconds: f64,
+    min_rally_seconds: f64,
     stationary_ball_ms: u32,
     stationary_intervals: Vec<(u64, u64)>,
     movement_filter_version: &'static str,
@@ -162,7 +163,7 @@ impl RallyMask {
         }
         let fallback_reason = if observed_ball_frames < MIN_DETECTIONS {
             Some("insufficient_ball_observations")
-        } else if detected.is_empty() {
+        } else if merged.is_empty() {
             Some("no_reliable_moving_ball_intervals")
         } else {
             None
@@ -176,9 +177,10 @@ impl RallyMask {
             source_frame_count: frames,
             min_trajectory_seconds: settings.min_trajectory_seconds,
             merge_gap_seconds: settings.merge_gap_seconds,
+            min_rally_seconds: crate::cpu_retrack::ball_track::MIN_RALLY_FRAMES as f64 / 30.0,
             stationary_ball_ms: settings.stationary_ball_ms,
             stationary_intervals: motion.stationary,
-            movement_filter_version: "stationary_ball_v1",
+            movement_filter_version: "stationary_ball_min_rally_5s_v2",
             context_seconds: CONTEXT_FRAMES as f64 / 30.0,
             observed_ball_frames,
             detected,
@@ -242,13 +244,13 @@ mod tests {
 
     #[test]
     fn moving_ball_selects_padded_intervals_without_changing_detected_bounds() {
-        let samples = moving_samples(80, 180);
+        let samples = moving_samples(80, 270);
         let mask =
             RallyMask::from_ball_samples(&samples, 900, PrimaryRallySettings::default()).unwrap();
         assert_eq!(mask.fallback_reason, None);
         assert_eq!(mask.detected.len(), 1);
         let (start, end) = mask.detected[0];
-        assert!(start >= 80 && end <= 180);
+        assert!(start >= 80 && end <= 270);
         assert!(mask.includes(start));
         assert!(mask.includes(end));
         assert!(mask.includes(start.saturating_sub(20)));
@@ -258,8 +260,8 @@ mod tests {
 
     #[test]
     fn separate_play_intervals_leave_long_pauses_outside_gpu_person_scope() {
-        let mut samples = moving_samples(60, 150);
-        samples.extend(moving_samples(450, 540));
+        let mut samples = moving_samples(60, 250);
+        samples.extend(moving_samples(450, 660));
         let mask =
             RallyMask::from_ball_samples(&samples, 900, PrimaryRallySettings::default()).unwrap();
         assert_eq!(mask.detected.len(), 2);
@@ -267,7 +269,7 @@ mod tests {
         assert!(mask.includes(100));
         assert!(mask.includes(500));
         assert!(!mask.includes(300));
-        assert!(mask.included_frames() < 400);
+        assert!(mask.included_frames() < 600);
         let sampled = (0..900)
             .filter(|frame| frame % 3 == 0 && mask.includes(*frame))
             .count() as u64;
@@ -293,12 +295,12 @@ mod tests {
 
     #[test]
     fn primary_mask_uses_its_own_thresholds_and_saves_them() {
-        let samples = moving_samples(60, 155);
+        let samples = moving_samples(60, 235);
         let defaults =
             RallyMask::from_ball_samples(&samples, 450, PrimaryRallySettings::default()).unwrap();
         assert_eq!(defaults.detected.len(), 1);
         let tuned = PrimaryRallySettings {
-            min_trajectory_seconds: 4.0,
+            min_trajectory_seconds: 7.0,
             merge_gap_seconds: 1.0,
             ..PrimaryRallySettings::default()
         };
@@ -309,7 +311,7 @@ mod tests {
             Some("no_reliable_moving_ball_intervals")
         );
         let serialized = serde_json::to_value(&mask).unwrap();
-        assert_eq!(serialized["min_trajectory_seconds"], 4.0);
+        assert_eq!(serialized["min_trajectory_seconds"], 7.0);
         assert_eq!(serialized["merge_gap_seconds"], 1.0);
         assert_eq!(serialized["stationary_ball_ms"], 1000);
         assert_eq!(
@@ -332,7 +334,7 @@ mod tests {
 
     #[test]
     fn short_ambiguous_flight_is_scanned_but_not_confirmed_as_rally() {
-        let mut samples = moving_samples(70, 180);
+        let mut samples = moving_samples(70, 270);
         samples.extend(moving_samples(580, 605));
         let mask =
             RallyMask::from_ball_samples(&samples, 1000, PrimaryRallySettings::default()).unwrap();
@@ -347,8 +349,8 @@ mod tests {
 
     #[test]
     fn a_held_ball_splits_rallies_despite_the_four_second_merge_gap() {
-        let mut samples = moving_samples(100, 195);
-        samples.extend((196..=242).map(|frame| RawDetection {
+        let mut samples = moving_samples(100, 285);
+        samples.extend((286..=332).map(|frame| RawDetection {
             frame_index: frame,
             class_name: "ball",
             score: 0.95,
@@ -362,16 +364,16 @@ mod tests {
             touch_probability: None,
             head_point_norm: None,
         }));
-        samples.extend(moving_samples(244, 355));
+        samples.extend(moving_samples(334, 560));
         let mask =
-            RallyMask::from_ball_samples(&samples, 450, PrimaryRallySettings::default()).unwrap();
+            RallyMask::from_ball_samples(&samples, 680, PrimaryRallySettings::default()).unwrap();
         assert_eq!(mask.detected.len(), 2, "{:?}", mask.detected);
         assert_eq!(mask.merged.len(), 2, "{:?}", mask.merged);
-        assert!(mask.merged[0].1 < 242 && mask.merged[1].0 > 242);
+        assert!(mask.merged[0].1 < 332 && mask.merged[1].0 > 332);
         assert!(mask
             .stationary_intervals
             .iter()
-            .any(|&(start, end)| start <= 215 && end >= 235));
+            .any(|&(start, end)| start <= 305 && end >= 325));
     }
 
     #[test]
@@ -386,9 +388,9 @@ mod tests {
             touch_probability: None,
             head_point_norm: None,
         }));
-        samples.extend(moving_samples(236, 345));
+        samples.extend(moving_samples(236, 435));
         let mask =
-            RallyMask::from_ball_samples(&samples, 420, PrimaryRallySettings::default()).unwrap();
+            RallyMask::from_ball_samples(&samples, 510, PrimaryRallySettings::default()).unwrap();
         assert_eq!(mask.merged.len(), 1, "{:?}", mask.merged);
         assert!(mask.merged[0].0 >= 230, "{:?}", mask.merged);
     }
@@ -422,17 +424,17 @@ mod tests {
 
     #[test]
     fn default_stillness_is_versioned_and_tunable() {
-        let mut points = vec![None; 400];
-        for (i, slot) in points.iter_mut().enumerate().take(160).skip(50) {
-            *slot = Some([0.18 + (i - 50) as f64 * 0.003, 0.4]);
+        let mut points = vec![None; 650];
+        for (i, slot) in points.iter_mut().enumerate().take(220).skip(30) {
+            *slot = Some([0.18 + (i - 30) as f64 * 0.003, 0.4]);
         }
-        for (i, slot) in points.iter_mut().enumerate().take(189).skip(160) {
+        for (i, slot) in points.iter_mut().enumerate().take(250).skip(220) {
             if i % 11 != 0 {
                 *slot = Some([0.56 + (i % 4) as f64 * 0.002, 0.41]);
             }
         }
-        for (i, slot) in points.iter_mut().enumerate().take(303).skip(190) {
-            *slot = Some([0.22 + (i - 190) as f64 * 0.003, 0.4]);
+        for (i, slot) in points.iter_mut().enumerate().take(480).skip(251) {
+            *slot = Some([0.12 + (i - 251) as f64 * 0.003, 0.4]);
         }
         let strict =
             crate::cpu_retrack::ball_track::analyze_moving_ball(&points, 1.5, 4.0, 1000).unwrap();
@@ -441,7 +443,7 @@ mod tests {
         assert!(sensitive
             .stationary
             .iter()
-            .any(|&(s, e)| s <= 165 && e >= 182));
+            .any(|&(s, e)| s <= 225 && e >= 243));
         assert_eq!(sensitive.merged.len(), 2, "{:?}", sensitive.merged);
         assert!(strict.stationary.is_empty());
         for bad in [0, 199, 10_001] {
@@ -452,6 +454,31 @@ mod tests {
             .validate()
             .is_err());
         }
+    }
+
+    #[test]
+    fn short_ball_pass_at_54_seconds_is_not_a_rally() {
+        let mut samples = moving_samples(1620, 1710);
+        samples.extend(moving_samples(1890, 2100));
+        let mask =
+            RallyMask::from_ball_samples(&samples, 2400, PrimaryRallySettings::default()).unwrap();
+        assert_eq!(mask.fallback_reason, None);
+        assert_eq!(mask.merged.len(), 1, "{:?}", mask.merged);
+        assert!(mask.merged[0].0 >= 1800, "{:?}", mask.merged);
+        assert_eq!(
+            serde_json::to_value(&mask).unwrap()["min_rally_seconds"],
+            5.0
+        );
+    }
+
+    #[test]
+    fn two_short_moving_segments_form_a_rally_when_merged_over_five_seconds() {
+        let mut samples = moving_samples(100, 200);
+        samples.extend(moving_samples(230, 340));
+        let mask =
+            RallyMask::from_ball_samples(&samples, 470, PrimaryRallySettings::default()).unwrap();
+        assert_eq!(mask.merged.len(), 1, "{:?}", mask.merged);
+        assert!(mask.merged[0].1 - mask.merged[0].0 + 1 >= 150);
     }
 
     #[test]

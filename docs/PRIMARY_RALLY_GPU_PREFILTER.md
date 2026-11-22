@@ -8,6 +8,9 @@ video's own saved analysis range:
    (at least **1.5 s**, inclusive).
 3. Merge detected intervals only when the uncovered gap is **strictly less
    than 4 s**. Preserve detected and merged intervals separately.
+   After merging, publish a rally only when the full unpadded interval
+   lasts **at least 5 s (150 frames at 30 FPS)**. Short ball exchanges
+   remain raw motion evidence, not rallies.
 4. Pad scanning intervals by 1 s before and after without altering the
    detected rally boundaries. Short movement fragments (at least 0.5 s)
    outside confirmed intervals are retained as **uncertain** scan candidates,
@@ -45,10 +48,15 @@ at least 10% of a frame dimension in horizontal or vertical displacement.
 
 GPU analysis and Debug have independent controls and both call this
 Rust detector, using cached VBallNet/CPU replay evidence respectively.
+The fixed 5-second minimum applies to the final merged intervals in
+the primary GPU path and saved-CPU-replay training comparison, regardless
+of the independently configured 1.5-second minimum moving trajectory.
+One second of RF-DETR scan padding is excluded from this duration.
 The primary GPU mask records the threshold, stationary intervals and
-movement_filter_version=stationary_ball_v1, and changing this setting
-invalidates the prior GPU profile match; old immutable evidence is not
-rewritten. The 1-second person-inference scan padding remains separate
+movement_filter_version=stationary_ball_min_rally_5s_v2 and
+min_rally_seconds=5.0. Both the threshold change and the stationary
+setting invalidate the prior GPU profile match; old immutable evidence is
+not rewritten. The 1-second person-inference scan padding remains separate
 from the saved unpadded rally boundaries. The safety fallback to scan
 the full permitted range when no reliable moving interval exists is retained.
 
