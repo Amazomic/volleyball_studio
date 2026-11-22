@@ -3957,7 +3957,11 @@ mod branching_tests {
         assert!(!compatible_version(&legacy, &request, &identity));
         assert!(gpu_lineage_valid(&project_dir, &request, &identity, &saved));
         assert!(cpu_lineage_valid(&project_dir, &request, &saved, None));
-        for version in ["ball_stabilizer_v1", "ball_stabilizer_v2"] {
+        for version in [
+            "ball_stabilizer_v1",
+            "ball_stabilizer_v2",
+            "ball_stabilizer_v3",
+        ] {
             let mut old_version = saved.clone();
             old_version["ball_stabilizer"]["version"] = json!(version);
             assert!(

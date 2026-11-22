@@ -89,12 +89,17 @@
                                          "rust/volley-app/src/native_player_tracks/reid_handlers.rs",
                                          "rust/volley-app/src/native_player_tracks/photo_comparison.rs",
                                          "rust/volley-app/src/native_player_tracks/embedding_jobs.rs",
-                                         "rust/volley-app/src/native_player_tracks/reference_store.rs"
+                                         "rust/volley-app/src/native_player_tracks/reference_store.rs",
+                                         "rust/volley-app/src/native_player_tracks/reference_refresh.rs"
                                      ],
                         "routes":  [
                                        {
                                            "path":  "/api/players/native/references",
                                            "handler":  "native_player_tracks::references"
+                                       },
+                                       {
+                                           "path":  "/api/players/native/references/refresh",
+                                           "handler":  "native_player_tracks::refresh_reference_features"
                                        },
                                        {
                                            "path":  "/api/players/native/reference-photo",

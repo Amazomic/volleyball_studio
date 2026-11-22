@@ -480,9 +480,9 @@ pub async fn refresh_reference_features(
                     continue;
                 };
                 let count = per_player_added.entry(player_id.clone()).or_default();
-                if *count >= MAX_NEW_PHOTOS_PER_ATHLETE {
-                    skipped_capacity += 1;
-                } else if album.photos.len() + *count >= MAX_PLAYER_PHOTOS {
+                if *count >= MAX_NEW_PHOTOS_PER_ATHLETE
+                    || album.photos.len() + *count >= MAX_PLAYER_PHOTOS
+                {
                     skipped_capacity += 1;
                 } else {
                     proposals.push((*track_id, player_id.clone()));

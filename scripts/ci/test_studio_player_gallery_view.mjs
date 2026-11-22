@@ -6,12 +6,15 @@ const source=readFileSync(new URL("../../rust/volley-app/static/studio_tabs.js",
 const start=source.indexOf("  const renderSidebarPlayers=()=>{");
 const end=source.indexOf("  const renderPlayers=()=>{",start);
 const make=(tag,klass,text)=>({tag,klass,text,children:[],events:{},append(...items){this.children.push(...items);},
-  addEventListener(type,fn){this.events[type]=fn;}});
+  addEventListener(type,fn){this.events[type]=fn;},setAttribute(key,value){
+    this.attributes??={};this.attributes[key]=value;
+  }});
 const sidebar=make("div");
 const events=[];
 const context={state:{players:[{id:"a",name:"Анна",saved_photo_count:3}],projectMemberIds:new Set(["a"]),trackCovers:new Map(),playerTrackCounts:{a:2}},
   $:()=>sidebar,make,clear:element=>{element.children=[];},URLSearchParams,projectId:()=>"project",
-  window:{dispatchEvent:event=>events.push(event)},CustomEvent:class{constructor(type,opts){this.type=type;this.detail=opts.detail;}}};
+  window:{dispatchEvent:event=>events.push(event),confirm:()=>true},
+  CustomEvent:class{constructor(type,opts){this.type=type;this.detail=opts.detail;}}};
 runInNewContext(source.slice(start,end)+"\nthis.render=renderSidebarPlayers;",context);
 context.render();
 const card=sidebar.children[0];
@@ -52,6 +55,11 @@ assert.equal(galleryState.viewPlayer,"");
 assert.equal(modeSwitch.children[3].textContent,"Непривязанные Track ID · 2");
 assert.equal(loads.at(-1),"");
 console.log("Player card opens its photo album: OK");
-const menu=card.children.find(item=>item.tag==="details");
-assert.ok(menu.children.some(item=>item.text==="Переименовать"));
-assert.ok(menu.children.some(item=>item.text==="Удалить из проекта"));
+const remove=card.children.find(item=>item.tag==="button"&&item.klass==="players-side-remove");
+assert.ok(remove,"Player sidebar must expose the project-unlink control");
+assert.match(remove.title,/фото останутся в библиотеке/);
+assert.equal(remove.attributes["aria-label"],"Удалить Анна из проекта");
+remove.events.click();
+assert.equal(events.at(-1).type,"volley:remove-project-player");
+assert.equal(events.at(-1).detail.player_id,"a");
+assert.equal(events.at(-1).detail.project_id,"project");

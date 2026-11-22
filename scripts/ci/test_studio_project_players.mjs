@@ -7,7 +7,9 @@ const start=source.indexOf("  const renderSidebarPlayers=()=>{");
 const end=source.indexOf("  const renderPlayers=()=>{",start);
 assert.ok(start>=0&&end>start);
 const element=(tag,klass,text)=>({tag,klass,text,children:[],append(...items){this.children.push(...items);},
-  addEventListener(){}});
+  addEventListener(){},setAttribute(key,value){
+    this.attributes??={};this.attributes[key]=value;
+  }});
 const sidebar=element("div");
 const state={players:[{id:"a",name:"Анна"},{id:"b",name:"Борис"}],
   projectMemberIds:new Set(["b"]),trackCovers:new Map()};

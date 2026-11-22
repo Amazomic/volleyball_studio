@@ -281,7 +281,9 @@
       const row=saved?.fields?.[input.id];
       if(Array.isArray(row)&&row.length===2&&
           (row[0]===input.dataset.default||
-           (input.id==="studio-gpu-threads"&&row[0]==="8"&&input.dataset.default==="0"))&&typeof row[1]==="string"&&
+           (input.id==="studio-gpu-threads"&&row[0]==="8"&&input.dataset.default==="0")||
+           (input.id==="studio-post-ball-stabilizer-score"&&
+             row[0]==="0.55"&&input.dataset.default==="0.70"))&&typeof row[1]==="string"&&
           row[1].length<=64){
         applyFieldValue(input,row[1]);
         if(!input.checkValidity())applyFieldValue(input,input.dataset.default);
