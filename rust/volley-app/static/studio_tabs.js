@@ -1444,7 +1444,10 @@
         make("span","players-side-membership"+
           (state.projectMemberIds.has(player.id)?" is-linked":""),
           state.projectMemberIds.has(player.id)?"В проекте":"В библиотеке"));
-      const menu=make("details","players-side-menu");
+      const remove=make("button","players-side-remove","−");
+      remove.type="button";
+      remove.setAttribute("aria-label","Удалить "+player.name+" из проекта");
+      remove.title="Удалить из проекта (фото останутся в библиотеке)";
       const selectPlayer=make("button","players-side-select");
       selectPlayer.type="button";
       selectPlayer.ariaLabel="Показать привязанные Track ID игрока "+player.name;
@@ -1452,34 +1455,13 @@
         new CustomEvent("volley:player-gallery-select",{
           detail:{project_id:projectId(),player_id:player.id,name:player.name}
         })));
-      const toggle=make("summary","","⋮");
-      toggle.ariaLabel="Действия с фотографиями "+player.name;
-      const rename=make("button","","Переименовать");rename.type="button";
-      rename.addEventListener("click",async()=>{
-        menu.open=false;
-        const name=window.prompt("Новое имя игрока",player.name);
-        if(name===null||!name.trim()||state.mutating)return;
-        state.mutating=true;
-        try{
-          const result=await post("/api/players/library/native",{
-            action:"rename",player_id:player.id,name:name.trim(),expected_revision:state.revision
-          });
-          state.revision=String(result.revision);
-          state.players=Array.isArray(result.players)?result.players:[];
-          renderPlayers();window.dispatchEvent(new Event("volley:player-library-updated"));
-        }catch(error){failure(error);await loadPlayers().catch(failure);}
-        finally{state.mutating=false;}
-      });
-      const remove=make("button","","Удалить из проекта");remove.type="button";
       remove.addEventListener("click",()=>{
-        menu.open=false;
-        if(window.confirm("Удалить игрока «"+player.name+"» из проекта?"))
+        if(window.confirm("Удалить игрока «"+player.name+"» из проекта? Фото останутся в библиотеке."))
           window.dispatchEvent(new CustomEvent("volley:remove-project-player",{
             detail:{project_id:projectId(),player_id:player.id}
           }));
       });
-      menu.append(toggle,rename,remove);
-      card.append(avatar,meta,menu,selectPlayer);
+      card.append(avatar,meta,remove,selectPlayer);
       sidebar.append(card);
     }
   };

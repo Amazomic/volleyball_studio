@@ -171,6 +171,8 @@ mod embedding_jobs;
 pub(crate) use embedding_jobs::*;
 mod reference_store;
 pub(crate) use reference_store::*;
+mod reference_refresh;
+pub(crate) use reference_refresh::*;
 #[cfg(test)]
 mod tests;
 

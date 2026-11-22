@@ -52,7 +52,7 @@ fn validated_global_features(
     result
 }
 
-fn read_global_features(
+pub(super) fn read_global_features(
     state: &AppState,
     player_id: &str,
     model: &str,
@@ -101,6 +101,39 @@ fn save_global_features(
         });
         versioned_store::write_json_checked(&folder, &target, &doc, MAX_GLOBAL_FEATURE_CACHE_BYTES)
             .map_err(storage::bad_request)?;
+    }
+    Ok(())
+}
+
+pub(super) fn persist_album_features(
+    state: &AppState,
+    player_id: &str,
+    model: &str,
+    features: &BTreeMap<String, Vec<f32>>,
+) -> Result<(), ApiError> {
+    if !state.writes_enabled {
+        return Ok(());
+    }
+    let _guard = reference_features()
+        .lock()
+        .map_err(|_| storage::internal("Reference ReID cache lock poisoned"))?;
+    let folder = checked_reference_folder(state, player_id, true)?;
+    let target = folder.join("reid-features.json");
+    let raw = versioned_store::read_optional_bounded(&target, MAX_GLOBAL_FEATURE_CACHE_BYTES)
+        .map_err(storage::bad_request)?;
+    if validated_global_features(raw.as_deref(), player_id, model) != *features {
+        versioned_store::write_json_checked(
+            &folder,
+            &target,
+            &json!({
+                "schema":"volley-native-player-reid-features/1",
+                "player_id":player_id,
+                "model_fingerprint":model,
+                "features":features,
+            }),
+            MAX_GLOBAL_FEATURE_CACHE_BYTES,
+        )
+        .map_err(storage::bad_request)?;
     }
     Ok(())
 }
@@ -194,7 +227,12 @@ pub(super) fn snapshot(state: &AppState, req: &ReidReviewRequest) -> Result<Snap
         let doc = references_doc(raw.as_deref(), player_id)?;
         albums.push((player_id.clone(), revision(raw.as_deref())));
         let mut seen = BTreeSet::new();
-        for row in doc["photos"].as_array().into_iter().flatten() {
+        for row in doc["photos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|row| row["reid_active"] != false)
+        {
             let sha = row["image_sha256"]
                 .as_str()
                 .ok_or_else(|| storage::bad_request("Invalid photo checksum"))?;
@@ -252,7 +290,7 @@ pub(super) fn snapshot(state: &AppState, req: &ReidReviewRequest) -> Result<Snap
     })
 }
 
-async fn decode(bytes: &[u8]) -> Result<Vec<f32>, ApiError> {
+pub(super) async fn decode(bytes: &[u8]) -> Result<Vec<f32>, ApiError> {
     let mut command = tokio::process::Command::new("ffmpeg");
     command
         .args([

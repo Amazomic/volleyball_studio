@@ -517,7 +517,7 @@ mod tests {
                 .unwrap(),
             "second"
         );
-        fs::write(dir.join("ui-contract.txt"), "5").unwrap();
+        fs::write(dir.join("ui-contract.txt"), "6").unwrap();
         assert_eq!(
             studio_asset_from(Some(&dir), "text/javascript", "studio.js", "embedded").status(),
             StatusCode::SERVICE_UNAVAILABLE

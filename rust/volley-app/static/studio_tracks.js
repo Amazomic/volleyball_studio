@@ -875,6 +875,45 @@
       picker.append(create);
     });
     heading.append(title,add);
+    const refreshReferences=node("button","secondary players-sidebar-refresh","Обновить признаки");
+    refreshReferences.type="button";
+    refreshReferences.title="Сопоставить подтверждённые Track ID с фотографиями игроков и сохранить новые непохожие эталоны";
+    const refreshStatus=node("small","players-sidebar-refresh-status");
+    refreshStatus.setAttribute("role","status");
+    refreshStatus.setAttribute("aria-live","polite");
+    refreshStatus.hidden=true;
+    refreshReferences.addEventListener("click",async()=>{
+      if(state.busy||state.rosterBusy||refreshReferences.disabled)return;
+      const scope={project_id:state.project,video:state.video,replay_id:state.replay,
+        rally_run_id:state.rallyRun||null,expected_source_sha256:state.sourceSha};
+      if(!scope.project_id||!scope.video||!scope.replay_id||!scope.expected_source_sha256){
+        refreshStatus.textContent="Сначала выберите видео и готовую CPU-версию с Track ID.";
+        refreshStatus.hidden=false;
+        return;
+      }
+      refreshReferences.disabled=true;
+      refreshStatus.hidden=false;
+      refreshStatus.textContent="Проверяем сохранённые фото и признаки подтверждённых ID…";
+      try{
+        const result=await post("/api/players/native/references/refresh",scope);
+        if(scope.project_id!==state.project||scope.replay_id!==state.replay)return;
+        const photoScope={project_id:scope.project_id,video:scope.video,
+          replay_id:scope.replay_id,rally_run_id:scope.rally_run_id,
+          expected_source_sha256:scope.expected_source_sha256};
+        window.dispatchEvent(new Event("volley:player-photo-saved"));
+        await loadLibraryRoster();
+        refreshStatus.textContent="Фотографии обновлены. Пересчитываем сходство всех Track ID…";
+        const comparison=await refreshPhotoMatches(photoScope,state.token);
+        if(scope.project_id!==state.project||scope.replay_id!==state.replay)return;
+        refreshStatus.textContent="Сопоставлено ID: "+(comparison?.trackCount||0)+
+          " · добавлено фото: "+(result.added||0)+
+          " · исключено похожих: "+(result.deactivated||0)+
+          (result.skipped_ambiguous?" · неоднозначных: "+result.skipped_ambiguous:"")+
+          (!result.confirmed_tracks?" · Новые фото сохраняются только из подтверждённых ID.":"");
+      }catch(error){
+        if(scope.project_id===state.project)refreshStatus.textContent="Ошибка обновления признаков: "+error.message;
+      }finally{refreshReferences.disabled=false;}
+    });
     const resetLinks=node("button","secondary players-reset-track-links","Сброс привязки ИД");
     resetLinks.type="button";
     resetLinks.addEventListener("click",async()=>{
@@ -898,7 +937,7 @@
         resetLinks.disabled=false;state.busy=false;unlock();
       }
     });
-    sidebar.append(heading,sidebarNote,picker,sidebarCards,resetLinks);
+    sidebar.append(heading,sidebarNote,picker,refreshReferences,refreshStatus,sidebarCards,resetLinks);
     add.setAttribute("aria-expanded","false");
     const closePicker=()=>{picker.hidden=true;add.setAttribute("aria-expanded","false");};
     document.addEventListener("pointerdown",event=>{
