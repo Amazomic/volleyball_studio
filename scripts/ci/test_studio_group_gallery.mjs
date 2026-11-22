@@ -78,6 +78,51 @@ assert.equal(requests[0].body.action,"compare_photos");
 assert.equal(summary.photoCount,7);
 assert.equal(helperState.playerMatches["101"],undefined,"old suggestions are replaced");
 assert.equal(helperState.playerMatches["102"][0].cosine_similarity,.92);
+helperState.writable=true;
+helperState.revision="outdated";
+helper.post=async(url,body)=>{
+  requests.push({url,body});
+  return {schema:"volley-native-player-photo-comparison/1",source_replay_sha256:"sha",
+    auto_assign_enabled:false,confirmed:false,saved:true,identity_revision:"new-revision",
+    photo_count:4,player_matches:{"101":[]}};
+};
+await helper.refreshPhotoMatches({
+  project_id:"project",video:"video",replay_id:"replay",
+  rally_run_id:"rally",expected_source_sha256:"sha"},9);
+assert.equal(requests.at(-1).body.action,"refresh_matches");
+assert.equal(helperState.revision,"new-revision",
+  "Matching refresh must synchronize the revision used by manual Track ID binding");
+
+const candidateStart=source.indexOf("  const playerCandidates=ids=>{");
+const candidateEnd=source.indexOf("  const renderRows=()=>{",candidateStart);
+assert.ok(candidateStart>0&&candidateEnd>candidateStart);
+const candidateState={
+  roster:[{id:"athlete",name:"Player A"}],
+  rows:[],unassignedReasons:{
+    "101":"identity_conflict_or_ambiguity","102":"insufficient_observations",
+    "103":"no_photo_match"},
+  appliedAutoThreshold:75,
+  playerMatches:{
+    "101":[{player_id:"athlete",cosine_similarity:0.91,reference_kind:"photo"}],
+    "102":[{player_id:"athlete",cosine_similarity:0.83,reference_kind:"photo"}]
+  }
+};
+const cardWithReasons=makeNode("article");
+const candidateContext={state:candidateState,node:makeNode,updateCardLink(){},bindSelected(){}};
+runInNewContext(source.slice(candidateStart,candidateEnd)+
+  "\nthis.attachSuggestions=attachSuggestions;",candidateContext);
+candidateContext.attachSuggestions(cardWithReasons,[101,102,103]);
+const panel=cardWithReasons.children[0];
+const warning=panel.children.find(item=>item.klass.includes("track-auto-warning"));
+assert.match(warning.text,/ID 101: конфликт/);
+assert.match(warning.text,/ID 102: недостаточно кадров/);
+assert.match(warning.text,/ID 103: нет совпадения/);
+const controls=panel.children.find(item=>item.klass==="track-card-link-actions");
+const select=controls.children[0];
+assert.equal(select.children[0].text,"Выберите игрока",
+  "A group with only two matching ID out of three must not silently select the athlete");
+assert.match(select.children[1].text,/по 2 из 3 ID/);
+
 const css=readFileSync(new URL("../../rust/volley-app/static/studio.css",import.meta.url),"utf8");
 assert.match(css,/#studio-players-view \.track-group-arrow-top\{left:8px;top:8px\}/,
   "previous photo control stays in the upper-left corner");

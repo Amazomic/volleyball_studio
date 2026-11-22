@@ -112,13 +112,15 @@ let onRefresh;
 const refreshButton={disabled:false,addEventListener(name,callback){if(name==="click")onRefresh=callback;}};
 const refreshStatus={hidden:true,textContent:""};
 const refreshState={busy:false,rosterBusy:false,project:"p",video:"match.mp4",replay:"r",
-  rallyRun:"run",sourceSha:sha,token:11};
+  rallyRun:"run",sourceSha:sha,token:11,writable:true};
 runInNewContext(source.slice(refreshStart,refreshEnd),{
   refreshReferences:refreshButton,refreshStatus,state:refreshState,
   photoEnrollmentQueues:queued,
   post:async url=>{refreshRequests.push(url);return {added:1,confirmed_tracks:1};},
   window:{dispatchEvent(){}},Event:class{},
-  loadLibraryRoster:async()=>{},refreshPhotoMatches:async()=>({trackCount:3})
+  loadLibraryRoster:async()=>{},
+  refreshPhotoMatches:async()=>{refreshRequests.push("matches");return {trackCount:3};},
+  autoAssignSimilar:async()=>{refreshRequests.push("auto_assign");}
 });
 const refreshing=onRefresh();
 await new Promise(resolve=>setImmediate(resolve));
@@ -126,7 +128,8 @@ assert.deepEqual(refreshRequests,[],"Feature refresh must wait for pending manua
 assert.match(refreshStatus.textContent,/Дожидаемся сохранения фотографий/);
 releasePhotos();
 await refreshing;
-assert.deepEqual(refreshRequests,["/api/players/native/references/refresh"]);
+assert.deepEqual(refreshRequests,["/api/players/native/references/refresh","matches","auto_assign"],
+  "Refreshing reference photos must finish comparison before automatic assignment");
 assert.match(refreshStatus.textContent,/Сопоставлено ID: 3/);
 
 console.log("Group assignment preserves links, bounds photo enrollment and handles reference failures: OK");
