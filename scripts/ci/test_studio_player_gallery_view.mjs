@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 const source=readFileSync(new URL("../../rust/volley-app/static/studio_tabs.js",import.meta.url),"utf8");
 const start=source.indexOf("  const renderSidebarPlayers=()=>{");
 const end=source.indexOf("  const renderPlayers=()=>{",start);
-const make=(tag,klass,text)=>({tag,klass,text,children:[],events:{},append(...items){this.children.push(...items);},
+const make=(tag,klass,text)=>({tag,klass,text,children:[],events:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},
   addEventListener(type,fn){this.events[type]=fn;},setAttribute(key,value){
     this.attributes??={};this.attributes[key]=value;
   }});
@@ -31,17 +31,23 @@ const viewEnd=tracks.indexOf('  ui.list.before(playerGallery);',viewStart);
 const handlers={},inserted=[],loads=[];
 const galleryState={project:"project",projectPlayerIds:new Set(["a"]),viewPlayer:"",viewConflicts:false,
   identityConflictIds:new Set(),selected:new Set(),offset:48,tracksLoaded:true,unassignedIds:new Set([1,2,3]),excludedIds:new Set([9]),viewExcluded:false};
-const modeSwitch=make("div"),modeTabs=make("div");modeSwitch.append(modeTabs);
+const modeSwitch=make("div"),modeTabs=make("div"),autoAssignControls=make("div");
+autoAssignControls.append(make("label"),make("button"));modeSwitch.append(modeTabs);
 const galleryContext={state:galleryState,node:make,ui:{list:{before:node=>inserted.push(node)}},
   window:{addEventListener:(name,fn)=>{handlers[name]=fn;}},groupsMode:make("button"),
-  playerMode:make("button"),modeSwitch,groupingControls:make("div"),autoAssignControls:make("div"),setMode:mode=>loads.push(mode),loadAlbum:()=>loads.push("album"),loadPage:()=>loads.push(galleryState.viewPlayer)};
+  playerMode:make("button"),modeSwitch,groupingControls:make("div"),autoAssignControls,setMode:mode=>loads.push(mode),loadAlbum:()=>loads.push("album"),loadPage:()=>loads.push(galleryState.viewPlayer)};
 runInNewContext(tracks.slice(viewStart,viewEnd)+"\nthis.updateUnassignedLabel=updateUnassignedLabel;",galleryContext);
 galleryContext.updateUnassignedLabel();
 assert.equal(modeSwitch.children[0],modeTabs);
-assert.equal(modeSwitch.children[1].klass,"track-view-bar","conflict filter shares the same row as ID tabs");
+assert.equal(modeSwitch.children[1].klass,"track-view-bar","player back button stays beside ID tabs");
+assert.equal(modeSwitch.children[1].children.length,1,"only the back button stays in the upper toolbar");
+assert.equal(autoAssignControls.children[0].klass,"track-filter-buttons","filter buttons belong to lower auto-assign toolbar");
+assert.equal(autoAssignControls.children[0].children.length,2);
+assert.equal(autoAssignControls.children[1].tag,"label","threshold stays after filters");
+assert.equal(autoAssignControls.children[2].tag,"button","auto-assign action stays after threshold");
 assert.equal(modeSwitch.children[2],galleryContext.groupingControls);
 assert.equal(modeSwitch.children[3].textContent,"Непривязанные Track ID · 3");
-assert.equal(inserted[0],modeSwitch,"one toolbar is inserted instead of two stacked rows");
+assert.equal(inserted[0],modeSwitch,"mode toolbar is inserted above auto-assign controls");
 assert.equal(inserted[1],galleryContext.autoAssignControls,"auto-assign threshold is mounted beside the gallery toolbar");
 galleryState.unassignedIds.delete(1);galleryContext.updateUnassignedLabel();
 assert.equal(modeSwitch.children[3].textContent,"Непривязанные Track ID · 2");
@@ -54,7 +60,7 @@ back.events.click();
 assert.equal(galleryState.viewPlayer,"");
 assert.equal(modeSwitch.children[3].textContent,"Непривязанные Track ID · 2");
 assert.equal(loads.at(-1),"");
-const excludedToggle=modeSwitch.children[1].children[2];
+const excludedToggle=autoAssignControls.children[0].children[1];
 assert.match(excludedToggle.textContent,/Исключённые · 1/);
 excludedToggle.events.click();
 assert.equal(galleryState.viewExcluded,true);

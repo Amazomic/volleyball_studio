@@ -3545,3 +3545,9 @@ Studio показывает кнопку перехода между debug и re
 - Ключи per-path mutex Track ID больше не накапливаются навечно: глобальная карта хранит Weak, а активные операции продолжают использовать общий Arc. Убрано клонирование всей коллекции запусков перед построением legacy-постобработки. Схемы, версии артефактов, API и алгоритмы детекции не менялись.
 - Проверки: cargo fmt --all, git diff --check, scripts/check-all.ps1 — PASS: WASM, clippy -D warnings, тесты Rust workspace и 98 Node-контрактов (с изолированным CARGO_TARGET_DIR и RUST_TEST_THREADS=1); регрессии на статус, активную связь GPU/CPU, защиту истории и повторное использование Track ID блокировки.
 - Ограничения: реальная GPU-сцена, FFmpeg-монтаж и A/B-профилирование производительности — NOT TESTED/NOT MEASURED; проценты ускорения не заявляются. Применение: на момент интеграционного коммита NOT APPLIED; после публикации требуется запуск scripts/deploy-volley-queue.ps1 и проверка live SHA.
+
+### 2026-11-23 — Фильтры Track ID перенесены в панель автопривязки
+
+- База origin/develop 3da79525; владелец UI: rust/volley-app/static/studio_tracks.js и studio.css; регрессионные контракты: scripts/ci/test_studio_viewport_layout.mjs и test_studio_player_gallery_view.mjs.
+- Кнопки «Конфликты» и «Исключённые» перенесены в левую часть нижней панели вместе с порогом и действием автопривязки справа. Верхний переключатель оставлен для режимов ID, групп и кнопки возврата к игрокам. API, состояние фильтров и идентификация игроков не изменены.
+- Регрессия RED до изменения, GREEN после; PASS: test_studio_viewport_layout.mjs, test_studio_dom_ids.mjs, test_studio_player_gallery_view.mjs, node --check studio_tracks.js, git diff --check. Полный scripts/check-all.ps1 PASS: WASM, cargo fmt, Clippy -D warnings, Rust workspace tests и 98 Node gates. Ручная проверка на реальном браузере: NOT TESTED; применение — после публикации через очередь развёртывания.

@@ -1176,8 +1176,10 @@
     state.viewExcluded=!state.viewExcluded;state.viewConflicts=false;state.offset=0;
     state.selected.clear();setMode("singles");updateUnassignedLabel();void loadPage();
   });
-  viewBar.append(viewBack,conflictToggle,excludedToggle);
-  // Keep the ID modes and conflict/unassigned filter on one toolbar row.
+  const filterBar=node("div","track-filter-buttons");
+  filterBar.append(conflictToggle,excludedToggle);
+  viewBar.append(viewBack);
+  autoAssignControls.prepend(filterBar);
   modeSwitch.append(viewBar,groupingControls,viewLabel);
   ui.list.before(modeSwitch);
   ui.list.before(autoAssignControls);
