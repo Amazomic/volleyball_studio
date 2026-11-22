@@ -1641,7 +1641,7 @@
           result.project_id!==project||result.video!==video||result.rally_run_id!==run||
           !Array.isArray(result.proposals)||!Number.isSafeInteger(result.total_frames)||
           result.method!=="piecewise_ballistic_impacts_v2"||
-          JSON.stringify(result.impact_settings)!==JSON.stringify(impact)||
+          Object.entries(impact).some(([key,value])=>result.impact_settings?.[key]!==value)||
           !Array.isArray(result.rally_intervals)||
           result.rally_count!==result.rally_intervals.length||
           result.rally_intervals.some(r=>!Number.isSafeInteger(r.start)||!Number.isSafeInteger(r.end)||

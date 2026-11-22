@@ -98,7 +98,8 @@ const context={
         source_replay_sha256:"a".repeat(64),
         rally_count:1,rally_intervals:[{start:95,end:150}],
         proposals:[{frame:100,score:9},{frame:140,score:3}],
-        method:"piecewise_ballistic_impacts_v2",impact_settings:payload.impact,
+        method:"piecewise_ballistic_impacts_v2",
+        impact_settings:Object.fromEntries(Object.entries(payload.impact).reverse()),
         calibration:{min_score:0,shift_frames:0,training_videos:0},
         metrics_on_labeled_video:null};
     }
