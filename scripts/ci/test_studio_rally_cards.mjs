@@ -44,7 +44,7 @@ const trainingRallyGroups=()=>({
     start:item.start,end:item.end,members:[item]}))
 });
 const context={fps:()=>30,ui,s,wasmReady:true,
-  training,timelineRallyLayers,comparison,comparisonMatches:data=>Boolean(data),
+  training,reference:{active:false},timelineRallyLayers,comparison,comparisonMatches:data=>Boolean(data),
   trainingRallyGroups,updateTrainingSummaries:()=>{},
   second:frame=>(frame/30).toFixed(1).replace(".",","),
   rallyCardProgresses:new Map(),timeline:{data:null},

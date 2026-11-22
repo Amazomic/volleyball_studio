@@ -315,6 +315,27 @@ pub struct QueryLabels {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CatalogQuery {
+    project_id: String,
+}
+fn catalog_value(library: &Library, project_id: &str) -> Value {
+    let videos: Vec<Value> = library
+        .videos
+        .iter()
+        .filter(|v| v.project_id == project_id && v.reviewed)
+        .map(|v| {
+            json!({
+                "video":v.video,
+                "rally_run_id":v.rally_run_id,
+                "rallies":v.rallies.len(),
+                "touches":v.touches.len()
+            })
+        })
+        .collect();
+    json!({"schema":"volley-touch-annotation-catalog/1","project_id":project_id,"videos":videos})
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EditLabels {
     project_id: String,
     rally_run_id: String,
@@ -450,6 +471,23 @@ pub(crate) fn comparison_truth(
     })
 }
 
+pub async fn catalog(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<CatalogQuery>,
+) -> ApiResult<Value> {
+    if q.project_id.trim().is_empty() {
+        return Err(storage::bad_request("Project ID is required"));
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        lock(|| {
+            let library = read(&state)?;
+            Ok(catalog_value(&library, &q.project_id))
+        })
+    })
+    .await
+    .map_err(|e| storage::internal(format!("Annotation catalog task: {e}")))??;
+    Ok(Json(result))
+}
 pub async fn list(
     State(state): State<Arc<AppState>>,
     Query(q): Query<QueryLabels>,
@@ -776,6 +814,29 @@ mod tests {
         assert!(valid(&roundtrip));
     }
 
+    #[test]
+    fn reference_catalog_includes_only_reviewed_videos_from_selected_project() {
+        let mk = |project: &str, video: &str, reviewed: bool| {
+            serde_json::from_value::<VideoLabels>(json!({
+                "project_id":project,"video":video,"source_sha256":"a".repeat(64),
+                "rally_run_id":"b".repeat(24),"total_frames":300,
+                "revision":1,"reviewed":reviewed,"touches":[],"rallies":[]
+            }))
+            .unwrap()
+        };
+        let library = Library {
+            schema: SCHEMA.into(),
+            videos: vec![
+                mk("one", "reviewed.mp4", true),
+                mk("one", "draft.mp4", false),
+                mk("two", "private.mp4", true),
+            ],
+        };
+        let result = catalog_value(&library, "one");
+        assert_eq!(result["videos"].as_array().unwrap().len(), 1);
+        assert_eq!(result["videos"][0]["video"], "reviewed.mp4");
+        assert_eq!(result["videos"][0]["rallies"], 0);
+    }
     #[test]
     fn duplicate_candidates_cannot_both_match_one_touch() {
         let result = accuracy(&[100], &[99, 100, 102], 3, 30.0);

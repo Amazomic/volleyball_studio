@@ -634,3 +634,15 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 О 1 фазе	About Phase 1
 Запустить отдельно 1 фазу (GPU) и сохранить её результат	Run Phase 1 (GPU) separately and save its result
 Запустить отдельно 2 фазу (CPU) на выбранных GPU-данных	Run Phase 2 (CPU) separately on the selected GPU evidence
+Инструменты отладки	Debug tools
+Расчёт по видео	Video calculations
+Параметры расчёта	Calculation parameters
+Режим дебага	Debug mode
+Выбрать эталонное видео	Select reference video
+Режим:	Mode:
+Анализ проекта	Project analysis
+Просмотр эталонов	Reference viewer
+Просмотр проверенной разметки без изменения результатов анализа	View verified annotations without changing analysis results
+Эталонное видео	Reference video
+Загрузка эталонов…	Loading references…
+Нет выбранного эталона	No reference selected

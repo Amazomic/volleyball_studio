@@ -69,7 +69,7 @@ const annotation={
   begin:new Node(),finish:new Node(),review:new Node(),current:new Node()
 };
 const context={
-  annotation,training:{active:true},ui:{video:{currentTime:2}},
+  annotation,training:{active:true},reference:{active:false},ui:{video:{currentTime:2}},
   s:{seekAt:0,project:"p",run:"cpu",video:"v.mp4"},timeline:{data:{rallies:[]}},
   document:{createElement:name=>new Node(name)},fps:()=>30,timelineDuration:()=>10,
   annotationFrame:()=>60,

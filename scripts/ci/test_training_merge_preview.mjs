@@ -57,7 +57,7 @@ const layers={gap:{value:"4"},cpuSummary:textNode(),ballSummary:textNode(),
   candidates:{checked:false}};
 const annotation={prediction:null};
 const context={timelineRallyLayers:layers,timeline,s,comparison,annotation,
-  training:{active:true},mergeTrainingIntervals:merge,fps:()=>30,
+  training:{active:true},reference:{active:false},mergeTrainingIntervals:merge,fps:()=>30,
   comparisonMatches:data=>Boolean(data),annotationSourceValid:()=>true};
 const helpers=runInNewContext(js.slice(p,q)+
   "\n({trainingRallyGroups,trainingGapSeconds,updateTrainingSummaries,showBallCandidates})",
@@ -91,7 +91,7 @@ const selectEnd=js.indexOf("  const schedulePreviewRecovery=",selectStart);
 assert.ok(selectStart>0&&selectEnd>selectStart);
 comparison.data={trajectory_status:"ready",mode:"continuous",trajectory_rallies:ballRecords};
 const {rallyAtTimelineTime}=runInNewContext(js.slice(selectStart,selectEnd)+
-  "\n({rallyAtTimelineTime})",{s,training:{active:true},fps:()=>30,
+  "\n({rallyAtTimelineTime})",{s,training:{active:true},reference:{active:false},fps:()=>30,
     timeline,trainingRallyGroups:helpers.trainingRallyGroups,timelineRallyLayers:layers});
 const insideBallGap=rallyAtTimelineTime(130/30);
 assert.equal(insideBallGap.start_frame,30);

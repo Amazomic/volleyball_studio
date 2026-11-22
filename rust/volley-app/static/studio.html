@@ -186,7 +186,16 @@
         <section class="workspace">
           <div class="viewer-layout">
             <section class="viewer-panel" aria-label="Плеер розыгрышей">
-              <div class="viewer-head"><strong><span class="studio-preview-caption">Просмотр видео</span><span class="studio-training-caption">Дебаг</span></strong><div class="studio-training-video-actions"><button type="button" class="primary" id="studio-comparison-recalculate">Рассчитать розыгрыши</button><button type="button" class="primary" id="studio-annotation-calculate" disabled>Рассчитать касания</button><details class="studio-impact-settings" id="studio-impact-settings"><summary>⚙ Параметры касаний</summary><div class="studio-impact-settings-body" role="group" aria-label="Поиск столкновений по траектории"><strong>Столкновения по траектории VBallNet</strong><p>Плавная параболическая дуга полёта игнорируется. Резкий излом направления между двумя участками траектории — кандидат столкновения, а не подтверждённое касание игрока.</p><label>Минимальный угол излома траектории, °<input id="studio-impact-angle" type="number" min="15" max="170" step="5" value="45"></label><label>Допустимый разрыв дуг, пикс.<input id="studio-impact-join" type="number" min="8" max="80" step="1" value="28"></label><label>Допустимая ошибка параболы, пикс.<input id="studio-impact-fit-error" type="number" min="1" max="20" step="0.5" value="4"></label><label>Минимальный интервал между столкновениями, кадры<input id="studio-impact-min-separation" type="number" min="3" max="30" step="1" value="6"></label><small>Параметры действуют только в «Дебаге». Для проверки изменений нажмите «Рассчитать касания».</small></div></details><button type="button" class="primary" id="studio-annotation-classify" disabled>Определить тип касания</button><small id="studio-simulation-summary" role="status" aria-live="polite"></small>
+              <div class="viewer-head">
+                <strong><span class="studio-preview-caption">Просмотр видео</span><span class="studio-training-caption">Дебаг</span></strong>
+                <div class="studio-training-video-actions" role="group" aria-label="Инструменты отладки">
+                  <div class="studio-debug-action-group" role="group" aria-label="Расчёт по видео">
+                    <button type="button" class="primary" id="studio-comparison-recalculate">Рассчитать розыгрыши</button>
+                    <button type="button" class="primary" id="studio-annotation-calculate" disabled>Рассчитать касания</button>
+                    <button type="button" class="primary" id="studio-annotation-classify" disabled>Определить тип касания</button>
+                  </div>
+                  <div class="studio-debug-settings-group" role="group" aria-label="Параметры расчёта">
+                    <details class="studio-impact-settings" id="studio-impact-settings"><summary>⚙ Параметры касаний</summary><div class="studio-impact-settings-body" role="group" aria-label="Поиск столкновений по траектории"><strong>Столкновения по траектории VBallNet</strong><p>Плавная параболическая дуга полёта игнорируется. Резкий излом направления между двумя участками траектории — кандидат столкновения, а не подтверждённое касание игрока.</p><label>Минимальный угол излома траектории, °<input id="studio-impact-angle" type="number" min="15" max="170" step="5" value="45"></label><label>Допустимый разрыв дуг, пикс.<input id="studio-impact-join" type="number" min="8" max="80" step="1" value="28"></label><label>Допустимая ошибка параболы, пикс.<input id="studio-impact-fit-error" type="number" min="1" max="20" step="0.5" value="4"></label><label>Минимальный интервал между столкновениями, кадры<input id="studio-impact-min-separation" type="number" min="3" max="30" step="1" value="6"></label><small>Параметры действуют только в «Дебаге». Для проверки изменений нажмите «Рассчитать касания».</small></div></details>
               <section id="studio-training-panel" class="studio-debug-controls hidden" aria-label="Параметры дебага">
                 <details id="studio-debug-settings" class="studio-debug-settings">
                   <summary>⚙ Настройки и сохранение</summary>
@@ -301,7 +310,24 @@
                   </div>
                 </details>
               </section>
-              </div><span id="studio-video-time">—</span></div>
+                  </div>
+                  <small id="studio-simulation-summary" role="status" aria-live="polite"></small>
+                </div>
+                <div class="studio-debug-mode-row" role="group" aria-label="Режим дебага">
+                  <span class="studio-debug-mode-label">Режим:</span>
+                  <div class="studio-debug-mode-switch">
+                    <button type="button" id="studio-debug-mode-analysis" aria-pressed="true">Анализ проекта</button>
+                    <button type="button" id="studio-debug-mode-reference" aria-pressed="false">Просмотр эталонов</button>
+                  </div>
+                  <span class="studio-debug-mode-help">Просмотр проверенной разметки без изменения результатов анализа</span>
+                </div>
+                <div id="studio-debug-reference-picker" class="studio-debug-reference-picker hidden">
+                  <label for="studio-debug-reference-video">Эталонное видео</label>
+                  <select id="studio-debug-reference-video" aria-label="Выбрать эталонное видео"><option value="">Загрузка эталонов…</option></select>
+                  <span id="studio-debug-reference-counts" role="status" aria-live="polite">Нет выбранного эталона</span>
+                </div>
+                <span id="studio-video-time">—</span>
+              </div>
               <div class="video-wrap">
                 <video id="studio-video" tabindex="0" preload="metadata" playsinline aria-label="Просмотр исходного видео. Пробел — воспроизведение или пауза"></video>
                 <canvas id="studio-video-overlay" class="video-overlay" aria-hidden="true"></canvas>
