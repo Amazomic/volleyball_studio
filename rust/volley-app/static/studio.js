@@ -3115,7 +3115,7 @@
       (!s.run||(chain.byAnalysis.get(s.analysis)||[]).some(row=>row.rally_run_id===s.run));
     s.chain=chain;
     options(ui.analysis,chain.choices,"value",item=>item.label,
-      chain.choices.length?"Выберите первичный анализ":"Нет GPU-анализов",
+      chain.choices.length?"Выберите 1 фазу":"Нет результатов 1 фазы",
       !chain.choices.length);
     ui.analysis.disabled=!chain.choices.length;
     // Restore a valid explicit choice; otherwise select the most recently

@@ -79,12 +79,12 @@
             </div>
           </div>
           <div class="studio-chain-step">
-            <label class="field-label" for="studio-inference">02 · Анализ GPU</label>
-            <select id="studio-inference" aria-label="Выберите первичный анализ" disabled><option value="">Сначала выберите проект</option></select>
+            <label class="field-label" for="studio-inference">02 · 1 фаза</label>
+            <select id="studio-inference" aria-label="Выберите результат 1 фазы" disabled><option value="">Сначала выберите проект</option></select>
           </div>
           <div class="studio-chain-step">
-            <label class="field-label" for="studio-run">03 · Постобработка CPU</label>
-            <select id="studio-run" aria-label="Выберите версию постобработки" disabled><option value="">Сначала выберите анализ</option></select>
+            <label class="field-label" for="studio-run">03 · 2 фаза</label>
+            <select id="studio-run" aria-label="Выберите результат 2 фазы" disabled><option value="">Сначала выберите анализ</option></select>
           </div>
           <button id="studio-quick-open" class="studio-quick-reel-launch" data-studio-tab="quick" type="button" aria-label="Создать быстрый рилс" title="Создать быстрый рилс">
             <svg class="studio-quick-reel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
@@ -524,21 +524,22 @@
             <div class="analysis-flow-toolbar">
               <strong>Конвейер анализа</strong>
               <div class="analysis-flow-actions">
-                <button id="analysis-flow-gpu-start" type="button" class="secondary">▶ GPU</button>
-                <button id="analysis-flow-cpu-start" type="button" class="secondary">▶ CPU</button>
+                <button id="analysis-flow-gpu-start" type="button" class="secondary">▶ 1 фаза</button>
+                <button id="analysis-flow-cpu-start" type="button" class="secondary">▶ 2 фаза</button>
                 <button id="analysis-flow-full-start" type="button" class="primary">▶ Полный анализ</button>
               </div>
             </div>
             <div id="analysis-flow-diagram" class="analysis-flow-diagram" aria-live="polite"></div>
+            <div id="analysis-flow-result" class="analysis-flow-result" aria-live="polite">После анализа здесь будет виден последний результат.</div>
             <div id="analysis-flow-feedback" class="analysis-flow-feedback"></div>
           </section>
           <div class="analysis-profile-grid">
             <section class="analysis-profile-card analysis-primary" aria-labelledby="studio-primary-heading">
               <div class="analysis-profile-heading">
                 <span class="analysis-profile-number">01</span>
-                <div class="analysis-primary-title"><h2 id="studio-primary-heading">Первичный анализ</h2>
-                  <button class="analysis-help" type="button" aria-label="О первичном анализе" aria-describedby="studio-primary-help">i<span id="studio-primary-help" class="analysis-tooltip" role="tooltip">VBallNet определяет мяч. <span id="studio-primary-person-model">Детектор игроков + RTMPose</span> определяет игроков и скелеты. Результат сохраняется для повторной постобработки.</span></button></div>
-                <button id="studio-analysis-gpu-only" class="primary analysis-stage-launch" type="button" title="Запустить только GPU и создать отдельную версию первичного анализа">▶ Начать анализ</button>
+                <div class="analysis-primary-title"><h2 id="studio-primary-heading">1 фаза</h2>
+                  <button class="analysis-help" type="button" aria-label="О 1 фазе" aria-describedby="studio-primary-help">i<span id="studio-primary-help" class="analysis-tooltip" role="tooltip">VBallNet определяет мяч. <span id="studio-primary-person-model">Детектор игроков + RTMPose</span> определяет игроков и скелеты. Результат сохраняется для повторной постобработки.</span></button></div>
+                <button id="studio-analysis-gpu-only" class="primary analysis-stage-launch" type="button" title="Запустить отдельно 1 фазу (GPU) и сохранить её результат">▶ Начать анализ</button>
               </div>
               <div class="analysis-profile-fields analysis-profile-core">
                 <div class="analysis-profile-source">
@@ -632,9 +633,9 @@
               <section class="analysis-profile-card" aria-labelledby="studio-post-heading">
               <div class="analysis-profile-heading">
                 <span class="analysis-profile-number">02</span>
-                <div><h2 id="studio-post-heading">Постобработка</h2>
+                <div><h2 id="studio-post-heading">2 фаза</h2>
                   <p>Трекинг · касания · розыгрыши. Повторный GPU-анализ не требуется.</p></div>
-                <button id="studio-analysis-post-only" class="primary analysis-stage-launch" type="button" title="Запустить CPU на выбранной в шапке GPU-версии и сохранить новую постобработку">▶ Начать анализ</button>
+                <button id="studio-analysis-post-only" class="primary analysis-stage-launch" type="button" title="Запустить отдельно 2 фазу (CPU) на выбранных GPU-данных">▶ Начать анализ</button>
               </div>
               <details class="analysis-profile-advanced">
                 <summary>Параметры постобработки</summary>
@@ -714,8 +715,8 @@
             <div class="analysis-history-toolbar">
               <div class="analysis-history-tabs" role="tablist" aria-label="Тип запусков">
                 <button type="button" role="tab" aria-selected="true" data-history-filter="all">Все</button>
-                <button type="button" role="tab" aria-selected="false" data-history-filter="gpu">Нейросеть</button>
-                <button type="button" role="tab" aria-selected="false" data-history-filter="post">Постобработка</button>
+                <button type="button" role="tab" aria-selected="false" data-history-filter="gpu">1 фаза</button>
+                <button type="button" role="tab" aria-selected="false" data-history-filter="post">2 фаза</button>
               </div>
               <div class="analysis-history-actions"><button id="studio-history-refresh" class="secondary" type="button">↻ Обновить</button><button id="studio-history-clear" class="secondary" type="button" title="Скрыть записи истории текущего проекта; результаты анализа сохраняются">Очистить историю</button></div>
             </div>

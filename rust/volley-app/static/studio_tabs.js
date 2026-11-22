@@ -301,7 +301,7 @@
       const changed=allProfileFields().filter(item=>fieldValue(item)!==item.dataset.default);
       ui.profileDelta.textContent=changed.length?
         "Изменено параметров: "+changed.length+
-        ". При изменении GPU создаётся новый анализ; при изменении только CPU — новая постобработка.":
+        ". При изменении GPU создаётся новая 1 фаза; при изменении только CPU — новая 2 фаза.":
         "Эталонный профиль активен. Совпадающие готовые версии используются повторно.";
       if($("studio-post-tcn-experimental").checked){
         ui.profileDelta.textContent+=" Экспериментальная TCN: требуется обученная модель models/volley3d_touch_tcn.onnx.";
@@ -329,7 +329,7 @@
       const preparing=live.stage==="Подготовка исходного видео";
       const phase=preparing?"Подготовка":
         /V[Bb]allNet/.test(live.stage||"")?"Мяч":
-        /RF-DETR|RTMPose|RTMDet/.test(live.stage||"")?"Игроки":"Первичный анализ";
+        /RF-DETR|RTMPose|RTMDet/.test(live.stage||"")?"Игроки":"1 фаза";
       const shown=measured===null?"…":
         (preparing?Math.min(100,measured/8*100):measured).toFixed(1)+"%";
       ui.gpuOnly.textContent="◌ "+phase+" · "+shown;
@@ -337,7 +337,7 @@
         (measured===null?"":" · "+measured.toFixed(1)+"% всего");
     }else{
       ui.gpuOnly.textContent="▶ Начать анализ";
-      ui.gpuOnly.title="Запустить только GPU и создать отдельную версию первичного анализа";
+      ui.gpuOnly.title="Запустить 1 фазу (GPU) и создать отдельную версию";
     }
     ui.gpuOnly.disabled=blocked||!gpuValid;
     ui.postOnly.disabled=blocked||!postValid||!selectedGpuSource();
@@ -810,9 +810,57 @@
       return true;
     }catch(error){output.textContent="Не удалось загрузить журнал: "+String(error.message||error);return false;}
   };
+  const showGraphResult=source=>{
+    const target=$("analysis-flow-result");
+    if(!target)return;
+    clear(target);
+    if(!source){
+      target.append(make("span","analysis-flow-result-muted",
+        "После анализа здесь будет виден последний результат."));
+      return;
+    }
+    const mode=source.mode==="gpu"?"1 фаза":source.mode==="post"?"2 фаза":"Полный анализ";
+    const statuses={queued:"В очереди",running:"В процессе",cancelling:"Останавливается",
+      complete:"Завершён",failed:"Ошибка",cancelled:"Отменён",interrupted:"Прерван"};
+    const elapsed=source.elapsed_ms??source.duration_ms;
+    const started=Number(source.started_ms);
+    const timestamp=Number.isFinite(started)&&started>0?
+      " · "+new Date(started).toLocaleString("ru-RU"):"";
+    target.append(
+      make("strong","analysis-flow-result-title","Последний запуск · "+mode),
+      make("span","analysis-flow-result-status",
+        (statuses[source.status]||"Ожидание данных")+
+        (elapsed==null?"":" · "+historyDuration(Number(elapsed)))+timestamp)
+    );
+  };
   const liveHistory=()=>{
     const status=state.latestPipeline;
     return status&&status.project_id===projectId()&&status.id&&status.status!=="idle"?status:null;
+  };
+  const historyVisibleByProject=new Map();
+  const visibleHistoryRuns=project=>{
+    if(!historyVisibleByProject.has(project)){
+      let stored=[];
+      try{
+        const raw=window.sessionStorage?.getItem("volley:analysis-session-runs:v1:"+project);
+        const parsed=JSON.parse(raw||"[]");
+        if(Array.isArray(parsed))stored=parsed.filter(id=>/^[a-f0-9]{32}$/.test(id)).slice(-40);
+      }catch{}
+      historyVisibleByProject.set(project,new Set(stored));
+    }
+    return historyVisibleByProject.get(project);
+  };
+  const recordHistoryRun=(project,id)=>{
+    if(!/^[a-f0-9]{12}$/.test(project||"")||!/^[a-f0-9]{32}$/.test(id||""))return;
+    const ids=visibleHistoryRuns(project);
+    ids.add(id);
+    if(ids.size>40)ids.delete(ids.values().next().value);
+    try{window.sessionStorage?.setItem("volley:analysis-session-runs:v1:"+project,
+      JSON.stringify([...ids]));}catch{}
+  };
+  const forgetHistoryRuns=project=>{
+    historyVisibleByProject.delete(project);
+    try{window.sessionStorage?.removeItem("volley:analysis-session-runs:v1:"+project);}catch{}
   };
   const liveHistoryLine=status=>{
     const pct=Number(status.progress_percent);
@@ -848,56 +896,27 @@
   };
   const renderStageTimeline=(target,row,current)=>{
     clear(target);
-    const graph=make("div","analysis-flow-diagram analysis-flow-history");
-    target.append(graph);
-    updatePipelineGraph(graph,current||row);
-    const details=make("details","analysis-flow-details");
-    details.append(make("summary","","Время и кадры по стадиям"));
-    const stageList=make("div","analysis-flow-details-list");
-    details.append(stageList);
     const stages=(Array.isArray(current?.stages)&&current.stages.length)?
       current.stages:(Array.isArray(row?.stages)?row.stages:[]);
     if(!stages.length){
-      stageList.append(make("div","analysis-history-no-stages",
-        current?"Стадии появятся после запуска.":"Данные о стадиях отсутствуют."));
-      target.append(details);
+      target.append(make("span","analysis-history-no-stages",
+        current?"Стадии появятся после запуска.":"Время стадий не записано."));
       return;
     }
     const now=Date.now();
     for(const entry of stages){
       const live=!!current&&["running","cancelling"].includes(current.status)&&
-        entry.finished_ms==null;
+        entry.started_ms!=null&&entry.finished_ms==null;
       const started=entry.started_ms==null?NaN:Number(entry.started_ms);
       const elapsed=live&&Number.isFinite(started)?Math.max(0,now-started):
         entry.duration_ms==null?null:Number(entry.duration_ms);
-      const stateLabel=live?"В процессе":entry.duration_ms==null?"Без времени":"Готово";
       const line=make("div","analysis-history-stage"+(live?" is-running":""));
-      const name=make("span","analysis-history-stage-name",pipelineLabel(entry));
-      const done=entry.frames_processed==null?NaN:Number(entry.frames_processed);
-      const total=entry.frames_total==null?NaN:Number(entry.frames_total);
-      if(Number.isSafeInteger(done)&&Number.isSafeInteger(total)&&total>0&&done>=0){
-        const amount=Math.max(0,Math.min(100,100*done/total));
-        name.append(make("small","analysis-history-stage-frames",
-          done.toLocaleString("ru-RU")+" / "+total.toLocaleString("ru-RU")+
-          " кадров · "+amount.toFixed(1)+"%"));
-        const rail=make("span","analysis-history-stage-rail");
-        const fill=make("span","analysis-history-stage-fill");
-        fill.style.width=amount+"%";
-        rail.setAttribute("role","progressbar");
-        rail.setAttribute("aria-label","Прогресс стадии "+String(entry.name||""));
-        rail.setAttribute("aria-valuemin","0");
-        rail.setAttribute("aria-valuemax","100");
-        rail.setAttribute("aria-valuenow",String(amount));
-        rail.append(fill);
-        name.append(rail);
-      }
-      line.append(make("span","analysis-history-stage-mark",live?"●":"✓"),
-        name,
-        make("span","analysis-history-stage-state",stateLabel),
-        make("span","analysis-history-stage-duration",historyDuration(elapsed)));
-      stageList.append(line);
+      line.append(
+        make("span","analysis-history-stage-name",pipelineLabel(entry)),
+        make("span","analysis-history-stage-duration",historyDuration(elapsed))
+      );
+      target.append(line);
     }
-    target.append(details);
   };
   const renderHistory=()=>{
     // Preserve the existing streaming log/progress nodes when history is refreshed.
@@ -906,21 +925,28 @@
     const latest=liveHistory();
     if(typeof updatePipelineGraph==="function"&&typeof mainGraph!=="undefined"&&
       mainGraph&&typeof mainGraph.querySelector==="function"){
-      updatePipelineGraph(mainGraph,latest||state.historyRows[0]||null);
+      const source=latest||state.historyRows[0]||null;
+      updatePipelineGraph(mainGraph,source);
+      showGraphResult(source);
       requestAnimationFrame(()=>graphDraw(mainGraph));
     }
     const active=latest&&["queued","running","cancelling"].includes(latest.status);
-    const rows=state.historyRows.filter(row=>state.historyFilter==="all"||
-      row.mode===state.historyFilter||!row.mode||row.mode==="full"||
-      (active&&row.id===latest.id));
+    const visibleIds=visibleHistoryRuns(projectId());
+    const rows=state.historyRows.filter(row=>visibleIds.has(row.id)&&
+      (state.historyFilter==="all"||row.mode===state.historyFilter||
+        !row.mode||row.mode==="full"||(active&&row.id===latest.id)));
     // The status endpoint can observe a new job before the history endpoint lists it.
-    if(active&&!rows.some(row=>row.id===latest.id)){
+    if(active&&visibleIds.has(latest.id)&&!rows.some(row=>row.id===latest.id)){
       rows.unshift({id:latest.id,mode:latest.mode,video:latest.video,
         status:latest.status,stage:latest.stage,stages:[],started_ms:null});
     }
-    if(!rows.length){ui.historyList.textContent=state.historyRows.length?
-      "На загруженных страницах запусков нет.":"Запусков пока нет.";return;}
-    const labels={gpu:"Нейросеть",post:"Постобработка",full:"Полный анализ"};
+    if(!rows.length){
+      ui.historyList.textContent=visibleIds.size?
+        "Запуски текущей сессии не найдены в выбранном фильтре.":
+        "История заполнится после нового запуска анализа.";
+      return;
+    }
+    const labels={gpu:"1 фаза",post:"2 фаза",full:"Полный анализ"};
     const statuses={queued:"В очереди",running:"Выполняется",cancelling:"Останавливается",
       complete:"Завершён",failed:"Ошибка",cancelled:"Отменён",interrupted:"Прерван"};
     for(const row of rows){
@@ -938,12 +964,6 @@
       if(current)summary.append(make("span","analysis-history-live-stage",liveHistoryLine(current)));
       if(current)summary.append(make("span","analysis-history-eta",historyEtaLine(current)));
       details.append(summary);
-      details.addEventListener("toggle",()=>{
-        if(details.open&&!liveHistory()){
-          updatePipelineGraph(mainGraph,row);
-          requestAnimationFrame(()=>graphDraw(mainGraph));
-        }
-      });
       const body=make("div","analysis-history-detail"),stages=make("div","analysis-history-stages");
       renderStageTimeline(stages,row,current);
       body.append(stages);
@@ -972,8 +992,10 @@
     if(typeof updatePipelineGraph==="function"&&typeof mainGraph!=="undefined"&&
       mainGraph&&typeof mainGraph.querySelector==="function"){
       updatePipelineGraph(mainGraph,status);
+      showGraphResult(status);
       requestAnimationFrame(()=>graphDraw(mainGraph));
     }
+    if(!visibleHistoryRuns(status.project_id).has(status.id))return;
     let item=[...ui.historyList.children].find(node=>node.dataset?.runId===status.id);
     if(!item){renderHistory();item=[...ui.historyList.children].find(node=>node.dataset?.runId===status.id);}
     if(!item)return;
@@ -1007,7 +1029,7 @@
         throw Error("Некорректный ответ истории");
       state.historyRows=append?state.historyRows.concat(data.runs):data.runs;
       state.historyOffset=data.next_offset;
-      ui.historyMore.classList.toggle("hidden",data.has_more!==true);
+      ui.historyMore.classList.add("hidden");
       renderHistory();
     }catch(error){if(epoch===state.historyEpoch){
       if(append)ui.historyMore.classList.remove("hidden");
@@ -1023,6 +1045,7 @@
     state.historyEpoch++;
     try{
       await post("/api/studio/pipeline/history",{project_id:project});
+      forgetHistoryRuns(project);
       if(project===projectId())await loadHistory();
     }catch(error){if(project===projectId())ui.historyList.textContent="Не удалось очистить историю: "+String(error.message||error);}
     finally{ui.historyClear.disabled=false;}
@@ -1049,6 +1072,7 @@
     if(typeof updatePipelineGraph==="function"&&typeof mainGraph!=="undefined"&&
       mainGraph&&typeof mainGraph.querySelector==="function"){
       updatePipelineGraph(mainGraph,status);
+      showGraphResult(status);
       requestAnimationFrame(()=>graphDraw(mainGraph));
     }
     const active=["queued","running","cancelling"].includes(status.status);
@@ -1056,8 +1080,8 @@
     const stage=String(status.stage||"Обработка");
     const project=String(status.project_id||"");
     const mode=["full","gpu","post"].includes(status.mode)?status.mode:"full";
-    const runLabel=mode==="gpu"?"Первичный GPU-анализ":
-      mode==="post"?"CPU-постобработка":"Полный анализ · GPU/CPU";
+    const runLabel=mode==="gpu"?"1 фаза · GPU":
+      mode==="post"?"2 фаза · CPU":"Полный анализ · GPU/CPU";
     if(active){
       window.VolleyballTasks?.set("analysis",{label:runLabel,
         projectId:project,stage,progress:percent});
@@ -1072,7 +1096,7 @@
          status.result_reused===true?
           "Настройки совпали: выбраны готовые версии GPU и CPU.":
           status.gpu_reused===true?
-          "GPU использован повторно. Новая CPU-постобработка доступна в шапке.":
+          "GPU использован повторно. Новая 2 фаза доступна в шапке.":
           "GPU и CPU завершены. Новые версии доступны в шапке страницы."):
         status.status==="cancelled"?"Анализ отменён. Частичные версии не выбраны.":
         status.status==="failed"||status.status==="interrupted"?
@@ -1125,6 +1149,7 @@
     const status=await get("/api/studio/pipeline/status",{project_id:project});
     if(project!==projectId()||epoch!==state.analysisGeneration)return;
     if(["queued","running","cancelling"].includes(status.status)){
+      recordHistoryRun(project,status.id);
       state.pipelineId=status.id;
       state.pipelineProject=project;
       state.stopRequested=status.status==="cancelling";
@@ -1215,6 +1240,7 @@
       if(response.schema!=="volley-studio-pipeline/1"||
           !/^[a-f0-9]{32}$/.test(String(response.id||"")))
         throw Error("Сервер не подтвердил создание анализа");
+      recordHistoryRun(project,response.id);
       state.pipelineId=response.id;state.pipelineProject=project;
       resetLog();ui.logPanel.open=true;
       state.latestPipeline=response;
@@ -1222,7 +1248,7 @@
       loadHistory();
       ui.progress.value=0;state.stopRequested=false;
       saveMessage(mode==="gpu"?"Запущен отдельный анализ: VballNet → "+(window.VolleyballPersonDetector?.label||"детектор игроков + RTMPose")+" → объединение.":
-        mode==="post"?"Запущена новая CPU-постобработка выбранного GPU-анализа.":
+        mode==="post"?"Запущена 2 фаза для выбранного результата 1 фазы.":
         "Запущен полный анализ: VBallNet → "+(window.VolleyballPersonDetector?.label||"детектор игроков + RTMPose")+" → CPU.");
       stopPipelinePolling();
       await pollPipeline();

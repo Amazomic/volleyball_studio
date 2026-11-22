@@ -621,3 +621,16 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Минимальный интервал между столкновениями, кадры	Minimum spacing between collisions, frames
 Параметры действуют только в «Дебаге». Для проверки изменений нажмите «Рассчитать касания».	Settings apply only in Debug. Recalculate touches to test a change.
 Изменения остаются в черновике до сохранения. Эталонные метки не подменяют физический поиск столкновений; для изменения чувствительности используйте параметры у плеера.	Changes remain a draft until saved. Reference labels do not replace collision detection; adjust sensitivity in the player settings.
+02 · 1 фаза	02 · Phase 1
+03 · 2 фаза	03 · Phase 2
+1 фаза	Phase 1
+2 фаза	Phase 2
+▶ 1 фаза	▶ Phase 1
+▶ 2 фаза	▶ Phase 2
+Последний запуск	Latest run
+После анализа здесь будет виден последний результат.	The latest result will appear here after analysis.
+Выберите результат 1 фазы	Select Phase 1 result
+Выберите результат 2 фазы	Select Phase 2 result
+О 1 фазе	About Phase 1
+Запустить отдельно 1 фазу (GPU) и сохранить её результат	Run Phase 1 (GPU) separately and save its result
+Запустить отдельно 2 фазу (CPU) на выбранных GPU-данных	Run Phase 2 (CPU) separately on the selected GPU evidence

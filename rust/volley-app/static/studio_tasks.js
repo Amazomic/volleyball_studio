@@ -28,7 +28,7 @@
   const tasks=new Map(),rows=new Map();
   let pollTimer=null;
   const preparationProjects=new Set();
-  const labels={analysis:"Полный анализ",gpu:"Анализ GPU",cpu:"Постобработка CPU",quick:"Быстрый рилс",montage:"Монтаж"};
+  const labels={analysis:"Полный анализ",gpu:"1 фаза",cpu:"2 фаза",quick:"Быстрый рилс",montage:"Монтаж"};
   let trackedGpuProject="",trackedAnalysisProject="",polling=false,refreshPending=false;
   const clamp=p=>Math.max(0,Math.min(100,p));
   const create=(tag,css,text)=>{

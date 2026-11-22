@@ -60,8 +60,20 @@ for(const [from,to] of edges){
   assert.ok(ids.includes(from)&&ids.includes(to),from+" -> "+to);
   assert.ok(ids.indexOf(from)<ids.indexOf(to),from+" -> "+to);
 }
-assert.match(js,/renderStageTimeline=[\s\S]*?updatePipelineGraph\(graph,current\|\|row\)/);
-assert.match(js,/const name=make\("span","analysis-history-stage-name",pipelineLabel\(entry\)\)/);
+const timeline=extract("const renderStageTimeline=","const renderHistory=");
+assert.doesNotMatch(timeline,/updatePipelineGraph|analysis-flow-grid|analysis-flow-diagram/);
+assert.match(timeline,/analysis-history-stage-duration/);
+assert.doesNotMatch(timeline,/analysis-history-stage-rail|analysis-history-stage-frames/);
+assert.match(html,/id="analysis-flow-result"/);
+assert.match(html,/id="studio-primary-heading">1 фаза/);
+assert.match(html,/id="studio-post-heading">2 фаза/);
+assert.match(html,/data-history-filter="gpu">1 фаза/);
+assert.match(html,/data-history-filter="post">2 фаза/);
+assert.match(js,/recordHistoryRun\(project,response\.id\)/);
+assert.match(js,/recordHistoryRun\(project,status\.id\)/);
+assert.match(js,/sessionStorage\?\.setItem\("volley:analysis-session-runs:v1:"/);
+assert.match(js,/visibleIds\.has\(row\.id\)/);
+assert.match(timeline,/make\("span","analysis-history-stage-name",pipelineLabel\(entry\)\)/);
 assert.match(js,/updatePipelineGraph\(mainGraph,status\)/);
 assert.match(rust,/rows\.push\(json!\(\{"name":stage_name,"id":stage_id/);
 assert.match(rust,/status\["stage_id"\] = json!\(stage_id\)/);

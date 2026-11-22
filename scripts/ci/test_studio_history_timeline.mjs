@@ -52,29 +52,37 @@ const stages=[
     frames_processed:120,frames_total:400,progress_percent:30}
 ];
 const current={
-  schema:"volley-studio-pipeline/1",project_id:"project",id,
+  schema:"volley-studio-pipeline/1",project_id:"aaaabbbbcccc",id,
   mode:"gpu",video:"game.mp4",stage:"GPU · RF-DETR Medium + RTMPose: running",
   status:"running",progress_percent:67.5,elapsed_ms:91000,remaining_ms:110000,stages
 };
 const state={latestPipeline:current,historyRows:[],historyFilter:"all",historyStatusAt:now,historyOffset:0};
-const {renderHistory,updateLiveHistory}=runInNewContext(registry+source.slice(from,to)+
-  "\n({renderHistory,updateLiveHistory})",{
-    state,ui,projectId:()=>"project", $:key=>key==="studio-analysis-live-host"?host:null,
+const storage=new Map();
+const sessionStorage={
+  getItem:key=>storage.get(key)||null,
+  setItem:(key,value)=>storage.set(key,value),
+  removeItem:key=>storage.delete(key)
+};
+const {renderHistory,updateLiveHistory,recordHistoryRun}=runInNewContext(registry+source.slice(from,to)+
+  "\n({renderHistory,updateLiveHistory,recordHistoryRun})",{
+    state,ui,projectId:()=>"aaaabbbbcccc", $:key=>key==="studio-analysis-live-host"?host:null,
     make:(tag,klass,text)=>new Node(tag,klass,text),
     clear:node=>node.textContent="",historyDuration:ms=>ms===null?"—":Math.floor(ms/1000)+" с",
     historyLog:async()=>true,
-    window:{VolleyballUi:{translate:x=>x}},updatePipelineGraph:()=>{},
+    window:{VolleyballUi:{translate:x=>x},sessionStorage},showGraphResult:()=>{},updatePipelineGraph:()=>{},
     requestAnimationFrame:()=>{}
   });
+renderHistory();
+assert.equal(ui.historyList.children.length,0,"Old result is not placed in new-session history");
+recordHistoryRun("aaaabbbbcccc",id);
 renderHistory();
 const run=ui.historyList.children[0];
 assert.equal(run.querySelector(".analysis-history-stages").children.length,2);
 assert.match(run.querySelector(".analysis-history-stages").textContent,/Детекция мяча.*50 с/);
-assert.match(run.querySelector(".analysis-history-stages").textContent,/В процессе/);
-assert.match(run.querySelector(".analysis-history-stages").textContent,/120 \/ 400 кадров · 30.0%/);
-const rail=run.querySelector(".analysis-history-stage-rail");
-assert.equal(rail?.attributes["aria-valuenow"],"30");
-assert.equal(rail?.children[0].style.width,"30%");
+assert.doesNotMatch(run.querySelector(".analysis-history-stages").textContent,/120 \/ 400 кадров|В процессе/);
+assert.equal(run.querySelector(".analysis-history-stage-rail"),null);
+assert.equal(run.querySelector(".analysis-history-stages").children[0].children.length,2,
+  "A history stage is just its canonical name and duration");
 assert.match(run.querySelector(".analysis-history-eta").textContent,/Осталось ≈ 10[5-9] с|Осталось ≈ 110 с/);
 assert.match(run.querySelector(".analysis-history-runtime").textContent,/Выполняется · 91 с/);
 assert.equal(progress.parent,logPanel.parent);
@@ -87,4 +95,20 @@ assert.match(run.querySelector(".analysis-history-runtime").textContent,/Зав�
 assert.doesNotMatch(run.querySelector(".analysis-history-stages").textContent,/В процессе/);
 assert.match(run.querySelector(".analysis-history-stages").textContent,/40 с/);
 assert.strictEqual(progress.parent,logPanel.parent);
-console.log("History timeline: active and completed stages, elapsed and ETA, stable live log");
+const resultPanel=new Node("div");
+const showGraphResult=runInNewContext(source.slice(
+  source.indexOf("  const showGraphResult=source=>{"),
+  source.indexOf("  const liveHistory=()=>{")
+)+"\nshowGraphResult",{
+  $:id=>id==="analysis-flow-result"?resultPanel:null,
+  clear:node=>node.textContent="",
+  make:(tag,klass,text)=>new Node(tag,klass,text),
+  historyDuration:ms=>Math.floor(ms/1000)+" с"
+});
+showGraphResult({...finished,elapsed_ms:91000});
+assert.match(resultPanel.textContent,/Последний запуск · 1 фаза.*Завершён · 91 с/);
+assert.equal(resultPanel.querySelector(".analysis-flow-result-title").textContent,
+  "Последний запуск · 1 фаза");
+showGraphResult(null);
+assert.match(resultPanel.textContent,/После анализа здесь будет виден последний результат/);
+console.log("History timeline: compact stage durations, latest result outside history and stable live log");

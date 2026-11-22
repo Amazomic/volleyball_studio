@@ -56,23 +56,33 @@ const state={
 };
 let project="aaaabbbbcccc";
 const getId=id=>id==="studio-analysis-live-host"?host:null;
+const storedRuns=new Map();
+const sessionStorage={
+  getItem:key=>storedRuns.get(key)||null,
+  setItem:(key,value)=>storedRuns.set(key,value),
+  removeItem:key=>storedRuns.delete(key)
+};
 const helpers={
   state,ui,projectId:()=>project,
   $:getId,make:(tag,klass,text)=>new Node(tag,klass,text),
   clear:node=>node.textContent="",
   historyDuration:()=> "—",
   historyLog:async()=>true,
-  window:{VolleyballUi:{translate:x=>x}},updatePipelineGraph:()=>{},
+  window:{VolleyballUi:{translate:x=>x},sessionStorage},showGraphResult:()=>{},updatePipelineGraph:()=>{},
   requestAnimationFrame:()=>{}
 };
 const result=runInNewContext(registry+source.slice(from,to)+
-  "\n({renderHistory,updateLiveHistory,liveHistory})",helpers);
+  "\n({renderHistory,updateLiveHistory,liveHistory,recordHistoryRun})",helpers);
 const id="a".repeat(32);
 const current={
   schema:"volley-studio-pipeline/1",project_id:project,id,
   video:"match.mp4",mode:"post",status:"queued",stage:"Очередь",progress_percent:0
 };
 state.latestPipeline=current;
+result.renderHistory();
+assert.equal(ui.historyList.children.length,0,"Previous result stays above history until next launch");
+result.recordHistoryRun(project,id);
+assert.deepEqual(JSON.parse(sessionStorage.getItem("volley:analysis-session-runs:v1:"+project)),[id]);
 result.renderHistory();
 assert.equal(ui.historyList.children.length,1);
 let row=ui.historyList.children[0];
@@ -95,17 +105,16 @@ state.historyRows=[
   {id:"b".repeat(32),mode:"gpu",video:"older.mp4",status:"complete",stages:[],started_ms:500}
 ];
 result.renderHistory();
-assert.equal(ui.historyList.children.length,2);
+assert.equal(ui.historyList.children.length,1,"Older server records must be hidden");
 assert.strictEqual(progress.parent,logPanel.parent,"Progress and log remain colocated after reload");
 assert.equal(host.children.length,0,"Live nodes must not remain duplicated in the hidden host");
 row=ui.historyList.children[0];
 assert.equal(row.querySelector(".analysis-history-live-stage").textContent,"CPU · касания · 45.7%");
-assert.ok(ui.historyList.children[1].querySelector(".analysis-history-status"),
-  "Historical run keeps its own status");
+assert.equal(ui.historyList.children[1],undefined,"No duplicate history graph from prior runs");
 
 state.historyFilter="gpu";
 result.renderHistory();
-assert.equal(ui.historyList.children.length,2,"Active run remains visible regardless of history filter");
+assert.equal(ui.historyList.children.length,1,"Active run remains visible regardless of history filter");
 state.historyFilter="all";
 result.updateLiveHistory({...running,status:"complete",stage:"Готово",progress_percent:100});
 assert.equal(ui.historyList.children[0].querySelector(".analysis-history-status").textContent,"Завершён");
@@ -116,4 +125,24 @@ result.renderHistory();
 assert.strictEqual(progress.parent,host,"Switching projects unmounts live progress");
 assert.strictEqual(logPanel.parent,host,"Switching projects unmounts live log");
 assert.equal(ui.historyList.children.length,0,"Different project must not display stale run");
-console.log("Studio analysis history: live progress/log preserved across refresh, filtering and project switch");
+const restoredUi={historyList:new Node("div"),progress:new Node("progress"),logPanel:new Node("details")};
+const restoredHost=new Node("div");restoredHost.append(restoredUi.progress,restoredUi.logPanel);
+const restoredState={
+  latestPipeline:null,
+  historyRows:[
+    {id,mode:"post",video:"match.mp4",status:"complete",duration_ms:90000,stages:[]},
+    {id:"b".repeat(32),mode:"gpu",video:"older.mp4",status:"complete",stages:[]}
+  ],
+  historyFilter:"all",historyOffset:0
+};
+const restored=runInNewContext(registry+source.slice(from,to)+
+  "\n({renderHistory,recordHistoryRun})",{
+    ...helpers,state:restoredState,ui:restoredUi,
+    projectId:()=>"aaaabbbbcccc",
+    $:key=>key==="studio-analysis-live-host"?restoredHost:null
+  });
+restored.renderHistory();
+assert.equal(restoredUi.historyList.children.length,1,
+  "Only a run accepted in this browser session survives reload, not older archived runs");
+assert.equal(restoredUi.historyList.children[0].dataset.runId,id);
+console.log("Studio analysis history: session-only runs, compact timing, reload persistence and project isolation");
