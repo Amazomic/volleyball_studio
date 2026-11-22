@@ -3441,3 +3441,8 @@ Studio показывает кнопку перехода между debug и re
 - Проверки: сначала воспроизведён падающий регрессионный тест; после исправления целевые тесты прошли. `cargo fmt --all -- --check`, `cargo clippy -p volley-core --all-targets --offline --locked -- -D warnings`, WASM release build и `cargo test --workspace --offline --locked` прошли: 888 passed, 21 ignored, 0 failed. `git diff --check` прошёл.
 - Ограничения: синтетический тест геометрии подтверждает новый путь и отрицательные случаи, но реальный новый CPU Touch replay и сквозное подтверждение RTMPose пока не запускались; качество на независимом размеченном видео не измерено.
 - Применение: изменение подготовлено для публикации в `origin/develop`; обязательное безопасное live-развёртывание выполняется через `scripts/deploy-volley-queue.ps1` с последующей проверкой обслуживаемого SHA.
+
+### 2026-11-23 — Проверка реальной очереди и обработка stderr в Windows
+
+- Первый запуск новой очереди изолировал два несвязанных сбоя: benign предупреждения Git/Cargo в stderr могли завершать Windows PowerShell при `ErrorActionPreference=Stop`; поиск SHA по кириллической строке в UTF-8 без BOM не распознавал live HTML. Исправлено восстановлением режима ошибок для native-процессов с явной проверкой exit code и поиском SHA по ASCII-маркеру `studio-build-commit`.
+- Проверки: PowerShell parser, очередь mutex/probe и packaging Node-контракты PASS; реальный повторный запрос при совпадающих `origin/develop`, deployment clone и live SHA вернул `SKIPPED` без сборки/перезапуска. Штатный launcher по-прежнему отклоняет ненулевые exit codes и проверяет принадлежность PID перед остановкой.

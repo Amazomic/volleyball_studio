@@ -43,7 +43,14 @@ $mode=if($ReadOnly){"readonly"}else{"isolated"}
 $ort=if($OrtLibrary){$OrtLibrary}else{"__not_configured__"}
 $openvino=if($OpenvinoLibrary){$OpenvinoLibrary}else{"__not_configured__"}
 Write-Host ("Volleyball Studio action={0} WSL={1} bind={2} storage={3}" -f $Action,$Distro,$Bind,$mode)
-& wsl.exe -d $Distro --exec bash $scriptWsl $Action.ToLowerInvariant() $repoWsl $Bind $data $mode $ort $openvino
-if($LASTEXITCODE -ne 0){
-    throw "Volleyball Studio $Action failed (exit $LASTEXITCODE). No Python process was changed."
+$originalErrorAction=$ErrorActionPreference
+try{
+    $ErrorActionPreference="Continue"
+    & wsl.exe -d $Distro --exec bash $scriptWsl $Action.ToLowerInvariant() $repoWsl $Bind $data $mode $ort $openvino
+    $processExit=$LASTEXITCODE
+}finally{
+    $ErrorActionPreference=$originalErrorAction
+}
+if($processExit -ne 0){
+    throw "Volleyball Studio $Action failed (exit $processExit). No Python process was changed."
 }
