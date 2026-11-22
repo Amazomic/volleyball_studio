@@ -11,7 +11,8 @@ class Element {
   constructor(tag="div") {
     this.tagName=tag;this.children=[];this.listeners=new Map();
     this.value="";this.disabled=false;this.checked=false;this.files=[];
-    this.textContent="";this.className="";
+    this.textContent="";this.className="";this.currentTime=0;this.readyState=1;
+    this.attributes=new Map();this.paused=true;
     const classes=new Set();
     this.classList={add:name=>classes.add(name),remove:name=>classes.delete(name),
       contains:name=>classes.has(name),toggle:(name,on)=>on?classes.add(name):classes.delete(name)};
@@ -21,6 +22,12 @@ class Element {
   addEventListener(name,fn){this.listeners.set(name,fn);}
   async fire(name,event={target:this}){await this.listeners.get(name)?.(event);await tick();}
   querySelectorAll(){return [];}
+  setAttribute(name,value){this.attributes.set(name,String(value));}
+  getAttribute(name){return this.attributes.get(name)||null;}
+  removeAttribute(name){this.attributes.delete(name);}
+  load(){this.loads=(this.loads||0)+1;}
+  pause(){this.paused=true;}
+  async play(){this.paused=false;this.plays=(this.plays||0)+1;}
   click(){this.clicks=(this.clicks||0)+1;}
 }
 const nodes=new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(m=>[m[1],new Element()]));
@@ -75,9 +82,14 @@ const fetch=async(url,options={})=>{
   throw Error("Unexpected request "+url);
 };
 const windowListeners=new Map();
+const events=[];
 let pollTimer=null;
+const window={addEventListener:(event,fn)=>windowListeners.set(event,fn),
+  dispatchEvent:event=>{events.push(event);windowListeners.get(event.type)?.(event);},
+  VolleyballStudioActivity:{fetch}};
 const context={document:{getElementById:get,createElement:tag=>new Element(tag)},
-  window:{addEventListener:(event,fn)=>windowListeners.set(event,fn),VolleyballStudioActivity:{fetch}},
+  window,Event:class {constructor(type){this.type=type;}},
+  CustomEvent:class {constructor(type,opts={}){this.type=type;this.detail=opts.detail;}},
   URLSearchParams,setInterval:fn=>{pollTimer=fn;return 1;},clearInterval(){} ,
   URL:{createObjectURL:()=>"blob:test",revokeObjectURL(){}},
   FormData:class {append(){}}};
@@ -166,4 +178,45 @@ assert.equal(montage("favorites").classList.contains("hidden"),false);
 assert.equal(montage("sources").classList.contains("hidden"),true);
 await montage("start").fire("click");
 assert.equal(get("studio-render").clicks,1);
-console.log("Live montage builder: roster, attack/report/favorite profiles, source fingerprint, audio, start, cancel and invalid-preview veto passed");
+const a="a".repeat(24),b="b".repeat(24);
+assert.ok(html.includes('id="studio-montage-assembly"'));
+assert.equal(montage("play").disabled,true,"empty montage cannot preview");
+assert.equal(windowListeners.has("volley:montage-favorites"),true);
+window.dispatchEvent(new context.CustomEvent("volley:montage-favorites",{detail:{
+  project_id:"1234abcdef01",rally_run_id:run,ready:true,video:"match.mp4",
+  items:[{id:a,video:"match.mp4",start:2,end:4,time:"00:02",duration:"2 с"},
+    {id:b,video:"match.mp4",start:8,end:11,time:"00:08",duration:"3 с"}]
+}}));
+assert.equal(montage("library").children.length,2);
+assert.equal(montage("sequence").children.length,1);
+const add=(index)=>montage("library").children[index].children[1].children[2].children[0].fire("click");
+await add(0);await add(1);
+assert.deepEqual([...window.VolleyballMontageDraft.ids("1234abcdef01",run)],[a,b]);
+assert.equal(montage("sequence").children.length,2);
+assert.equal(montage("play").disabled,false);
+await montage("sequence").children[0].children[1].children[2].children[1].fire("click");
+assert.deepEqual([...window.VolleyballMontageDraft.ids("1234abcdef01",run)],[b,a],
+  "Export must receive the manual order");
+await montage("play").fire("click");
+assert.equal(get("studio-montage-video").currentTime,8);
+assert.equal(montage("play-position").textContent,"1 / 2");
+get("studio-montage-video").currentTime=11;
+await get("studio-montage-video").fire("timeupdate");
+assert.equal(get("studio-montage-video").currentTime,2);
+assert.equal(montage("play-position").textContent,"2 / 2");
+get("studio-montage-video").currentTime=4;
+await get("studio-montage-video").fire("timeupdate");
+assert.match(montage("play-status").textContent,/завершён/);
+await montage("sequence").children[1].children[1].children[2].children[2].fire("click");
+assert.deepEqual([...window.VolleyballMontageDraft.ids("1234abcdef01",run)],[b],
+  "Removing a clip must affect export");
+assert.match(text("rust/volley-app/static/studio.js"),
+  /const ids=window\.VolleyballMontageDraft\?\.ids\(s\.project,s\.run\)\|\|\[\]/);
+get("studio-run").value=otherRun;
+window.dispatchEvent(new context.CustomEvent("volley:montage-favorites",{detail:{
+  project_id:"1234abcdef01",rally_run_id:otherRun,ready:true,video:"match.mp4",
+  items:[{id:a,video:"match.mp4",start:2,end:4,time:"00:02",duration:"2 с"}]
+}}));
+assert.deepEqual([...window.VolleyballMontageDraft.ids("1234abcdef01",run)],[],
+  "Draft order must be scoped to a specific CPU run");
+console.log("Live montage builder: profiles, fingerprint, audio, sequenced preview, reordered export IDs, cleanup and source isolation passed");

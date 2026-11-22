@@ -37,6 +37,15 @@ for(const id of ["studio-montage","studio-montage-profile","studio-montage-setti
   assert.ok(montage.includes('id="'+id+'"'),id+" must belong to montage");
   assert.equal(html.split('id="'+id+'"').length,2,"No duplicate "+id);
 }
+for(const id of ["studio-montage-assembly","studio-montage-video","studio-montage-play",
+    "studio-montage-play-status","studio-montage-sequence","studio-montage-library",
+    "studio-montage-draft-count"]){
+  assert.ok(montage.includes('id="'+id+'"'),id+" belongs to montage");
+  assert.ok(!preview.includes('id="'+id+'"'),id+" must stay out of rallies preview");
+  assert.equal(html.split('id="'+id+'"').length,2,"Unique "+id);
+}
+assert.ok(montage.indexOf('id="studio-montage-sequence"')<
+  montage.indexOf('id="studio-montage-library"'),"Sequence above favorites library");
 assert.ok(!montage.includes('id="studio-highlights-panel"'),
     "Highlights must not be a second independent montage block");
 assert.ok(!montage.includes('id="studio-montage-mode"'));
