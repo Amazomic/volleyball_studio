@@ -1492,6 +1492,7 @@
       const result=await post("/api/cpu/native/ball-extrema",{
         project_id:scope.project_id,video:scope.video,
         replay_id:scope.replay_id,
+        ...(scope.rally_run_id?{rally_run_id:scope.rally_run_id}:{}),
         expected_source_sha256:scope.expected_source_sha256,
         start_frame:start,count
       });

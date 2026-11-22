@@ -352,7 +352,9 @@
     stabilizerStats:$("studio-debug-stabilizer-stats"),rawControls:$("studio-overlay-raw-controls"),actionControls:$("studio-overlay-actions"),
     rawBall:$("studio-raw-ball"),rawBallTrail:$("studio-raw-ball-trail"),rawVballVisible:$("studio-raw-vball-visible"),rawPeopleVisible:$("studio-raw-people-visible"),rawPlayer:$("studio-raw-player"),rawPlayerInterpolated:$("studio-raw-player-interpolated"),
     rawPose:$("studio-raw-pose"),rawPoseVisible:$("studio-raw-pose-visible"),
-    raw:false,stabilizerView:false,
+    raw:false,stabilizerView:false,trajectoryVariant:"after",
+    debugTrajectorySwitch:$("studio-debug-trajectory-switch"),
+    debugBefore:$("studio-debug-trajectory-before"),debugAfter:$("studio-debug-trajectory-after"),
     actionFlags:{unknown_touch:true,attack:true,block:true,serve:true,overhead_pass:true,dig:true},
     source:null,cache:new Map(),rawFrames:new Map(),rawDetectors:new Map(),rawOffsets:new Map(),presentedTime:null,
     fetching:new Set(),controllers:new Map(),failed:new Map(),loop:0,
@@ -566,6 +568,10 @@
         throw Error("Несовместимые кадры предпросмотра");
       if(!isRaw&&!processedBallOverlayIsValid(value))
         throw Error("Processed ball source is not VballNet-only");
+      if(!isRaw&&value.ball_trajectory_source==="ball_stabilizer_file_v1"&&
+        value.frames.some(row=>!Object.hasOwn(row,"ball_before")||
+          !Object.hasOwn(row,"ball_rejected")))
+        throw Error("Отсутствует сохранённое сравнение траекторий");
       if(s.project!==project||s.video!==video||overlay.raw!==isRaw||
          overlaySourceId()!==run)return;
       if(isRaw){
@@ -842,6 +848,11 @@
     const {ctx,x,y,width,height}=box;
     const point=ball=>[x+ball[0]*width,y+ball[1]*height];
     const frames=record.frames;
+    const debugTrajectory=typeof training!=="undefined"&&training.active;
+    const canonicalTrajectory=record.ball_trajectory_source==="ball_stabilizer_file_v1";
+    const showBefore=debugTrajectory&&overlay.trajectoryVariant==="before";
+    const displayedBall=row=>showBefore?row.ball_before:
+      (debugTrajectory&&!canonicalTrajectory?null:row.ball);
     if(overlay.raw){
       if(overlay.rawVballVisible.checked&&overlay.rawBallTrail?.checked){
         const threshold=Number(overlay.rawBall.value)/100;
@@ -987,20 +998,23 @@
       return;
     }
     if(overlay.flags.trajectory&&!overlay.raw){
-      // Only connect consecutive observed frames; never fabricate a long missing trajectory.
-      ctx.beginPath();let previous=-100;
+      ctx.save();
+      ctx.strokeStyle=debugTrajectory&&!showBefore?"#f1bd51":"#47e2ff";
+      ctx.lineWidth=2.5;ctx.lineJoin="round";
+      let previous=null;
       for(const row of frames){
-        if(row.frame<frame-44||row.frame>frame||!Array.isArray(row.ball)){
-          if(row.frame>=frame-44&&row.frame<=frame)previous=-100;
-          continue;
+        if(row.frame<frame-44||row.frame>frame)continue;
+        const sample=displayedBall(row);
+        if(!Array.isArray(sample)){previous=null;continue;}
+        const [px,py]=point(sample);
+        if(previous&&row.frame-previous.frame<=2){
+          ctx.setLineDash(debugTrajectory&&!showBefore&&
+            (row.ball_interpolated||previous.interpolated)?[5,4]:[]);
+          ctx.beginPath();ctx.moveTo(previous.x,previous.y);ctx.lineTo(px,py);ctx.stroke();
         }
-        const [px,py]=point(row.ball);
-        if(row.frame-previous>2)ctx.moveTo(px,py);
-        else ctx.lineTo(px,py);
-        previous=row.frame;
+        previous={frame:row.frame,x:px,y:py,interpolated:row.ball_interpolated===true};
       }
-      ctx.strokeStyle="#47e2ff";ctx.lineWidth=2.5;ctx.lineJoin="round";
-      ctx.shadowColor="#1cb9ff";ctx.shadowBlur=5;ctx.stroke();ctx.shadowBlur=0;
+      ctx.restore();
     }
     const current=frames.find(row=>row.frame===frame);
     // Match the CPU player's verified rally scope; do not draw skeletons between plays.
@@ -1056,13 +1070,16 @@
         ctx.fillStyle="#f1f8ff";ctx.fillText(name,px+5,py+rh+1,tw-10);
       }
     }
-    if(current&&Array.isArray(current.ball)){
-      const [px,py]=point(current.ball);
-      if(overlay.flags.trajectory){
-        ctx.beginPath();ctx.arc(px,py,5,0,2*Math.PI);
-        ctx.fillStyle="#e7fbff";ctx.fill();
-        ctx.strokeStyle="#21b4fc";ctx.lineWidth=2;ctx.stroke();
-      }
+    if(current&&Array.isArray(displayedBall(current))&&overlay.flags.trajectory){
+      const [px,py]=point(displayedBall(current));
+      ctx.save();
+      if(debugTrajectory&&!showBefore&&current.ball_interpolated===true)ctx.setLineDash([4,3]);
+      ctx.beginPath();ctx.arc(px,py,5,0,2*Math.PI);
+      ctx.fillStyle=debugTrajectory&&!showBefore?"#f1bd51":"#e7fbff";
+      ctx.fill();
+      ctx.strokeStyle=debugTrajectory&&!showBefore?"#f1bd51":"#21b4fc";
+      ctx.lineWidth=2;ctx.stroke();
+      ctx.restore();
     }
   };
   const setOverlaySource=item=>{
@@ -2434,6 +2451,7 @@
       overlay.stabilizerMode.setAttribute("aria-selected",String(stabilizer));
       overlay.rawControls.classList.toggle("hidden",!raw);
       overlay.stabilizerControls.classList.toggle("hidden",!stabilizer);
+      overlay.debugTrajectorySwitch.classList.add("hidden");
       updateOverlayToggles();
       overlay.mode.closest(".video-overlay-toggles").classList.toggle("raw-selected",raw);
       setOverlaySource(raw||s.run?{}:null);
@@ -2455,6 +2473,19 @@
     overlay.mode.addEventListener("click",()=>selectMode(false));
     overlay.rawMode.addEventListener("click",()=>selectMode(true));
     overlay.stabilizerMode.addEventListener("click",()=>selectMode(true,true));
+    const selectTrajectoryVariant=variant=>{
+      overlay.trajectoryVariant=variant;
+      overlay.flags.trajectory=true;
+      updateOverlayToggles();
+      overlay.debugBefore.setAttribute("aria-pressed",String(variant==="before"));
+      overlay.debugAfter.setAttribute("aria-pressed",String(variant==="after"));
+      overlayMessage(variant==="after"?
+        "После стабилизации · используется сохранённая траектория 2-й фазы":
+        "До стабилизации · исходные точки VBallNet из CPU replay");
+      drawOverlay();
+    };
+    overlay.debugBefore.addEventListener("click",()=>selectTrajectoryVariant("before"));
+    overlay.debugAfter.addEventListener("click",()=>selectTrajectoryVariant("after"));
     for(const id of ["studio-debug-stabilizer-score","studio-debug-stabilizer-gap","studio-debug-stabilizer-step"]){
       $(id).addEventListener("change",()=>{
         if(!overlay.stabilizerView)return;
@@ -2484,6 +2515,7 @@
       overlay.rawMode.setAttribute("aria-selected","false");
       overlay.stabilizerMode.setAttribute("aria-selected","false");
       overlay.stabilizerControls.classList.add("hidden");
+      overlay.debugTrajectorySwitch.classList.remove("hidden");
       overlay.rawControls.classList.add("hidden");
       training.panel.classList.remove("hidden");
       placeTrainingTimeline();

@@ -3,7 +3,7 @@
 #[cfg(test)]
 use crate::native_player_tracks::NativeReviewedOwners;
 use crate::{
-    inference_stream,
+    cpu_touches, inference_stream,
     native_player_tracks::{self},
     native_preview_pose, native_rally_evidence, preparation, projects,
     storage::{self, safe_file, safe_folder, ApiResult},
@@ -513,15 +513,18 @@ fn gated_ball_observations(samples: &[Option<(&str, [f64; 2])>]) -> Vec<Option<[
     repaired_ball_observations(samples, 1280, 720, &vec![Vec::new(); samples.len()]).0
 }
 
+type OverlayFrameFilters<'a> = (Option<(u8, u8, u8)>, Option<(&'a [u64], f64)>);
+
 fn extract_frames(
     source: (&Path, &str, u64),
     window: (u64, u64),
     scope: &native_rally_evidence::RallyWindows,
     dimensions: (u32, u32),
     min_ball_score: f64,
-    raw_thresholds: Option<(u8, u8, u8)>,
-    ball_scope: Option<(&[u64], f64)>,
+    filters: OverlayFrameFilters<'_>,
+    canonical_ball: Option<&[cpu_touches::CanonicalBallFrame]>,
 ) -> Result<Vec<Value>, String> {
+    let (raw_thresholds, ball_scope) = filters;
     let (path, sha, total) = source;
     let (start, end) = window;
     let (width, height) = dimensions;
@@ -552,6 +555,9 @@ fn extract_frames(
     // real observation on each side. Preserve this halo for every page.
     let read_start = start.saturating_sub(30);
     let read_end = end.saturating_add(30).min(total);
+    if canonical_ball.is_some_and(|rows| rows.len() != (read_end - read_start) as usize) {
+        return Err("Canonical ball trajectory window does not match replay".into());
+    }
     let anchor = read_start / STRIDE * STRIDE;
     let offset = index.offsets[(read_start / STRIDE) as usize];
     let mut file = File::open(path).map_err(|e| format!("Open indexed replay: {e}"))?;
@@ -573,13 +579,24 @@ fn extract_frames(
         {
             return Err("Overlay frame provenance mismatch".into());
         }
-        let ball = frame["selected_ball"]["detection"]["score"]
-            .as_f64()
-            .filter(|score| {
-                score.is_finite() && *score >= min_ball_score && ball_mask.accepted[i as usize]
-            })
-            .and_then(|_| box_norm(&frame["selected_ball"]["detection"]["bbox_xyxy_norm"]))
+        let ball_before = (frame["selected_ball"]["source_model"] == "vballnet")
+            .then(|| box_norm(&frame["selected_ball"]["detection"]["bbox_xyxy_norm"]))
+            .flatten()
             .map(|bb| json!([(bb[0] + bb[2]) * 0.5, (bb[1] + bb[3]) * 0.5]));
+        let ball = if let Some(rows) = canonical_ball {
+            let row = &rows[(i - read_start) as usize];
+            row.validate(i)?;
+            json!(row.ball)
+        } else {
+            frame["selected_ball"]["detection"]["score"]
+                .as_f64()
+                .filter(|score| {
+                    score.is_finite() && *score >= min_ball_score && ball_mask.accepted[i as usize]
+                })
+                .and_then(|_| box_norm(&frame["selected_ball"]["detection"]["bbox_xyxy_norm"]))
+                .map(|bb| json!([(bb[0] + bb[2]) * 0.5, (bb[1] + bb[3]) * 0.5]))
+                .unwrap_or(Value::Null)
+        };
         let in_rally = scope.contains(i);
         let players = if in_rally {
             overlay_players(&frame)
@@ -589,13 +606,34 @@ fn extract_frames(
         let raw =
             raw_thresholds.map(|(ball, player, touch)| raw_frame(&frame, ball, player, touch));
         output.push(json!({
-            "frame":i,"ball":ball,"ball_source":frame["selected_ball"]["source_model"],
+            "frame":i,"ball":ball,"ball_before":ball_before,
+            "ball_source":frame["selected_ball"]["source_model"],
             "raw":raw,"in_rally":in_rally,"players":players,
             "ball_candidates_count":ball_mask.candidate_counts[i as usize],
             "ball_candidate_accepted":ball_mask.accepted[i as usize],
             "ball_candidate_rejected":ball_mask.rejected[i as usize],
             "leading_ball_track_id":ball_mask.track_ids[i as usize],
         }));
+    }
+    if let Some(rows) = canonical_ball {
+        for row in &mut output {
+            let frame = row["frame"].as_u64().ok_or("Missing overlay frame")?;
+            let canonical = &rows[(frame - read_start) as usize];
+            row["ball_origin"] = json!(if canonical.ball.is_none() {
+                None
+            } else if canonical.interpolated {
+                Some("vballnet_interpolated")
+            } else {
+                Some("vballnet")
+            });
+            row["ball_interpolated"] = json!(canonical.interpolated);
+            row["ball_rejected"] = json!(canonical.rejected);
+            row.as_object_mut().unwrap().remove("ball_source");
+        }
+        return Ok(output
+            .into_iter()
+            .filter(|row| row["frame"].as_u64().is_some_and(|f| f >= start && f < end))
+            .collect());
     }
     let samples = output
         .iter()
@@ -679,6 +717,34 @@ fn extract_frames(
         .collect())
 }
 
+fn canonical_ball_window(
+    path: &Path,
+    sha: &str,
+    total: u64,
+    start: u64,
+    end: u64,
+) -> Result<Vec<cpu_touches::CanonicalBallFrame>, String> {
+    let index = index_for(path, sha, total)?;
+    let anchor = start / STRIDE * STRIDE;
+    let offset = index.offsets[(start / STRIDE) as usize];
+    let mut file = File::open(path).map_err(|e| format!("Open canonical ball trajectory: {e}"))?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|e| format!("Seek canonical ball trajectory: {e}"))?;
+    let mut reader = BufReader::new(file);
+    let mut rows = Vec::with_capacity((end - start) as usize);
+    for i in anchor..end {
+        let line = bounded_line(&mut reader)?.ok_or("Canonical ball trajectory truncated")?;
+        if i < start {
+            continue;
+        }
+        let row: cpu_touches::CanonicalBallFrame = serde_json::from_slice(&line)
+            .map_err(|e| format!("Invalid canonical ball trajectory: {e}"))?;
+        row.validate(i)?;
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
 pub async fn get(
     State(state): State<Arc<AppState>>,
     Query(query): Query<OverlayQuery>,
@@ -742,6 +808,35 @@ pub async fn get(
     }
     let replay_path = safe_file(&replay_dir, "tracked_frames.jsonl", MAX_REPLAY_BYTES)
         .map_err(storage::bad_request)?;
+    let touch_dir = projects::project_root(&state)
+        .join(&query.project_id)
+        .join("native_cpu_touch_runs")
+        .join(&run.touch_id);
+    safe_folder(&touch_dir).map_err(storage::bad_request)?;
+    let touch_manifest: Value = serde_json::from_slice(
+        &fs::read(
+            safe_file(&touch_dir, "manifest.json", MAX_MANIFEST_BYTES)
+                .map_err(storage::bad_request)?,
+        )
+        .map_err(|e| storage::bad_request(format!("Read touch source: {e}")))?,
+    )
+    .map_err(|e| storage::bad_request(format!("Invalid touch source: {e}")))?;
+    let canonical_source = if touch_manifest.get("ball_stabilizer").is_some() {
+        Some(
+            cpu_touches::verified_ball_trajectory(
+                &projects::project_root(&state).join(&query.project_id),
+                &touch_manifest["ball_stabilizer"],
+                &query.project_id,
+                &run.video,
+                &run.replay_id,
+                &run.replay_sha,
+                run.frames,
+            )
+            .map_err(storage::bad_request)?,
+        )
+    } else {
+        None
+    };
     let replay_sha = run.replay_sha.clone();
     let total = run.frames;
     let interpolate_players = manifest["interpolate_players"].as_bool().unwrap_or(true);
@@ -762,6 +857,7 @@ pub async fn get(
     let pose_root = projects::project_root(&state).join(&query.project_id);
     let identity_state = state.clone();
     let continuity_state = state.clone();
+    let has_canonical_ball = canonical_source.is_some();
     let (frames, poses_available, ball_policy) = tokio::task::spawn_blocking(move || {
         let windows = native_rally_evidence::verified_track_windows(&preview_run)
             .map_err(|e| format!("Unverified rally scope: {e}"))?;
@@ -780,16 +876,28 @@ pub async fn get(
             |policy| json!(policy),
         );
         let (context_start, context_end) = continuity::context(start, end, &windows.intervals);
+        let read_start = context_start.saturating_sub(30);
+        let read_end = context_end.saturating_add(30).min(total);
+        let canonical_rows = if let Some((path, sha)) = &canonical_source {
+            Some(canonical_ball_window(
+                path, sha, total, read_start, read_end,
+            )?)
+        } else {
+            None
+        };
         let mut frames = extract_frames(
             (&replay_path, &replay_sha, total),
             (context_start, context_end),
             &windows,
             (preview_run.width, preview_run.height),
             preview_run.min_ball_score,
-            raw_thresholds,
-            ball_scope
-                .as_ref()
-                .map(|(starts, score)| (starts.as_slice(), *score)),
+            (
+                raw_thresholds,
+                ball_scope
+                    .as_ref()
+                    .map(|(starts, score)| (starts.as_slice(), *score)),
+            ),
+            canonical_rows.as_deref(),
         )?;
         let (owners, _) = native_player_tracks::statistics_owners(
             &identity_state,
@@ -848,6 +956,7 @@ pub async fn get(
         "schema":"volley-native-preview-overlay/1",
         "continuity_policy":"cpu_rally_linear_v1",
         "ball_policy":ball_policy,
+        "ball_trajectory_source":if has_canonical_ball {"ball_stabilizer_file_v1"} else {"legacy_cpu_replay_v1"},
         "expected_balls":1,
         "fps":30,
         "project_id":run.project_id,"video":run.video,
@@ -1648,7 +1757,7 @@ mod tests {
             &scope,
             (1280, 720),
             0.35,
-            None,
+            (None, None),
             None,
         )
         .unwrap();
@@ -1705,7 +1814,7 @@ mod tests {
             &scope,
             (640, 360),
             0.35,
-            Some((50, 50, 50)),
+            (Some((50, 50, 50)), None),
             None,
         )
         .unwrap();
@@ -1718,6 +1827,29 @@ mod tests {
         }
         assert!((frames[0]["ball"][0].as_f64().unwrap() - 0.35).abs() < 1e-12);
         assert!((frames[1]["ball"][0].as_f64().unwrap() - 0.45).abs() < 1e-12);
+        let canonical = (0..8u64)
+            .map(|frame| cpu_touches::CanonicalBallFrame {
+                frame,
+                ball: Some([0.21 + frame as f64 * 0.01, 0.48]),
+                interpolated: frame == 3,
+                rejected: frame == 4,
+            })
+            .collect::<Vec<_>>();
+        let canonical_rows = extract_frames(
+            (&path, &sha, 8),
+            (3, 5),
+            &scope,
+            (640, 360),
+            0.35,
+            (Some((50, 50, 50)), None),
+            Some(&canonical),
+        )
+        .unwrap();
+        assert_eq!(canonical_rows[0]["ball"], json!([0.24, 0.48]));
+        assert_eq!(canonical_rows[0]["ball_before"], Value::Null);
+        assert_eq!(canonical_rows[0]["ball_interpolated"], true);
+        assert_eq!(canonical_rows[1]["ball"], json!([0.25, 0.48]));
+        assert_eq!(canonical_rows[1]["ball_rejected"], true);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1761,8 +1893,8 @@ mod tests {
                 &scope,
                 (1280, 720),
                 0.35,
+                (None, Some((&[0], 0.35))),
                 None,
-                Some((&[0], 0.35)),
             )
             .unwrap();
             for row in frames {
@@ -1835,7 +1967,7 @@ mod tests {
             &active,
             (640, 360),
             0.35,
-            None,
+            (None, None),
             None,
         )
         .unwrap();

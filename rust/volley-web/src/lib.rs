@@ -268,6 +268,11 @@ const TEXT: &[(&str, &str)] = &[
     ("Интерполяция · максимальный пропуск, кадров", "Interpolation · maximum gap, frames"),
     ("Фильтр скачков · доля кадра/кадр", "Jump filter · frame fraction/frame"),
     ("Ball Stabilizer · интерполяция траектории мяча", "Ball Stabilizer · ball trajectory interpolation"),
+    ("Источник траектории мяча в дебаге", "Debug ball trajectory source"),
+    ("Исходные положения мяча до Ball Stabilizer", "Original ball positions before Ball Stabilizer"),
+    ("Единый сохранённый файл Ball Stabilizer, используемый при поиске касаний", "Single saved Ball Stabilizer file used for touch detection"),
+    ("До стабилизации", "Before stabilization"),
+    ("После стабилизации", "After stabilization"),
 ];
 thread_local! {
     static UI:RefCell<UiState>=const{RefCell::new(UiState::initial())};

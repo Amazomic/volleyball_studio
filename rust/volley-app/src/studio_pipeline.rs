@@ -1173,6 +1173,34 @@ fn cpu_lineage_valid(
     ) else {
         return false;
     };
+    let Some(artifact_id) = touches["ball_stabilizer"]["artifact_id"]
+        .as_str()
+        .filter(|id| valid_id(id))
+    else {
+        return false;
+    };
+    let Some(trajectory) = saved_stage(
+        project,
+        "native_cpu_ball_stabilizer",
+        artifact_id,
+        "trajectory.jsonl",
+    ) else {
+        return false;
+    };
+    if trajectory["schema"] != "volley-native-stabilized-ball-trajectory/1"
+        || trajectory["state"] != "complete"
+        || trajectory["artifact_id"] != artifact_id
+        || trajectory["file"] != "trajectory.jsonl"
+        || trajectory["sha256"] != touches["ball_stabilizer"]["trajectory_sha256"]
+        || trajectory["source_replay_id"] != replay
+        || trajectory["source_replay_sha256"] != touches["source_replay_sha256"]
+        || trajectory["settings"] != touches["ball_stabilizer"]["settings"]
+        || trajectory["frames"] != touches["ball_stabilizer"]["frames"]
+        || touches["ball_stabilizer"]["trajectory_file"] != "trajectory.jsonl"
+    {
+        return false;
+    }
+
     track["schema"] == "volley-native-cpu-tracking/1"
         && track["state"] == "provisional_tracklets_rebuilt"
         && track["interpolated_positions_version"] == (if request.post.interpolate_players {
@@ -3681,6 +3709,7 @@ mod branching_tests {
         let replay = "d".repeat(32);
         let touch = "e".repeat(32);
         let rally = "f".repeat(32);
+        let trajectory_id = "9".repeat(32);
         let identity = json!({"bytes":2048,"mtime_ns":123456789u64});
         let mut request: StartRequest = serde_json::from_value(json!({
             "project_id":"abc123def456","video":"match.mp4"
@@ -3740,6 +3769,19 @@ mod branching_tests {
         );
         emit(
             &project_dir,
+            "native_cpu_ball_stabilizer",
+            &trajectory_id,
+            "trajectory.jsonl",
+            &json!({
+                "schema":"volley-native-stabilized-ball-trajectory/1","state":"complete",
+                "artifact_id":trajectory_id,"project_id":request.project_id,"video":request.video,
+                "source_replay_id":replay,"source_replay_sha256":sha,
+                "frames":100,"settings":request.post.ball_stabilizer,
+                "file":"trajectory.jsonl","sha256":sha
+            }),
+        );
+        emit(
+            &project_dir,
             "native_cpu_touch_runs",
             &touch,
             "touch_candidates.jsonl",
@@ -3754,6 +3796,11 @@ mod branching_tests {
                     "schema":"volley-ball-stabilizer/1",
                     "version":"ball_stabilizer_v1",
                     "source_replay_sha256":sha,
+                    "source_replay_id":replay,
+                    "artifact_id":trajectory_id,
+                    "trajectory_file":"trajectory.jsonl",
+                    "trajectory_sha256":sha,
+                    "frames":100,
                     "settings":request.post.ball_stabilizer
                 },
                 "automatic_action_prediction_method":"pose_keypoints_v1_or_unknown_touch",
@@ -3803,6 +3850,11 @@ mod branching_tests {
                 "schema":"volley-ball-stabilizer/1",
                 "version":"ball_stabilizer_v1",
                 "source_replay_sha256":sha,
+                "source_replay_id":replay,
+                "artifact_id":trajectory_id,
+                "trajectory_file":"trajectory.jsonl",
+                "trajectory_sha256":sha,
+                "frames":100,
                 "settings":request.post.ball_stabilizer
             },
             "analysis_id":analysis,"cpu_runs":{"tracking":replay,"touches":touch,"rallies":rally},
