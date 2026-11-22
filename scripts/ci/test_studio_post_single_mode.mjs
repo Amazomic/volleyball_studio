@@ -23,6 +23,8 @@ for(const id of [
   "studio-post-player-score",
   "studio-post-auto-assign-threshold",
   "studio-post-max-gap",
+  "studio-post-lost-low-gap",
+  "studio-post-lost-low-iou",
   "studio-post-rally-min",
   "studio-analysis-reset"
 ]){
@@ -41,7 +43,8 @@ const b=tabs.indexOf("  const allProfileFields=()=>",a);
 assert.ok(a>=0&&b>a,"Postprocessing request factory is missing");
 const env={
   $:id=>({checked:id==="studio-post-tcn-experimental"?false:true,value:"1",id}),
-  inputValue:id=>id==="studio-post-auto-assign-threshold"?75:0.48
+  inputValue:id=>({"studio-post-auto-assign-threshold":75,
+    "studio-post-lost-low-gap":30,"studio-post-lost-low-iou":0.30}[id]??0.48)
 };
 runInNewContext(tabs.slice(a,b)+"\nthis.profile=postProfile;",env);
 const profile=env.profile();
@@ -55,6 +58,8 @@ assert.equal(profile.touches.threshold,0.48);
 assert.equal(profile.auto_assign_threshold_percent,75);
 assert.equal(profile.touches.require_pose,true);
 assert.equal(profile.interpolate_players,true);
+assert.equal(profile.tracking.lost_low_confidence_max_gap_frames,30);
+assert.equal(profile.tracking.lost_low_confidence_min_iou,0.30);
 assert.doesNotMatch(tabs,/\$\("studio-post-touch-algorithm"\)/,
   "No hidden DOM dependency on the removed algorithm selector");
 console.log("Postprocessing: one pose_motion algorithm, parameters only in closed details: OK");

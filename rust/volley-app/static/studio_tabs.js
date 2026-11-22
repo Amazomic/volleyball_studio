@@ -223,6 +223,8 @@
       min_player_score:inputValue("studio-post-player-score"),
       nms_iou:inputValue("studio-post-nms"),
       max_gap_frames:inputValue("studio-post-max-gap"),
+      lost_low_confidence_max_gap_frames:inputValue("studio-post-lost-low-gap"),
+      lost_low_confidence_min_iou:inputValue("studio-post-lost-low-iou"),
       min_track_observations:inputValue("studio-post-min-track-frames"),
       min_assignment_score:inputValue("studio-post-assignment"),
       ambiguity_margin:inputValue("studio-post-margin")
@@ -571,7 +573,7 @@
     pose:["#studio-gpu-pose-enabled","#studio-gpu-interpolate-pose"],
     fusion:["#studio-gpu-memory","#studio-gpu-threads"],
     tracking:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap",
-      "#studio-post-min-track-frames","#studio-post-nms","#studio-post-assignment","#studio-post-margin"],
+      "#studio-post-lost-low-gap","#studio-post-lost-low-iou","#studio-post-min-track-frames","#studio-post-nms","#studio-post-assignment","#studio-post-margin"],
     touches:["#studio-post-touch-threshold","#studio-post-pose-confidence",
       "#studio-post-pose-distance","#studio-post-occluded-turn","#studio-post-touch-gap",
       "#studio-post-reach","#studio-post-smooth","#studio-post-interval",

@@ -19,6 +19,10 @@ pub struct TrackingOptions {
     pub nms_iou: f64,
     /// Maximum disappearance in frames (90 frames = 3 seconds at the 30 FPS CPU replay rate).
     pub max_gap_frames: u64,
+    #[serde(default = "default_lost_low_confidence_max_gap_frames")]
+    pub lost_low_confidence_max_gap_frames: u64,
+    #[serde(default = "default_lost_low_confidence_min_iou")]
+    pub lost_low_confidence_min_iou: f64,
     pub min_assignment_score: f64,
     /// Mark close competing matches as ambiguous without creating extra IDs.
     pub ambiguity_margin: f64,
@@ -30,6 +34,12 @@ pub struct TrackingOptions {
 const fn default_min_track_observations() -> u64 {
     12
 }
+const fn default_lost_low_confidence_max_gap_frames() -> u64 {
+    30
+}
+const fn default_lost_low_confidence_min_iou() -> f64 {
+    0.30
+}
 
 impl Default for TrackingOptions {
     fn default() -> Self {
@@ -37,6 +47,8 @@ impl Default for TrackingOptions {
             min_player_score: 0.28,
             nms_iou: 0.72,
             max_gap_frames: 90,
+            lost_low_confidence_max_gap_frames: default_lost_low_confidence_max_gap_frames(),
+            lost_low_confidence_min_iou: default_lost_low_confidence_min_iou(),
             min_assignment_score: 0.43,
             ambiguity_margin: 0.11,
             min_track_observations: default_min_track_observations(),
@@ -50,6 +62,9 @@ impl TrackingOptions {
             || !self.nms_iou.is_finite()
             || !(0.6..=0.99).contains(&self.nms_iou)
             || !(1..=180).contains(&self.max_gap_frames)
+            || self.lost_low_confidence_max_gap_frames > 90
+            || !self.lost_low_confidence_min_iou.is_finite()
+            || !(0.20..=0.85).contains(&self.lost_low_confidence_min_iou)
             || !self.min_assignment_score.is_finite()
             || !(0.2..=1.0).contains(&self.min_assignment_score)
             || !self.ambiguity_margin.is_finite()
@@ -72,12 +87,22 @@ pub struct TrackedPlayer {
     pub is_verified_athlete: bool,
 }
 #[derive(Clone, Debug, Serialize)]
+pub struct NewTrackDiagnostic {
+    pub track_id: u64,
+    pub reason: &'static str,
+    pub closest_previous_track_id: Option<u64>,
+    pub closest_predicted_iou: Option<f64>,
+    pub frames_since_last_seen: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct TrackedFrame {
     pub frame_index: u64,
     pub tracks: Vec<TrackedPlayer>,
     pub retained_boxes: usize,
     pub rejected_boxes: usize,
     pub ambiguous_detections: usize,
+    pub new_track_diagnostics: Vec<NewTrackDiagnostic>,
 }
 #[derive(Clone, Debug)]
 struct ActiveTrack {
@@ -567,6 +592,7 @@ impl ProvisionalTracker {
             retained_boxes: raw.len() - skipped,
             rejected_boxes: skipped,
             ambiguous_detections: ambiguous,
+            new_track_diagnostics: Vec::new(),
         })
     }
     pub fn next_id(&self) -> u64 {
@@ -1263,11 +1289,35 @@ mod tests {
         let settings = settings.validate().unwrap();
         assert_eq!(settings.max_gap_frames, 90);
         assert_eq!(settings.min_track_observations, 12);
+        assert_eq!(settings.lost_low_confidence_max_gap_frames, 30);
+        assert_eq!(settings.lost_low_confidence_min_iou, 0.30);
         let bad = TrackingOptions {
             min_track_observations: 5,
             ..settings
         };
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn weak_lost_recovery_settings_are_validated() {
+        assert!(TrackingOptions {
+            lost_low_confidence_max_gap_frames: 91,
+            ..TrackingOptions::default()
+        }
+        .validate()
+        .is_err());
+        assert!(TrackingOptions {
+            lost_low_confidence_min_iou: 0.1,
+            ..TrackingOptions::default()
+        }
+        .validate()
+        .is_err());
+        assert!(TrackingOptions {
+            lost_low_confidence_max_gap_frames: 0,
+            ..TrackingOptions::default()
+        }
+        .validate()
+        .is_ok());
     }
 
     #[test]
