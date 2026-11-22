@@ -13,7 +13,7 @@ pub struct EmbeddingRequest {
     pub(super) transient: bool,
 }
 
-const MAX_EMBEDDING_BATCH_TRACKS: usize = 48;
+const MAX_EMBEDDING_BATCH_TRACKS: usize = native_reid_cache::MAX_CACHE_BATCH_TRACKS;
 
 pub async fn embeddings(
     State(state): State<Arc<AppState>>,
