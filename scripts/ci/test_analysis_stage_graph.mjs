@@ -29,8 +29,12 @@ assert.equal(format("video",{duration_ms:423000,finished_ms:500000},{status:"com
 assert.equal(format("touches",null,null,0,false,false),"—");
 const sharedPose={gpu_jobs:{pose:"pose-run"},stages:[{id:"players",duration_ms:36000}],
   shared_pose:{source_stage_id:"players",sampled_frames:175,player_poses:612,duration_ms:36000}};
+const scopedPose={gpu_jobs:{pose:"pose-run"},stages:[{id:"players",duration_ms:36000}],
+  shared_pose:{source_stage_id:"players",sampled_frames:175,eligible_pose_frames:50,player_poses:612,duration_ms:36000}};
+assert.equal(format("pose",null,scopedPose,0,true,false),
+  "50 игровых кадр. · 612 поз · 00:00:36 (общ.)");
 assert.equal(format("pose",null,sharedPose,0,true,false),
-  "175 кадр. · 612 поз · 00:00:36 (общ.)");
+  "175 выборок · 612 поз · 00:00:36 (общ.)");
 assert.equal(format("pose",null,{gpu_jobs:{pose:"pose-run"},stages:[{id:"players",name:"GPU · RF-DETR + RTMPose",duration_ms:36000}]},0,true,false),
   "С RF-DETR · 00:00:36");
 assert.equal(format("pose",null,{gpu_jobs:{pose:"pose-run"},stages:[]},0,true,false),

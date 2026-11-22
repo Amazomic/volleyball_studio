@@ -326,7 +326,7 @@ a.nodes.get("studio-analysis-start").dispatch("click");
 await tick();
 assert.equal(pipelineStarts().length,2,"Second explicit pipeline launch only");
 const override=JSON.parse(pipelineStarts()[1].options.body);
-assert.deepEqual(override.gpu,{stride:3,gpu_memory_limit_mb:8192,cpu_threads:12,pose_enabled:true,pose_mode:"photo",pose_stride:1,primary_rallies:{min_trajectory_seconds:1.5,merge_gap_seconds:4,stationary_ball_ms:1000}});
+assert.deepEqual(override.gpu,{stride:9,gpu_memory_limit_mb:8192,cpu_threads:12,pose_enabled:true,pose_mode:"photo",pose_stride:1,primary_rallies:{min_trajectory_seconds:1.5,merge_gap_seconds:4,stationary_ball_ms:1000}});
 assert.equal(override.post.tracking.min_player_score,0.28);
 a.nodes.get("studio-gpu-memory").value="-1";
 a.nodes.get("studio-gpu-memory").dispatch("input");

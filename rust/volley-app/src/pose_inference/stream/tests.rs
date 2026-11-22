@@ -95,6 +95,8 @@ fn fake_pending() -> (PendingPose, Value) {
         native_width: 1920,
         native_height: 1080,
         sampled: 1,
+        eligible_frames: 1,
+        inferred_frames: 0,
         people: 0,
         observed_crops: 0,
         interpolated_crops: 0,
@@ -130,6 +132,9 @@ fn streamed_pose_manifest_is_published_only_after_verified_fusion() {
     assert_eq!(manifest["source_fusion_sha256"], fusion["sha256"]);
     assert_eq!(manifest["decoded_frames"], 22);
     assert_eq!(manifest["sampled_frames"], 1);
+    assert_eq!(manifest["eligible_pose_frames"], 1);
+    assert_eq!(manifest["inferred_pose_frames"], 0);
+    assert_eq!(manifest["skipped_pose_frames"], 0);
     assert_eq!(manifest["observed_pose_crops"], 0);
     assert_eq!(manifest["interpolated_pose_crops"], 0);
     assert!(manifest.get("interpolate_pose").is_none());

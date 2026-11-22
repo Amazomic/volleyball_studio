@@ -3,15 +3,21 @@
 pub(crate) mod interpolation;
 #[cfg(any(unix, windows))]
 mod stream;
-use crate::{inference_stream, preparation, projects, AppState};
+#[cfg(test)]
+use crate::{inference_stream, preparation};
+use crate::{projects, AppState};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::io::{BufRead, BufReader, BufWriter};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::{
     fs::{self, File},
-    io::{BufRead, BufReader, BufWriter, Read, Write},
+    io::{Read, Write},
     path::Path,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::AtomicBool,
 };
 #[cfg(any(unix, windows))]
 pub(crate) use stream::{GpuPoseStage, PendingPose, PoseStream};
@@ -22,9 +28,11 @@ use volley_inference::{
     pose::{PoseEngine, MODEL_FILE, MODEL_SHA256},
     Device,
 };
+#[cfg(test)]
 use volley_media::raw_decoder::{decode_original_frames_in_range, AnalysisRange};
 
 const MAX_FUSION: u64 = 64 * 1024 * 1024 * 1024;
+#[cfg(test)]
 const MAX_LINE: u64 = 512 * 1024;
 const MAX_POSES_PER_FRAME: usize = 12;
 const POSE_FILE: &str = "poses.jsonl";
@@ -156,6 +164,7 @@ impl PoseInputMode {
     }
 }
 
+#[cfg(test)]
 fn sampled_boxes(
     frame: &Value,
     expected_frame: u64,
@@ -171,8 +180,10 @@ fn sampled_boxes(
 
 /// Reads a bounded detector neighborhood without materializing a whole video.
 /// Only measured RF-DETR proposals can become interpolation anchors.
+#[cfg(test)]
 type PoseBoxPair = (Vec<[f64; 4]>, Vec<[f64; 4]>);
 
+#[cfg(test)]
 struct FusionBoxWindow {
     reader: BufReader<File>,
     frames: std::collections::VecDeque<interpolation::FrameBoxes>,
@@ -181,6 +192,7 @@ struct FusionBoxWindow {
     stride: usize,
 }
 
+#[cfg(test)]
 impl FusionBoxWindow {
     fn open(path: &Path, total: u64, stride: usize) -> Result<Self, String> {
         Ok(Self {
@@ -258,6 +270,7 @@ fn pose_proposals(
 
 /// Probe the selected fusion and run ONNX using one persistent CUDA session.
 /// In-progress output is never exposed; returns an immutable manifest after sync.
+#[cfg(test)]
 #[expect(clippy::too_many_arguments)]
 pub fn process(
     app: &AppState,
