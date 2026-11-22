@@ -1441,7 +1441,9 @@ fn detect_stream_with_pose(
     }
     settings.validate()?;
     if preliminary_intervals.is_some_and(|intervals| {
-        intervals.iter().any(|(start, end)| start > end)
+        intervals
+            .iter()
+            .any(|(start, end)| start > end || *end >= count)
             || intervals.windows(2).any(|pair| pair[0].1 >= pair[1].0)
     }) {
         return Err("Invalid preliminary rally intervals".into());
@@ -1452,6 +1454,9 @@ fn detect_stream_with_pose(
     if count == 0 || count > 48 * 3600 * 30 {
         return Err("Touch source frame count exceeds limit".into());
     }
+    let full_range = [(0, count - 1)];
+    let windows = preliminary_intervals.unwrap_or(&full_range);
+    let scoped_frames: u64 = windows.iter().map(|(start, end)| end - start + 1).sum();
     if settings.require_pose {
         let (root, fusion, _) =
             pose_source.ok_or("Для выбранного режима необходим сохранённый анализ позы")?;
@@ -1468,24 +1473,20 @@ fn detect_stream_with_pose(
     let mut writer = BufWriter::new(file);
     let mut output_hash = Sha256::new();
     let mut buffer: VecDeque<TouchFrame> = VecDeque::new();
-    let mut next_emit: u64 = 0;
+    let mut next_emit = windows.first().map(|(start, _)| *start).unwrap_or(count);
+    let mut window_index = 0;
+    let mut completed_frames = 0;
     let mut emitted: u64 = 0;
     let mut motion_candidates: u64 = 0;
     let mut pending: Option<PhysicalTouchCandidate> = None;
     let separation = (settings.min_interval_sec * 30.0).round().max(1.0) as u64;
     let mut process_block = |start: u64,
                              end: u64,
-                             input: &VecDeque<TouchFrame>|
+                             input: &VecDeque<TouchFrame>,
+                             window: (u64, u64)|
      -> Result<(), String> {
-        if preliminary_intervals.is_some_and(|intervals| {
-            !intervals
-                .iter()
-                .any(|(first, last)| *first < end && *last >= start)
-        }) {
-            return Ok(());
-        }
-        let region_start = start.saturating_sub(HALO as u64);
-        let region_end = (end + HALO as u64).min(count);
+        let region_start = start.saturating_sub(HALO as u64).max(window.0);
+        let region_end = (end + HALO as u64).min(window.1 + 1);
         let first = input
             .front()
             .ok_or("Touch frame buffer is empty")?
@@ -1741,15 +1742,22 @@ fn detect_stream_with_pose(
             return Err("cancelled".into());
         }
         let bytes = reader.line()?.ok_or("CPU tracked frame JSONL truncated")?;
+        let Some(&(window_start, window_end)) = windows.get(window_index) else {
+            continue;
+        };
+        if index < window_start {
+            continue;
+        }
         let raw: TrackedFrame = serde_json::from_slice(&bytes)
             .map_err(|e| format!("Invalid CPU tracked frame: {e}"))?;
         buffer.push_back(transform_frame(raw, index)?);
         while next_emit + (CHUNK + HALO) as u64 <= index + 1 {
             let end = next_emit + CHUNK as u64;
-            process_block(next_emit, end, &buffer)?;
+            process_block(next_emit, end, &buffer, (window_start, window_end))?;
+            completed_frames += end - next_emit;
             next_emit = end;
             if let Some(report) = on_progress.as_deref_mut() {
-                report(next_emit, count)?;
+                report(completed_frames, scoped_frames)?;
             }
             while buffer
                 .front()
@@ -1758,19 +1766,28 @@ fn detect_stream_with_pose(
                 buffer.pop_front();
             }
         }
-    }
-    while next_emit < count {
-        let end = (next_emit + CHUNK as u64).min(count);
-        process_block(next_emit, end, &buffer)?;
-        next_emit = end;
-        if let Some(report) = on_progress.as_deref_mut() {
-            report(next_emit, count)?;
-        }
-        while buffer
-            .front()
-            .is_some_and(|row| row.frame_index < next_emit.saturating_sub(HALO as u64))
-        {
-            buffer.pop_front();
+        if index == window_end {
+            while next_emit <= window_end {
+                let end = (next_emit + CHUNK as u64).min(window_end + 1);
+                process_block(next_emit, end, &buffer, (window_start, window_end))?;
+                completed_frames += end - next_emit;
+                next_emit = end;
+                if let Some(report) = on_progress.as_deref_mut() {
+                    report(completed_frames, scoped_frames)?;
+                }
+                while buffer
+                    .front()
+                    .is_some_and(|row| row.frame_index < next_emit.saturating_sub(HALO as u64))
+                {
+                    buffer.pop_front();
+                }
+            }
+            buffer.clear();
+            window_index += 1;
+            next_emit = windows
+                .get(window_index)
+                .map(|(start, _)| *start)
+                .unwrap_or(count);
         }
     }
     if reader.line()?.is_some() {
@@ -1984,7 +2001,11 @@ fn process_with_ball_scope_and_rally_settings_report(
         rally_starts
     };
     if let Some(update) = report.as_deref_mut() {
-        update(0, frames).map_err(storage::internal)?;
+        let scoped_frames = primary_intervals
+            .as_deref()
+            .map(|intervals| intervals.iter().map(|(start, end)| end - start + 1).sum())
+            .unwrap_or(frames);
+        update(0, scoped_frames).map_err(storage::internal)?;
     }
     let sha = manifest["sha256"]
         .as_str()
@@ -2872,6 +2893,107 @@ mod tests {
         }
         let sha = format!("{:x}", Sha256::digest(&bytes));
         (bytes, sha)
+    }
+    #[test]
+    fn scoped_touch_replay_only_processes_primary_rally_frames() {
+        let root = std::env::temp_dir().join(format!("touch-primary-scope-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.jsonl");
+        let (bytes, sha) = sample_frames(true, 320);
+        fs::write(&source, bytes).unwrap();
+        let mut progress = Vec::new();
+        let (_, emitted, _) = detect_stream_with_pose(
+            None,
+            &source,
+            &root.join("inside.jsonl"),
+            &sha,
+            630,
+            640,
+            360,
+            TouchSettings::default(),
+            true,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            None,
+            &[],
+            Some(&[(10, 90), (285, 365)]),
+            Some(&mut |done, total| {
+                progress.push((done, total));
+                Ok(())
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(progress, vec![(81, 162), (162, 162)]);
+        assert!(emitted > 0);
+        for row in fs::read_to_string(root.join("inside.jsonl"))
+            .unwrap()
+            .lines()
+        {
+            let event: Value = serde_json::from_str(row).unwrap();
+            let index = event["frame_index"].as_u64().unwrap();
+            assert!((10..=90).contains(&index) || (285..=365).contains(&index));
+        }
+        let mut outside_progress = Vec::new();
+        let (_, outside, _) = detect_stream_with_pose(
+            None,
+            &source,
+            &root.join("outside.jsonl"),
+            &sha,
+            630,
+            640,
+            360,
+            TouchSettings::default(),
+            true,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            None,
+            &[],
+            Some(&[(0, 80), (450, 530)]),
+            Some(&mut |done, total| {
+                outside_progress.push((done, total));
+                Ok(())
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(outside_progress, vec![(81, 162), (162, 162)]);
+        assert_eq!(outside, 0);
+        let mut empty_progress = Vec::new();
+        let (_, empty, _) = detect_stream_with_pose(
+            None,
+            &source,
+            &root.join("empty.jsonl"),
+            &sha,
+            630,
+            640,
+            360,
+            TouchSettings::default(),
+            true,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            None,
+            &[],
+            Some(&[]),
+            Some(&mut |done, total| {
+                empty_progress.push((done, total));
+                Ok(())
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(empty, 0);
+        assert!(empty_progress.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn chunked_replay_verifies_sha_and_does_not_invent_straight_flight_touch() {
