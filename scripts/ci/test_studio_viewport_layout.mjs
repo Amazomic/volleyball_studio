@@ -14,4 +14,7 @@ assert.match(css,/\.sr-only\{width:1px!important;height:1px!important;min-width:
 assert.match(css,/\.native-stats-source-choice\{grid-template-columns:minmax\(0,1fr\)\}/);
 assert.match(css,/\.tab-workspace\{min-width:0;min-height:0;max-width:100%\}/);
 assert.match(css,/@media \(max-width:650px\)\{[\s\S]*?\.sidebar \.menu\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
-console.log("PASS: no footer disclaimer; viewport shell, flexible cards, invisible upload input and compact mobile navigation are constrained");
+const rail=html.match(/<aside class="rallies-panel"[^>]*>([\s\S]*?)<\/aside>/)?.[1]??"";
+assert.match(rail,/id="studio-rallies"[\s\S]*id="studio-debug-reference-picker"[\s\S]*class="studio-debug-mode-row"/,"debug modes must be anchored after the scrollable rally list in the right rail");
+assert.match(css,/#studio-preview-view\.training-workspace \.studio-debug-mode-row\{[\s\S]*?flex:0 0 auto/,"debug mode footer must not scroll with rally cards");
+console.log("PASS: no footer disclaimer; viewport shell, flexible cards, invisible upload input, compact mobile navigation and debug mode footer are constrained");

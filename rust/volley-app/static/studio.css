@@ -2108,12 +2108,16 @@ body[data-ui-theme="light"] .analysis-flow-stage-hint{background:#f7fbff;color:#
 }
 #studio-preview-view.training-workspace #studio-simulation-summary:empty{display:none}
 #studio-preview-view.training-workspace .studio-debug-mode-row{
-  display:flex;align-items:center;flex-wrap:wrap;gap:9px 13px;
-  min-width:0;padding:0 0 12px;border-bottom:1px solid #2c405d
+  display:grid;grid-template-columns:minmax(0,1fr);gap:8px;flex:0 0 auto;
+  min-width:0;padding:12px;border-top:1px solid #2c405d
 }
 #studio-preview-view .studio-debug-mode-label{color:#a7c3dd;font-weight:650}
 #studio-preview-view .studio-debug-mode-switch{
   display:flex;gap:3px;padding:3px;background:#17283e;border:1px solid #354d6d;border-radius:10px
+}
+#studio-preview-view.training-workspace .studio-debug-mode-switch{width:100%;min-width:0}
+#studio-preview-view.training-workspace .studio-debug-mode-switch button{
+  flex:1 1 0;min-width:0;padding:9px 5px;font-size:11px
 }
 #studio-preview-view .studio-debug-mode-switch button{
   border:1px solid transparent;background:transparent;border-radius:7px;
@@ -2124,17 +2128,17 @@ body[data-ui-theme="light"] .analysis-flow-stage-hint{background:#f7fbff;color:#
 }
 #studio-preview-view .studio-debug-mode-switch button:hover:not([aria-pressed="true"]){background:#244161}
 #studio-preview-view .studio-debug-mode-help{
-  color:#94aeca;font-size:11px;line-height:1.4;flex:1 1 240px
+  color:#94aeca;font-size:10px;line-height:1.4
 }
 #studio-preview-view.training-workspace .studio-debug-reference-picker:not(.hidden){
-  display:grid;grid-template-columns:auto minmax(150px,1fr) auto;
-  align-items:center;gap:10px;padding:10px 12px;
-  border:1px solid #3c5675;border-radius:10px;background:#182b43;min-width:0
+  display:grid;grid-template-columns:minmax(0,1fr);
+  align-items:center;gap:7px;padding:10px 12px;
+  border-top:1px solid #2c405d;background:#182b43;min-width:0;flex:0 0 auto
 }
 #studio-preview-view .studio-debug-reference-picker label{font-weight:650;color:#dceaff;white-space:nowrap}
 #studio-preview-view .studio-debug-reference-picker select{min-width:0;width:100%;padding:9px 11px}
 #studio-preview-view .studio-debug-reference-picker #studio-debug-reference-counts{
-  font-size:11px;color:#b8d3ed;white-space:nowrap
+  font-size:11px;color:#b8d3ed;white-space:normal
 }
 #studio-preview-view.reference-workspace .studio-training-video-actions{display:none}
 #studio-preview-view .studio-reference-card{border-left:3px solid #39bdad;min-height:110px;gap:9px}
