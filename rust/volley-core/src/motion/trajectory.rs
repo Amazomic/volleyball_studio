@@ -1,5 +1,34 @@
 use super::{BallObservation, MotionEvidence};
 
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrajectoryBreakConfig {
+    pub min_velocity_jump_px_frame: f64,
+    pub relative_velocity_jump: f64,
+    pub max_fit_error_px: f64,
+    pub min_separation_frames: i64,
+}
+
+impl Default for TrajectoryBreakConfig {
+    fn default() -> Self {
+        Self {
+            min_velocity_jump_px_frame: 8.0,
+            relative_velocity_jump: 0.45,
+            max_fit_error_px: 4.0,
+            min_separation_frames: 6,
+        }
+    }
+}
+
+impl TrajectoryBreakConfig {
+    pub fn valid(self) -> bool {
+        (2.0..=60.0).contains(&self.min_velocity_jump_px_frame)
+            && (0.0..=1.5).contains(&self.relative_velocity_jump)
+            && (1.0..=20.0).contains(&self.max_fit_error_px)
+            && (3..=30).contains(&self.min_separation_frames)
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct TrajectoryBreak {
     pub frame: i64,
@@ -91,7 +120,15 @@ fn fit(points: &[BallObservation], at: i64) -> Option<Flight> {
 }
 
 pub fn trajectory_breaks(points: &[BallObservation]) -> Vec<TrajectoryBreak> {
+    trajectory_breaks_configured(points, TrajectoryBreakConfig::default())
+}
+
+pub fn trajectory_breaks_configured(
+    points: &[BallObservation],
+    config: TrajectoryBreakConfig,
+) -> Vec<TrajectoryBreak> {
     if points.len() < 9
+        || !config.valid()
         || points.windows(2).any(|p| p[1].frame <= p[0].frame)
         || points.iter().any(|p| {
             p.frame < 0 || p.frame > i32::MAX as i64 || !p.x.is_finite() || !p.y.is_finite()
@@ -128,7 +165,7 @@ pub fn trajectory_breaks(points: &[BallObservation]) -> Vec<TrajectoryBreak> {
             continue;
         };
         let error = before.error.max(after.error);
-        if error > 4.0 {
+        if error > config.max_fit_error_px {
             continue;
         }
         let join = (before.x[0] - after.x[0]).hypot(before.y[0] - after.y[0]);
@@ -141,8 +178,9 @@ pub fn trajectory_breaks(points: &[BallObservation]) -> Vec<TrajectoryBreak> {
         if speed_before.min(speed_after) < 2.0
             || speed_before.max(speed_after) > 60.0
             || residual
-                < 8.0_f64
-                    .max(0.45 * speed_before.max(speed_after))
+                < config
+                    .min_velocity_jump_px_frame
+                    .max(config.relative_velocity_jump * speed_before.max(speed_after))
                     .max(3.0 * error)
         {
             continue;
@@ -177,7 +215,10 @@ pub fn trajectory_breaks(points: &[BallObservation]) -> Vec<TrajectoryBreak> {
             after_frames: right.iter().map(|p| p.frame).collect(),
             contact_observed: points.binary_search_by_key(&at, |p| p.frame).is_ok(),
         };
-        if let Some(last) = found.last_mut().filter(|old| at - old.frame <= 6) {
+        if let Some(last) = found
+            .last_mut()
+            .filter(|old| at - old.frame <= config.min_separation_frames)
+        {
             if candidate.motion.residual / (1.0 + candidate.fit_error)
                 > last.motion.residual / (1.0 + last.fit_error)
             {
@@ -235,6 +276,46 @@ mod tests {
             })
             .collect();
         assert!(trajectory_breaks(&line).is_empty());
+    }
+
+    #[test]
+    fn tunable_collision_detection_ignores_gravity_and_detects_impulses() {
+        let gravity_only: Vec<_> = (0..121)
+            .map(|frame| {
+                let t = frame as f64 - 60.0;
+                BallObservation {
+                    frame,
+                    x: 380.0 + 3.0 * t,
+                    y: 120.0 + 0.12 * t * t,
+                }
+            })
+            .collect();
+        for threshold in [2.0, 8.0, 25.0] {
+            let config = TrajectoryBreakConfig {
+                min_velocity_jump_px_frame: threshold,
+                ..TrajectoryBreakConfig::default()
+            };
+            assert!(trajectory_breaks_configured(&gravity_only, config).is_empty());
+        }
+        let mut hit = gravity_only;
+        for p in &mut hit {
+            let t = (p.frame as f64 - 60.0).max(0.0);
+            p.x -= 19.0 * t;
+            p.y -= 12.0 * t;
+        }
+        let found = trajectory_breaks_configured(&hit, TrajectoryBreakConfig::default());
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!((found[0].frame - 60).abs() <= 1, "{found:?}");
+        let threshold = TrajectoryBreakConfig {
+            min_velocity_jump_px_frame: 50.0,
+            ..TrajectoryBreakConfig::default()
+        };
+        assert!(trajectory_breaks_configured(&hit, threshold).is_empty());
+        assert!(!TrajectoryBreakConfig {
+            max_fit_error_px: f64::NAN,
+            ..TrajectoryBreakConfig::default()
+        }
+        .valid());
     }
 
     #[test]

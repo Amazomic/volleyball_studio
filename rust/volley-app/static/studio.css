@@ -1918,6 +1918,16 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 
 #studio-preview-view .studio-debug-controls{display:none}
 #studio-preview-view.training-workspace .studio-debug-controls:not(.hidden){display:block;position:relative;flex:0 0 auto}
+#studio-preview-view .studio-impact-settings{position:relative;flex:0 0 auto}
+#studio-preview-view .studio-impact-settings>summary{list-style:none;cursor:pointer;white-space:nowrap;border:1px solid #52728e;border-radius:8px;background:#1b334b;color:#d8ebff;padding:8px 11px;font-size:12px;font-weight:600}
+#studio-preview-view .studio-impact-settings>summary::-webkit-details-marker{display:none}
+#studio-preview-view .studio-impact-settings[open]>summary{background:#28506b;border-color:#7ca8c4}
+#studio-preview-view .studio-impact-settings-body{position:absolute;z-index:90;top:calc(100% + 8px);left:0;width:min(340px,calc(100vw - 44px));max-height:min(65dvh,540px);overflow-y:auto;overscroll-behavior:contain;padding:13px;display:grid;gap:10px;background:#13273e;border:1px solid #5c7f9c;border-radius:12px;box-shadow:0 16px 35px #0009}
+#studio-preview-view .studio-impact-settings-body>strong{font-size:13px;color:#ebf5ff}
+#studio-preview-view .studio-impact-settings-body p,#studio-preview-view .studio-impact-settings-body small{margin:0;color:#aec5d9;font-size:11px;line-height:1.45}
+#studio-preview-view .studio-impact-settings-body label{display:grid;grid-template-columns:minmax(0,1fr) 68px;gap:9px;align-items:center;font-size:12px;color:#dceafd}
+#studio-preview-view .studio-impact-settings-body input{width:100%;min-width:0;padding:6px;text-align:right;font:inherit}
+@media(max-width:690px){#studio-preview-view .studio-impact-settings-body{left:auto;right:0}}
 #studio-preview-view .studio-debug-settings{position:relative}
 #studio-preview-view .studio-debug-settings>summary{list-style:none;cursor:pointer;white-space:nowrap;border:1px solid #52728e;border-radius:9px;background:#1b334b;color:#d8ebff;padding:8px 12px;font-size:12px;font-weight:600}
 #studio-preview-view .studio-debug-settings>summary::-webkit-details-marker{display:none}

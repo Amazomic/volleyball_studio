@@ -14,6 +14,8 @@ pub(crate) struct ClassifyRequest {
     rally_run_id: String,
     source_replay_sha256: String,
     rally: crate::rally_training_comparison::TouchRallyFilter,
+    #[serde(default)]
+    impact: volley_core::motion::TrajectoryBreakConfig,
     frames: Vec<u64>,
 }
 
@@ -215,21 +217,8 @@ pub async fn calculate(
         }
         let intervals =
             crate::rally_training_comparison::touch_rally_scope(&state, &run, &req.rally)?;
-        let mut library = lock(|| read(&state))?;
-        let scores = trajectory::scan_scoped_trajectory(&run, &intervals)?;
-        trajectory::include_legacy_reviewed_labels(
-            &mut library,
-            &run.project_id,
-            &run.video,
-            &source_sha(&run)?,
-            &run.replay_sha,
-            &scores,
-        );
-        let profile = trajectory::trajectory_profile(&library);
-        let expected = trajectory::predict(&scores, profile, run.frames)
-            .into_iter()
-            .filter(|f| intervals.iter().any(|&(a, b)| a <= *f && *f <= b))
-            .collect::<Vec<_>>();
+        let scores = trajectory::scan_collision_trajectory(&run, &intervals, req.impact)?;
+        let expected = trajectory::collision_frames(&scores, run.frames);
         if expected != req.frames {
             return Err(storage::conflict(
                 "Touch candidates changed: recalculate ball touches",

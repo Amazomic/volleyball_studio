@@ -168,6 +168,25 @@ pub(crate) fn full_video_ball_suggestions_scoped(
     run: &crate::native_rally_evidence::ValidatedRun,
     scope: &[(u64, u64)],
 ) -> Result<(Vec<(u64, f64)>, usize), String> {
+    full_video_ball_suggestions_impl(run, scope, None)
+}
+
+pub(crate) fn full_video_ball_impacts_scoped(
+    run: &crate::native_rally_evidence::ValidatedRun,
+    scope: &[(u64, u64)],
+    config: volley_core::motion::TrajectoryBreakConfig,
+) -> Result<(Vec<(u64, f64)>, usize), String> {
+    if !config.valid() {
+        return Err("Invalid ball impact sensitivity parameters".into());
+    }
+    full_video_ball_suggestions_impl(run, scope, Some(config))
+}
+
+fn full_video_ball_suggestions_impl(
+    run: &crate::native_rally_evidence::ValidatedRun,
+    scope: &[(u64, u64)],
+    impact: Option<volley_core::motion::TrajectoryBreakConfig>,
+) -> Result<(Vec<(u64, f64)>, usize), String> {
     if scope
         .iter()
         .any(|&(start, end)| start > end || end >= run.frames)
@@ -195,17 +214,28 @@ pub(crate) fn full_video_ball_suggestions_scoped(
     let mut candidates = Vec::<(u64, f64)>::new();
     let mut observations = 0usize;
     let mut scope_index = 0usize;
-    fn emit(points: &[BallObservation], candidates: &mut Vec<(u64, f64)>) -> Result<(), String> {
+    fn emit(
+        points: &[BallObservation],
+        candidates: &mut Vec<(u64, f64)>,
+        impact: Option<volley_core::motion::TrajectoryBreakConfig>,
+    ) -> Result<(), String> {
         if points.len() < 9 {
             return Ok(());
         }
-        for b in volley_core::motion::trajectory_breaks(points) {
+        let breaks = if let Some(config) = impact {
+            volley_core::motion::trajectory_breaks_configured(points, config)
+        } else {
+            volley_core::motion::trajectory_breaks(points)
+        };
+        for b in breaks {
             if b.frame >= 0 {
                 candidates.push((b.frame as u64, b.motion.residual / (1.0 + b.fit_error)));
             }
         }
-        for b in ball_motion_extrema(points, 5)? {
-            candidates.push((b.frame_index, b.velocity_residual_px_frame * 0.4));
+        if impact.is_none() {
+            for b in ball_motion_extrema(points, 5)? {
+                candidates.push((b.frame_index, b.velocity_residual_px_frame * 0.4));
+            }
         }
         Ok(())
     }
@@ -221,7 +251,7 @@ pub(crate) fn full_video_ball_suggestions_scoped(
             return Err("Ball source frame state differs from saved replay".into());
         }
         while scope.get(scope_index).is_some_and(|&(_, end)| end < frame) {
-            emit(&points, &mut candidates)?;
+            emit(&points, &mut candidates, impact)?;
             points.clear();
             scope_index += 1;
         }
@@ -233,7 +263,7 @@ pub(crate) fn full_video_ball_suggestions_scoped(
         }
         let Some(ball) = row.selected_ball else {
             if !points.is_empty() && frame as i64 - points.last().unwrap().frame > 4 {
-                emit(&points, &mut candidates)?;
+                emit(&points, &mut candidates, impact)?;
                 points.clear();
             }
             continue;
@@ -250,7 +280,7 @@ pub(crate) fn full_video_ball_suggestions_scoped(
         }
         let b = ball.detection.bbox_xyxy_norm;
         if points.last().is_some_and(|p| frame as i64 - p.frame > 4) {
-            emit(&points, &mut candidates)?;
+            emit(&points, &mut candidates, impact)?;
             points.clear();
         }
         points.push(BallObservation {
@@ -260,11 +290,11 @@ pub(crate) fn full_video_ball_suggestions_scoped(
         });
         observations += 1;
         if points.len() >= 900 {
-            emit(&points, &mut candidates)?;
+            emit(&points, &mut candidates, impact)?;
             points = points.split_off(points.len() - 24);
         }
     }
-    emit(&points, &mut candidates)?;
+    emit(&points, &mut candidates, impact)?;
     if reader.line()?.is_some() || reader.finish() != run.replay_sha {
         return Err("Ball replay SHA-256 differs from saved source".into());
     }
@@ -272,7 +302,10 @@ pub(crate) fn full_video_ball_suggestions_scoped(
     // Local maxima from the two existing estimators refer to the same impact.
     let mut dedup = Vec::<(u64, f64)>::new();
     for p in candidates {
-        if let Some(last) = dedup.last_mut().filter(|q| q.0.abs_diff(p.0) <= 5) {
+        if let Some(last) = dedup
+            .last_mut()
+            .filter(|q| q.0.abs_diff(p.0) <= impact.map_or(5, |c| c.min_separation_frames as u64))
+        {
             if p.1 > last.1 {
                 *last = p;
             }
@@ -358,6 +391,24 @@ mod scored_trajectory_tests {
         let (scoped, observed) = full_video_ball_suggestions_scoped(&run, &[(20, 30)]).unwrap();
         assert_eq!(observed, 11);
         assert!(scoped.iter().all(|(frame, _)| (20..=30).contains(frame)));
+        let (impacts, _) = full_video_ball_impacts_scoped(
+            &run,
+            &[(0, 49)],
+            volley_core::motion::TrajectoryBreakConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(impacts.len(), 1, "{impacts:?}");
+        assert!(impacts[0].0.abs_diff(25) <= 2);
+        let (suppressed, _) = full_video_ball_impacts_scoped(
+            &run,
+            &[(0, 49)],
+            volley_core::motion::TrajectoryBreakConfig {
+                min_velocity_jump_px_frame: 50.0,
+                ..volley_core::motion::TrajectoryBreakConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(suppressed.is_empty());
         let (no_rallies, observed) = full_video_ball_suggestions_scoped(&run, &[]).unwrap();
         assert_eq!(observed, 0);
         assert!(no_rallies.is_empty());

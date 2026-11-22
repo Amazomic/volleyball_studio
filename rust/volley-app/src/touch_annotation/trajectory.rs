@@ -7,6 +7,8 @@ pub(crate) struct CalculateRequest {
     project_id: String,
     rally_run_id: String,
     rally: crate::rally_training_comparison::TouchRallyFilter,
+    #[serde(default)]
+    impact: volley_core::motion::TrajectoryBreakConfig,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -132,6 +134,7 @@ pub(super) fn trajectory_profile(lib: &Library) -> TrajectoryProfile {
     }
     best
 }
+#[cfg(test)]
 pub(super) fn include_legacy_reviewed_labels(
     lib: &mut Library,
     project_id: &str,
@@ -164,19 +167,16 @@ pub(super) fn scan_trajectory(run: &ValidatedRun) -> Result<Vec<TrajectoryCandid
         })
         .collect())
 }
-fn inside_rally(frame: u64, intervals: &[(u64, u64)]) -> bool {
-    let i = intervals.partition_point(|&(_, end)| end < frame);
-    intervals
-        .get(i)
-        .is_some_and(|&(start, end)| start <= frame && frame <= end)
-}
-
-pub(super) fn scan_scoped_trajectory(
+pub(super) fn scan_collision_trajectory(
     run: &ValidatedRun,
     intervals: &[(u64, u64)],
+    impact: volley_core::motion::TrajectoryBreakConfig,
 ) -> Result<Vec<TrajectoryCandidate>, ApiError> {
+    if !impact.valid() {
+        return Err(storage::bad_request("Invalid collision detector settings"));
+    }
     let (events, _) =
-        crate::native_player_tracks::full_video_ball_suggestions_scoped(run, intervals)
+        crate::native_player_tracks::full_video_ball_impacts_scoped(run, intervals, impact)
             .map_err(storage::bad_request)?;
     Ok(events
         .into_iter()
@@ -187,12 +187,33 @@ pub(super) fn scan_scoped_trajectory(
         .collect())
 }
 
+pub(super) fn collision_frames(scores: &[TrajectoryCandidate], total: u64) -> Vec<u64> {
+    let mut frames = scores
+        .iter()
+        .map(|score| score.frame)
+        .filter(|frame| *frame < total)
+        .collect::<Vec<_>>();
+    frames.sort_unstable();
+    frames.dedup();
+    frames
+}
+
+fn inside_rally(frame: u64, intervals: &[(u64, u64)]) -> bool {
+    let i = intervals.partition_point(|&(_, end)| end < frame);
+    intervals
+        .get(i)
+        .is_some_and(|&(start, end)| start <= frame && frame <= end)
+}
+
 pub async fn calculate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<CalculateRequest>,
 ) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
+    if !req.impact.valid() {
+        return Err(storage::bad_request("Invalid collision detector settings"));
+    }
     let _permit = state
         .touch_limit
         .acquire()
@@ -206,7 +227,7 @@ pub async fn calculate(
             &state, &run, &req.rally,
         )?;
         let source = source_sha(&run)?;
-        let mut lib = lock(|| read(&state))?;
+        let lib = lock(|| read(&state))?;
         let labels = lib
             .videos
             .iter()
@@ -224,30 +245,18 @@ pub async fn calculate(
             frames.sort_unstable();
             frames
         });
-        let scores = scan_scoped_trajectory(&run, &intervals)?;
-        include_legacy_reviewed_labels(
-            &mut lib,
-            &run.project_id,
-            &run.video,
-            &source,
-            &run.replay_sha,
-            &scores,
-        );
-        let calibration = trajectory_profile(&lib);
-        let selected = predict(&scores, calibration, run.frames)
-            .into_iter()
-            .filter(|&frame| inside_rally(frame, &intervals))
-            .collect::<Vec<_>>();
-        let proposals = selected
+        let scores = scan_collision_trajectory(&run, &intervals, req.impact)?;
+        let selected = collision_frames(&scores, run.frames);
+        let calibration = TrajectoryProfile {
+            min_score: 0.0,
+            shift_frames: 0,
+            training_videos: 0,
+            detector_version: "piecewise_ballistic_impacts_v2",
+        };
+        let proposals = scores
             .iter()
-            .map(|&frame| {
-                let src = frame.checked_add_signed(-calibration.shift_frames);
-                let score = src
-                    .and_then(|f| scores.iter().find(|c| c.frame == f))
-                    .map(|c| c.score)
-                    .unwrap_or(0.0);
-                json!({"frame":frame,"score":score})
-            })
+            .filter(|score| selected.binary_search(&score.frame).is_ok())
+            .map(|score| json!({"frame":score.frame,"score":score.score}))
             .collect::<Vec<_>>();
         let metrics = truth.map(|frames| accuracy(&frames, &selected, 1, 30.0));
         Ok(json!({"schema":"volley-trajectory-touch-proposals/1",
@@ -256,9 +265,10 @@ pub async fn calculate(
             "proposals":proposals,"candidate_count":scores.len(),
             "rally_intervals":intervals.iter().map(|&(start,end)| json!({"start":start,"end":end})).collect::<Vec<_>>(),
             "rally_count":intervals.len(),
-            "calibration":calibration,"metrics_on_labeled_video":metrics,
+            "calibration":calibration,"impact_settings":req.impact,
+            "metrics_on_labeled_video":metrics,
             "gpu_rerun":false,"player_pose_required":false,
-            "method":"vballnet_trajectory_breaks_and_motion_extrema"}))
+            "method":"piecewise_ballistic_impacts_v2"}))
     })
     .await
     .map_err(|e| storage::internal(format!("Trajectory worker: {e}")))??;

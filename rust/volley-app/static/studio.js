@@ -1475,9 +1475,13 @@
       (overall.matched?Number(overall.mean_error_ms).toFixed(1)+" мс":"—");
     if(annotation.prediction){
       const p=annotation.prediction;
-      annotation.metrics.textContent+=" | По мячу "+p.proposals.length+" касаний · обучающих видео "+
-        p.calibration.training_videos+" · порог "+p.calibration.min_score+
-        " · сдвиг "+p.calibration.shift_frames+" кадра";
+      annotation.metrics.textContent+=" | По мячу "+p.proposals.length+" кандидатов"+
+        (p.method==="piecewise_ballistic_impacts_v2"?
+          " · порог скачка "+p.impact_settings.min_velocity_jump_px_frame+" пикс./кадр"+
+          " · допуск параболы "+p.impact_settings.max_fit_error_px+" пикс.":
+          " · обучающих видео "+p.calibration.training_videos+
+          " · порог "+p.calibration.min_score+
+          " · сдвиг "+p.calibration.shift_frames+" кадра");
       if(p.metrics_on_labeled_video){
         annotation.metrics.textContent+=" · F1 "+(100*p.metrics_on_labeled_video.f1).toFixed(1)+"% (на обучающем видео)";
       }
@@ -1575,6 +1579,27 @@
     drawAnnotation();drawTimeline();
     annotationNotice("Черновик изменён. Сохраните данные касаний, затем повторите расчёт по траектории.");
   };
+  const impactInputIds=[
+    "studio-impact-min-jump","studio-impact-relative-jump",
+    "studio-impact-fit-error","studio-impact-min-separation"
+  ];
+  const impactSettingsFromPlayer=()=>{
+    const [jump,relative,fit,separation]=impactInputIds.map(id=>Number($(id).value));
+    if(!Number.isFinite(jump)||jump<2||jump>60||
+      !Number.isFinite(relative)||relative<0||relative>150||
+      !Number.isFinite(fit)||fit<1||fit>20||
+      !Number.isSafeInteger(separation)||separation<3||separation>30||
+      impactInputIds.some(id=>$(id).value.trim()===""))return null;
+    return {
+      min_velocity_jump_px_frame:jump,
+      relative_velocity_jump:relative/100,
+      max_fit_error_px:fit,
+      min_separation_frames:separation
+    };
+  };
+  for(const id of impactInputIds)$(id).addEventListener("change",()=>{
+    if(annotation.prediction)invalidateTrainingTouchPrediction();
+  });
   const trainingTouchRallySettings=()=>{
     const rally={mode:comparison.mode.value,merge_gap_seconds:trainingGapSeconds()};
     if(rally.mode==="continuous"){
@@ -1591,26 +1616,32 @@
     if(!annotation.prediction)return;
     annotation.prediction=null;annotation.typePrediction=null;
     drawAnnotation();drawTimeline();drawOverlay();
-    annotationNotice("Настройки розыгрышей изменены. Пересчитайте касания внутри новых интервалов.");
+    annotationNotice("Настройки розыгрышей или столкновений изменены. Повторите расчёт касаний.");
   };
   const calculateTrajectory=async()=>{
     if(annotation.busy||annotation.dirty||!s.run||!annotationSourceValid())return;
+    const impact=impactSettingsFromPlayer();
+    if(!impact){annotationNotice("Проверьте параметры поиска столкновений.",true);return;}
     const epoch=annotation.epoch,project=s.project,run=s.run,video=s.video;
     annotation.busy=true;drawAnnotation();
     window.VolleyballTasks?.set("training-trajectory",{label:"Дебаг",stage:"Поиск касаний по траектории VBallNet",progress:null});
-    annotationNotice("Ищем касания только внутри розыгрышей, найденных по мячу, без GPU…");
+    annotationNotice("Ищем столкновения по отклонению от параболического полёта внутри розыгрышей, без GPU…");
     const rally=trainingTouchRallySettings();
-    const settingsKey=JSON.stringify(rally);
+    const settingsKey=JSON.stringify({rally,impact});
     try{
       const result=await post("/api/training/trajectory/calculate",{
-        project_id:project,rally_run_id:run,rally
+        project_id:project,rally_run_id:run,rally,impact
       });
-      if(settingsKey!==JSON.stringify(trainingTouchRallySettings()))
+      if(settingsKey!==JSON.stringify({
+        rally:trainingTouchRallySettings(),impact:impactSettingsFromPlayer()
+      }))
         throw Error("Настройки розыгрышей изменились. Повторите расчёт касаний.");
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run||video!==s.video)return;
       if(result.schema!=="volley-trajectory-touch-proposals/1"||
           result.project_id!==project||result.video!==video||result.rally_run_id!==run||
           !Array.isArray(result.proposals)||!Number.isSafeInteger(result.total_frames)||
+          result.method!=="piecewise_ballistic_impacts_v2"||
+          JSON.stringify(result.impact_settings)!==JSON.stringify(impact)||
           !Array.isArray(result.rally_intervals)||
           result.rally_count!==result.rally_intervals.length||
           result.rally_intervals.some(r=>!Number.isSafeInteger(r.start)||!Number.isSafeInteger(r.end)||
@@ -1627,7 +1658,7 @@
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run||video!==s.video)return;
       annotationNotice("Внутри "+result.rally_count+" розыгрышей по мячу найдено "+
         result.proposals.length+" кандидатов касаний. Вне розыгрышей поиск не выполняется. "+
-        "Типы и игроки не определяются. Включите «Определение касания» для просмотра.");
+        "Результаты отображаются в плеере и на шкале; препятствие может быть игроком, сеткой или полом.");
     }catch(error){
       if(epoch===annotation.epoch)annotationNotice("Ошибка расчёта касаний: "+error.message,true);
     }finally{
@@ -1638,7 +1669,9 @@
     if(annotation.busy||annotation.dirty||!annotation.prediction||!annotationSourceValid())return;
     const epoch=annotation.epoch,project=s.project,run=s.run,video=s.video;
     const candidates=annotation.prediction;
-    const rally=trainingTouchRallySettings(),settingsKey=JSON.stringify(rally);
+    const impact=impactSettingsFromPlayer();
+    if(!impact){annotationNotice("Проверьте параметры поиска столкновений.",true);return;}
+    const rally=trainingTouchRallySettings(),settingsKey=JSON.stringify({rally,impact});
     annotation.busy=true;drawAnnotation();
     window.VolleyballTasks?.set("training-types",{
       label:"Дебаг",stage:"Определение типов касаний по RTMPose",progress:null
@@ -1648,11 +1681,13 @@
       const result=await post("/api/training/trajectory/types",{
         project_id:project,rally_run_id:run,
         source_replay_sha256:candidates.source_replay_sha256,
-        rally,frames:candidates.proposals.map(item=>item.frame)
+        rally,impact,frames:candidates.proposals.map(item=>item.frame)
       });
       if(epoch!==annotation.epoch||s.project!==project||s.run!==run||s.video!==video||
         annotation.prediction!==candidates)return;
-      if(JSON.stringify(trainingTouchRallySettings())!==settingsKey)
+      if(JSON.stringify({
+        rally:trainingTouchRallySettings(),impact:impactSettingsFromPlayer()
+      })!==settingsKey)
         throw Error("Настройки розыгрышей изменились, рассчитайте типы заново.");
       if(result.schema!=="volley-trajectory-touch-types/1"||
         result.project_id!==project||result.video!==video||result.rally_run_id!==run||

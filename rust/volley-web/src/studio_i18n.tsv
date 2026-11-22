@@ -610,3 +610,14 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Объединение розыгрышей, с	Rally merge gap, s
 Детекция мяча	Ball detection
 Публикация	Publishing
+
+⚙ Параметры касаний	⚙ Touch settings
+Поиск столкновений по траектории	Trajectory-based collision search
+Столкновения по траектории VBallNet	VBallNet trajectory collisions
+Плавная дуга полёта под действием гравитации игнорируется. Резкий скачок скорости — кандидат столкновения, не подтверждённое касание игрока.	Smooth gravitational flight is ignored. A sudden velocity jump is a collision candidate, not a confirmed player touch.
+Минимальный скачок скорости, пикс./кадр	Minimum velocity jump, px/frame
+Относительный скачок скорости, %	Relative velocity jump, %
+Допустимая ошибка параболы, пикс.	Maximum ballistic fit error, px
+Минимальный интервал между столкновениями, кадры	Minimum spacing between collisions, frames
+Параметры действуют только в «Дебаге». Для проверки изменений нажмите «Рассчитать касания».	Settings apply only in Debug. Recalculate touches to test a change.
+Изменения остаются в черновике до сохранения. Эталонные метки не подменяют физический поиск столкновений; для изменения чувствительности используйте параметры у плеера.	Changes remain a draft until saved. Reference labels do not replace collision detection; adjust sensitivity in the player settings.

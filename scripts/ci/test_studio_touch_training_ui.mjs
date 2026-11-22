@@ -11,13 +11,21 @@ const server=read("rust/volley-app/src/main.rs");
 const annotationSource=read("rust/volley-app/src/touch_annotation.rs");
 const scanner=read("rust/volley-app/src/native_player_tracks/trajectory.rs");
 assert.equal((html.match(/id="studio-timeline-track"/g)||[]).length,1);
+assert.ok(html.indexOf('id="studio-impact-settings"') > html.indexOf('class="viewer-head"'));
+assert.ok(html.indexOf('id="studio-impact-settings"') < html.indexOf('class="video-wrap"'),
+  "Collision sensitivity must be editable alongside the debug player, not beneath the timeline");
 for(const id of ["studio-annotation-calculate","studio-annotation-seed-trajectory",
   "studio-annotation-save","studio-training-method","studio-annotation-hide-extra",
-  "studio-annotation-review","studio-annotation-rallies"]){
+  "studio-annotation-review","studio-annotation-rallies",
+  "studio-impact-min-jump","studio-impact-relative-jump","studio-impact-fit-error",
+  "studio-impact-min-separation"]){
   assert.ok(html.includes('id="'+id+'"'),id);
 }
 assert.match(server,/\/api\/training\/trajectory\/calculate"[\s\S]{0,90}touch_annotation::trajectory::calculate/);
-assert.ok(rust.includes("trajectory_profile(&lib)"));
+assert.ok(rust.includes("scan_collision_trajectory(&run, &intervals, req.impact)"));
+assert.ok(!rust.includes('method":"vballnet_trajectory_breaks_and_motion_extrema"'));
+assert.ok(scanner.includes("full_video_ball_impacts_scoped"));
+assert.ok(typesRust.includes("scan_collision_trajectory(&run, &intervals, req.impact)"));
 assert.match(server,/\/api\/training\/trajectory\/types"[\s\S]{0,100}touch_annotation::types::calculate/);
 assert.ok(typesRust.includes("observed_pose_motion")&&typesRust.includes("refine_with_motion"));
 assert.ok(typesRust.includes("expected != req.frames"),"Types must never invent a second touch detector");
@@ -46,6 +54,10 @@ const $=id=>{
   return elements.get(id);
 };
 const logs=[],writeActions=[],calculations=[],classifications=[];
+for(const [id,value] of [
+  ["studio-impact-min-jump","8"],["studio-impact-relative-jump","45"],
+  ["studio-impact-fit-error","4"],["studio-impact-min-separation","6"]
+])elements.set(id,Object.assign(new Element(),{value}));
 const original={
   schema:"volley-touch-annotations/1",project_id:"p",rally_run_id:"r",
   video:"match.mp4",total_frames:200,revision:0,reviewed:false,
@@ -85,11 +97,9 @@ const context={
         rally_run_id:"r",video:"match.mp4",total_frames:200,
         source_replay_sha256:"a".repeat(64),
         rally_count:1,rally_intervals:[{start:95,end:150}],
-        proposals:calculations.length===1?
-          [{frame:100,score:9},{frame:140,score:3}]:
-          [{frame:102,score:9}],
-        calibration:{min_score:8,shift_frames:calculations.length===1?0:2,
-          training_videos:calculations.length===1?0:1},
+        proposals:[{frame:100,score:9},{frame:140,score:3}],
+        method:"piecewise_ballistic_impacts_v2",impact_settings:payload.impact,
+        calibration:{min_score:0,shift_frames:0,training_videos:0},
         metrics_on_labeled_video:null};
     }
     if(path==="/api/training/trajectory/types"){
@@ -126,9 +136,15 @@ assert.equal(calculations.length,1);
 assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].rally)),
   {mode:"continuous",merge_gap_seconds:4,min_trajectory_seconds:1.5});
 assert.equal(annotation.prediction.proposals.length,2);
+assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].impact)),{
+  min_velocity_jump_px_frame:8,relative_velocity_jump:0.45,
+  max_fit_error_px:4,min_separation_frames:6
+});
 assert.equal(annotation.classify.disabled,false,"Type stage requires ball candidates");
 await elements.get("studio-annotation-classify").click();
 assert.deepEqual(JSON.parse(JSON.stringify(classifications[0].frames)),[100,140]);
+assert.deepEqual(JSON.parse(JSON.stringify(classifications[0].impact)),
+  JSON.parse(JSON.stringify(calculations[0].impact)));
 assert.equal(classifications[0].source_replay_sha256,"a".repeat(64));
 assert.equal(annotation.typePrediction.classified,1);
 assert.equal(context.timelineRallyLayers.types.checked,true);
@@ -161,12 +177,17 @@ assert.equal(annotation.typePrediction,null,"Saved labels must invalidate classi
 assert.equal(elements.get("studio-annotation-calculate").disabled,false);
 await elements.get("studio-annotation-calculate").click();
 assert.equal(calculations.length,2);
-assert.equal(annotation.prediction.calibration.shift_frames,2);
-assert.equal(annotation.prediction.calibration.training_videos,1);
-assert.equal(annotation.prediction.proposals[0].frame,102);
+assert.equal(annotation.prediction.calibration.shift_frames,0);
+assert.equal(annotation.prediction.calibration.training_videos,0);
+assert.equal(annotation.prediction.proposals[0].frame,100);
+elements.get("studio-impact-min-jump").value="12";
+elements.get("studio-impact-min-jump").listeners.change();
+assert.equal(annotation.prediction,null,"Changing collision sensitivity invalidates stale candidates");
+await elements.get("studio-annotation-calculate").click();
+assert.equal(calculations[2].impact.min_velocity_jump_px_frame,12);
 invalidateTrainingTouchPrediction();
-assert.equal(annotation.prediction,null,"Changed rally settings must invalidate old touch candidates");
+assert.equal(annotation.prediction,null,"Changing rally settings must invalidate old touch candidates");
 assert.ok(drawn>=4);
 assert.ok(logs.some(entry=>entry.key==="training-trajectory"));
 assert.ok(logs.some(entry=>entry.key==="training-annotation"));
-console.log("PASS: trajectory calculate -> accept -> edit -> explicit save -> recalibrate using saved labels");
+console.log("PASS: ballistic collision parameters -> calculate -> classify -> edit -> save -> invalidate and recalculate");
