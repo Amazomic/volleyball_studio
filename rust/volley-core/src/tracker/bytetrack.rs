@@ -6,9 +6,11 @@
 //! No synthetic/interpolated coordinate ever counts as an observed detection.
 
 use super::{
-    association, NewTrackDiagnostic, PoseEvidence, TrackedFrame, TrackedPlayer, TrackingOptions,
+    association, same_head_body_duplicate, NewTrackDiagnostic, PoseEvidence, TrackedFrame,
+    TrackedPlayer, TrackingOptions,
 };
 use crate::{bbox_iou, fusion::Candidate};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Preserve weak RF-DETR detections solely for second-stage continuation.
 /// The legacy 0.28 cutoff removed the very measurements ByteTrack needs.
@@ -227,6 +229,7 @@ pub struct ByteTracker {
     ambiguous: u64,
     low_confidence_matches: u64,
     lost_low_confidence_matches: u64,
+    separated_pairs: BTreeMap<(u64, u64), (u64, u8)>,
 }
 
 impl ByteTracker {
@@ -245,7 +248,85 @@ impl ByteTracker {
             ambiguous: 0,
             low_confidence_matches: 0,
             lost_low_confidence_matches: 0,
+            separated_pairs: BTreeMap::new(),
         })
+    }
+    fn independently_tracked_bodies(
+        &self,
+        frame: u64,
+        first: &Candidate,
+        second: &Candidate,
+    ) -> bool {
+        let recent = |track: &Track| {
+            track.status == Status::Tracked
+                && track.observations >= 2
+                && frame.saturating_sub(track.last_frame) <= 2
+        };
+        self.tracks.iter().filter(|track| recent(track)).any(|a| {
+            self.tracks.iter().filter(|track| recent(track)).any(|b| {
+                if a.id == b.id
+                    || !self
+                        .separated_pairs
+                        .get(&(a.id.min(b.id), a.id.max(b.id)))
+                        .is_some_and(|(last, count)| {
+                            *count >= 3 && frame.saturating_sub(*last) <= 60
+                        })
+                {
+                    return false;
+                }
+                let (a_box, b_box) = (a.kalman.bbox(), b.kalman.bbox());
+                (bbox_iou(a_box, first.bbox_xyxy_norm) >= 0.12
+                    && bbox_iou(b_box, second.bbox_xyxy_norm) >= 0.12)
+                    || (bbox_iou(a_box, second.bbox_xyxy_norm) >= 0.12
+                        && bbox_iou(b_box, first.bbox_xyxy_norm) >= 0.12)
+            })
+        })
+    }
+    fn remember_separate_bodies(&mut self, frame: u64, observed: &[TrackedPlayer]) {
+        for (index, first) in observed.iter().enumerate() {
+            for second in observed.iter().skip(index + 1) {
+                let (a, b) = (
+                    first.detection.bbox_xyxy_norm,
+                    second.detection.bbox_xyxy_norm,
+                );
+                let shorter = (a[2] - a[0]).min(b[2] - b[0]);
+                let distinct_heads = match (
+                    first.detection.head_point_norm,
+                    second.detection.head_point_norm,
+                ) {
+                    (Some(head_a), Some(head_b)) => {
+                        (head_a[0] - head_b[0]).hypot(head_a[1] - head_b[1])
+                            > (0.7 * shorter).max(0.018)
+                    }
+                    _ => {
+                        let center_a = (a[0] + a[2]) * 0.5;
+                        let center_b = (b[0] + b[2]) * 0.5;
+                        (center_a - center_b).abs() > (0.8 * shorter).max(0.020)
+                    }
+                };
+                if bbox_iou(a, b) <= 0.25 && distinct_heads {
+                    let pair = (
+                        first.track_id.min(second.track_id),
+                        first.track_id.max(second.track_id),
+                    );
+                    let evidence = self.separated_pairs.entry(pair).or_insert((frame, 0));
+                    evidence.1 = if frame.saturating_sub(evidence.0) <= 30 {
+                        evidence.1.saturating_add(1)
+                    } else {
+                        1
+                    };
+                    evidence.0 = frame;
+                }
+            }
+        }
+        let active = self
+            .tracks
+            .iter()
+            .map(|track| track.id)
+            .collect::<BTreeSet<_>>();
+        self.separated_pairs.retain(|&(a, b), (last, _)| {
+            frame.saturating_sub(*last) <= 60 && active.contains(&a) && active.contains(&b)
+        });
     }
     pub fn process_frame_with_poses(
         &mut self,
@@ -298,12 +379,13 @@ impl ByteTracker {
                 .total_cmp(&a.box_.score)
                 .then_with(|| a.box_.query_index.cmp(&b.box_.query_index))
         });
-        // Standard detection-space IoU-NMS. No legacy body/head/pose
-        // association logic participates in ByteTrack.
         let mut retained: Vec<Observation> = Vec::new();
         for item in sorted {
             if retained.iter().all(|other| {
-                bbox_iou(other.box_.bbox_xyxy_norm, item.box_.bbox_xyxy_norm) < self.config.nms_iou
+                let duplicate = bbox_iou(other.box_.bbox_xyxy_norm, item.box_.bbox_xyxy_norm)
+                    >= self.config.nms_iou
+                    || same_head_body_duplicate(&other.box_, &item.box_);
+                !duplicate || self.independently_tracked_bodies(frame, &other.box_, &item.box_)
             }) {
                 retained.push(item);
             }
@@ -437,6 +519,7 @@ impl ByteTracker {
             }
         }
         self.previous = Some(frame);
+        self.remember_separate_bodies(frame, &emitted);
         emitted.sort_by_key(|p| p.track_id);
         Ok(TrackedFrame {
             frame_index: frame,
@@ -477,7 +560,7 @@ impl ByteTracker {
         let mut ambiguous = 0;
         let mut blocked = Vec::new();
         let strictness = (self.config.min_assignment_score - 0.43) * 0.7;
-        for observation in observations {
+        for (index, observation) in observations.iter().enumerate() {
             let scores = indices
                 .iter()
                 .map(|&ti| {
@@ -503,7 +586,14 @@ impl ByteTracker {
                 .collect::<Vec<_>>();
             let mut available = scores.iter().filter_map(|v| *v).collect::<Vec<_>>();
             available.sort_by(|a, b| b.total_cmp(a));
-            if available.len() > 1 && available[0] - available[1] < self.config.ambiguity_margin {
+            let independent_crossing = observations.iter().enumerate().any(|(other, row)| {
+                other != index
+                    && self.independently_tracked_bodies(frame, &observation.box_, &row.box_)
+            });
+            if available.len() > 1
+                && available[0] - available[1] < self.config.ambiguity_margin
+                && !independent_crossing
+            {
                 ambiguous += 1;
                 blocked.push(matrix.len());
                 matrix.push(vec![None; indices.len()]);
@@ -574,6 +664,175 @@ mod tests {
     }
     fn tracker() -> ByteTracker {
         ByteTracker::new(TrackingOptions::default()).unwrap()
+    }
+
+    #[test]
+    fn duplicate_pose_boxes_with_the_same_head_never_mint_an_extra_id() {
+        let mut tracker = tracker();
+        let before = Candidate {
+            bbox_xyxy_norm: [0.519, 0.459, 0.548, 0.519],
+            head_point_norm: Some([0.537, 0.472]),
+            ..person(0, 0, 0.519, 0.92)
+        };
+        let id = tracker
+            .process_frame_with_poses(0, std::slice::from_ref(&before), &[])
+            .unwrap()
+            .tracks[0]
+            .track_id;
+        let small = Candidate {
+            frame_index: 1,
+            query_index: Some(5),
+            bbox_xyxy_norm: [0.5312153, 0.4684438, 0.5457274, 0.5359460],
+            head_point_norm: Some([0.542465, 0.474742]),
+            score: 0.62,
+            ..before.clone()
+        };
+        let large = Candidate {
+            frame_index: 1,
+            query_index: Some(4),
+            bbox_xyxy_norm: [0.5307123, 0.4664318, 0.5491365, 0.5847691],
+            head_point_norm: Some([0.541959, 0.475287]),
+            score: 0.90,
+            ..before
+        };
+        let result = tracker
+            .process_frame_with_poses(1, &[small, large], &[])
+            .unwrap();
+        assert_eq!(result.tracks.len(), 1);
+        assert_eq!(result.tracks[0].track_id, id);
+        assert_eq!(tracker.next_id(), 2);
+    }
+
+    #[test]
+    fn two_crops_of_one_body_are_not_mistaken_for_previously_separate_players() {
+        let mut tracker = tracker();
+        let crop = |frame, query: usize, tall: bool, head| Candidate {
+            frame_index: frame,
+            class_name: "player".into(),
+            score: if tall { 0.91 } else { 0.90 },
+            query_index: Some(query),
+            bbox_xyxy_norm: if tall {
+                [0.53, 0.45, 0.55, 0.75]
+            } else {
+                [0.53, 0.45, 0.55, 0.52]
+            },
+            head_point_norm: head,
+            touch_probability: None,
+        };
+        for frame in 0..3 {
+            let row = tracker
+                .process_frame_with_poses(
+                    frame,
+                    &[crop(frame, 0, false, None), crop(frame, 1, true, None)],
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(row.tracks.len(), 2);
+        }
+        let identified = tracker
+            .process_frame_with_poses(
+                3,
+                &[
+                    crop(3, 0, false, Some([0.54, 0.46])),
+                    crop(3, 1, true, Some([0.54, 0.46])),
+                ],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            identified.tracks.len(),
+            1,
+            "Vertical crop-size differences without measured separate heads are not two people"
+        );
+    }
+
+    #[test]
+    fn two_existing_players_are_not_deduplicated_during_a_crossing() {
+        let mut tracker = tracker();
+        let observed = |frame, query, left: f64, head_x: f64| Candidate {
+            frame_index: frame,
+            class_name: "player".into(),
+            score: 0.90,
+            query_index: Some(query),
+            bbox_xyxy_norm: [left, 0.25, left + 0.10, 0.70],
+            head_point_norm: Some([head_x, 0.26]),
+            touch_probability: None,
+        };
+        let first = tracker
+            .process_frame_with_poses(
+                0,
+                &[observed(0, 0, 0.20, 0.25), observed(0, 1, 0.43, 0.48)],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(first.tracks.len(), 2);
+        let previous = first.tracks.iter().map(|t| t.track_id).collect::<Vec<_>>();
+        for (frame, a, b) in [(1, 0.235, 0.395), (2, 0.27, 0.36)] {
+            let row = tracker
+                .process_frame_with_poses(
+                    frame,
+                    &[
+                        observed(frame, 0, a, a + 0.05),
+                        observed(frame, 1, b, b + 0.05),
+                    ],
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(row.tracks.len(), 2);
+        }
+        let crossing_a = observed(3, 0, 0.308, 0.358);
+        let crossing_b = observed(3, 1, 0.317, 0.363);
+        let joined = tracker
+            .process_frame_with_poses(3, &[crossing_a, crossing_b], &[])
+            .unwrap();
+        assert_eq!(
+            joined.tracks.len(),
+            2,
+            "Two prior distinct tracks may approach with overlapping heads"
+        );
+        for (frame, a, b) in [(4, 0.35, 0.275), (5, 0.395, 0.235)] {
+            let row = tracker
+                .process_frame_with_poses(
+                    frame,
+                    &[
+                        observed(frame, 0, a, a + 0.05),
+                        observed(frame, 1, b, b + 0.05),
+                    ],
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(row.tracks.len(), 2);
+        }
+        assert_eq!(tracker.next_id(), 3);
+        let last = tracker
+            .process_frame_with_poses(
+                6,
+                &[observed(6, 0, 0.430, 0.480), observed(6, 1, 0.200, 0.250)],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            last.tracks.iter().map(|t| t.track_id).collect::<Vec<_>>(),
+            previous
+        );
+        assert_eq!(
+            last.tracks
+                .iter()
+                .find(|t| t.detection.bbox_xyxy_norm[0] > 0.4)
+                .unwrap()
+                .track_id,
+            previous[0],
+            "The initially left player must retain its own ID after crossing"
+        );
+        assert_eq!(
+            last.tracks
+                .iter()
+                .find(|t| t.detection.bbox_xyxy_norm[0] < 0.3)
+                .unwrap()
+                .track_id,
+            previous[1],
+            "The initially right player must retain its own ID after crossing"
+        );
     }
 
     #[test]
