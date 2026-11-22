@@ -3389,3 +3389,11 @@ Studio показывает кнопку перехода между debug и re
 - Кнопка «Ball Stabilizer · сравнение» удалена из общего переключателя обычного «Предпросмотра», перенесена в отладочную группу «До/После стабилизации» и недоступна вне вкладки «Дебаг». Сравнение использует исходные GPU-детекции и собственные настройки, а возврат к исходной/стабилизированной CPU-траектории не завершает Debug. Алгоритм Ball Stabilizer, анализ, версии данных и источники видео не изменены.
 - RED: в ходе полного прогона обнаружен отсутствующий английский перевод нового tooltip; исправлен через WASM-каталог. Первый повтор полного gate остановился на нестабильном несвязанном тесте CUDA P016 (0 против 32); отдельный запуск этого теста PASS без изменений GPU-кода.
 - GREEN: `node scripts/ci/test_studio_overlay_continuity.mjs`, `node scripts/ci/test_debug_player_ui.mjs`, DOM/viewport, raw GPU/processed pose и training layers — PASS. `scripts/check-all.ps1` после исправлений — PASS (WASM, fmt, Clippy `-D warnings`, Rust workspace и 96 Node gates). `git diff --check` — PASS. Ручной браузерный QA и реальная GPU-сцена — NOT TESTED.
+
+### 2026-11-23 — Геометрия рамок фаз конвейера анализа
+
+- База: `origin/develop` `5f621d40`, ветка `fix/20261123-analysis-phase-geometry`; владелец `rust/volley-app/static/studio.css`; регрессия `scripts/ci/test_studio_analysis_flow_geometry.mjs`.
+- Причина: отрицательный верхний отступ рамок почти совмещал заголовки фаз с кнопками этапов. Для обеих фаз заданы одинаковые горизонтальные поля, фиксированная высота заголовков и резерв места перед кнопками.
+- RED: новый тест геометрии исходной CSS не прошёл. GREEN: тест геометрии, DOM IDs, viewport, `git diff --check` — PASS. Edge headless на 1920 и 800 px подтвердил по 12 px боковых полей, зазор 10 px между заголовком и этапом и 26 px между рамками фаз.
+- Полный `RUST_TEST_THREADS=1 scripts/check-all.ps1` — PASS: сборка WASM, fmt, Clippy, Rust workspace и 97 Node gates. GPU-проход не требуется для CSS; ручная браузерная приёмка на живом проекте NOT TESTED.
+- Запущенную Studio не перезапускали: `start-volley-ui.cmd /status` не подтвердил принадлежность порта 8875 текущему `develop`. Пользовательские файлы и активные задания не затронуты.
