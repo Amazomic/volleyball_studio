@@ -1,0 +1,25 @@
+import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
+import {runInNewContext} from "node:vm";
+
+const script=readFileSync(new URL("../../rust/volley-app/static/studio_tabs.js",import.meta.url),"utf8");
+const start=script.indexOf("  const playerTrackingSummary=run=>{");
+const end=script.indexOf("  const stageResultText=",start);
+assert.ok(start>=0&&end>start,"Player ID summary must be defined on the analysis screen");
+const context={};
+runInNewContext(script.slice(start,end)+"\nthis.summary=playerTrackingSummary;",context);
+const stats={raw_detections:2546,total_track_ids:301,short_track_ids:21,track_ids:280};
+const result=context.summary({player_tracking_stats:stats});
+assert.match(result.text,/2[\s\u00a0\u202f]*546 обнаружений/);
+assert.match(result.text,/280 ID после ByteTrack/);
+assert.match(result.title,/21 коротких ID/);
+assert.match(result.title,/не подтверждённые личности/);
+assert.equal(context.summary({player_tracking_stats:{raw_detections:0,total_track_ids:0,short_track_ids:0,track_ids:0}}).text,"0 обнаружений\n0 ID после ByteTrack");
+assert.equal(context.summary({}),null);
+assert.equal(context.summary(null),null);
+assert.equal(context.summary({player_tracking_stats:{raw_detections:5,total_track_ids:2,short_track_ids:0}}),null);
+assert.equal(context.summary({player_tracking_stats:{raw_detections:5,total_track_ids:1,short_track_ids:0,track_ids:2}}),null);
+assert.equal(context.summary({player_tracking_stats:{raw_detections:-1,total_track_ids:0,short_track_ids:0,track_ids:0}}),null);
+assert.match(script,/cell\.append\(make\("small","analysis-flow-node-player-ids hidden"\)\)/);
+assert.match(script,/const metrics=playerTrackingSummary\(run\)/);
+console.log("Analysis RF-DETR / ByteTrack counts: OK");

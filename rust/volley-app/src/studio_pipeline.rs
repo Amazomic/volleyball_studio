@@ -1773,6 +1773,7 @@ async fn pipeline(
         status["gpu_rally_mask"] = existing["gpu_rally_mask"].clone();
         status["gpu_rally_mask_sha256"] = existing["gpu_rally_mask_sha256"].clone();
         status["cpu_runs"] = existing["cpu_runs"].clone();
+        status["player_tracking_stats"] = existing["player_tracking_stats"].clone();
         status["postprocessing_id"] = existing["postprocessing_id"].clone();
         status["gpu_reused"] = json!(true);
         status["result_reused"] = json!(true);
@@ -2077,6 +2078,12 @@ async fn pipeline(
         return Err("Трекинг CPU вышел за границы проверенной GPU-маски розыгрышей".into());
     }
     status["cpu_runs"]["tracking"] = json!(replay_id);
+    status["player_tracking_stats"] = json!({
+        "raw_detections": replay["raw_player_detections"],
+        "total_track_ids": replay["tentative_track_count"],
+        "short_track_ids": replay["discarded_short_track_ids"],
+        "track_ids": replay["provisional_track_count"],
+    });
     status["cpu_player_frame_coverage"] = json!({
         "processed_frames":replay["player_frames_processed"],
         "eligible_frames":replay["player_frame_scope_frames"],

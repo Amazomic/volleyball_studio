@@ -171,6 +171,7 @@ fn load_player_frame_scope(
 struct ReplayTotals {
     frames: u64,
     detections: u64,
+    raw_player_detections: u64,
     rejected: u64,
     ambiguous: u64,
     frames_with_ball: u64,
@@ -488,6 +489,7 @@ fn replay_frames_verified(
         if !player_frame && !frame.player_candidates.is_empty() {
             return Err("Player detections exist outside the GPU rally selection".into());
         }
+        totals.raw_player_detections += frame.player_candidates.len() as u64;
         let (proposals, joints, pose_count) = if let Some(rows) = pose_rows.as_mut() {
             if player_frame {
                 rows.frame(expected_frame, &frame.player_candidates)?
@@ -870,6 +872,7 @@ fn process_inner(
             "settings":settings,
             "frames":totals.frames,
             "tracked_player_detections":totals.detections,
+            "raw_player_detections":totals.raw_player_detections,
             "discarded_player_detections":totals.rejected + totals.short_track_detections,
             "discarded_short_track_detections":totals.short_track_detections,
             "discarded_short_track_ids":totals.unconfirmed_tracks,
@@ -1479,6 +1482,7 @@ mod tests {
         let sha = format!("{:x}", Sha256::digest(&raw));
         let (digest, totals, ids) =
             replay_frames(&source, &output, 30, TrackingOptions::default(), &sha).unwrap();
+        assert_eq!(totals.raw_player_detections, 25);
         assert_eq!(totals.tentative_tracks, 2);
         assert_eq!(ids, 1);
         assert_eq!(totals.unconfirmed_tracks, 1);
@@ -1687,6 +1691,9 @@ mod tests {
         let first = process(&state, &request).unwrap();
         assert_eq!(first["provisional_track_count"], 1);
         assert_eq!(first["tracked_player_detections"], 18);
+        assert_eq!(first["raw_player_detections"], 18);
+        assert_eq!(first["tentative_track_count"], 1);
+        assert_eq!(first["discarded_short_track_ids"], 0);
         let stricter = ReplayRequest {
             settings: Some(TrackingOptions {
                 min_player_score: 0.95,
@@ -1697,6 +1704,8 @@ mod tests {
         let second = process(&state, &stricter).unwrap();
         assert_eq!(second["provisional_track_count"], 0);
         assert_eq!(second["discarded_player_detections"], 18);
+        assert_eq!(second["raw_player_detections"], 18);
+        assert_eq!(second["tentative_track_count"], 0);
         assert_ne!(first["replay_id"], second["replay_id"]);
         assert_eq!(fs::read(fusion_dir.join("frames.jsonl")).unwrap(), raw);
         let first_id = first["replay_id"].as_str().unwrap();
