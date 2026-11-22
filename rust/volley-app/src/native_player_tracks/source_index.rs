@@ -59,7 +59,7 @@ pub(super) mod pair_geometry_keys {
     }
 }
 
-const INDEX_CACHE_SCHEMA: &str = "volley-native-track-index/2";
+const INDEX_CACHE_SCHEMA: &str = "volley-native-track-index/3";
 const MAX_INDEX_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -511,7 +511,12 @@ fn observe_track(
     }
     Ok(())
 }
-fn boxes_co_located(a: [f64; 4], b: [f64; 4]) -> bool {
+fn boxes_co_located(
+    a: [f64; 4],
+    b: [f64; 4],
+    head_a: Option<[f64; 2]>,
+    head_b: Option<[f64; 2]>,
+) -> bool {
     let width_a = a[2] - a[0];
     let height_a = a[3] - a[1];
     let width_b = b[2] - b[0];
@@ -526,18 +531,42 @@ fn boxes_co_located(a: [f64; 4], b: [f64; 4]) -> bool {
     let iou = intersection / (area_a + area_b - intersection);
     let center_x = ((a[0] + a[2]) - (b[0] + b[2])).abs() * 0.5;
     let center_y = ((a[1] + a[3]) - (b[1] + b[3])).abs() * 0.5;
-    iou >= 0.58
+    if iou >= 0.58
         && area_a.min(area_b) / area_a.max(area_b) >= 0.55
         && center_x <= 0.25 * width_a.min(width_b)
         && center_y <= 0.25 * height_a.min(height_b)
+    {
+        return true;
+    }
+    let (Some(head_a), Some(head_b)) = (head_a, head_b) else {
+        return false;
+    };
+    let min_width = width_a.min(width_b);
+    let min_height = height_a.min(height_b);
+    head_a.iter().chain(head_b.iter()).all(|v| v.is_finite())
+        && [(&head_a, &a), (&head_b, &b)].iter().all(|(head, bbox)| {
+            head[0] >= bbox[0] && head[0] <= bbox[2] && head[1] >= bbox[1] && head[1] <= bbox[3]
+        })
+        && iou >= 0.35
+        && area_a.min(area_b) / area_a.max(area_b) >= 0.35
+        && center_x <= 0.35 * min_width
+        && (a[1] - b[1]).abs() <= 0.20 * min_height
+        && (head_a[0] - head_b[0]).abs() <= 0.22 * min_width
+        && (head_a[1] - head_b[1]).abs() <= 0.12 * min_height
 }
 
-fn record_observed_pairs(tracks: &mut TrackObservations, frame: u64, boxes: &[(u64, [f64; 4])]) {
-    for (position, (first_id, first_box)) in boxes.iter().enumerate() {
-        for (second_id, second_box) in boxes.iter().skip(position + 1) {
-            let pair = ((*first_id).min(*second_id), (*first_id).max(*second_id));
-            let same_position = boxes_co_located(*first_box, *second_box);
-            for id in [*first_id, *second_id] {
+struct ObservedPlayerBox {
+    id: u64,
+    bbox: [f64; 4],
+    head: Option<[f64; 2]>,
+}
+
+fn record_observed_pairs(tracks: &mut TrackObservations, frame: u64, boxes: &[ObservedPlayerBox]) {
+    for (position, first) in boxes.iter().enumerate() {
+        for second in boxes.iter().skip(position + 1) {
+            let pair = (first.id.min(second.id), first.id.max(second.id));
+            let same_position = boxes_co_located(first.bbox, second.bbox, first.head, second.head);
+            for id in [first.id, second.id] {
                 let observation = tracks
                     .get_mut(&id)
                     .expect("observed Track ID already indexed")
@@ -608,7 +637,11 @@ fn scan_with_scope(
             if inferred.contains(&tracked.track_id) {
                 continue;
             }
-            observed_boxes.push((tracked.track_id, tracked.detection.bbox_xyxy_norm));
+            observed_boxes.push(ObservedPlayerBox {
+                id: tracked.track_id,
+                bbox: tracked.detection.bbox_xyxy_norm,
+                head: tracked.detection.head_point_norm,
+            });
             observe_track(&mut full, tracked, frame_idx)?;
             if in_play {
                 if let Some(ref mut selected) = scoped {
@@ -1057,6 +1090,57 @@ mod spatial_duplicate_tests {
     }
 
     #[test]
+    fn single_frame_same_head_handoff_does_not_create_a_distinct_player() {
+        let root = std::env::temp_dir().join(format!("track-head-handoff-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("tracked_frames.jsonl");
+        let old = [0.5312153, 0.4684438, 0.5457274, 0.5359460];
+        let next = [0.5307123, 0.4664318, 0.5491365, 0.5847691];
+        assert!(!boxes_co_located(old, next, None, None));
+        assert!(!boxes_co_located(
+            old,
+            next,
+            Some([0.542465, 0.474742]),
+            Some([0.547, 0.475287]),
+        ));
+        let mut bytes = Vec::new();
+        for frame in 0..3u64 {
+            let mut players = Vec::new();
+            if frame <= 1 {
+                players.push(json!({
+                    "track_id":4, "is_verified_athlete":false,
+                    "detection":{"frame_index":frame, "class_name":"player",
+                        "score":0.65, "query_index":5, "bbox_xyxy_norm":old,
+                        "head_point_norm":[0.542465,0.474742]}
+                }));
+            }
+            if frame >= 1 {
+                players.push(json!({
+                    "track_id":12, "is_verified_athlete":false,
+                    "detection":{"frame_index":frame, "class_name":"player",
+                        "score":0.75, "query_index":4, "bbox_xyxy_norm":next,
+                        "head_point_norm":[0.541959,0.475287]}
+                }));
+            }
+            let row = json!({
+                "frame_index":frame, "tracked_players":players,
+                "interpolated_track_ids":[], "track_ids_provisional":true,
+                "confirmed_athlete_identities":false, "touches_confirmed":false
+            });
+            bytes.extend(serde_json::to_vec(&row).unwrap());
+            bytes.push(b'\n');
+        }
+        fs::write(&path, &bytes).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let indexed = index_replay(&path, &sha, 3).unwrap();
+        let pair = &indexed[&4].observed_pairs[&(4, 12)];
+        assert_eq!(pair.same_position, 1);
+        assert_eq!(pair.distinct_position, 0);
+        assert!(!tracks_co_visible(&indexed[&4], &indexed[&12]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn true_duplicate_player_boxes_can_share_athlete_assignment() {
         let boxes = [[0.21, 0.11, 0.41, 0.71]; 4];
         let indexed = observed_pair(&boxes, false);
@@ -1196,7 +1280,7 @@ mod persistent_index_tests {
         let cache_path = stored_index_path(&path, None).unwrap();
         assert!(cache_path.is_file());
         let mut stale: Value = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
-        stale["schema"] = json!("volley-native-track-index/1");
+        stale["schema"] = json!("volley-native-track-index/2");
         stale["tracks"]["7"]["observed"] = json!(1);
         fs::write(&cache_path, serde_json::to_vec(&stale).unwrap()).unwrap();
         TRACK_INDICES.get().unwrap().lock().unwrap().clear();
