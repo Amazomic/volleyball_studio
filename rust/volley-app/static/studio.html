@@ -316,19 +316,6 @@
                   </div>
                   <small id="studio-simulation-summary" role="status" aria-live="polite"></small>
                 </div>
-                <div class="studio-debug-mode-row" role="group" aria-label="Режим дебага">
-                  <span class="studio-debug-mode-label">Режим:</span>
-                  <div class="studio-debug-mode-switch">
-                    <button type="button" id="studio-debug-mode-analysis" aria-pressed="true">Анализ проекта</button>
-                    <button type="button" id="studio-debug-mode-reference" aria-pressed="false">Просмотр эталонов</button>
-                  </div>
-                  <span class="studio-debug-mode-help">Просмотр проверенной разметки без изменения результатов анализа</span>
-                </div>
-                <div id="studio-debug-reference-picker" class="studio-debug-reference-picker hidden">
-                  <label for="studio-debug-reference-video">Эталонное видео</label>
-                  <select id="studio-debug-reference-video" aria-label="Выбрать эталонное видео"><option value="">Загрузка эталонов…</option></select>
-                  <span id="studio-debug-reference-counts" role="status" aria-live="polite">Нет выбранного эталона</span>
-                </div>
                 <span id="studio-video-time">—</span>
               </div>
               <div class="video-wrap">
@@ -446,6 +433,20 @@
                 </div>
               </div>
               <div id="studio-rallies" class="rally-grid" aria-live="polite"><div class="empty-state">Здесь появятся карточки после выбора CPU-анализа.</div></div>
+
+              <div id="studio-debug-reference-picker" class="studio-debug-reference-picker hidden">
+                <label for="studio-debug-reference-video">Эталонное видео</label>
+                <select id="studio-debug-reference-video" aria-label="Выбрать эталонное видео"><option value="">Загрузка эталонов…</option></select>
+                <span id="studio-debug-reference-counts" role="status" aria-live="polite">Нет выбранного эталона</span>
+              </div>
+              <div class="studio-debug-mode-row" role="group" aria-label="Режим дебага">
+                <span class="studio-debug-mode-label">Режим:</span>
+                <div class="studio-debug-mode-switch">
+                  <button type="button" id="studio-debug-mode-analysis" aria-pressed="true">Анализ проекта</button>
+                  <button type="button" id="studio-debug-mode-reference" aria-pressed="false">Просмотр эталонов</button>
+                </div>
+                <span class="studio-debug-mode-help">Просмотр проверенной разметки без изменения результатов анализа</span>
+              </div>
             </aside>
 
               <div id="studio-timeline" class="video-timeline" aria-label="Временная шкала всего исходного видео">
