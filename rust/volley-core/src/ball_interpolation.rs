@@ -176,7 +176,7 @@ pub struct StabilizedBallMotion {
     pub observed_frames: usize,
 }
 
-pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v6";
+pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v7";
 
 fn reject_unlinked_motion(
     points: &mut [Option<[f64; 2]>],
@@ -558,7 +558,8 @@ pub fn stabilize_ball_motion(
     rejected_frames.sort_unstable();
     rejected_frames.dedup();
     let observed_frames = confidence_frames - rejected_frames.len();
-    let interpolated = interpolate_short_gaps_bounded(&mut points, settings.max_gap_frames);
+    let mut interpolated = interpolate_short_gaps_bounded(&mut points, settings.max_gap_frames);
+    interpolate_stabilizer_rebounds(&mut points, &mut interpolated, settings.max_gap_frames);
     Ok(StabilizedBallMotion {
         points,
         interpolated,
@@ -570,6 +571,158 @@ pub fn stabilize_ball_motion(
 
 pub fn interpolate_short_gaps(points: &mut [Option<[f64; 2]>]) -> Vec<bool> {
     interpolate_short_gaps_bounded(points, MAX_MISSING_BALL_FRAMES)
+}
+
+fn reconstruct_occluded_rebound(
+    points: &[Option<[f64; 2]>],
+    left: usize,
+    right: usize,
+    synthetic: &[bool],
+    max_missing_frames: usize,
+) -> Option<Vec<[f64; 2]>> {
+    let missing = right.checked_sub(left + 1)?;
+    if !(3..=12.min(max_missing_frames)).contains(&missing)
+        || left < 2
+        || right + 2 >= points.len()
+        || synthetic[left - 1]
+        || synthetic[left - 2]
+        || synthetic[right + 1]
+        || synthetic[right + 2]
+    {
+        return None;
+    }
+    let begin = points[left]?;
+    let end = points[right]?;
+    let before = points[left - 1]?;
+    let before_prev = points[left - 2]?;
+    let after = points[right + 1]?;
+    let after_next = points[right + 2]?;
+    let incoming = [begin[0] - before[0], begin[1] - before[1]];
+    let incoming_previous = [before[0] - before_prev[0], before[1] - before_prev[1]];
+    let outgoing = [after[0] - end[0], after[1] - end[1]];
+    let outgoing_next = [after_next[0] - after[0], after_next[1] - after[1]];
+    let norm = |v: [f64; 2]| v[0].hypot(v[1]);
+    let speed_in = norm(incoming);
+    let speed_out = norm(outgoing);
+    if speed_in < 0.012
+        || speed_out < 0.012
+        || speed_in > MAX_DISPLACEMENT_PER_FRAME
+        || speed_out > MAX_DISPLACEMENT_PER_FRAME
+        || norm([
+            incoming[0] - incoming_previous[0],
+            incoming[1] - incoming_previous[1],
+        ]) > 0.009
+        || norm([
+            outgoing[0] - outgoing_next[0],
+            outgoing[1] - outgoing_next[1],
+        ]) > 0.009
+    {
+        return None;
+    }
+    let cosine = (incoming[0] * outgoing[0] + incoming[1] * outgoing[1]) / (speed_in * speed_out);
+    if cosine > 0.15
+        || norm([outgoing[0] - incoming[0], outgoing[1] - incoming[1]]) < 0.028
+        || (incoming[1] < -0.004 && outgoing[1] > 0.004)
+    {
+        return None;
+    }
+    let duration = (right - left) as f64;
+    let mut closest: Option<(f64, usize, [f64; 2])> = None;
+    for impact in left..right {
+        let t = (impact - left) as f64;
+        let predicted_in = [begin[0] + incoming[0] * t, begin[1] + incoming[1] * t];
+        let predicted_out = [
+            end[0] - outgoing[0] * (duration - t),
+            end[1] - outgoing[1] * (duration - t),
+        ];
+        let separation = norm([
+            predicted_in[0] - predicted_out[0],
+            predicted_in[1] - predicted_out[1],
+        ]);
+        if (predicted_in[0] - predicted_out[0]).abs() > 0.024 || separation > 0.055 {
+            continue;
+        }
+        let joint = if impact == left {
+            begin
+        } else {
+            [
+                (predicted_in[0] + predicted_out[0]) * 0.5,
+                (predicted_in[1] + predicted_out[1]) * 0.5,
+            ]
+        };
+        if !valid_point(joint) {
+            continue;
+        }
+        if closest.is_none_or(|(error, _, _)| separation < error) {
+            closest = Some((separation, impact, joint));
+        }
+    }
+    let (_, impact, joint) = closest?;
+    let slope_after = [
+        (end[0] - joint[0]) / (right - impact) as f64,
+        (end[1] - joint[1]) / (right - impact) as f64,
+    ];
+    if norm([slope_after[0] - outgoing[0], slope_after[1] - outgoing[1]]) > 0.025
+        || norm(slope_after) > MAX_DISPLACEMENT_PER_FRAME
+    {
+        return None;
+    }
+    let slope_before = if impact > left {
+        [
+            (joint[0] - begin[0]) / (impact - left) as f64,
+            (joint[1] - begin[1]) / (impact - left) as f64,
+        ]
+    } else {
+        incoming
+    };
+    if norm(slope_before) > MAX_DISPLACEMENT_PER_FRAME {
+        return None;
+    }
+    let estimates = (left + 1..right)
+        .map(|frame| {
+            if frame <= impact {
+                let t = (frame - left) as f64;
+                [
+                    begin[0] + slope_before[0] * t,
+                    begin[1] + slope_before[1] * t,
+                ]
+            } else {
+                let t = (frame - impact) as f64;
+                [joint[0] + slope_after[0] * t, joint[1] + slope_after[1] * t]
+            }
+        })
+        .collect::<Vec<_>>();
+    estimates
+        .iter()
+        .all(|point| valid_point(*point))
+        .then_some(estimates)
+}
+
+fn interpolate_stabilizer_rebounds(
+    points: &mut [Option<[f64; 2]>],
+    synthetic: &mut [bool],
+    max_missing_frames: usize,
+) {
+    let mut previous: Option<usize> = None;
+    for right in 0..points.len() {
+        if points[right].is_none() {
+            continue;
+        }
+        if let Some(left) = previous {
+            if !synthetic[left] && !synthetic[right] {
+                if let Some(estimates) =
+                    reconstruct_occluded_rebound(points, left, right, synthetic, max_missing_frames)
+                {
+                    for (offset, point) in estimates.into_iter().enumerate() {
+                        let frame = left + offset + 1;
+                        points[frame] = Some(point);
+                        synthetic[frame] = true;
+                    }
+                }
+            }
+        }
+        previous = Some(right);
+    }
 }
 
 fn interpolate_short_gaps_bounded(
@@ -1155,6 +1308,63 @@ mod tests {
             .all(|&frame| (25..=27).contains(&frame)));
     }
 
+    #[test]
+    fn ball_stabilizer_reconstructs_an_occluded_rebound_instead_of_erasing_it() {
+        let samples = |offset: f64| {
+            (407..=435)
+                .filter(|frame| !(420..=427).contains(frame))
+                .map(|frame| {
+                    let t = (frame as i64 - 419) as f64;
+                    ScoredBallSample {
+                        frame,
+                        point: [
+                            (1035.0 + 2.5 * t + if frame > 419 { offset } else { 0.0 }) / 1920.0,
+                            (if frame <= 419 {
+                                820.0 + 48.0 * t + 0.15 * t * t
+                            } else {
+                                790.0 - 42.0 * t + 0.20 * t * t
+                            }) / 1080.0,
+                        ],
+                        confidence: 0.85,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let result =
+            stabilize_ball_motion(&samples(0.0), 436, BallStabilizerSettings::default()).unwrap();
+        for frame in 420..=427 {
+            assert!(
+                result.interpolated[frame],
+                "missing synthetic frame {frame}"
+            );
+            assert!(result.points[frame].is_some());
+        }
+        assert!(result.points[419].unwrap()[1] > result.points[418].unwrap()[1]);
+        assert!(result.points[420].unwrap()[1] < result.points[419].unwrap()[1]);
+        assert!(result.points[429].unwrap()[1] < result.points[428].unwrap()[1]);
+        assert!(!result.interpolated[419]);
+        assert!(!result.interpolated[428]);
+
+        let switched =
+            stabilize_ball_motion(&samples(260.0), 436, BallStabilizerSettings::default()).unwrap();
+        assert!(!switched.interpolated[424]);
+        assert!(switched.points[424].is_none());
+        let apex = (407..=435)
+            .filter(|frame| !(420..=427).contains(frame))
+            .map(|frame| {
+                let t = (frame as i64 - 420) as f64;
+                ScoredBallSample {
+                    frame,
+                    point: [0.52, (350.0 + 0.20 * t * t) / 1080.0],
+                    confidence: 0.90,
+                }
+            })
+            .collect::<Vec<_>>();
+        let smooth = stabilize_ball_motion(&apex, 436, BallStabilizerSettings::default()).unwrap();
+        assert!(smooth.points[420..=427].iter().all(Option::is_some));
+        assert!(smooth.points[418].unwrap()[1] > smooth.points[419].unwrap()[1]);
+        assert!(smooth.points[429].unwrap()[1] > smooth.points[428].unwrap()[1]);
+    }
     #[test]
     fn ball_stabilizer_keeps_real_turns_and_refuses_long_gaps() {
         let mut samples = Vec::new();

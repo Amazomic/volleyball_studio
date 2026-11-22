@@ -47,6 +47,7 @@
 - [Трекинг: версионная заметка](native-player-tracking.md)
 - [Позы: версионная заметка](RTMPOSE_PIPELINE.md)
 - [Постобработка касаний](TOUCH_PROCESSING.md)
+- [Контракт Ball Stabilizer](BALL_STABILIZER.md)
 - [Траекторный детектор](TRAJECTORY_TOUCH_DETECTOR.md)
 - [Архивный алгоритм ведущего мяча](LEADING_BALL_TRACKING.md)
 - [Совместимость геометрической интерпретации касаний](TOUCH_DETECTION_RUST_PARITY.md)
