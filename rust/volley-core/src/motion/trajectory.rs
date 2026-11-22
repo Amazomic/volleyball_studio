@@ -285,7 +285,8 @@ fn smooth_gravity_apex_near(points: &[BallObservation], frame: i64, max_fit_erro
     let Some(flight) = fit(window, points[apex].frame) else {
         return false;
     };
-    if flight.error > max_fit_error_px || flight.y[2] <= 0.0 || 2.0 * flight.x[2].abs() > 0.8 {
+    if flight.error > 1.5 * max_fit_error_px || flight.y[2] <= 0.0 || 2.0 * flight.x[2].abs() > 0.8
+    {
         return false;
     }
     let left_t = (window[0].frame - points[apex].frame) as f64;
@@ -303,6 +304,85 @@ fn smooth_gravity_apex_near(points: &[BallObservation], frame: i64, max_fit_erro
     let left_dx = window[4].x - window[0].x;
     let right_dx = window[10].x - window[6].x;
     !(left_dx * right_dx < 0.0 && left_dx.abs().min(right_dx.abs()) > 2.0 * max_fit_error_px)
+}
+
+fn sustained_down_to_up_rebounds(
+    points: &[BallObservation],
+    config: DirectionBreakConfig,
+) -> Vec<TrajectoryBreak> {
+    let mut candidates: Vec<TrajectoryBreak> = Vec::new();
+    for at in 4..points.len().saturating_sub(4) {
+        let window = &points[at - 4..=at + 4];
+        if window[8].frame - window[0].frame > 10
+            || window.windows(2).any(|pair| {
+                pair[1].frame - pair[0].frame > 2
+                    || (pair[1].x - pair[0].x).abs() > 4.0 * config.max_join_error_px
+            })
+        {
+            continue;
+        }
+        let contact = window[4];
+        let displacement_needed = 20.0 * config.max_fit_error_px;
+        if contact.y - window[0].y < displacement_needed
+            || contact.y - window[8].y < displacement_needed
+            || window[..5]
+                .windows(2)
+                .any(|pair| pair[1].y + 2.0 * config.max_fit_error_px < pair[0].y)
+            || window[4..]
+                .windows(2)
+                .any(|pair| pair[1].y > pair[0].y + 2.0 * config.max_fit_error_px)
+        {
+            continue;
+        }
+        let before_span = (contact.frame - window[0].frame) as f64;
+        let after_span = (window[8].frame - contact.frame) as f64;
+        let before = [
+            (contact.x - window[0].x) / before_span,
+            (contact.y - window[0].y) / before_span,
+        ];
+        let after = [
+            (window[8].x - contact.x) / after_span,
+            (window[8].y - contact.y) / after_span,
+        ];
+        let before_length = before[0].hypot(before[1]);
+        let after_length = after[0].hypot(after[1]);
+        if before_length <= 1e-6 || after_length <= 1e-6 {
+            continue;
+        }
+        let cosine = ((before[0] * after[0] + before[1] * after[1])
+            / (before_length * after_length))
+            .clamp(-1.0, 1.0);
+        let angle = cosine.acos().to_degrees();
+        if angle < config.min_turn_angle_deg {
+            continue;
+        }
+        let local_x_error = (contact.x - 0.5 * (window[3].x + window[5].x)).abs();
+        let candidate = TrajectoryBreak {
+            frame: contact.frame,
+            position: [contact.x, contact.y],
+            motion: MotionEvidence {
+                motion_frame: contact.frame,
+                speed_before: before_length,
+                speed_after: after_length,
+                angle,
+                residual: (after[0] - before[0]).hypot(after[1] - before[1]),
+            },
+            fit_error: local_x_error,
+            before_frames: window[..4].iter().map(|p| p.frame).collect(),
+            after_frames: window[5..].iter().map(|p| p.frame).collect(),
+            contact_observed: true,
+        };
+        if let Some(prior) = candidates.last_mut().filter(|event| {
+            event.frame.abs_diff(candidate.frame) <= config.min_separation_frames as u64
+        }) {
+            if candidate.position[1] > prior.position[1] {
+                *prior = candidate;
+            }
+        } else {
+            candidates.push(candidate);
+        }
+    }
+    candidates
 }
 
 pub fn trajectory_direction_breaks(
@@ -438,6 +518,18 @@ pub fn trajectory_direction_breaks(
             found.push(candidate);
         }
     }
+    for rebound in sustained_down_to_up_rebounds(points, config) {
+        if let Some(nearby) = found.iter_mut().find(|event| {
+            event.frame.abs_diff(rebound.frame) <= config.min_separation_frames as u64
+        }) {
+            if nearby.frame != rebound.frame {
+                *nearby = rebound;
+            }
+        } else {
+            found.push(rebound);
+        }
+    }
+    found.sort_by_key(|event| event.frame);
     found
 }
 
@@ -580,6 +672,56 @@ mod tests {
         assert!(
             found.is_empty(),
             "smooth quantized flight generated false contact: {found:?}"
+        );
+    }
+
+    #[test]
+    fn false_track_switch_during_a_descent_is_not_a_rebound() {
+        let points: Vec<_> = (0..64)
+            .map(|frame| {
+                let t = frame as f64 - 32.0;
+                BallObservation {
+                    frame,
+                    x: 480.0 + 2.0 * t - if frame >= 32 { 900.0 } else { 0.0 },
+                    y: 330.0 + 7.0 * t + 0.2 * t * t + if frame == 32 { 250.0 } else { 0.0 },
+                }
+            })
+            .collect();
+        assert!(
+            trajectory_direction_breaks(&points, DirectionBreakConfig::default()).is_empty(),
+            "A switched track or a single spurious position is not a confirmed contact"
+        );
+    }
+
+    #[test]
+    fn rebound_precedes_noisy_upper_apex_and_is_timed_at_first_turn() {
+        let points: Vec<_> = (40..=108)
+            .map(|frame| {
+                let t = (frame - 70) as f64;
+                let descending = 900.0 + 47.0 * t + 1.5 * t * t;
+                let rising = 900.0 - 84.0 * t + 2.0 * t * t;
+                let mut y = if t <= 0.0 { descending } else { rising };
+                if frame == 71 {
+                    y = 889.0;
+                }
+                if (75..=77).contains(&frame) {
+                    y = 820.0;
+                }
+                BallObservation {
+                    frame,
+                    x: ((1050.0 + 2.2 * t) / 3.75).round() * 3.75,
+                    y: (y / 3.75).round() * 3.75,
+                }
+            })
+            .collect();
+        let events = trajectory_direction_breaks(&points, DirectionBreakConfig::default());
+        assert!(
+            events.iter().any(|event| event.frame.abs_diff(70) <= 1),
+            "The descending-to-rising collision was missed: {events:?}"
+        );
+        assert!(
+            events.iter().all(|event| event.frame.abs_diff(91) > 5),
+            "The next unforced upper apex is not another contact: {events:?}"
         );
     }
 
