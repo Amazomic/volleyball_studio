@@ -260,6 +260,51 @@ pub fn trajectory_breaks_configured(
     found
 }
 
+fn smooth_gravity_apex_near(points: &[BallObservation], frame: i64, max_fit_error_px: f64) -> bool {
+    let start = points.partition_point(|point| point.frame < frame - 12);
+    let end = points.partition_point(|point| point.frame <= frame + 12);
+    let Some((offset, _)) = points[start..end]
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.y.total_cmp(&b.y))
+    else {
+        return false;
+    };
+    let apex = start + offset;
+    if apex < 5 || apex + 5 >= points.len() || points[apex].frame.abs_diff(frame) > 10 {
+        return false;
+    }
+    let window = &points[apex - 5..=apex + 5];
+    if window[10].frame - window[0].frame > 18
+        || window
+            .windows(2)
+            .any(|pair| pair[1].frame - pair[0].frame > 3)
+    {
+        return false;
+    }
+    let Some(flight) = fit(window, points[apex].frame) else {
+        return false;
+    };
+    if flight.error > max_fit_error_px || flight.y[2] <= 0.0 || 2.0 * flight.x[2].abs() > 0.8 {
+        return false;
+    }
+    let left_t = (window[0].frame - points[apex].frame) as f64;
+    let right_t = (window[window.len() - 1].frame - points[apex].frame) as f64;
+    let before_vertical = flight.y[1] + 2.0 * flight.y[2] * left_t;
+    let after_vertical = flight.y[1] + 2.0 * flight.y[2] * right_t;
+    let vertex = flight.y[0] - flight.y[1].powi(2) / (4.0 * flight.y[2]);
+    if before_vertical >= -max_fit_error_px / 2.0
+        || after_vertical <= max_fit_error_px / 2.0
+        || (window[0].y - vertex) < 2.0 * max_fit_error_px
+        || (window[window.len() - 1].y - vertex) < 2.0 * max_fit_error_px
+    {
+        return false;
+    }
+    let left_dx = window[4].x - window[0].x;
+    let right_dx = window[10].x - window[6].x;
+    !(left_dx * right_dx < 0.0 && left_dx.abs().min(right_dx.abs()) > 2.0 * max_fit_error_px)
+}
+
 pub fn trajectory_direction_breaks(
     points: &[BallObservation],
     config: DirectionBreakConfig,
@@ -356,6 +401,9 @@ pub fn trajectory_direction_breaks(
             && !impossible_gravity_reversal)
             || error > smooth.error * 0.65
         {
+            continue;
+        }
+        if smooth_gravity_apex_near(points, at, config.max_fit_error_px) {
             continue;
         }
         let candidate = TrajectoryBreak {
@@ -478,6 +526,27 @@ mod tests {
             ..TrajectoryBreakConfig::default()
         }
         .valid());
+    }
+
+    #[test]
+    fn rounded_slowing_ascent_before_gravity_apex_is_not_a_touch() {
+        let points: Vec<BallObservation> = (0..46)
+            .map(|frame| {
+                let at = frame as f64 - 25.0;
+                let early_ascent = (3.0 - at).max(0.0);
+                BallObservation {
+                    frame,
+                    x: ((804.0 + 1.7 * at) / 3.75).round() * 3.75,
+                    y: ((305.0 + 0.75 * at * at + 0.09 * early_ascent.powi(3)) / 3.75).round()
+                        * 3.75,
+                }
+            })
+            .collect();
+        let found = trajectory_direction_breaks(&points, DirectionBreakConfig::default());
+        assert!(
+            found.is_empty(),
+            "Smooth ascent through natural apex gave a false touch: {found:?}"
+        );
     }
 
     #[test]
