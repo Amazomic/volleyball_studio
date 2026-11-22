@@ -20,9 +20,9 @@ pub use trajectory_tcn::{evaluate_tcn_peaks, trajectory_features};
 
 /// Maximum time between a real observed VBallNet anchor and a predicted
 /// impact inside the bounded (at most ten-frame) missing-ball island.
-/// The touch itself must still reference a real same-frame ball and player.
+/// Occluded impacts retain observed flight anchors and a same-frame tracked player.
 pub const MAX_OBSERVED_TOUCH_OFFSET_FRAMES: u64 = 9;
-pub const TRAJECTORY_DETECTOR_VERSION: &str = "piecewise_ballistic_motion_v4";
+pub const TRAJECTORY_DETECTOR_VERSION: &str = "piecewise_ballistic_motion_v5";
 pub const INTERPOLATED_BALL_SOURCE: &str = "ball_stabilizer_interpolated";
 
 use crate::{
@@ -370,10 +370,20 @@ pub fn evaluate_block(
             .players
             .iter()
             .find(|p| p.track_id == candidate.track_id);
-        let ball = source
+        let observed_ball = source
             .selected_ball
             .as_ref()
             .filter(|ball| ball.source_model == "vballnet");
+        let ball = observed_ball.or_else(|| {
+            candidate.ball_occluded_at_contact.then(|| {
+                frames[..candidate.frame]
+                    .iter()
+                    .rev()
+                    .take(10)
+                    .filter_map(|row| row.selected_ball.as_ref())
+                    .find(|ball| ball.source_model == "vballnet")
+            })?
+        });
         let (Some(player), Some(ball)) = (player, ball) else {
             continue;
         };
@@ -425,8 +435,8 @@ pub fn evaluate_block(
             body_contact_supported: false,
             contact_landmark: None,
             contact_pose_sample_frame: None,
-            ball_occluded_at_contact: false,
-            inferred_body_reach_supported: false,
+            ball_occluded_at_contact: candidate.ball_occluded_at_contact,
+            inferred_body_reach_supported: candidate.ball_occluded_at_contact,
             athlete_identity_verified: false,
         });
     }
@@ -828,6 +838,115 @@ mod tests {
             serde_json::to_value(without_model).unwrap(),
             serde_json::to_value(expected).unwrap()
         );
+    }
+
+    fn stopped_ball_launch_frames(has_player: bool, fast_exit: bool) -> Vec<TouchFrame> {
+        (0..50u64)
+            .map(|i| {
+                let selected_ball = if (33..=38).contains(&i) {
+                    None
+                } else {
+                    let t = i.saturating_sub(39) as f64;
+                    let x = 420.0 - if i >= 39 { t * 1.5 } else { 0.0 };
+                    let y = 360.0
+                        - if i >= 39 {
+                            if fast_exit {
+                                60.0 + 20.0 * t
+                            } else {
+                                4.0 + t
+                            }
+                        } else {
+                            0.0
+                        };
+                    Some(TouchBall {
+                        source_model: "vballnet".into(),
+                        score: 0.85,
+                        bbox_xyxy_norm: [
+                            (x - 5.0) / 1280.0,
+                            (y - 5.0) / 720.0,
+                            (x + 5.0) / 1280.0,
+                            (y + 5.0) / 720.0,
+                        ],
+                    })
+                };
+                TouchFrame {
+                    frame_index: i,
+                    players: if has_player {
+                        vec![TouchPlayer {
+                            track_id: 11,
+                            score: 0.90,
+                            touch_probability: None,
+                            bbox_xyxy_norm: [0.30, 0.30, 0.36, 0.65],
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    selected_ball,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn occluded_stationary_ball_launch_is_timed_inside_real_observation_gap() {
+        let frames = stopped_ball_launch_frames(true, true);
+        let events = evaluate_block(&frames, 1280, 720, 0, 50, TouchSettings::default()).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].frame_index, 36, "{events:?}");
+        assert!(frames[events[0].frame_index as usize]
+            .selected_ball
+            .is_none());
+        assert_eq!(events[0].provisional_track_id, Some(11));
+        assert!(events[0].ball_occluded_at_contact);
+        assert!(events[0].inferred_body_reach_supported);
+        assert!(!events[0].body_contact_supported);
+        assert!(events[0].speed_after_px_frame > 15.0);
+    }
+
+    #[test]
+    fn occluded_stationary_ball_launch_requires_player_and_strong_outgoing_flight() {
+        for (has_player, fast_exit) in [(false, true), (true, false)] {
+            let frames = stopped_ball_launch_frames(has_player, fast_exit);
+            let events =
+                evaluate_block(&frames, 1280, 720, 0, 50, TouchSettings::default()).unwrap();
+            assert!(events.is_empty(), "{events:?}");
+        }
+    }
+
+    #[test]
+    fn stabilized_speed_and_direction_change_with_sparse_raw_anchors_is_detected() {
+        let mut frames = strong_rebound_frames();
+        for (index, frame) in frames.iter_mut().enumerate() {
+            let x = if index <= 32 {
+                0.20 + index as f64 * 0.008
+            } else {
+                0.20 + 32.0 * 0.008 - (index - 32) as f64 * 0.0095
+            };
+            let ball = frame.selected_ball.as_mut().unwrap();
+            ball.bbox_xyxy_norm[0] = x;
+            ball.bbox_xyxy_norm[2] = x + 0.02;
+            if index != 32 && index % 3 != 0 {
+                ball.source_model = INTERPOLATED_BALL_SOURCE.into();
+            }
+        }
+        let events = evaluate_block(&frames, 640, 360, 0, 80, TouchSettings::default()).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].frame_index.abs_diff(32) <= 1, "{events:?}");
+        assert!(events[0].speed_after_px_frame > events[0].speed_before_px_frame);
+        assert!(events[0].direction_change_deg > 120.0);
+    }
+
+    #[test]
+    fn stabilized_smooth_flight_with_sparse_raw_anchors_does_not_produce_contact() {
+        let mut frames = scenario(false, true, false);
+        for (index, frame) in frames.iter_mut().enumerate() {
+            if index % 3 != 0 {
+                frame.selected_ball.as_mut().unwrap().source_model =
+                    INTERPOLATED_BALL_SOURCE.into();
+            }
+        }
+        let events = evaluate_block(&frames, 640, 360, 0, 80, TouchSettings::default()).unwrap();
+        assert!(events.is_empty(), "{events:?}");
     }
 
     #[test]

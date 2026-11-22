@@ -13,11 +13,21 @@ pub(super) struct GeometryContact {
     pub motion: MotionEvidence,
     pub ball_x: f64,
     pub ball_y: f64,
+    pub ball_occluded_at_contact: bool,
 }
 
 /// Do not interpret a switch to an unsupported ball source as an impact.
 pub(super) fn stable_ball_source(frames: &[TouchFrame], index: usize) -> bool {
     stable_ball_source_with_min_samples(frames, index, 3)
+        || (index >= 5
+            && index + 5 < frames.len()
+            && frames[index - 5..=index + 5].iter().any(|frame| {
+                frame
+                    .selected_ball
+                    .as_ref()
+                    .is_some_and(|ball| ball.source_model == INTERPOLATED_BALL_SOURCE)
+            })
+            && stable_ball_source_with_min_samples(frames, index, 2))
 }
 
 /// Pose-confirmed contacts can tolerate a few missing VballNet frames: two
@@ -343,6 +353,7 @@ pub(super) fn detect(
             motion,
             ball_x: x,
             ball_y: y,
+            ball_occluded_at_contact: false,
         });
     }
     result
@@ -452,6 +463,7 @@ pub(super) fn detect_observed_vertical_rebounds(
             },
             ball_x: b[0],
             ball_y: b[1],
+            ball_occluded_at_contact: false,
         });
     }
     proposals
@@ -672,6 +684,90 @@ pub(super) fn detect_gap_rebounds(
         let speed_before = v_before[0].hypot(v_before[1]);
         let speed_after = v_after[0].hypot(v_after[1]);
         let top_speed = speed_before.max(speed_after);
+        if speed_before < 3.0 && (14.0..=60.0).contains(&speed_after) {
+            let preceding: Vec<_> = (before.saturating_sub(6)..=before)
+                .filter_map(center_px)
+                .collect();
+            let outbound = (after..(after + 8).min(frames.len()))
+                .filter(|&i| center_px(i).is_some())
+                .count();
+            if preceding.len() >= 4
+                && outbound >= 4
+                && preceding
+                    .iter()
+                    .all(|point| (point[0] - a[0]).hypot(point[1] - a[1]) <= 14.0)
+            {
+                let delta = [b[0] - a[0], b[1] - a[1]];
+                let flight_time =
+                    (delta[0] * v_after[0] + delta[1] * v_after[1]) / speed_after.powi(2);
+                let projected = [
+                    b[0] - flight_time * v_after[0],
+                    b[1] - flight_time * v_after[1],
+                ];
+                let cross_track_error = (projected[0] - a[0]).hypot(projected[1] - a[1]);
+                if flight_time.is_finite()
+                    && flight_time >= 1.0
+                    && flight_time <= (after - before - 1) as f64
+                    && cross_track_error <= 16.0
+                {
+                    let impact = (after as f64 - flight_time).round() as usize;
+                    if impact > before && impact < after {
+                        let anchor_ball = frames[before].selected_ball.as_ref().unwrap();
+                        let [x1, y1, x2, y2] = anchor_ball.bbox_xyxy_norm;
+                        let radius = ((x2 - x1) * width + (y2 - y1) * height) * 0.25;
+                        if let Some((track_id, cost, player_score)) = touching_player(
+                            frames,
+                            impact,
+                            ReachEvidence {
+                                width,
+                                height,
+                                ball_x: a[0],
+                                ball_y: a[1],
+                                ball_radius: radius,
+                                max_reach_ratio,
+                                strong_reversal: false,
+                            },
+                        ) {
+                            let stable_player = frames[before]
+                                .players
+                                .iter()
+                                .any(|p| p.track_id == track_id)
+                                && frames[after].players.iter().any(|p| p.track_id == track_id)
+                                && frames[before..=after]
+                                    .iter()
+                                    .filter(|row| {
+                                        row.players.iter().any(|p| p.track_id == track_id)
+                                    })
+                                    .count()
+                                    >= 5;
+                            if stable_player {
+                                result.push(GeometryContact {
+                                    frame: impact,
+                                    track_id,
+                                    probability: (0.60
+                                        + 0.15 * speed_after / (speed_after + 12.0)
+                                        + 0.10 * player_score
+                                        + 0.10 * (1.0 - cost.min(1.0)))
+                                    .min(0.87),
+                                    motion: MotionEvidence {
+                                        motion_frame: impact as i64,
+                                        speed_before,
+                                        speed_after,
+                                        angle: 0.0,
+                                        residual: (v_after[0] - v_before[0])
+                                            .hypot(v_after[1] - v_before[1]),
+                                    },
+                                    ball_x: a[0],
+                                    ball_y: a[1],
+                                    ball_occluded_at_contact: true,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         if speed_before < 3.0 || speed_after < 3.0 {
             continue;
         }
@@ -815,6 +911,7 @@ pub(super) fn detect_gap_rebounds(
             },
             ball_x: anchor_ball[0],
             ball_y: anchor_ball[1],
+            ball_occluded_at_contact: false,
         });
     }
     result
