@@ -1752,6 +1752,9 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
     let original = read_internal(&state, &query).unwrap();
     assert_eq!(original["total_tracks"], 2);
     assert_eq!(original["revision"], "absent");
+    assert_eq!(original["automatic_link_health"]["saved_count"], 0);
+    assert_eq!(original["automatic_link_health"]["effective_count"], 0);
+    assert_eq!(original["automatic_link_health"]["reason"], "current");
     assert_eq!(original["source_kind"], "native_gpu_cpu_replay");
     assert_eq!(
         original["evidence_source"]["tracked_frames_sha256"],
@@ -2426,5 +2429,91 @@ fn large_reid_match_evidence_fits_native_assignment_sidecar() {
         .unwrap()
         .unwrap();
     assert_eq!(serde_json::from_slice::<Value>(&loaded).unwrap(), doc);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn strict_reid_group_links_a_short_fragment_only_with_three_frame_anchor() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    let mut second = ctx.tracks[&7].clone();
+    second.first = 5;
+    second.last = 15;
+    second.visible_spans = vec![(12, 15)];
+    second.observed_pairs.clear();
+    ctx.tracks.get_mut(&7).unwrap().visible_spans = vec![(0, 4)];
+    ctx.tracks.insert(8, second);
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
+    let mut embedding = vec![0.0_f32; volley_inference::reid_openvino::DIMENSIONS];
+    embedding[0] = 1.0;
+    let vectors = BTreeMap::from([(7, embedding.clone()), (8, embedding)]);
+    let matches = json!({
+        "7":[{"player_id":"abcdef012345","cosine_similarity":0.86,"samples_used":3}],
+        "8":[{"player_id":"abcdef012345","cosine_similarity":0.70,"samples_used":1}]
+    });
+    let groups = photo_comparison::strict_visual_identity_groups(&ctx, &vectors, &matches);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["track_ids"], json!([7, 8]));
+    let initial = choose_automatic_photo_links(&ctx, &base_document(&ctx), &matches).unwrap();
+    assert_eq!(initial.len(), 1);
+    let linked = choose_automatic_photo_links_with_groups(
+        &ctx,
+        &base_document(&ctx),
+        &matches,
+        &json!(groups),
+        0.75,
+    )
+    .unwrap();
+    assert_eq!(linked.len(), 2);
+    assert_eq!(linked.get(&8).map(String::as_str), Some("abcdef012345"));
+    ctx.tracks.get_mut(&8).unwrap().visible_spans = vec![(2, 8)];
+    assert!(photo_comparison::strict_visual_identity_groups(&ctx, &vectors, &matches).is_empty());
+    let blocked = choose_automatic_photo_links_with_groups(
+        &ctx,
+        &base_document(&ctx),
+        &matches,
+        &json!(groups),
+        0.75,
+    )
+    .unwrap();
+    assert_eq!(blocked.len(), 1);
+    assert!(!blocked.contains_key(&8));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ambiguous_or_unverified_visual_group_does_not_invent_an_athlete() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    ctx.roster.insert("123456abcdef".into(), "Player B".into());
+    let mut second = ctx.tracks[&7].clone();
+    second.first = 18;
+    second.last = 24;
+    second.visible_spans = vec![(18, 24)];
+    ctx.tracks.insert(8, second);
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
+    let mut embedding = vec![0.0_f32; volley_inference::reid_openvino::DIMENSIONS];
+    embedding[0] = 1.0;
+    let vectors = BTreeMap::from([(7, embedding.clone()), (8, embedding)]);
+    let ambiguous = json!({
+        "7":[{"player_id":"abcdef012345","cosine_similarity":0.90,"samples_used":3}],
+        "8":[{"player_id":"abcdef012345","cosine_similarity":0.72,"samples_used":1},
+             {"player_id":"123456abcdef","cosine_similarity":0.68,"samples_used":1}]
+    });
+    assert!(photo_comparison::strict_visual_identity_groups(&ctx, &vectors, &ambiguous).is_empty());
+    let forged = json!([{"player_id":"abcdef012345",
+        "policy":"unsupported","track_ids":[7,8]}]);
+    let chosen = choose_automatic_photo_links_with_groups(
+        &ctx,
+        &base_document(&ctx),
+        &ambiguous,
+        &forged,
+        0.75,
+    )
+    .unwrap();
+    assert_eq!(chosen.len(), 1);
+    assert!(!chosen.contains_key(&8));
     fs::remove_dir_all(root).unwrap();
 }

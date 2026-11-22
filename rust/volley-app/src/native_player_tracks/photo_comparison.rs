@@ -454,6 +454,106 @@ async fn decode_track_crop(
     volley_inference::reid_openvino::bgr24_to_nchw(&output.stdout).map_err(storage::bad_request)
 }
 
+pub(super) fn strict_visual_identity_groups(
+    ctx: &Inputs,
+    vectors: &BTreeMap<u64, Vec<f32>>,
+    matches: &Value,
+) -> Vec<Value> {
+    let mut by_player = BTreeMap::<String, Vec<u64>>::new();
+    for (&id, vector) in vectors {
+        if vector.len() != volley_inference::reid_openvino::DIMENSIONS
+            || !ctx.tracks.contains_key(&id)
+        {
+            continue;
+        }
+        let Some(rows) = matches[id.to_string()].as_array() else {
+            continue;
+        };
+        let Some(best) = rows.first() else { continue };
+        let (Some(player), Some(score)) = (
+            best["player_id"].as_str(),
+            best["cosine_similarity"].as_f64(),
+        ) else {
+            continue;
+        };
+        let competitor = rows
+            .iter()
+            .skip(1)
+            .filter_map(|row| row["cosine_similarity"].as_f64())
+            .fold(0.0_f64, f64::max);
+        if !ctx.roster.contains_key(player)
+            || !score.is_finite()
+            || score < 0.65
+            || score - competitor < 0.08
+        {
+            continue;
+        }
+        by_player.entry(player.to_owned()).or_default().push(id);
+    }
+    let mut result = Vec::new();
+    for (player, mut ids) in by_player {
+        ids.sort_by(|a, b| {
+            ctx.tracks[b]
+                .observed
+                .cmp(&ctx.tracks[a].observed)
+                .then_with(|| a.cmp(b))
+        });
+        let mut groups: Vec<Vec<u64>> = Vec::new();
+        for id in ids {
+            let mut inserted = false;
+            for group in &mut groups {
+                if group.len() == 200 {
+                    continue;
+                }
+                let compatible = group.iter().all(|other| {
+                    if tracks_co_visible(&ctx.tracks[&id], &ctx.tracks[other]) {
+                        return false;
+                    }
+                    let left = &vectors[&id];
+                    let right = &vectors[other];
+                    left.len() == right.len()
+                        && left
+                            .iter()
+                            .zip(right)
+                            .map(|(a, b)| f64::from(*a) * f64::from(*b))
+                            .sum::<f64>()
+                            >= 0.96
+                });
+                if compatible {
+                    group.push(id);
+                    inserted = true;
+                    break;
+                }
+            }
+            if !inserted {
+                groups.push(vec![id]);
+            }
+        }
+        for mut group in groups {
+            if group.len() < 2
+                || !group.iter().any(|id| {
+                    matches[id.to_string()]
+                        .as_array()
+                        .and_then(|rows| rows.first())
+                        .is_some_and(|row| {
+                            row["samples_used"].as_u64() == Some(3)
+                                && row["cosine_similarity"].as_f64().is_some_and(|s| s >= 0.75)
+                        })
+                })
+            {
+                continue;
+            }
+            group.sort_unstable();
+            result.push(json!({
+                "player_id": player,
+                "track_ids": group,
+                "policy": "measured_complete_link_cosine_96_v1",
+            }));
+        }
+    }
+    result
+}
+
 pub(super) async fn compare(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -503,7 +603,7 @@ pub(super) async fn compare(
             json!({"schema":"volley-native-player-photo-comparison/1","project_id":snap.ctx.project_id,"replay_id":snap.ctx.replay_id,"source_replay_sha256":snap.ctx.source_sha,"player_matches":{},"photo_count":snap.photos.len(),"identity_revision":snap.identity_revision,"album_revisions":snap.albums,"model_fingerprint":snap.model,"photo_sample_policy":"three_observations_v1","auto_assign_enabled":false,"confirmed":false}),
         );
     }
-    for chunk in ids.chunks(8) {
+    for chunk in ids.chunks(48) {
         let Json(result) = embeddings(
             State(state.clone()),
             headers.clone(),
@@ -803,12 +903,14 @@ pub(super) async fn compare(
         &refs,
     )
     .map_err(storage::bad_request)?;
+    let identity_groups = strict_visual_identity_groups(&snap.ctx, &snap.vectors, &matches);
     Ok(json!({
         "schema":"volley-native-player-photo-comparison/1",
         "project_id":snap.ctx.project_id,
         "replay_id":snap.ctx.replay_id,
         "source_replay_sha256":snap.ctx.source_sha,
         "player_matches":matches,
+        "identity_groups":identity_groups,
         "photo_count":refs.len(),
         "independent_photo_checks":multi_samples.len() * 2,
         "multiframe_track_count":multi_samples.len(),

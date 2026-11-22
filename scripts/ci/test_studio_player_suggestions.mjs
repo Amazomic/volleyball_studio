@@ -29,4 +29,18 @@ assert.equal(unmatched.children[0].children[1].children[0].children[0].value,"",
 state.playerMatches={"7":[{player_id:"a",cosine_similarity:.865,reference_kind:"reviewed_track"}]};
 const reviewed=node("article");context.attachSuggestions(reviewed,[7]);
 assert.match(reviewed.children[0].children[0].text,/86\.5% · с подтверждённым ID/);
-console.log("Player dropdown selects the best match without automatic assignment: OK");
+state.playerMatches={
+  "7":[{player_id:"a",cosine_similarity:.98},{player_id:"b",cosine_similarity:.61}],
+  "8":[{player_id:"b",cosine_similarity:.82}],
+  "9":[{player_id:"b",cosine_similarity:.84}]
+};
+const group=node("article");context.attachSuggestions(group,[7,8,9]);
+const groupControls=group.children[0].children[1];
+assert.equal(groupControls.children[0].value,"b",
+  "An isolated 98% crop must not outrank three consistent group observations");
+assert.match(group.children[0].children[0].text,/3\/3 ID/);
+state.playerMatches={"7":[{player_id:"a",cosine_similarity:.99}]};
+const uncertain=node("article");context.attachSuggestions(uncertain,[7,8,9]);
+assert.equal(uncertain.children[0].children[1].children[0].value,"",
+  "A group cannot preselect its owner based on a single fragment");
+console.log("Player dropdown ranks grouped Track IDs by consistent multi-ID evidence: OK");
