@@ -25,6 +25,8 @@ assert.match(text,/shutdown_safe/);
 assert.match(text,/active_jobs/);
 assert.match(text,/SUPERSEDED:/);
 assert.match(text,/Invoke-Launcher "\/status"/);
+assert.match(text,/if\(\$local -eq \$published -and \(Get-LiveSha\) -eq \$published\)/);
+assert.ok(text.indexOf("if($local -eq $published") < text.indexOf("        Wait-For-Idle",text.indexOf("function Invoke-Deployment")),"Already-live SHA must skip before waiting for active jobs");
 if(process.platform==="win32"){
   const temp=mkdtempSync(join(tmpdir(),"volley-deploy-queue-test-"));
   const trace=join(temp,"trace.txt"),state=join(temp,"state.txt");

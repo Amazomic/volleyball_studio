@@ -121,9 +121,18 @@ function Wait-For-Idle {
 
 function Invoke-Deployment {
     for($attempt=1;$attempt -le $MaxBuildAttempts;$attempt++){
+        Confirm-Checkout
+        Invoke-Launcher "/status"
+        $published=Published-Sha
+        $local=Git-Text @("rev-parse","HEAD")
+        if($local -eq $published -and (Get-LiveSha) -eq $published){
+            if((Published-Sha) -eq $published){
+                Write-Output "SKIPPED: Studio already serves $published"
+                return
+            }
+        }
         Wait-For-Idle
         $target=Update-Checkout
-        Invoke-Launcher "/status"
         $live=Get-LiveSha
         if($live -eq $target){
             if((Published-Sha) -eq $target){
