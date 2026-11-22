@@ -22,7 +22,7 @@
     groups:[],grouped:new Set(),groupLoaded:false,groupShown:24,singleCount:0,
     playerMatches:{},similarityStatus:"not_calculated",libraryPlayers:[],projectPlayerIds:new Set(),playerTrackCounts:{},
     rosterEpoch:0,rosterBusy:false,rosterLoaded:false,tracksLoaded:false,loadingKey:null,grouping:false,
-    photoIndices:new Map(),groupNavigation:new Map(),viewPlayer:"",viewConflicts:false,filteredTotal:0,unassignedIds:new Set(),identityConflictIds:new Set(),comparisonIds:new Set(),
+    photoIndices:new Map(),groupNavigation:new Map(),viewPlayer:"",viewConflicts:false,viewExcluded:false,filteredTotal:0,unassignedIds:new Set(),excludedIds:new Set(),identityConflictIds:new Set(),comparisonIds:new Set(),
     photoScoreLoading:false,autoThresholdScope:"",autoAssignPending:null
   };
   const node=(tag,klass,text)=>{
@@ -238,7 +238,7 @@
     state.sourceSha="";state.groupRevision=null;state.rallyRun="";state.fallback=false;
     state.groups=[];state.grouped.clear();state.groupLoaded=false;
     state.groupShown=24;state.singleCount=0;state.playerMatches={};state.similarityStatus="not_calculated";
-    state.viewPlayer="";state.viewConflicts=false;state.filteredTotal=0;state.unassignedIds.clear();state.identityConflictIds.clear();
+    state.viewPlayer="";state.viewConflicts=false;state.viewExcluded=false;state.filteredTotal=0;state.unassignedIds.clear();state.excludedIds.clear();state.identityConflictIds.clear();
     state.comparisonIds.clear();state.autoAssignPending=null;
     updateUnassignedLabel();viewBack.hidden=true;groupsMode.hidden=false;playerMode.hidden=true;setMode("singles");
     state.rosterEpoch++;state.libraryPlayers=[];state.projectPlayerIds.clear();state.playerTrackCounts={};
@@ -371,7 +371,7 @@
     try{
       const result=await read(path("/api/players/native/tracks",{
         project_id:project,video,replay_id:replay,rally_run_id:state.rallyRun,
-        offset:state.offset,limit:state.limit,view:state.viewPlayer?"player":state.viewConflicts?"conflict":"unassigned",
+        offset:state.offset,limit:state.limit,view:state.viewPlayer?"player":state.viewExcluded?"excluded":state.viewConflicts?"conflict":"unassigned",
         ...(state.viewPlayer?{view_player_id:state.viewPlayer}:{})
       }));
       if(token!==state.token||project!==state.project||
@@ -387,10 +387,12 @@
         throw Error("Некорректная выборка ID выбранных розыгрышей");
       state.total=state.rallyIds.size;
       if(!Number.isSafeInteger(result.filtered_total)||result.filtered_total<0||
-        !Array.isArray(result.unassigned_track_ids)||!Array.isArray(result.comparison_track_ids))
+        !Array.isArray(result.unassigned_track_ids)||!Array.isArray(result.excluded_track_ids)||
+        !Array.isArray(result.comparison_track_ids))
         throw Error("Сервер не подтвердил фильтр привязок Track ID");
       state.filteredTotal=result.filtered_total;
       state.unassignedIds=new Set(result.unassigned_track_ids.map(Number));
+      state.excludedIds=new Set(result.excluded_track_ids.map(Number));
       state.identityConflictIds=new Set((result.identity_conflict_track_ids||[]).map(Number));
       state.comparisonIds=new Set(result.comparison_track_ids.map(Number));
       state.roster=Array.isArray(result.roster)?result.roster:[];
@@ -571,7 +573,8 @@
       " · на странице "+singles.length;
     if(!state.rows.length){
       ui.list.append(node("div","empty-state",state.viewPlayer?
-        "У игрока нет привязанных Track ID в выбранной обработке.":
+        "У игрока нет привязанных Track ID в выбранной обработке.":state.viewExcluded?
+        "Нет исключённых Track ID в выбранной обработке.":
         "Нет непривязанных Track ID в выбранной обработке."));
     }else if(!singles.length){
       ui.list.append(node("div","empty-state",
@@ -613,7 +616,13 @@
       card.append(media,info);
       // An assigned ID has one clear action: unlink it from its current player.
       // Do not offer "Add player" for IDs which already have an owner.
-      if(row.assigned_player_id){
+      if(row.excluded){
+        const restore=node("button","secondary track-restore-assignment","↺ Вернуть ID");
+        restore.type="button";
+        restore.disabled=state.busy||!state.writable;
+        restore.addEventListener("click",()=>void edit("restore",[id]));
+        card.append(restore);
+      }else if(row.assigned_player_id){
         const remove=node("button","secondary track-remove-assignment","✕ Снять привязку");
         remove.type="button";
         remove.disabled=state.busy||!state.writable;
@@ -648,11 +657,14 @@
     }
     if(Array.isArray(result.unassigned_track_ids))
       state.unassignedIds=new Set(result.unassigned_track_ids.map(Number));
+    if(Array.isArray(result.excluded_track_ids))
+      state.excludedIds=new Set(result.excluded_track_ids.map(Number));
     if(Array.isArray(result.comparison_track_ids))
       state.comparisonIds=new Set(result.comparison_track_ids.map(Number));
     if(!state.viewPlayer&&!state.viewConflicts){
-      state.filteredTotal=state.unassignedIds.size;
-      state.rows=state.rows.filter(row=>state.unassignedIds.has(Number(row.track_id)));
+      const visible=state.viewExcluded?state.excludedIds:state.unassignedIds;
+      state.filteredTotal=visible.size;
+      state.rows=state.rows.filter(row=>visible.has(Number(row.track_id)));
       if(state.filteredTotal&&state.offset>=state.filteredTotal)
         state.offset=Math.floor((state.filteredTotal-1)/state.limit)*state.limit;
       if(!state.filteredTotal)state.offset=0;
@@ -734,8 +746,9 @@
     const displaced=Array.isArray(state.lastDisplacedAutomatic)?
       state.lastDisplacedAutomatic:[];
     const notice=displaced.length?
-      " Автоматические привязки ID "+displaced.join(", ")+" сняты из-за подтверждения; проверьте их.":"";
-    note("Track ID привязаны. Фото сохраняются отдельно; можно продолжать работу."+notice,
+      " Конфликтующие автопривязки ID "+displaced.join(", ")+" сняты: это существовавшие ID, проверьте их повторно.":"";
+    note("ID "+ids.join(", ")+" привязаны. Непривязанных осталось "+state.unassignedIds.size+
+      ". Следующие карточки — уже обнаруженные ID, а не новые. Фото сохраняются отдельно, можно продолжать работу."+notice,
       displaced.length>0);
     return enqueuePhotoEnrollment(playerId,async()=>{
       let saved=0,alreadySaved=0,limited=0;
@@ -895,6 +908,13 @@
       refreshStatus.hidden=false;
       refreshStatus.textContent="Проверяем сохранённые фото и признаки подтверждённых ID…";
       try{
+        if(photoEnrollmentQueues.size){
+          refreshStatus.textContent="Дожидаемся сохранения фотографий после ручных привязок…";
+          await Promise.allSettled([...photoEnrollmentQueues.values()]);
+          if(scope.project_id!==state.project||scope.replay_id!==state.replay||
+            scope.expected_source_sha256!==state.sourceSha)return;
+        }
+        refreshStatus.textContent="Обновляем признаки и выбираем непохожие эталоны…";
         const result=await post("/api/players/native/references/refresh",scope);
         if(scope.project_id!==state.project||scope.replay_id!==state.replay)return;
         const photoScope={project_id:scope.project_id,video:scope.video,
@@ -1065,35 +1085,45 @@
   const viewBar=node("div","track-view-bar");
   const viewLabel=node("strong","track-view-label","Непривязанные Track ID");
   const updateUnassignedLabel=()=>{
-    if(!state.viewPlayer)viewLabel.textContent=state.viewConflicts?
+    if(!state.viewPlayer)viewLabel.textContent=state.viewExcluded?
+      "Исключённые Track ID · "+state.excludedIds.size:state.viewConflicts?
       "Конфликты одновременной видимости · "+state.identityConflictIds.size:
       "Непривязанные Track ID · "+state.unassignedIds.size;
-    if(typeof conflictToggle!=="undefined"){
-      conflictToggle.hidden=Boolean(state.viewPlayer);
-      conflictToggle.textContent=state.viewConflicts?
-        "Показать непривязанные · "+state.unassignedIds.size:
-        "Конфликты · "+state.identityConflictIds.size;
-    }
-  };  const viewBack=node("button","secondary","Все непривязанные ID");
+    conflictToggle.hidden=Boolean(state.viewPlayer);
+    conflictToggle.textContent=state.viewConflicts?
+      "Показать непривязанные · "+state.unassignedIds.size:
+      "Конфликты · "+state.identityConflictIds.size;
+    excludedToggle.hidden=Boolean(state.viewPlayer);
+    excludedToggle.textContent=state.viewExcluded?
+      "Показать непривязанные · "+state.unassignedIds.size:
+      "Исключённые · "+state.excludedIds.size;
+  };
+  const viewBack=node("button","secondary","Все непривязанные ID");
   viewBack.type="button";viewBack.hidden=true;
   viewBack.addEventListener("click",()=>{
-    state.viewPlayer="";state.viewConflicts=false;state.offset=0;updateUnassignedLabel();
+    state.viewPlayer="";state.viewConflicts=false;state.viewExcluded=false;state.offset=0;updateUnassignedLabel();
     viewBack.hidden=true;groupsMode.hidden=false;playerMode.hidden=true;setMode("singles");void loadPage();
   });
   window.addEventListener("volley:player-gallery-select",event=>{
     const detail=event.detail||{};
     if(detail.project_id!==state.project||!state.projectPlayerIds.has(detail.player_id))return;
-    state.viewPlayer=detail.player_id;state.offset=0;
+    state.viewPlayer=detail.player_id;state.viewConflicts=false;state.viewExcluded=false;state.offset=0;
     viewLabel.textContent=String(detail.name||"");
     viewBack.hidden=false;groupsMode.hidden=true;playerMode.hidden=false;setMode("player");void loadAlbum();void loadPage();
   });
   const conflictToggle=node("button","secondary","Конфликты");
   conflictToggle.type="button";
   conflictToggle.addEventListener("click",()=>{
-    state.viewConflicts=!state.viewConflicts;state.offset=0;
+    state.viewConflicts=!state.viewConflicts;state.viewExcluded=false;state.offset=0;
     state.selected.clear();updateUnassignedLabel();void loadPage();
-  });  viewBar.append(viewBack);
-  viewBar.append(conflictToggle);
+  });
+  const excludedToggle=node("button","secondary","Исключённые");
+  excludedToggle.type="button";
+  excludedToggle.addEventListener("click",()=>{
+    state.viewExcluded=!state.viewExcluded;state.viewConflicts=false;state.offset=0;
+    state.selected.clear();setMode("singles");updateUnassignedLabel();void loadPage();
+  });
+  viewBar.append(viewBack,conflictToggle,excludedToggle);
   // Keep the ID modes and conflict/unassigned filter on one toolbar row.
   modeSwitch.append(viewBar,groupingControls,viewLabel);
   ui.list.before(modeSwitch);
@@ -1321,8 +1351,16 @@
         project_id:scope.project_id,video:scope.video,replay_id:scope.replay_id
       }}));
       await loadPage({preserveCards:true});
+      const reasons=result.unassigned_reasons||{};
+      const count=key=>Array.isArray(reasons[key])?reasons[key].length:0;
+      const remaining=Array.isArray(result.unassigned_track_ids)?result.unassigned_track_ids.length:0;
       galleryStatus.textContent="Автопривязано ID: "+result.automatic_count+
-        " · порог: "+threshold+"% · остальные остались непривязанными.";
+        " · без привязки: "+remaining+" · порог: "+threshold+"%"+
+        (remaining?" · нет совпадений: "+count("no_photo_match")+
+          " · мало наблюдений: "+count("insufficient_observations")+
+          " · ниже порога: "+count("below_similarity_threshold")+
+          " · конфликт: "+count("identity_conflict_or_ambiguity")+
+          " · вручную отключено: "+count("manually_suppressed"):"");
       reviewNote("Автопривязка выполнена: "+result.automatic_count+
         ". Ручные назначения сохранены; одновременные ID одного игрока не объединяются.");
       autoAssignMessage("Привязано ID: "+result.automatic_count+" · порог "+threshold+"%");

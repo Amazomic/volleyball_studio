@@ -8,7 +8,7 @@ const end=source.indexOf("  // Native appearance matches",start);
 assert.ok(start>=0&&end>start);
 const calls=[],messages=[],events=[];
 const sha="a".repeat(64);
-const state={project:"p",video:"match.mp4",replay:"r",rallyRun:"run",sourceSha:sha,
+const state={project:"p",video:"match.mp4",replay:"r",rallyRun:"run",sourceSha:sha,unassignedIds:new Set(),
   busy:false,rosterBusy:false,projectPlayerIds:new Set(["player"]),
   photoIndices:new Map([[7,2],[8,4]])};
 const savedPhoto=(track_id,photo_index)=>({
@@ -101,4 +101,32 @@ calls.length=0;
 await context.bindSelected([7,8,9],"player");
 assert.equal(calls.filter(call=>call.body?.action==="enroll").length,0,
   "Completed album must not be expanded on every manual Track ID binding");
+const refreshStart=source.indexOf('    refreshReferences.addEventListener("click",async()=>{');
+const refreshEnd=source.indexOf('    const resetLinks=node(',refreshStart);
+assert.ok(refreshStart>0&&refreshEnd>refreshStart);
+let releasePhotos;
+const pendingPhotos=new Promise(resolve=>{releasePhotos=resolve;});
+const queued=new Map([["player",pendingPhotos]]);
+const refreshRequests=[];
+let onRefresh;
+const refreshButton={disabled:false,addEventListener(name,callback){if(name==="click")onRefresh=callback;}};
+const refreshStatus={hidden:true,textContent:""};
+const refreshState={busy:false,rosterBusy:false,project:"p",video:"match.mp4",replay:"r",
+  rallyRun:"run",sourceSha:sha,token:11};
+runInNewContext(source.slice(refreshStart,refreshEnd),{
+  refreshReferences:refreshButton,refreshStatus,state:refreshState,
+  photoEnrollmentQueues:queued,
+  post:async url=>{refreshRequests.push(url);return {added:1,confirmed_tracks:1};},
+  window:{dispatchEvent(){}},Event:class{},
+  loadLibraryRoster:async()=>{},refreshPhotoMatches:async()=>({trackCount:3})
+});
+const refreshing=onRefresh();
+await new Promise(resolve=>setImmediate(resolve));
+assert.deepEqual(refreshRequests,[],"Feature refresh must wait for pending manual photo saves");
+assert.match(refreshStatus.textContent,/Дожидаемся сохранения фотографий/);
+releasePhotos();
+await refreshing;
+assert.deepEqual(refreshRequests,["/api/players/native/references/refresh"]);
+assert.match(refreshStatus.textContent,/Сопоставлено ID: 3/);
+
 console.log("Group assignment preserves links, bounds photo enrollment and handles reference failures: OK");

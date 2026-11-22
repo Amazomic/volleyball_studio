@@ -91,6 +91,22 @@ pub(super) fn new_manual_owner_conflict(
     }
     None
 }
+pub(super) fn revised_automatic_links(
+    previous: &Value,
+    current: &Value,
+    selected: &[u64],
+) -> BTreeSet<u64> {
+    previous
+        .as_object()
+        .into_iter()
+        .flat_map(|map| map.iter())
+        .filter_map(|(id, owner)| {
+            let id_number = id.parse::<u64>().ok()?;
+            (!selected.contains(&id_number) && current[id] != *owner).then_some(id_number)
+        })
+        .collect()
+}
+
 pub(super) fn conflicting_automatic_links(
     ctx: &Inputs,
     reviewed: &BTreeMap<u64, String>,
@@ -628,7 +644,7 @@ pub(super) fn filtered_page(
     }
     if !matches!(
         view,
-        None | Some("unassigned") | Some("conflict") | Some("player")
+        None | Some("unassigned") | Some("excluded") | Some("conflict") | Some("player")
     ) || (view == Some("player") && player_id.is_none_or(|id| !ctx.roster.contains_key(id)))
         || (view != Some("player") && player_id.is_some())
     {
@@ -678,7 +694,8 @@ pub(super) fn filtered_page(
         .filter(|id| ctx.tracks.contains_key(id))
         .count();
     let matches = |id: &u64| match view {
-        Some("unassigned") => !owners.contains_key(id),
+        Some("unassigned") => !owners.contains_key(id) && !excluded.contains(id),
+        Some("excluded") => excluded.contains(id),
         Some("conflict") => actual_conflicts.contains(id),
         Some("player") => owners.get(id).map(String::as_str) == player_id,
         _ => true,
@@ -726,7 +743,8 @@ pub(super) fn filtered_page(
         "total_tracks":ctx.tracks.len(),"offset":offset,"limit":limit,
         "filtered_total":filtered_total,
         "player_track_counts":player_track_counts,
-        "unassigned_track_ids":ctx.tracks.keys().filter(|id| !owners.contains_key(id)).copied().collect::<Vec<_>>(),
+        "unassigned_track_ids":ctx.tracks.keys().filter(|id| !owners.contains_key(id) && !excluded.contains(id)).copied().collect::<Vec<_>>(),
+        "excluded_track_ids":ctx.tracks.keys().filter(|id| excluded.contains(id)).copied().collect::<Vec<_>>(),
         "comparison_track_ids":ctx.tracks.keys().filter(|id| !owners.contains_key(id) && !excluded.contains(id)).copied().collect::<Vec<_>>(),
         "rally_track_ids":ctx.tracks.keys().copied().collect::<Vec<_>>(),
         "assigned_count":scoped_assigned,"excluded_count":scoped_excluded,
@@ -1098,7 +1116,7 @@ pub(super) fn change(state: &AppState, req: &TrackEdit) -> Result<Value, ApiErro
     } else {
         None
     };
-    let displaced_automatic = if req.action == "assign" {
+    let mut displaced_automatic = if req.action == "assign" {
         conflicting_automatic_links(conflict_tracks, &review.assignments, &previous_automatic)
     } else {
         BTreeSet::new()
@@ -1128,26 +1146,11 @@ pub(super) fn change(state: &AppState, req: &TrackEdit) -> Result<Value, ApiErro
     }
     reconcile_automatic_photo_links(conflict_tracks, &mut doc).map_err(storage::bad_request)?;
     if req.action == "assign" {
-        for (id, previous_owner) in previous_automatic
-            .as_object()
-            .into_iter()
-            .flat_map(|map| map.iter())
-        {
-            if req
-                .track_ids
-                .iter()
-                .any(|selected| selected.to_string() == *id)
-            {
-                continue;
-            }
-            if !displaced_automatic.contains(&id.parse::<u64>().unwrap_or_default())
-                && doc["automatic_assignments"][id] != *previous_owner
-            {
-                return Err(storage::conflict(format!(
-                    "Привязка ID {id} изменила бы другого игрока. Изменения отменены; обновите распознавание или проверьте кадры."
-                )));
-            }
-        }
+        displaced_automatic.extend(revised_automatic_links(
+            &previous_automatic,
+            &doc["automatic_assignments"],
+            &req.track_ids,
+        ));
     }
     if before.is_none()
         || doc != validated(before.as_deref(), &ctx).map_err(storage::bad_request)?
@@ -1218,6 +1221,41 @@ fn reviewed_scope_sha256(doc: &Value) -> String {
         "{:x}",
         Sha256::digest(serde_json::to_vec(&scope).unwrap_or_default())
     )
+}
+
+pub(super) fn automatic_unassigned_reason(
+    id: u64,
+    doc: &Value,
+    matches: &Value,
+    threshold: f64,
+) -> &'static str {
+    if doc["automatic_suppressed_ids"]
+        .as_array()
+        .is_some_and(|ids| ids.iter().any(|value| value.as_u64() == Some(id)))
+    {
+        return "manually_suppressed";
+    }
+    let Some(rows) = matches[id.to_string()]
+        .as_array()
+        .filter(|rows| !rows.is_empty())
+    else {
+        return "no_photo_match";
+    };
+    if rows.iter().any(|row| {
+        row["samples_used"].as_u64() == Some(3)
+            && row["cosine_similarity"]
+                .as_f64()
+                .is_some_and(|score| score >= threshold)
+    }) {
+        return "identity_conflict_or_ambiguity";
+    }
+    if rows
+        .iter()
+        .all(|row| row["samples_used"].as_u64() != Some(3))
+    {
+        return "insufficient_observations";
+    }
+    "below_similarity_threshold"
 }
 
 fn cached_photo_comparison(
@@ -1386,9 +1424,17 @@ fn persist_photo_comparison(
                 && !doc["automatic_assignments"]
                     .as_object()
                     .is_some_and(|map| map.contains_key(&key))
+                && !doc["excluded_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|value| value.as_u64() == Some(**id)))
         })
         .copied()
         .collect();
+    let mut unassigned_reasons = BTreeMap::<&str, Vec<u64>>::new();
+    for &id in &unassigned {
+        let reason = automatic_unassigned_reason(id, &doc, matches, threshold);
+        unassigned_reasons.entry(reason).or_default().push(id);
+    }
     let parent = ctx
         .sidecar
         .parent()
@@ -1399,7 +1445,7 @@ fn persist_photo_comparison(
     if return_automatic_result {
         Ok(
             json!({"automatic_count":chosen.len(),"automatic_assignments":chosen,
-            "unassigned_track_ids":unassigned,
+            "unassigned_track_ids":unassigned,"unassigned_reasons":unassigned_reasons,
             "identity_revision":revision(saved.as_deref()),"confirmed":false,
             "threshold_percent":(threshold * 100.0).round() as u8}),
         )
