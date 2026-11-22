@@ -627,16 +627,26 @@ fn use_stabilized_ball(
             frame.selected_ball = None;
             continue;
         };
-        if !motion.interpolated[index] && frame.selected_ball.is_some() {
+        if !motion.interpolated[index] && frame.selected_ball.is_none() {
             continue;
         }
         let (half_w, half_h) = frame.selected_ball.as_ref().map_or((0.005, 0.005), |ball| {
             let [x1, y1, x2, y2] = ball.bbox_xyxy_norm;
             ((x2 - x1) * 0.5, (y2 - y1) * 0.5)
         });
+        let observed = !motion.interpolated[index];
         frame.selected_ball = Some(TouchBall {
-            source_model: "vballnet".into(),
-            score: f64::from(0.55f32),
+            source_model: if observed {
+                "vballnet"
+            } else {
+                volley_core::touch_pipeline::INTERPOLATED_BALL_SOURCE
+            }
+            .into(),
+            score: if observed {
+                frame.selected_ball.as_ref().unwrap().score
+            } else {
+                f64::from(0.55f32)
+            },
             bbox_xyxy_norm: [
                 (x - half_w).max(0.0),
                 (y - half_h).max(0.0),
@@ -715,7 +725,21 @@ mod ball_stabilizer_postprocessing_tests {
         assert!(motion.points[6].is_some());
         assert!(!motion.interpolated[6]);
         let original = block.clone();
-        use_stabilized_ball(&mut block, &motion);
+        let mut canonical = motion.clone();
+        canonical.points[6] = Some([0.15, 0.25]);
+        use_stabilized_ball(&mut block, &canonical);
+        let accepted = block[6].selected_ball.as_ref().unwrap();
+        let center_x = (accepted.bbox_xyxy_norm[0] + accepted.bbox_xyxy_norm[2]) * 0.5;
+        assert!((center_x - 0.15).abs() < 1e-9);
+        assert_eq!(accepted.source_model, "vballnet");
+        assert_eq!(
+            block[20].selected_ball.as_ref().unwrap().source_model,
+            "ball_stabilizer_interpolated"
+        );
+        assert_eq!(
+            block[32].selected_ball.as_ref().unwrap().source_model,
+            "ball_stabilizer_interpolated"
+        );
         assert_eq!(block[6].selected_ball.as_ref().unwrap().score, 0.49);
         assert!(
             (original[20].selected_ball.as_ref().unwrap().bbox_xyxy_norm[0] - 0.915).abs() < 1e-9

@@ -1,10 +1,17 @@
 //! CPU-only VBallNet trajectory input and strict, provisional neural peaks.
 //! An ONNX score is not a confirmed athlete touch or an autonomous rally event.
-use super::{PhysicalTouchCandidate, TouchFrame, TouchSettings};
+use super::{PhysicalTouchCandidate, TouchFrame, TouchSettings, INTERPOLATED_BALL_SOURCE};
 
 fn point(frame: &TouchFrame) -> Option<[f64; 2]> {
+    if frame.selected_ball.as_ref()?.source_model != "vballnet" {
+        return None;
+    }
+    motion_point(frame)
+}
+
+fn motion_point(frame: &TouchFrame) -> Option<[f64; 2]> {
     let ball = frame.selected_ball.as_ref()?;
-    if ball.source_model != "vballnet"
+    if (ball.source_model != "vballnet" && ball.source_model != INTERPOLATED_BALL_SOURCE)
         || !ball
             .bbox_xyxy_norm
             .iter()
@@ -26,7 +33,7 @@ pub fn trajectory_features(frames: &[TouchFrame]) -> Vec<[f32; 4]> {
     let mut result = Vec::with_capacity(frames.len());
     let mut previous: Option<[f64; 2]> = None;
     for frame in frames {
-        let current = point(frame);
+        let current = motion_point(frame);
         let feature = match current {
             Some([x, y]) => {
                 let (dx, dy) = match previous {
@@ -212,6 +219,24 @@ mod tests {
         assert_eq!(v[3], [0.0; 4]);
         assert_eq!(v[4][2], 0.0);
     }
+    #[test]
+    fn trajectory_features_use_canonical_interpolation_without_confirming_it() {
+        let mut f = frames(true);
+        f[14].selected_ball.as_mut().unwrap().source_model =
+            "ball_stabilizer_interpolated".to_owned();
+        let features = trajectory_features(&f);
+        assert!(features[14][0] > 0.0);
+        assert!(features[14][2].abs() > 0.0);
+        let scores = (0..31)
+            .map(|i| if i == 14 { 0.95 } else { 0.01 })
+            .collect::<Vec<_>>();
+        assert!(
+            evaluate_tcn_peaks(&f, &scores, 1280, 720, 0, 31, TouchSettings::default())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[test]
     fn trained_scores_still_require_a_real_motion_break() {
         let scores = (0..31)

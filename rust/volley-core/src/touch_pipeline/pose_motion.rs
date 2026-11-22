@@ -383,7 +383,13 @@ fn occluded_ball_impact(
     settings: TouchSettings,
 ) -> Option<([f64; 2], f64, crate::motion::MotionEvidence)> {
     let frame = frames.get(index)?;
-    if frame.selected_ball.is_some() || index < 9 || index + 9 >= frames.len() {
+    if frame
+        .selected_ball
+        .as_ref()
+        .is_some_and(|ball| ball.source_model == "vballnet")
+        || index < 9
+        || index + 9 >= frames.len()
+    {
         return None;
     }
     let (w, h) = (width as f64, height as f64);
@@ -608,7 +614,9 @@ pub fn evaluate_pose_block(
         .iter()
         .filter_map(|f| {
             let ball = f.selected_ball.as_ref()?;
-            if ball.source_model != "vballnet" {
+            if ball.source_model != "vballnet"
+                && ball.source_model != super::INTERPOLATED_BALL_SOURCE
+            {
                 return None;
             }
             let p = center(ball.bbox_xyxy_norm);

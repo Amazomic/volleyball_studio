@@ -2,7 +2,7 @@
 //! Unlike confidence-only touch peaks, this path can recover contacts without neural Touch logits.
 //! It is deliberately conservative: a ball flight near a person alone is not a Touch.
 
-use super::{center, pixel_bbox, standing_height, TouchFrame};
+use super::{center, pixel_bbox, standing_height, TouchFrame, INTERPOLATED_BALL_SOURCE};
 use crate::motion::{BallObservation, MotionEvidence};
 
 #[derive(Clone, Copy, Debug)]
@@ -31,14 +31,21 @@ pub(super) fn stable_ball_source_with_min_samples(
     if index < 5 || index + 5 >= frames.len() || !(2..=3).contains(&min_samples) {
         return false;
     }
-    let source = match frames[index].selected_ball.as_ref() {
-        Some(ball) => ball.source_model.as_str(),
-        None => return false,
-    };
+    if !frames[index]
+        .selected_ball
+        .as_ref()
+        .is_some_and(|ball| ball.source_model == "vballnet")
+    {
+        return false;
+    }
+    let source = "vballnet";
     let mut left = 0;
     let mut right = 0;
     for (relative, frame) in frames[index - 5..=index + 5].iter().enumerate() {
         if let Some(ball) = frame.selected_ball.as_ref() {
+            if ball.source_model == INTERPOLATED_BALL_SOURCE {
+                continue;
+            }
             if ball.source_model != source {
                 return false;
             }
@@ -59,13 +66,20 @@ pub(super) fn stable_pose_ball_source(frames: &[TouchFrame], index: usize) -> bo
     if index < WINDOW || index + WINDOW >= frames.len() {
         return false;
     }
-    let Some(source) = frames[index].selected_ball.as_ref() else {
+    let Some(source) = frames[index]
+        .selected_ball
+        .as_ref()
+        .filter(|ball| ball.source_model == "vballnet")
+    else {
         return false;
     };
     let mut before = 0;
     let mut after = 0;
     for (relative, row) in frames[index - WINDOW..=index + WINDOW].iter().enumerate() {
         if let Some(ball) = &row.selected_ball {
+            if ball.source_model == INTERPOLATED_BALL_SOURCE {
+                continue;
+            }
             if ball.source_model != source.source_model {
                 return false;
             }
@@ -567,7 +581,12 @@ pub(super) fn detect_gap_rebounds(
         let after =
             (before + 3..=(before + 10).min(frames.len() - 5)).find(|&i| center_px(i).is_some());
         let Some(after) = after else { continue };
-        if (before + 1..after).any(|i| frames[i].selected_ball.is_some()) {
+        if (before + 1..after).any(|i| {
+            frames[i]
+                .selected_ball
+                .as_ref()
+                .is_some_and(|ball| ball.source_model != INTERPOLATED_BALL_SOURCE)
+        }) {
             continue;
         }
         let Some(b) = center_px(after) else { continue };
@@ -1486,6 +1505,21 @@ mod gap_tests {
                 .selected_ball
                 .as_ref()
                 .is_some_and(|b| b.source_model == "vballnet")
+        }));
+        let mut interpolated = clean.clone();
+        for frame in 396..=401 {
+            interpolated[(frame - 380) as usize].selected_ball = Some(TouchBall {
+                source_model: INTERPOLATED_BALL_SOURCE.to_owned(),
+                score: 0.55,
+                bbox_xyxy_norm: [0.495, 0.35, 0.505, 0.37],
+            });
+        }
+        let from_canonical =
+            evaluate_block(&interpolated, 1280, 720, 380, 421, TouchSettings::default()).unwrap();
+        assert!(from_canonical.iter().any(|event| {
+            event.frame_index == 395
+                && (396..=401).contains(&event.motion_frame_index)
+                && event.physical_motion_supported
         }));
     }
 

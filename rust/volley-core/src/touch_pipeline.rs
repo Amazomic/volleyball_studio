@@ -22,7 +22,8 @@ pub use trajectory_tcn::{evaluate_tcn_peaks, trajectory_features};
 /// impact inside the bounded (at most ten-frame) missing-ball island.
 /// The touch itself must still reference a real same-frame ball and player.
 pub const MAX_OBSERVED_TOUCH_OFFSET_FRAMES: u64 = 9;
-pub const TRAJECTORY_DETECTOR_VERSION: &str = "piecewise_ballistic_motion_v3";
+pub const TRAJECTORY_DETECTOR_VERSION: &str = "piecewise_ballistic_motion_v4";
+pub const INTERPOLATED_BALL_SOURCE: &str = "ball_stabilizer_interpolated";
 
 use crate::{
     action_prediction::{self, ActionPrediction, CourtContext, PositionEvidence},
@@ -332,7 +333,7 @@ pub fn evaluate_block(
             }
         }
         if let Some(ball) = &frame.selected_ball {
-            if ball.source_model != "vballnet"
+            if (ball.source_model != "vballnet" && ball.source_model != INTERPOLATED_BALL_SOURCE)
                 || !valid_bbox(ball.bbox_xyxy_norm)
                 || !ball.score.is_finite()
                 || !(0.0..=1.0).contains(&ball.score)
@@ -369,7 +370,10 @@ pub fn evaluate_block(
             .players
             .iter()
             .find(|p| p.track_id == candidate.track_id);
-        let ball = source.selected_ball.as_ref();
+        let ball = source
+            .selected_ball
+            .as_ref()
+            .filter(|ball| ball.source_model == "vballnet");
         let (Some(player), Some(ball)) = (player, ball) else {
             continue;
         };
@@ -475,6 +479,31 @@ mod tests {
             inferred_body_reach_supported: false,
             athlete_identity_verified: false,
         }
+    }
+
+    #[test]
+    fn interpolated_ball_positions_support_motion_but_never_anchor_a_touch() {
+        let frames = (0..24)
+            .map(|i| TouchFrame {
+                frame_index: i,
+                players: vec![TouchPlayer {
+                    track_id: 4,
+                    score: 0.95,
+                    touch_probability: None,
+                    bbox_xyxy_norm: [0.4, 0.2, 0.7, 0.9],
+                }],
+                selected_ball: Some(TouchBall {
+                    source_model: "ball_stabilizer_interpolated".into(),
+                    score: 0.55,
+                    bbox_xyxy_norm: [0.5, 0.4, 0.51, 0.41],
+                }),
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            evaluate_block(&frames, 1280, 720, 0, 24, TouchSettings::default())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
