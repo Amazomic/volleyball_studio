@@ -72,6 +72,8 @@ for(const detail of ['"$debug (deleted)"','"$release (deleted)"',
 assert.doesNotMatch(bash,/kill -KILL|kill -9|pkill|taskkill|python\d?\s/);
 const ps=content("scripts/start-volley-rust-dev.ps1");
 assert.match(ps,/Ubuntu-25\.04/);
+assert.match(ps,/\$processExit=\$LASTEXITCODE/);
+assert.match(ps,/\$originalErrorAction=\$ErrorActionPreference/);
 assert.match(ps,/127\.0\.0\.1:8875/);
 assert.match(ps,/wsl\.exe -d \$Distro --exec bash/);
 assert.match(ps,/ValidateSet\("Start","Detach","Status","Stop","Restart","Build","Doctor","Check"\)/);

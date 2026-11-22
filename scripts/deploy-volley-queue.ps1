@@ -33,9 +33,17 @@ $mutex=New-Object System.Threading.Mutex($false,$lockName)
 $ownsLock=$false
 
 function Git-Text([string[]]$Arguments){
-    $output=@(& git -C $root @Arguments)
-    if($LASTEXITCODE -ne 0){throw "git $($Arguments -join ' ') failed (exit $LASTEXITCODE)"}
-    return (($output|Out-String).Trim())
+    $previous=$ErrorActionPreference
+    try{
+        $ErrorActionPreference="Continue"
+        $output=@(& git -C $root @Arguments 2>&1)
+        $exitCode=$LASTEXITCODE
+    }finally{
+        $ErrorActionPreference=$previous
+    }
+    if($exitCode -ne 0){throw "git $($Arguments -join ' ') failed (exit $exitCode): $(($output|Out-String).Trim())"}
+    $stdout=@($output|Where-Object {$_ -isnot [System.Management.Automation.ErrorRecord] -and $_.ToString() -notmatch '^warning:'})
+    return (($stdout|Out-String).Trim())
 }
 
 function Confirm-Checkout {
@@ -69,7 +77,7 @@ function Get-LiveSha {
     try{
         $response=Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8875/studio" -TimeoutSec 5
         if($response.StatusCode -ne 200){return ""}
-        $match=[regex]::Match($response.Content,"Коммит сборки:\s*([0-9a-fA-F]{40})")
+        $match=[regex]::Match($response.Content,'class="studio-build-commit"\s+title="[^"]*?([0-9a-fA-F]{40})"')
         if($match.Success){return $match.Groups[1].Value.ToLowerInvariant()}
     }catch [System.Net.WebException]{
         return ""
@@ -78,8 +86,16 @@ function Get-LiveSha {
 }
 
 function Invoke-Launcher([string]$Command){
-    & (Join-Path $root "start-volley-ui.cmd") $Command
-    if($LASTEXITCODE -ne 0){throw "Studio launcher $Command failed (exit $LASTEXITCODE)"}
+    $previous=$ErrorActionPreference
+    try{
+        $ErrorActionPreference="Continue"
+        $output=@(& (Join-Path $root "start-volley-ui.cmd") $Command 2>&1)
+        $exitCode=$LASTEXITCODE
+    }finally{
+        $ErrorActionPreference=$previous
+    }
+    if($exitCode -ne 0){throw "Studio launcher $Command failed (exit $exitCode): $(($output|Select-Object -Last 12|Out-String).Trim())"}
+    Write-Output "Launcher $($Command): OK"
 }
 
 function Wait-For-Idle {
