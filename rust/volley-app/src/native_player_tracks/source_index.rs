@@ -59,7 +59,7 @@ pub(super) mod pair_geometry_keys {
     }
 }
 
-const INDEX_CACHE_SCHEMA: &str = "volley-native-track-index/1";
+const INDEX_CACHE_SCHEMA: &str = "volley-native-track-index/2";
 const MAX_INDEX_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -1195,6 +1195,15 @@ mod persistent_index_tests {
         prepare_replay_index(&path, &sha, 3).unwrap();
         let cache_path = stored_index_path(&path, None).unwrap();
         assert!(cache_path.is_file());
+        let mut stale: Value = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        stale["schema"] = json!("volley-native-track-index/1");
+        stale["tracks"]["7"]["observed"] = json!(1);
+        fs::write(&cache_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        TRACK_INDICES.get().unwrap().lock().unwrap().clear();
+        prepare_replay_index(&path, &sha, 3).unwrap();
+        let rebuilt: Value = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        assert_eq!(rebuilt["schema"], INDEX_CACHE_SCHEMA);
+        assert_eq!(rebuilt["tracks"]["7"]["observed"], 3);
         // Even a warm in-memory cache must re-create a missing durable index.
         fs::remove_file(&cache_path).unwrap();
         prepare_replay_index(&path, &sha, 3).unwrap();
