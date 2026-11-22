@@ -482,6 +482,21 @@ pub(super) fn reconcile_automatic_photo_links(ctx: &Inputs, doc: &mut Value) -> 
     Ok(())
 }
 
+pub(super) fn reconcile_saved_automatic_photo_links(
+    ctx: &Inputs,
+    doc: &mut Value,
+) -> Result<(), String> {
+    let previously_linked = doc["automatic_assignments"]
+        .as_object()
+        .map(|links| links.keys().cloned().collect::<BTreeSet<_>>())
+        .unwrap_or_default();
+    reconcile_automatic_photo_links(ctx, doc)?;
+    if let Some(links) = doc["automatic_assignments"].as_object_mut() {
+        links.retain(|id, _| previously_linked.contains(id));
+    }
+    Ok(())
+}
+
 pub(super) fn existing(sidecar: &Path) -> Result<Option<Vec<u8>>, String> {
     versioned_store::read_optional_bounded(sidecar, MAX_LINKS)
 }
@@ -729,6 +744,22 @@ pub(super) fn filtered_page(
         _ => true,
     };
     let filtered_total = ctx.tracks.keys().filter(|id| matches(id)).count();
+    let unassigned_reasons = ctx
+        .tracks
+        .keys()
+        .filter(|id| !owners.contains_key(id) && !excluded.contains(id))
+        .map(|id| {
+            (
+                id.to_string(),
+                automatic_unassigned_reason(
+                    *id,
+                    doc,
+                    &doc["automatic_identity_evidence"]["matches"],
+                    saved_automatic_photo_threshold(doc),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut player_track_counts = std::collections::BTreeMap::<&str, usize>::new();
     for id in ctx.tracks.keys() {
         if let Some(owner) = owners.get(id) {
@@ -807,6 +838,7 @@ pub(super) fn filtered_page(
         "filtered_total":filtered_total,
         "player_track_counts":player_track_counts,
         "unassigned_track_ids":ctx.tracks.keys().filter(|id| !owners.contains_key(id) && !excluded.contains(id)).copied().collect::<Vec<_>>(),
+        "automatic_unassigned_reasons":unassigned_reasons,
         "excluded_track_ids":ctx.tracks.keys().filter(|id| excluded.contains(id)).copied().collect::<Vec<_>>(),
         "comparison_track_ids":ctx.tracks.keys().filter(|id| !owners.contains_key(id) && !excluded.contains(id)).copied().collect::<Vec<_>>(),
         "rally_track_ids":ctx.tracks.keys().copied().collect::<Vec<_>>(),
@@ -1476,6 +1508,9 @@ fn persist_photo_comparison(
         "model_fingerprint":comparison["model_fingerprint"],
         "reviewed_scope_sha256":reviewed_scope_sha256(&doc)
     });
+    if !auto_assign {
+        reconcile_saved_automatic_photo_links(&scoped, &mut doc).map_err(storage::bad_request)?;
+    }
     let unassigned: Vec<_> = scoped
         .tracks
         .keys()

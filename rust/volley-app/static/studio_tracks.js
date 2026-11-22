@@ -23,7 +23,8 @@
     playerMatches:{},similarityStatus:"not_calculated",libraryPlayers:[],projectPlayerIds:new Set(),playerTrackCounts:{},
     rosterEpoch:0,rosterBusy:false,rosterLoaded:false,tracksLoaded:false,loadingKey:null,grouping:false,
     photoIndices:new Map(),groupNavigation:new Map(),viewPlayer:"",viewConflicts:false,viewExcluded:false,filteredTotal:0,unassignedIds:new Set(),excludedIds:new Set(),identityConflictIds:new Set(),comparisonIds:new Set(),
-    photoScoreLoading:false,autoThresholdScope:"",autoAssignPending:null,pendingEditFailure:""
+    photoScoreLoading:false,autoThresholdScope:"",autoAssignPending:null,pendingEditFailure:"",
+    unassignedReasons:{},appliedAutoThreshold:75
   };
   const node=(tag,klass,text)=>{
     const n=document.createElement(tag);if(klass)n.className=klass;
@@ -396,15 +397,20 @@
         throw Error("Сервер не подтвердил фильтр привязок Track ID");
       state.filteredTotal=result.filtered_total;
       state.unassignedIds=new Set(result.unassigned_track_ids.map(Number));
+      state.unassignedReasons=result.automatic_unassigned_reasons&&
+        typeof result.automatic_unassigned_reasons==="object"&&!Array.isArray(result.automatic_unassigned_reasons)?
+        result.automatic_unassigned_reasons:{};
       state.excludedIds=new Set(result.excluded_track_ids.map(Number));
       state.identityConflictIds=new Set((result.identity_conflict_track_ids||[]).map(Number));
       state.comparisonIds=new Set(result.comparison_track_ids.map(Number));
       state.roster=Array.isArray(result.roster)?result.roster:[];
+      const appliedThreshold=Number(result.automatic_assignment_threshold_percent);
+      state.appliedAutoThreshold=Number.isInteger(appliedThreshold)&&appliedThreshold>=1&&appliedThreshold<=99?
+        appliedThreshold:75;
       const autoScope=[project,video,replay,state.rallyRun].join("|");
       if(state.autoThresholdScope!==autoScope){
         state.autoThresholdScope=autoScope;
-        const applied=Number(result.automatic_assignment_threshold_percent);
-        galleryAutoThreshold.value=Number.isInteger(applied)&&applied>=1&&applied<=99?String(applied):"75";
+        galleryAutoThreshold.value=String(state.appliedAutoThreshold);
         galleryAutoValue.textContent=galleryAutoThreshold.value+"%";
       }
       const savedMatches=result.automatic_identity_matches;
@@ -531,13 +537,13 @@
     controls.dataset.trackCount=String(ids.length);
     const select=node("select");
     select.setAttribute("aria-label","Назначить игрока для "+ids.map(id=>"ID "+id).join(", "));
-    const reliableDefault=ids.length===1||(candidates[0]?.supported||0)>=2;
+    const reliableDefault=ids.length===1||(candidates[0]?.supported||0)===ids.length;
     if(!candidates.length||!reliableDefault){
       const empty=node("option","","Выберите игрока");empty.value="";select.append(empty);
     }
     for(const match of candidates){
       const option=node("option","",match.name+" · "+(match.score*100).toFixed(1)+"%"+
-        (ids.length>1?" · "+match.supported+"/"+ids.length+" ID":""));
+        (ids.length>1?" · по "+match.supported+" из "+ids.length+" ID":""));
       option.value=match.playerId;select.append(option);
     }
     const matched=new Set(candidates.map(match=>match.playerId));
@@ -553,8 +559,8 @@
       "Нет эталонных фото игроков":state.similarityStatus==="calculated"?
       "Совпадений с игроками не найдено":"Не рассчитано при постобработке · проверьте журнал";
     const similarity=node("small","track-match-score",candidates.length?
-      "Лучшее сходство: "+candidates[0].name+" · "+(candidates[0].score*100).toFixed(1)+"%"+
-      (ids.length>1?" · "+candidates[0].supported+"/"+ids.length+" ID":"")+kind:
+      "Сходство: "+candidates[0].name+" · "+(candidates[0].score*100).toFixed(1)+"%"+
+      (ids.length>1?" · по "+candidates[0].supported+" из "+ids.length+" ID":"")+kind:
       emptySimilarity);
     const link=node("button","primary","Добавить игроку");
     link.type="button";
@@ -568,17 +574,27 @@
       return Array.isArray(row?.automatic_conflicting_track_ids)?
         row.automatic_conflicting_track_ids.map(other=>"ID "+other):[];
     });
-    const pending=ids.map(id=>(state.rows||[]).find(row=>Number(row.track_id)===Number(id))).
-      filter(Boolean);
-    let reason="";
-    if(blocked.length)reason="Автопривязка заблокирована: разные игроки одновременно видны под "+[...new Set(blocked)].join(", ")+". Проверьте игрока перед ручной привязкой.";
-    else if(pending.some(row=>row.automatic_unassigned_reason==="manually_suppressed"))
-      reason="Автопривязка отключена после ручного снятия. Вы можете снова привязать ID вручную.";
-    else if(pending.some(row=>row.automatic_unassigned_reason==="below_similarity_threshold"))
-      reason="Сходство ниже установленного порога автопривязки "+galleryAutoThreshold.value+"%.";
-    else if(pending.some(row=>row.automatic_unassigned_reason==="insufficient_observations"))
-      reason="Недостаточно независимых кадров для автоматического подтверждения.";
-    if(reason)panel.append(node("small","track-match-score track-auto-warning",reason));
+    const descriptions={
+      manually_suppressed:"автопривязка отменена вручную",
+      below_similarity_threshold:"ниже порога "+state.appliedAutoThreshold+"%",
+      insufficient_observations:"недостаточно кадров (нужно 3)",
+      identity_conflict_or_ambiguity:"конфликт ID или неоднозначное сходство",
+      no_photo_match:"нет совпадения с эталонами"
+    };
+    const reasons=ids.map(id=>{
+      const row=(state.rows||[]).find(item=>Number(item.track_id)===Number(id));
+      const reason=state.unassignedReasons?.[String(id)]||row?.automatic_unassigned_reason;
+      return reason&&descriptions[reason]?"ID "+id+": "+descriptions[reason]:null;
+    }).filter(Boolean);
+    if(reasons.length){
+      const summary=reasons.slice(0,4).join(" · ")+
+        (reasons.length>4?" · и ещё "+(reasons.length-4)+" ID":"");
+      const warning=node("small","track-match-score track-auto-warning",summary);
+      warning.title=reasons.join("\n");
+      panel.append(warning);
+    }
+    if(blocked.length)panel.append(node("small","track-match-score track-auto-warning",
+      "Одновременная видимость с "+[...new Set(blocked)].join(", ")+" — проверьте ручное назначение."));
     panel.append(similarity,controls);
     card.append(panel);
   };
@@ -677,6 +693,7 @@
     }
     if(Array.isArray(result.unassigned_track_ids))
       state.unassignedIds=new Set(result.unassigned_track_ids.map(Number));
+    if(state.unassignedReasons)for(const id of changed)delete state.unassignedReasons[String(id)];
     if(Array.isArray(result.excluded_track_ids))
       state.excludedIds=new Set(result.excluded_track_ids.map(Number));
     if(Array.isArray(result.comparison_track_ids))
@@ -965,6 +982,7 @@
           " · исключено похожих: "+(result.deactivated||0)+
           (result.skipped_ambiguous?" · неоднозначных: "+result.skipped_ambiguous:"")+
           (!result.confirmed_tracks?" · Новые фото сохраняются только из подтверждённых ID.":"");
+        if(comparison&&state.writable)await autoAssignSimilar();
       }catch(error){
         if(scope.project_id===state.project)refreshStatus.textContent="Ошибка обновления признаков: "+error.message;
       }finally{refreshReferences.disabled=false;}
@@ -1425,6 +1443,11 @@
       result.confirmed!==false||(state.writable&&result.saved!==true)||!result.player_matches||
       typeof result.player_matches!=="object"||Array.isArray(result.player_matches))
       throw Error("Некорректный результат сравнения фотографий");
+    if(state.writable){
+      if(typeof result.identity_revision!=="string"||!result.identity_revision)
+        throw Error("Сервер не вернул ревизию сохранённых совпадений");
+      state.revision=result.identity_revision;
+    }
     state.playerMatches=result.player_matches;
     state.similarityStatus=Number(result.photo_count)===0?"no_reference_photos":"calculated";
     renderRows();renderGroupCards();

@@ -38,7 +38,7 @@ const group=node("article");context.attachSuggestions(group,[7,8,9]);
 const groupControls=group.children[0].children[1];
 assert.equal(groupControls.children[0].value,"b",
   "An isolated 98% crop must not outrank three consistent group observations");
-assert.match(group.children[0].children[0].text,/3\/3 ID/);
+assert.match(group.children[0].children[0].text,/по 3 из 3 ID/);
 state.playerMatches={"7":[{player_id:"a",cosine_similarity:.99}]};
 const uncertain=node("article");context.attachSuggestions(uncertain,[7,8,9]);
 assert.equal(uncertain.children[0].children[1].children[0].value,"",
