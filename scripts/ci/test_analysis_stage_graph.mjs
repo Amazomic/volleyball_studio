@@ -69,7 +69,11 @@ for(const row of [1,2]){
   assert.equal(nodes.length,6);
   assert.deepEqual(Array.from(nodes,item=>item[4]),[1,2,3,4,5,6]);
 }
-assert.match(css,/\.analysis-flow-node::after\{[^}]*conic-gradient/);
+assert.match(css,/\.analysis-flow-node::after\{[^}]*linear-gradient\(to right,/);
+assert.match(css,/\.analysis-flow-node\[data-flow="rtl"\]::after\{[^}]*linear-gradient\(to left,/);
+assert.doesNotMatch(css,/\.analysis-flow-node::after\{[^}]*conic-gradient/);
+assert.match(js,/cell\.style\.gridColumn=row===2\?7-col:col/);
+assert.match(js,/node\.dataset\.flow=row===2\?"rtl":"ltr"/);
 assert.match(js,/node\.style\.setProperty\("--stage-progress"/);
 assert.match(css,/\.analysis-flow-dialog-body\{[^}]*grid-template-columns:repeat\(auto-fit,minmax\(180px,1fr\)\)/);
 assert.match(css,/\.analysis-flow-dialog-panel\{[^}]*width:min\(960px,100%\)/);

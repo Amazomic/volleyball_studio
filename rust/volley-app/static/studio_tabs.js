@@ -740,9 +740,10 @@
     }
     for(const [id,name,kind,row,col] of pipelineStages){
       const cell=make("div","analysis-flow-cell");
-      cell.style.gridRow=row;cell.style.gridColumn=col;
+      cell.style.gridRow=row;cell.style.gridColumn=row===2?7-col:col;
       const node=make("button","analysis-flow-node");
       node.type="button";node.dataset.stageId=id;node.dataset.kind=kind;
+      node.dataset.flow=row===2?"rtl":"ltr";
       const heading=make("span","analysis-flow-node-title",window.VolleyballUi.translate(name));
       const technical=make("span","analysis-flow-node-model");
       const meta=pipelineModelMeta(id,run);

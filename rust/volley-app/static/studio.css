@@ -1989,7 +1989,8 @@ body[data-ui-theme="light"] .analysis-flow-phase[data-phase="cpu"] .analysis-flo
 .analysis-flow-node.is-skipped{opacity:.46;filter:grayscale(.4)}
 .analysis-flow-node.is-failed{border-color:#fa7a7a;box-shadow:0 0 14px #dd494966}
 .analysis-flow-node.is-branch{height:25px;font-size:10px;background:#1d2b40;border-style:dashed}
-.analysis-flow-node::after{content:"";position:absolute;inset:0;padding:3px;border-radius:inherit;background:conic-gradient(#efba4b 0 var(--stage-progress,0%),transparent var(--stage-progress,0%) 100%);-webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);mask-composite:exclude;pointer-events:none}
+.analysis-flow-node::after{content:"";position:absolute;inset:0;padding:3px;border-radius:inherit;background:linear-gradient(to right,#efba4b 0 var(--stage-progress,0%),transparent var(--stage-progress,0%) 100%);-webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);mask-composite:exclude;pointer-events:none}
+.analysis-flow-node[data-flow="rtl"]::after{background:linear-gradient(to left,#efba4b 0 var(--stage-progress,0%),transparent var(--stage-progress,0%) 100%)}
 .analysis-flow-node.is-active:not(.is-progress-unknown)::after{filter:drop-shadow(0 0 3px #efba4b)}
 .analysis-flow-lines{position:absolute;z-index:2;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
 .analysis-flow-edge{fill:none;stroke:#6b91b7;stroke-width:2.4;stroke-linejoin:round;stroke-linecap:round}
