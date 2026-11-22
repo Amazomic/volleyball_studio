@@ -664,3 +664,7 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Возврат ID по слабой детекции, кадров (0 = выкл)	Restore lost ID from weak detections, frames (0 = off)
 Совпадение рамки потерянного ID, IoU	Lost ID box overlap, IoU
 Сравнить исходные GPU-детекции VBallNet со стабилизированной траекторией только в дебаге	Compare raw VBallNet GPU detections with the stabilized trajectory in Debug only
+После Ball Stabilizer	After Ball Stabilizer
+Оба	Both
+Цвета сравнения	Comparison colors
+Параметры сравнения траекторий	Trajectory comparison settings

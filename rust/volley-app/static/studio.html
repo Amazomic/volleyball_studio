@@ -351,9 +351,13 @@
                 </div>
                 <div id="studio-debug-trajectory-switch" class="video-overlay-trajectory-switch hidden" role="group" aria-label="Источник траектории мяча в дебаге">
                   <span>Траектория мяча</span>
-                  <button type="button" id="studio-debug-trajectory-before" aria-pressed="false" title="Исходные положения мяча до Ball Stabilizer">До стабилизации</button>
-                  <button type="button" id="studio-debug-trajectory-after" aria-pressed="true" title="Единый сохранённый файл Ball Stabilizer, используемый при поиске касаний">После стабилизации</button>
-                  <button type="button" id="studio-debug-stabilizer-compare" aria-pressed="false" title="Сравнить исходные GPU-детекции VBallNet со стабилизированной траекторией только в дебаге">Ball Stabilizer · сравнение</button>
+                  <button type="button" id="studio-debug-trajectory-before" aria-pressed="false" title="Исходные положения мяча до Ball Stabilizer">Сырые</button>
+                  <button type="button" id="studio-debug-trajectory-after" aria-pressed="true" title="Единый сохранённый файл Ball Stabilizer, используемый при поиске касаний">После Ball Stabilizer</button>
+                  <button type="button" id="studio-debug-stabilizer-compare" aria-pressed="false" title="Сравнить исходные GPU-детекции VBallNet со стабилизированной траекторией только в дебаге">Оба</button>
+                  <span id="studio-debug-trajectory-legend" class="video-overlay-trajectory-legend hidden" aria-label="Цвета сравнения">
+                    <span><i class="trajectory-raw" aria-hidden="true"></i> VBallNet</span>
+                    <span><i class="trajectory-stabilized" aria-hidden="true"></i> Ball Stabilizer</span>
+                  </span>
                 </div>
                 <fieldset id="studio-overlay-actions" class="video-overlay-actions hidden" aria-label="Типы касаний — оценка CPU">
                   <label><input type="checkbox" data-overlay-action="unknown_touch" checked><span class="action-unknown-touch">●</span> Касание</label>
@@ -370,7 +374,7 @@
                     <label>Мяч <input id="studio-raw-ball" type="range" min="0" max="100" value="0"><output id="studio-raw-ball-value">0%</output></label>
                   </fieldset>
                   <fieldset id="studio-ball-stabilizer-controls" class="raw-model-control hidden">
-                    <legend>Ball Stabilizer · сравнение на видео</legend>
+                    <legend>Параметры сравнения траекторий</legend>
                     <small>Голубой — VBallNet, золотой — стабилизированная траектория, штрих — интерполяция, красный × — отброшенная детекция.</small>
                     <label>Пропуск, кадров <input id="studio-debug-stabilizer-gap" type="number" min="1" max="27" step="1" value="12"></label>
                     <label>Макс. скачок, доля/кадр <input id="studio-debug-stabilizer-step" type="number" min="0.01" max="0.25" step="0.01" value="0.12"></label>

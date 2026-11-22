@@ -6,7 +6,17 @@ const js=readFileSync(new URL("../../rust/volley-app/static/studio.js",import.me
 const html=readFileSync(new URL("../../rust/volley-app/static/studio.html",import.meta.url),"utf8");
 const css=readFileSync(new URL("../../rust/volley-app/static/studio.css",import.meta.url),"utf8");
 assert.doesNotMatch(html,/id="studio-overlay-stabilizer"/);
-assert.match(html,/id="studio-debug-stabilizer-compare"[^>]*aria-pressed="false"/);
+assert.match(html,/id="studio-debug-stabilizer-compare"[^>]*aria-pressed="false"[^>]*>Оба<\/button>/);
+const trajectoryModes=html.match(/<div id="studio-debug-trajectory-switch"[\s\S]*?<\/div>/)?.[0]||"";
+assert.deepEqual([...trajectoryModes.matchAll(/<button[^>]*id="([^"]+)"[^>]*>([^<]+)<\/button>/g)]
+  .map(match=>[match[1],match[2]]),[
+    ["studio-debug-trajectory-before","Сырые"],
+    ["studio-debug-trajectory-after","После Ball Stabilizer"],
+    ["studio-debug-stabilizer-compare","Оба"]
+  ],"The Debug trajectory control has exactly three exclusive display modes");
+assert.match(trajectoryModes,/id="studio-debug-trajectory-legend"[^>]*hidden/);
+assert.match(css,/\.trajectory-raw\{background:#47e2ff\}/);
+assert.match(css,/\.trajectory-stabilized\{background:#f1bd51\}/);
 assert.match(css,/#studio-preview-view:not\(\.training-workspace\) #studio-debug-stabilizer-compare\{display:none\}/);
 assert.match(js,/\["ball_stabilizer_v3","ball_stabilizer_v4","ball_stabilizer_v5","ball_stabilizer_v6"\]\.includes\(stats\?\.version\)/,
   "Debug comparison must read historical V3/V4/V5 results alongside V6");
@@ -129,6 +139,29 @@ scope.drawOverlay();
 assert.equal(poseFills.length,17);
 assert.ok(poseFills.every(value=>value===1));
 overlay.rawPoseVisible.checked=false;
+const comparisonRecord={
+  width:100,height:100,start_frame:0,end_frame:180,
+  frames:[
+    {frame:44,raw:{balls:[{source:"vballnet",point:[0.2,0.25],score:0.2}]},
+      stabilized_ball:[0.3,0.3],ball_interpolated:false,ball_rejected:false},
+    {frame:45,raw:{balls:[{source:"vballnet",point:[0.22,0.3],score:0.2}]},
+      stabilized_ball:[0.32,0.35],ball_interpolated:true,ball_rejected:false}
+  ]
+};
+overlay.cache.set("p:gpu-stabilizer:f:v:0",comparisonRecord);
+overlay.stabilizerView=true;
+overlay.rawBallTrail={checked:false};
+overlay.rawBall.value="99";
+overlay.rawVballVisible.checked=false;
+overlay.rawPoseVisible.checked=true;
+ui.video.currentTime=45/30;
+actionColors.length=0;ballColors.length=0;poseFills.length=0;
+scope.drawOverlay();
+assert.ok(actionColors.includes("#47e2ff"),"Both draws the cyan raw VBallNet trajectory even if the raw trail is disabled");
+assert.ok(actionColors.includes("#f1bd51"),"Both draws the gold stabilized trajectory in the same frame");
+assert.ok(ballColors.includes("#47e2ff"),"Both displays unfiltered raw detections below the raw confidence slider");
+assert.deepEqual(poseFills,[],"Both compares ball trajectories without unrelated RTMPose skeletons");
+overlay.stabilizerView=false;overlay.rawPoseVisible.checked=false;
 actionColors.length=0;
 overlay.raw=false;s.run="r";
 timeline.data.schema="volley-native-rally-timeline/1";
@@ -179,7 +212,7 @@ const controls={querySelectorAll:()=>[checkbox],classList:{toggle(){},remove(){}
 const tab=()=>({attributes:{},closest:()=>controls,addEventListener(name,fn){this[name]=fn;},setAttribute(name,value){this.attributes[name]=value;}});
 const trainingMode={active:false,panel:{classList:{add(){}}}};
 const initOverlay={mode:tab(),rawMode:tab(),stabilizerMode:tab(),stabilizerControls:controls,
-  debugTrajectorySwitch:controls,debugBefore:tab(),debugAfter:tab(),
+  debugTrajectorySwitch:controls,debugTrajectoryLegend:controls,debugBefore:tab(),debugAfter:tab(),
   rawControls:controls,actionControls:controls,canvas:{closest:()=>controls},
   rawBall:input,rawVballVisible:input,rawPeopleVisible:input,
   rawPlayer:input,rawPose:input,rawPoseVisible:input,
@@ -216,11 +249,14 @@ assert.equal(trainingMode.active,true,"Debug comparison must not leave Debug");
 assert.equal(initOverlay.raw,true,"Debug comparison must request raw GPU observations");
 assert.equal(initOverlay.stabilizerView,true);
 assert.equal(initOverlay.stabilizerMode.attributes["aria-pressed"],"true");
+assert.equal(initOverlay.debugBefore.attributes["aria-pressed"],"false");
+assert.equal(initOverlay.debugAfter.attributes["aria-pressed"],"false");
 initOverlay.debugAfter.click();
 assert.equal(trainingMode.active,true);
 assert.equal(initOverlay.raw,false,"After stabilization must restore CPU observations");
 assert.equal(initOverlay.stabilizerView,false);
 assert.equal(initOverlay.stabilizerMode.attributes["aria-pressed"],"false");
+assert.equal(initOverlay.debugAfter.attributes["aria-pressed"],"true");
 trainingMode.active=false;
 assert.match(html,/id="studio-debug-trajectory-before"[^>]*aria-pressed="false"/);
 assert.match(html,/id="studio-debug-trajectory-after"[^>]*aria-pressed="true"/);

@@ -15,6 +15,6 @@ assert.equal(ctx.visible({pose_points:pose}),false,"Fail closed when scope was n
 assert.equal(ctx.visible({in_rally:true,pose_points:null}),false);
 assert.equal(ctx.visible(null),false);
 assert.match(source,/if\(overlay\.flags\.pose && poseVisibleInRally\(current\)\)/);
-assert.match(source,/if\(overlay\.rawPoseVisible\.checked\)/,
-  "Raw GPU diagnostic overlays must remain independent of rally scope");
+assert.match(source,/if\(!overlay\.stabilizerView&&overlay\.rawPoseVisible\.checked\)/,
+  "Raw GPU pose observations must remain independent of rally scope outside trajectory-only comparison");
 console.log("Studio processed RTMPose respects rally-only visibility; raw GPU diagnostic stays available.");

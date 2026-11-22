@@ -355,6 +355,7 @@
     raw:false,stabilizerView:false,trajectoryVariant:"after",
     debugTrajectorySwitch:$("studio-debug-trajectory-switch"),
     debugBefore:$("studio-debug-trajectory-before"),debugAfter:$("studio-debug-trajectory-after"),
+    debugTrajectoryLegend:$("studio-debug-trajectory-legend"),
     actionFlags:{unknown_touch:true,attack:true,block:true,serve:true,overhead_pass:true,dig:true},
     source:null,cache:new Map(),rawFrames:new Map(),rawDetectors:new Map(),rawOffsets:new Map(),presentedTime:null,
     fetching:new Set(),controllers:new Map(),failed:new Map(),loop:0,
@@ -853,12 +854,12 @@
     const displayedBall=row=>showBefore?row.ball_before:
       (debugTrajectory&&!canonicalTrajectory?null:row.ball);
     if(overlay.raw){
-      if(overlay.rawVballVisible.checked&&overlay.rawBallTrail?.checked){
-        const threshold=Number(overlay.rawBall.value)/100;
+      if(overlay.stabilizerView||(overlay.rawVballVisible.checked&&overlay.rawBallTrail?.checked)){
+        const threshold=overlay.stabilizerView?0:Number(overlay.rawBall.value)/100;
         let previous=null;
         ctx.strokeStyle="#47e2ff";ctx.fillStyle="#47e2ff";ctx.lineWidth=2;
         for(const row of frames){
-          if(row.frame<frame-Math.round(fps())||row.frame>frame)continue;
+          if(row.frame<frame-(overlay.stabilizerView?44:Math.round(fps()))||row.frame>frame)continue;
           const balls=(row.raw?.balls||[]).filter(ball=>ball.source==="vballnet"&&
             Number.isFinite(ball.score)&&ball.score>=threshold&&
             Array.isArray(ball.point)&&ball.point.length===2&&ball.point.every(Number.isFinite));
@@ -879,7 +880,7 @@
       const raw=current.raw;
       const enough=(score,input)=>Number.isFinite(score)&&score>=Number(input.value)/100;
       ctx.font="bold 11px Inter, sans-serif";ctx.textBaseline="top";ctx.lineWidth=1.8;
-      for(const ball of raw.balls||[]){
+      for(const ball of overlay.stabilizerView?[]:(raw.balls||[])){
         if(ball.source!=="vballnet"||!overlay.rawVballVisible.checked||
           !enough(ball.score,overlay.rawBall)||!Array.isArray(ball.point))continue;
         const [px,py]=point(ball.point);
@@ -923,7 +924,7 @@
         }
         ctx.restore();
       }
-      if(overlay.rawPeopleVisible.checked){
+      if(!overlay.stabilizerView&&overlay.rawPeopleVisible.checked){
         for(const player of raw.players||[]){
           if(!Array.isArray(player.box)||player.box.length!==4)continue;
           const [x1,y1,x2,y2]=player.box,px=x+x1*width,py=y+y1*height;
@@ -967,7 +968,7 @@
           ctx.restore();
         }
       }
-      if(overlay.rawPoseVisible.checked){
+      if(!overlay.stabilizerView&&overlay.rawPoseVisible.checked){
         const edges=[[5,7],[7,9],[6,8],[8,10],[5,6],[5,11],[6,12],
           [11,12],[11,13],[13,15],[12,14],[14,16]];
         const threshold=Number(overlay.rawPose.value)/100;
@@ -2448,6 +2449,7 @@
       overlay.mode.setAttribute("aria-selected",String(!raw));
       overlay.rawMode.setAttribute("aria-selected",String(raw));
       overlay.stabilizerMode.setAttribute("aria-pressed","false");
+      overlay.debugTrajectoryLegend.classList.add("hidden");
       overlay.rawControls.classList.toggle("hidden",!raw);
       overlay.stabilizerControls.classList.add("hidden");
       overlay.debugTrajectorySwitch.classList.add("hidden");
@@ -2479,18 +2481,20 @@
       overlay.raw=comparison;
       overlay.stabilizerView=comparison;
       overlay.stabilizerMode.setAttribute("aria-pressed",String(comparison));
+      overlay.debugTrajectoryLegend.classList.toggle("hidden",!comparison);
+      if(comparison)overlay.flags.trajectory=true;
       overlay.debugBefore.setAttribute("aria-pressed",String(!comparison&&overlay.trajectoryVariant==="before"));
       overlay.debugAfter.setAttribute("aria-pressed",String(!comparison&&overlay.trajectoryVariant==="after"));
       overlay.rawControls.classList.toggle("hidden",!comparison);
       overlay.stabilizerControls.classList.toggle("hidden",!comparison);
-      overlay.mode.closest(".video-overlay-toggles").classList.toggle("raw-selected",comparison);
+      overlay.mode.closest(".video-overlay-toggles").classList.remove("raw-selected");
       updateOverlayToggles();
       setOverlaySource(comparison||s.run?{}:null);
       if(comparison&&s.video){
         ensurePreviewVideo();
         prefetchOverlayAtFrame(0);
       }
-      if(comparison)timeline.status.textContent="Ball Stabilizer · сравнение VBallNet и интерполяции";
+      if(comparison)timeline.status.textContent="Обе траектории · голубая: VBallNet, золотая: Ball Stabilizer";
       else if(!s.run)timeline.status.textContent="Выберите CPU-версию";
       else if(timeline.data)timeline.status.textContent=
         "Розыгрыши по мячу: "+trainingRallyGroups().ball.length+
@@ -2541,6 +2545,7 @@
       overlay.mode.setAttribute("aria-selected","false");
       overlay.rawMode.setAttribute("aria-selected","false");
       overlay.stabilizerMode.setAttribute("aria-pressed","false");
+      overlay.debugTrajectoryLegend.classList.add("hidden");
       overlay.debugBefore.setAttribute("aria-pressed",String(overlay.trajectoryVariant==="before"));
       overlay.debugAfter.setAttribute("aria-pressed",String(overlay.trajectoryVariant==="after"));
       overlay.mode.closest(".video-overlay-toggles").classList.remove("raw-selected");

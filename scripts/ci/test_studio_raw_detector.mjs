@@ -39,7 +39,8 @@ assert.equal(checkbox.checked,false,"switching analysis preserves visibility cho
 s.analysis="missing";
 context.updateRawDetectorLabel();
 assert.equal(checkbox.disabled,true,"no selected GPU fusion disables the toggle");
-assert.match(source,/if\(overlay\.rawPeopleVisible\.checked\)/);
+assert.match(source,/if\(!overlay\.stabilizerView&&overlay\.rawPeopleVisible\.checked\)/,
+  "The regular raw GPU preview keeps RF-DETR controls; trajectory-only comparison hides people");
 assert.match(source,/const poseBoxes=raw\.poses\?\.length\?raw\.poses:\(raw\.poses_interpolated\|\|\[\]\)/,
   "unobserved detector frames reuse measured or bridged RTMPose crop boxes");
 assert.match(source,/if\(player\.interpolated===true\)\{ctx\.setLineDash/,
