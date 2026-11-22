@@ -2337,17 +2337,25 @@ async fn pipeline(
     status["automatic_identity_complete"] = json!(remaining.is_empty());
     save(path, status)?;
     if !remaining.is_empty() {
-        // Identity labels are suggestions, not a prerequisite for physical
-        // tracking, Touch detection or rally reconstruction.
+        let reason_count = |key: &str| {
+            identities["unassigned_reasons"][key]
+                .as_array()
+                .map_or(0, Vec::len)
+        };
         log_event(
             path,
             "Игроки",
             "warning",
             &format!(
-                "Автопривязка: назначено {} ID, без совпадения {} ID (первые 12: {:?}). Порог {}%, причины: нет подходящих эталонов, недостаточно независимых наблюдений или конфликт видимости.",
+                "Автопривязка: назначено {} ID, непривязанных {} ID (первые 12: {:?}). Порог {}%. Причины: нет совпадений {}, мало наблюдений {}, ниже порога {}, конфликт/неоднозначность {}, запрещено вручную {}.",
                 identities["automatic_count"],remaining.len(),
                 remaining.iter().take(12).collect::<Vec<_>>(),
-                request.post.auto_assign_threshold_percent
+                request.post.auto_assign_threshold_percent,
+                reason_count("no_photo_match"),
+                reason_count("insufficient_observations"),
+                reason_count("below_similarity_threshold"),
+                reason_count("identity_conflict_or_ambiguity"),
+                reason_count("manually_suppressed")
             ),
         )?;
     } else {

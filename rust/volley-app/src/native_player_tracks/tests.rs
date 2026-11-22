@@ -2334,6 +2334,80 @@ fn track_gallery_filters_owners_before_pagination() {
 }
 
 #[test]
+fn automatic_reid_explains_why_specific_tracks_remain_unassigned() {
+    let doc = json!({"automatic_suppressed_ids":[11]});
+    let matches = json!({
+        "8":[{"player_id":"abcdef012345","cosine_similarity":0.90,"samples_used":1}],
+        "9":[{"player_id":"abcdef012345","cosine_similarity":0.68,"samples_used":3}],
+        "10":[{"player_id":"abcdef012345","cosine_similarity":0.88,"samples_used":3}]
+    });
+    assert_eq!(
+        automatic_unassigned_reason(7, &doc, &matches, 0.75),
+        "no_photo_match"
+    );
+    assert_eq!(
+        automatic_unassigned_reason(8, &doc, &matches, 0.75),
+        "insufficient_observations"
+    );
+    assert_eq!(
+        automatic_unassigned_reason(9, &doc, &matches, 0.75),
+        "below_similarity_threshold"
+    );
+    assert_eq!(
+        automatic_unassigned_reason(10, &doc, &matches, 0.75),
+        "identity_conflict_or_ambiguity"
+    );
+    assert_eq!(
+        automatic_unassigned_reason(11, &doc, &matches, 0.75),
+        "manually_suppressed"
+    );
+}
+
+#[test]
+fn manual_binding_keeps_its_confirmation_when_other_automatic_links_are_revalidated() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    let another = ctx.tracks[&7].clone();
+    ctx.tracks.insert(8, another);
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
+    let mut doc = base_document(&ctx);
+    doc["assignments"]["7"] = json!("abcdef012345");
+    doc["automatic_assignments"]["8"] = json!("abcdef012345");
+    let previous = doc["automatic_assignments"].clone();
+    reconcile_automatic_photo_links(&ctx, &mut doc).unwrap();
+    assert_eq!(doc["assignments"]["7"], "abcdef012345");
+    assert_eq!(doc["automatic_assignments"], json!({}));
+    assert_eq!(
+        revised_automatic_links(&previous, &doc["automatic_assignments"], &[7]),
+        BTreeSet::from([8]),
+    );
+    assert!(revised_automatic_links(&previous, &doc["automatic_assignments"], &[8]).is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn excluded_tracks_never_appear_as_assignable_unassigned_ids() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    let second = ctx.tracks[&7].clone();
+    ctx.tracks.insert(8, second);
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
+    let mut doc = base_document(&ctx);
+    doc["excluded_ids"] = json!([7]);
+    let unassigned = filtered_page(&ctx, &doc, "rev", 0, 10, Some("unassigned"), None).unwrap();
+    assert_eq!(unassigned["unassigned_track_ids"], json!([8]));
+    assert_eq!(unassigned["filtered_total"], 1);
+    assert_eq!(unassigned["tracks"][0]["track_id"], 8);
+    let excluded = filtered_page(&ctx, &doc, "rev", 0, 10, Some("excluded"), None).unwrap();
+    assert_eq!(excluded["filtered_total"], 1);
+    assert_eq!(excluded["excluded_track_ids"], json!([7]));
+    assert_eq!(excluded["tracks"][0]["track_id"], 7);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn native_manual_assignments_are_replay_scoped_and_roster_checked() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();

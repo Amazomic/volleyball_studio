@@ -38,7 +38,8 @@ const context={
   post:async(url,body)=>{
     requests.push({url,body});
     return {automatic_count:1,automatic_assignments:{"101":"playerA"},
-      threshold_percent:body.auto_threshold_percent,unassigned_track_ids:[102,103]};
+      threshold_percent:body.auto_threshold_percent,unassigned_track_ids:[102,103],
+      unassigned_reasons:{insufficient_observations:[102],below_similarity_threshold:[103]}};
   }
 };
 runInNewContext(source.slice(start,end)+"\nthis.run=autoAssignSimilar;",context);
@@ -49,7 +50,9 @@ assert.equal(requests[0].body.action,"postprocess_auto_assign");
 assert.equal(requests[0].body.auto_threshold_percent,92);
 assert.equal(state.busy,false);
 assert.match(status.textContent,/92%/);
-assert.match(status.textContent,/остальные остались непривязанными/);
+assert.match(status.textContent,/без привязки: 2/);
+assert.match(status.textContent,/мало наблюдений: 1/);
+assert.match(status.textContent,/ниже порога: 1/);
 assert.equal(events.length,1);
 
 slider.value="35";

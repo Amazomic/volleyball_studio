@@ -37,7 +37,7 @@ const slice=(start,end)=> {
   const response={schema:"volley-native-player-track-links/1",
     source_replay_sha256:"a".repeat(64),automatic_reid_binding:true,
     tracks:[],rally_track_ids:[2],total_tracks:1,filtered_total:0,
-    unassigned_track_ids:[],comparison_track_ids:[],roster:[],
+    unassigned_track_ids:[],excluded_track_ids:[],comparison_track_ids:[],roster:[],
     revision:"new-revision",writable:true,assigned_count:1,excluded_count:0,
     automatic_assignment_threshold_percent:92};
   const calls=[];

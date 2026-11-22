@@ -30,7 +30,7 @@ const viewStart=tracks.indexOf('  const viewBar=node("div","track-view-bar");');
 const viewEnd=tracks.indexOf('  ui.list.before(playerGallery);',viewStart);
 const handlers={},inserted=[],loads=[];
 const galleryState={project:"project",projectPlayerIds:new Set(["a"]),viewPlayer:"",viewConflicts:false,
-  identityConflictIds:new Set(),offset:48,tracksLoaded:true,unassignedIds:new Set([1,2,3])};
+  identityConflictIds:new Set(),selected:new Set(),offset:48,tracksLoaded:true,unassignedIds:new Set([1,2,3]),excludedIds:new Set([9]),viewExcluded:false};
 const modeSwitch=make("div"),modeTabs=make("div");modeSwitch.append(modeTabs);
 const galleryContext={state:galleryState,node:make,ui:{list:{before:node=>inserted.push(node)}},
   window:{addEventListener:(name,fn)=>{handlers[name]=fn;}},groupsMode:make("button"),
@@ -54,6 +54,14 @@ back.events.click();
 assert.equal(galleryState.viewPlayer,"");
 assert.equal(modeSwitch.children[3].textContent,"Непривязанные Track ID · 2");
 assert.equal(loads.at(-1),"");
+const excludedToggle=modeSwitch.children[1].children[2];
+assert.match(excludedToggle.textContent,/Исключённые · 1/);
+excludedToggle.events.click();
+assert.equal(galleryState.viewExcluded,true);
+assert.equal(modeSwitch.children[3].textContent,"Исключённые Track ID · 1");
+excludedToggle.events.click();
+assert.equal(galleryState.viewExcluded,false);
+assert.equal(modeSwitch.children[3].textContent,"Непривязанные Track ID · 2");
 console.log("Player card opens its photo album: OK");
 const remove=card.children.find(item=>item.tag==="button"&&item.klass==="players-side-remove");
 assert.ok(remove,"Player sidebar must expose the project-unlink control");
