@@ -151,7 +151,7 @@ pub struct StabilizedBallMotion {
     pub observed_frames: usize,
 }
 
-pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v2";
+pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v3";
 
 fn reject_interleaved_outliers(points: &[Option<[f64; 2]>], max_step_fraction: f64) -> Vec<usize> {
     let mut rejected = Vec::new();
@@ -206,6 +206,101 @@ fn reject_interleaved_outliers(points: &[Option<[f64; 2]>], max_step_fraction: f
     rejected
 }
 
+fn reject_recurring_static_hotspots(
+    points: &[Option<[f64; 2]>],
+    max_step_fraction: f64,
+) -> Vec<usize> {
+    #[derive(Default)]
+    struct Cell {
+        count: usize,
+        episodes: usize,
+        first: usize,
+        last: usize,
+        sum: [f64; 2],
+        square_sum: [f64; 2],
+        min: [f64; 2],
+        max: [f64; 2],
+    }
+
+    let mut cells = std::collections::HashMap::<(u8, u8), Cell>::new();
+    for (frame, point) in points.iter().enumerate() {
+        let Some(point) = point else {
+            continue;
+        };
+        let key = (
+            (point[0] * 40.0).round() as u8,
+            (point[1] * 40.0).round() as u8,
+        );
+        let cell = cells.entry(key).or_default();
+        if cell.count == 0 {
+            cell.first = frame;
+            cell.episodes = 1;
+            cell.min = *point;
+            cell.max = *point;
+        } else if frame - cell.last > 120 {
+            cell.episodes += 1;
+        }
+        cell.last = frame;
+        cell.count += 1;
+        for (axis, &coordinate) in point.iter().enumerate() {
+            cell.sum[axis] += coordinate;
+            cell.square_sum[axis] += coordinate * coordinate;
+            cell.min[axis] = cell.min[axis].min(coordinate);
+            cell.max[axis] = cell.max[axis].max(coordinate);
+        }
+    }
+
+    let hotspots = cells
+        .values()
+        .filter_map(|cell| {
+            if cell.count < 40 || cell.episodes < 3 || cell.last - cell.first < 300 {
+                return None;
+            }
+            let n = cell.count as f64;
+            let center = [cell.sum[0] / n, cell.sum[1] / n];
+            let spread = [
+                (cell.square_sum[0] / n - center[0] * center[0])
+                    .max(0.0)
+                    .sqrt(),
+                (cell.square_sum[1] / n - center[1] * center[1])
+                    .max(0.0)
+                    .sqrt(),
+            ];
+            (spread[0] <= 0.005
+                && spread[1] <= 0.005
+                && cell.max[0] - cell.min[0] <= 0.015
+                && cell.max[1] - cell.min[1] <= 0.021)
+                .then_some(center)
+        })
+        .collect::<Vec<_>>();
+
+    let mut rejected = Vec::new();
+    for (frame, point) in points.iter().enumerate() {
+        let Some(point) = point else {
+            continue;
+        };
+        for center in &hotspots {
+            if (point[0] - center[0]).hypot(point[1] - center[1]) > 0.018 {
+                continue;
+            }
+            let moving_neighbor = |neighbor: usize| {
+                points[neighbor].is_some_and(|other| {
+                    let distance = (point[0] - other[0]).hypot(point[1] - other[1]);
+                    distance > 0.018
+                        && distance <= max_step_fraction * frame.abs_diff(neighbor) as f64
+                })
+            };
+            let moving_before = (frame.saturating_sub(2)..frame).any(moving_neighbor);
+            let moving_after = ((frame + 1)..(frame + 3).min(points.len())).any(moving_neighbor);
+            if !(moving_before && moving_after) {
+                rejected.push(frame);
+            }
+            break;
+        }
+    }
+    rejected
+}
+
 pub fn stabilize_ball_motion(
     samples: &[ScoredBallSample],
     frames: usize,
@@ -233,7 +328,10 @@ pub fn stabilize_ball_motion(
         }
     }
     let confidence_frames = points.iter().filter(|p| p.is_some()).count();
-    let mut rejected_frames = Vec::new();
+    let mut rejected_frames = reject_recurring_static_hotspots(&points, settings.max_step_fraction);
+    for &index in &rejected_frames {
+        points[index] = None;
+    }
     for index in 0..frames {
         let Some(point) = points[index] else {
             continue;
@@ -290,8 +388,7 @@ pub fn stabilize_ball_motion(
         let (_, before_end, before_count) = triple[0];
         let (island_start, island_end, island_count) = triple[1];
         let (after_start, _, after_count) = triple[2];
-        if before_count < 4
-            || after_count < 4
+        if after_count < 4
             || island_count > 4
             || after_start - before_end > settings.max_gap_frames + 5
         {
@@ -299,8 +396,22 @@ pub fn stabilize_ball_motion(
         }
         let before = points[before_end].expect("segment end is observed");
         let after = points[after_start].expect("segment start is observed");
-        if (before[0] - after[0]).hypot(before[1] - after[1])
-            <= settings.max_step_fraction * (after_start - before_end) as f64
+        let island_first = points[island_start].expect("island start is observed");
+        let island_last = points[island_end].expect("island end is observed");
+        let bounded_static_island = before_count >= 1
+            && (2..=4).contains(&island_count)
+            && island_end - island_start <= 4
+            && island_start - before_end <= 2
+            && after_start - island_end <= 2
+            && (before[0] - island_first[0]).hypot(before[1] - island_first[1])
+                > settings.max_step_fraction * (island_start - before_end) as f64
+            && (island_last[0] - after[0]).hypot(island_last[1] - after[1])
+                > settings.max_step_fraction * (after_start - island_end) as f64
+            && (island_first[0] - island_last[0]).hypot(island_first[1] - island_last[1])
+                <= settings.max_step_fraction * 0.25;
+        if (before_count >= 4 || bounded_static_island)
+            && (before[0] - after[0]).hypot(before[1] - after[1])
+                <= settings.max_step_fraction * (after_start - before_end) as f64
         {
             for (index, slot) in points
                 .iter_mut()
@@ -691,6 +802,122 @@ mod tests {
             assert_eq!(result.observed_frames, 35);
             assert!(result.interpolated.iter().all(|&value| !value));
         }
+    }
+
+    #[test]
+    fn ball_stabilizer_rejects_recurrent_static_false_detection_in_any_image_area() {
+        let mut samples = Vec::new();
+        for frame in 0..900 {
+            if (10..59).contains(&frame)
+                || (180..226).contains(&frame)
+                || (540..583).contains(&frame)
+                || (750..775).contains(&frame)
+            {
+                samples.push(ScoredBallSample {
+                    frame,
+                    point: [
+                        0.63 + (frame % 3) as f64 * 0.001,
+                        0.55 + (frame % 4) as f64 * 0.001,
+                    ],
+                    confidence: 0.84,
+                });
+            } else if (300..343).contains(&frame) {
+                samples.push(ScoredBallSample {
+                    frame,
+                    point: [0.15 + (frame - 300) as f64 * 0.004, 0.30],
+                    confidence: 0.84,
+                });
+            }
+        }
+        let result =
+            stabilize_ball_motion(&samples, 900, BallStabilizerSettings::default()).unwrap();
+        for frame in [10, 25, 180, 200, 540, 560, 750] {
+            assert!(result.rejected_frames.contains(&frame));
+            assert_eq!(result.points[frame], None);
+        }
+        assert!((result.points[320].unwrap()[0] - 0.23).abs() < 1e-12);
+        assert_eq!(result.points[320].unwrap()[1], 0.30);
+    }
+
+    #[test]
+    fn ball_stabilizer_preserves_genuine_motion_through_a_recurrent_static_hotspot() {
+        let mut samples = Vec::new();
+        for frame in 0..900 {
+            if (10..59).contains(&frame)
+                || (180..226).contains(&frame)
+                || (540..583).contains(&frame)
+                || (750..775).contains(&frame)
+            {
+                samples.push(ScoredBallSample {
+                    frame,
+                    point: [0.63 + (frame % 3) as f64 * 0.001, 0.55],
+                    confidence: 0.84,
+                });
+            } else if (310..321).contains(&frame) {
+                samples.push(ScoredBallSample {
+                    frame,
+                    point: [0.505 + (frame - 310) as f64 * 0.025, 0.55],
+                    confidence: 0.84,
+                });
+            }
+        }
+        let result =
+            stabilize_ball_motion(&samples, 900, BallStabilizerSettings::default()).unwrap();
+        assert_eq!(result.points[315], Some([0.63, 0.55]));
+        assert!(!result.rejected_frames.contains(&315));
+        assert!(!result.interpolated[315]);
+    }
+
+    #[test]
+    fn ball_stabilizer_keeps_a_stationary_ball_seen_in_one_episode() {
+        let samples = (15..70)
+            .map(|frame| ScoredBallSample {
+                frame,
+                point: [
+                    0.63 + (frame % 3) as f64 * 0.001,
+                    0.55 + (frame % 4) as f64 * 0.001,
+                ],
+                confidence: 0.85,
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 300, BallStabilizerSettings::default()).unwrap();
+        assert!(result.rejected_frames.is_empty());
+        assert_eq!(result.observed_frames, 55);
+    }
+
+    #[test]
+    fn ball_stabilizer_rejects_short_static_island_with_one_previous_anchor() {
+        let samples = (24..37)
+            .map(|frame| ScoredBallSample {
+                frame,
+                point: if frame == 24 {
+                    [0.553, 0.562]
+                } else if (25..=27).contains(&frame) {
+                    [0.562, 0.76 + (frame % 2) as f64 * 0.004]
+                } else {
+                    [
+                        0.553 + (frame - 28) as f64 * 0.002,
+                        0.354 - (frame - 28) as f64 * 0.035,
+                    ]
+                },
+                confidence: 0.8,
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 48, BallStabilizerSettings::default()).unwrap();
+        assert_eq!(result.points[24], Some([0.553, 0.562]));
+        assert_eq!(result.points[28], Some([0.553, 0.354]));
+        for frame in 25..=27 {
+            assert!(result.rejected_frames.contains(&frame), "frame {frame}");
+            assert!(result.interpolated[frame]);
+            let point = result.points[frame].unwrap();
+            assert!(point[1] < 0.56 && point[1] > 0.35);
+        }
+        assert!(result
+            .rejected_frames
+            .iter()
+            .all(|&frame| (25..=27).contains(&frame)));
     }
 
     #[test]

@@ -305,7 +305,10 @@ pub(crate) fn verified_ball_trajectory(
         .as_str()
         .ok_or("Missing Ball Stabilizer version")?;
     if summary["schema"] != "volley-ball-stabilizer/1"
-        || !matches!(version, "ball_stabilizer_v1" | "ball_stabilizer_v2")
+        || !matches!(
+            version,
+            "ball_stabilizer_v1" | "ball_stabilizer_v2" | "ball_stabilizer_v3"
+        )
         || summary["source_replay_id"] != replay_id
         || summary["source_replay_sha256"] != replay_sha256
         || summary["trajectory_file"] != BALL_TRAJECTORY_FILE
@@ -805,6 +808,32 @@ mod ball_stabilizer_postprocessing_tests {
         assert!(verified_ball_trajectory(
             &root,
             &previous_summary,
+            "abc123def456",
+            "match.mp4",
+            &"d".repeat(32),
+            &replay_sha,
+            32,
+        )
+        .is_ok());
+        assert!(verified_ball_trajectory(
+            &root,
+            &summary,
+            "abc123def456",
+            "match.mp4",
+            &"d".repeat(32),
+            &replay_sha,
+            32,
+        )
+        .is_err());
+        storage::write_json_atomic(&manifest_path, &published_manifest).unwrap();
+        let mut v2_manifest = published_manifest.clone();
+        v2_manifest["algorithm_version"] = json!("ball_stabilizer_v2");
+        storage::write_json_atomic(&manifest_path, &v2_manifest).unwrap();
+        let mut v2_summary = summary.clone();
+        v2_summary["version"] = json!("ball_stabilizer_v2");
+        assert!(verified_ball_trajectory(
+            &root,
+            &v2_summary,
             "abc123def456",
             "match.mp4",
             &"d".repeat(32),

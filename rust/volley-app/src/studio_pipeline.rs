@@ -3957,12 +3957,14 @@ mod branching_tests {
         assert!(!compatible_version(&legacy, &request, &identity));
         assert!(gpu_lineage_valid(&project_dir, &request, &identity, &saved));
         assert!(cpu_lineage_valid(&project_dir, &request, &saved, None));
-        let mut old_version = saved.clone();
-        old_version["ball_stabilizer"]["version"] = json!("ball_stabilizer_v1");
-        assert!(
-            !cpu_lineage_valid(&project_dir, &request, &old_version, None),
-            "Previous Ball Stabilizer algorithm must invalidate CPU reuse"
-        );
+        for version in ["ball_stabilizer_v1", "ball_stabilizer_v2"] {
+            let mut old_version = saved.clone();
+            old_version["ball_stabilizer"]["version"] = json!(version);
+            assert!(
+                !cpu_lineage_valid(&project_dir, &request, &old_version, None),
+                "Previous Ball Stabilizer algorithm must invalidate CPU reuse"
+            );
+        }
         let trajectory_manifest = project_dir
             .join("native_cpu_ball_stabilizer")
             .join(&trajectory_id)

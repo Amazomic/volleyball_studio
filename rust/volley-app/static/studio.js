@@ -594,7 +594,7 @@
       while(overlay.cache.size>16)overlay.cache.delete(overlay.cache.keys().next().value);
       if(isRaw&&overlay.stabilizerView){
         const stats=value.ball_stabilizer;
-        if(stats?.version!=="ball_stabilizer_v2"||
+        if(stats?.version!=="ball_stabilizer_v3"||
            value.frames.some(row=>!Object.hasOwn(row,"stabilized_ball")||
              typeof row.ball_interpolated!=="boolean"||typeof row.ball_rejected!=="boolean"))
           throw Error("Нет результата Ball Stabilizer");
