@@ -859,7 +859,7 @@
           for(const ball of balls){
             const [px,py]=point(ball.point);
             ctx.globalAlpha=0.25+0.6*(1-(frame-row.frame)/Math.max(1,fps()));
-            if(previous&&row.frame===previous.frame+1&&balls.length===1){
+            if(!overlay.stabilizerView&&previous&&row.frame===previous.frame+1&&balls.length===1){
               ctx.beginPath();ctx.moveTo(previous.x,previous.y);ctx.lineTo(px,py);ctx.stroke();
             }
             ctx.beginPath();ctx.arc(px,py,2.5,0,Math.PI*2);ctx.fill();
