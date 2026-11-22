@@ -647,8 +647,46 @@
     identity:"Автоматическая привязка Track ID к игрокам из библиотеки.",
     cache:"Готовый GPU-анализ переиспользуется при совместимых настройках."
   };
-  let graphMoved=[],graphFocus=null;
+  let graphMoved=[],graphFocus=null,graphHintTarget=null;
+  const graphDialog=$("analysis-flow-dialog");
+  const graphHint=document.createElement("div");
+  graphHint.className="analysis-flow-stage-hint hidden";
+  graphHint.id="analysis-flow-stage-hint";
+  graphHint.setAttribute("role","tooltip");
+  graphDialog.append(graphHint);
+  const hideGraphHint=()=>{
+    graphHintTarget=null;
+    graphHint.classList.add("hidden");
+  };
+  const positionGraphHint=()=>{
+    if(!graphHintTarget?.isConnected)return hideGraphHint();
+    const anchor=graphHintTarget.getBoundingClientRect();
+    graphHint.style.left="12px";
+    graphHint.style.top="12px";
+    graphHint.classList.remove("hidden");
+    const bubble=graphHint.getBoundingClientRect();
+    const margin=12;
+    const x=Math.max(margin,Math.min(anchor.left,window.innerWidth-bubble.width-margin));
+    const below=anchor.bottom+8;
+    const y=below+bubble.height<=window.innerHeight-margin?below:
+      Math.max(margin,anchor.top-bubble.height-8);
+    graphHint.style.left=x+"px";
+    graphHint.style.top=y+"px";
+  };
+  const showGraphHint=element=>{
+    const target=element?.closest?.(".analysis-setting-help[data-analysis-hint],.analysis-help");
+    if(!target||!$("analysis-flow-dialog-body").contains(target))return hideGraphHint();
+    const description=target.classList.contains("analysis-help")?
+      target.querySelector(".analysis-tooltip")?.textContent:
+      (document.documentElement.lang==="en"?target.dataset.analysisHintEn:
+        target.dataset.analysisHint)||target.dataset.analysisHint;
+    if(!description)return hideGraphHint();
+    graphHintTarget=target;
+    graphHint.textContent=description.trim();
+    positionGraphHint();
+  };
   const closeGraphSettings=()=>{
+    hideGraphHint();
     const dialog=$("analysis-flow-dialog");
     if(dialog.classList.contains("hidden"))return;
     for(const [node,placeholder,wasOpen] of graphMoved){
@@ -656,7 +694,7 @@
       if(wasOpen!==null)node.open=wasOpen;
     }
     graphMoved=[];dialog.classList.add("hidden");
-    dialog.querySelector(".analysis-flow-dialog-panel").classList.remove("is-editor","is-compact","is-single","is-medium");
+    dialog.querySelector(".analysis-flow-dialog-panel").classList.remove("is-editor");
     if(graphFocus?.isConnected)graphFocus.focus({preventScroll:true});
   };
   const openGraphSettings=id=>{
@@ -680,12 +718,30 @@
     if(!body.children.length)body.append(make("p","panel-note","Дополнительных параметров нет."));
     const panel=$("analysis-flow-dialog").querySelector(".analysis-flow-dialog-panel");
     panel.classList.toggle("is-editor",id==="video");
-    panel.classList.toggle("is-single",id!=="video"&&body.children.length<=1);
-    panel.classList.toggle("is-compact",id!=="video"&&body.children.length>=2&&body.children.length<=4);
-    panel.classList.toggle("is-medium",id!=="video"&&body.children.length>=5&&body.children.length<=10);
     $("analysis-flow-dialog").classList.remove("hidden");
     $("analysis-flow-dialog-close").focus();
   };
+  graphDialog.addEventListener("pointerover",event=>{
+    const target=event.target.closest?.(".analysis-setting-help[data-analysis-hint],.analysis-help");
+    if(target&&target!==graphHintTarget)showGraphHint(target);
+  });
+  graphDialog.addEventListener("pointerout",event=>{
+    if(graphHintTarget?.contains(event.target)&&
+      !graphHintTarget.contains(event.relatedTarget))hideGraphHint();
+  });
+  graphDialog.addEventListener("focusin",event=>{
+    const target=event.target.closest?.(".analysis-setting-help[data-analysis-hint],.analysis-help");
+    if(target)showGraphHint(target);
+    else if(graphHintTarget)hideGraphHint();
+  });
+  graphDialog.addEventListener("focusout",event=>{
+    if(graphHintTarget===event.target)hideGraphHint();
+  });
+  graphDialog.addEventListener("scroll",hideGraphHint,true);
+  window.addEventListener("resize",hideGraphHint);
+  window.addEventListener("volley:ui-language",()=>{
+    if(graphHintTarget)showGraphHint(graphHintTarget);
+  });
   $("analysis-flow-dialog-close").addEventListener("click",closeGraphSettings);
   $("analysis-flow-dialog-ok").addEventListener("click",closeGraphSettings);
   $("analysis-flow-dialog").addEventListener("click",event=>{
