@@ -77,7 +77,9 @@ pub(crate) fn require_develop_checkout(repository: &Path, packaged: bool) -> io:
             "Studio development launch denied: develop differs from origin/develop",
         ));
     }
-    if !git(&["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
+    if git(&["-c", "core.autocrlf=input", "diff", "--quiet", "--"]).is_err()
+        || git(&["diff", "--cached", "--quiet", "--"]).is_err()
+    {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Studio development launch denied: checkout has uncommitted changes",
@@ -470,6 +472,8 @@ mod tests {
         fs::write(repo.join("README.md"), "dirty\n").unwrap();
         assert!(require_develop_checkout(&repo, false).is_err());
         fs::write(repo.join("README.md"), "first\n").unwrap();
+        require_develop_checkout(&repo, false).unwrap();
+        fs::write(repo.join("README.md"), "first\r\n").unwrap();
         require_develop_checkout(&repo, false).unwrap();
         fs::write(repo.join("README.md"), "second\n").unwrap();
         git(&["add", "README.md"]);
