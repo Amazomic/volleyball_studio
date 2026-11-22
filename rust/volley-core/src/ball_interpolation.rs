@@ -103,18 +103,45 @@ pub fn reconstruct_short_ball_motion(
     })
 }
 
-#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(from = "BallStabilizerSettingsInput")]
 pub struct BallStabilizerSettings {
-    pub min_confidence: f32,
     pub max_gap_frames: usize,
     pub max_step_fraction: f64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct BallStabilizerSettingsInput {
+    #[serde(rename = "min_confidence")]
+    _legacy_min_confidence: Option<f32>,
+    max_gap_frames: usize,
+    max_step_fraction: f64,
+}
+
+impl Default for BallStabilizerSettingsInput {
+    fn default() -> Self {
+        let settings = BallStabilizerSettings::default();
+        Self {
+            _legacy_min_confidence: None,
+            max_gap_frames: settings.max_gap_frames,
+            max_step_fraction: settings.max_step_fraction,
+        }
+    }
+}
+
+impl From<BallStabilizerSettingsInput> for BallStabilizerSettings {
+    fn from(value: BallStabilizerSettingsInput) -> Self {
+        Self {
+            max_gap_frames: value.max_gap_frames,
+            max_step_fraction: value.max_step_fraction,
+        }
+    }
 }
 
 impl Default for BallStabilizerSettings {
     fn default() -> Self {
         Self {
-            min_confidence: 0.70,
             max_gap_frames: 12,
             max_step_fraction: 0.12,
         }
@@ -123,9 +150,7 @@ impl Default for BallStabilizerSettings {
 
 impl BallStabilizerSettings {
     pub fn validate(self) -> Result<(), &'static str> {
-        if !self.min_confidence.is_finite()
-            || !(0.51..=1.0).contains(&self.min_confidence)
-            || !(1..=MAX_MISSING_BALL_FRAMES).contains(&self.max_gap_frames)
+        if !(1..=MAX_MISSING_BALL_FRAMES).contains(&self.max_gap_frames)
             || !self.max_step_fraction.is_finite()
             || !(0.01..=0.25).contains(&self.max_step_fraction)
         {
@@ -151,7 +176,7 @@ pub struct StabilizedBallMotion {
     pub observed_frames: usize,
 }
 
-pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v4";
+pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v5";
 
 fn reject_interleaved_outliers(points: &[Option<[f64; 2]>], max_step_fraction: f64) -> Vec<usize> {
     let mut rejected = Vec::new();
@@ -311,8 +336,7 @@ pub fn stabilize_ball_motion(
         return Err("Invalid Ball Stabilizer frame count");
     }
     let mut points = vec![None; frames];
-    let mut scores = vec![settings.min_confidence; frames];
-    let mut weaker = vec![None::<ScoredBallSample>; frames];
+    let mut scores = vec![f32::NEG_INFINITY; frames];
     for sample in samples {
         if sample.frame >= frames
             || !sample.confidence.is_finite()
@@ -326,13 +350,6 @@ pub fn stabilize_ball_motion(
         if sample.confidence >= scores[sample.frame] {
             points[sample.frame] = Some(sample.point);
             scores[sample.frame] = sample.confidence;
-        } else if sample.confidence >= 0.05
-            && sample.confidence < settings.min_confidence
-            && weaker[sample.frame]
-                .as_ref()
-                .is_none_or(|previous| sample.confidence > previous.confidence)
-        {
-            weaker[sample.frame] = Some(*sample);
         }
     }
     let confidence_frames = points.iter().filter(|p| p.is_some()).count();
@@ -437,23 +454,6 @@ pub fn stabilize_ball_motion(
     rejected_frames.dedup();
     let observed_frames = confidence_frames - rejected_frames.len();
     let interpolated = interpolate_short_gaps_bounded(&mut points, settings.max_gap_frames);
-    for (frame, possible_weak) in weaker.iter().enumerate() {
-        if !interpolated[frame] {
-            continue;
-        }
-        let (Some(predicted), Some(weak)) = (points[frame], possible_weak) else {
-            continue;
-        };
-        let displacement = (predicted[0] - weak.point[0]).hypot(predicted[1] - weak.point[1]);
-        if displacement > (settings.max_step_fraction * 0.25).min(0.03) {
-            continue;
-        }
-        let correction_weight = 0.35 * f64::from(weak.confidence / settings.min_confidence);
-        points[frame] = Some([
-            predicted[0] + (weak.point[0] - predicted[0]) * correction_weight,
-            predicted[1] + (weak.point[1] - predicted[1]) * correction_weight,
-        ]);
-    }
     Ok(StabilizedBallMotion {
         points,
         interpolated,
@@ -791,15 +791,8 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        let result = stabilize_ball_motion(
-            &samples,
-            48,
-            BallStabilizerSettings {
-                min_confidence: 0.55,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let result =
+            stabilize_ball_motion(&samples, 48, BallStabilizerSettings::default()).unwrap();
         for frame in [19, 20, 22] {
             assert!(
                 result.rejected_frames.contains(&frame),
@@ -975,12 +968,24 @@ mod tests {
     }
 
     #[test]
-    fn ball_stabilizer_defaults_to_seventy_percent_strong_anchors() {
-        assert!((BallStabilizerSettings::default().min_confidence - 0.70).abs() < f32::EPSILON);
+    fn ball_stabilizer_accepts_continuous_low_confidence_observations() {
+        let samples = (0..40)
+            .map(|frame| ScoredBallSample {
+                frame,
+                point: [0.2 + frame as f64 * 0.003, 0.4],
+                confidence: 0.08,
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 40, BallStabilizerSettings::default()).unwrap();
+        assert_eq!(result.confidence_frames, 40);
+        assert_eq!(result.observed_frames, 40);
+        assert!(result.rejected_frames.is_empty());
+        assert!(result.points.iter().all(Option::is_some));
     }
 
     #[test]
-    fn ball_stabilizer_weak_detection_only_corrects_a_bracketed_prediction() {
+    fn ball_stabilizer_rejects_remote_false_detection_even_at_high_confidence() {
         let samples = (0..42)
             .map(|frame| {
                 let expected = [0.20 + frame as f64 * 0.004, 0.35];
@@ -992,58 +997,47 @@ mod tests {
                         22 => [0.92, 0.83],
                         _ => expected,
                     },
-                    confidence: if [12, 13, 22].contains(&frame) {
-                        0.61
-                    } else {
-                        0.92
-                    },
+                    confidence: if frame == 22 { 0.99 } else { 0.06 },
                 }
             })
             .collect::<Vec<_>>();
         let result =
             stabilize_ball_motion(&samples, 42, BallStabilizerSettings::default()).unwrap();
         for frame in [12, 13] {
-            let expected = 0.20 + frame as f64 * 0.004;
-            assert!(result.interpolated[frame]);
             assert!(!result.rejected_frames.contains(&frame));
-            let corrected = result.points[frame].unwrap();
-            assert!((corrected[0] - expected).abs() > 0.001);
-            assert!((corrected[0] - expected).abs() < 0.012);
-            assert!((corrected[1] - 0.35).abs() < 0.010);
+            assert!(!result.interpolated[frame]);
+            assert_eq!(result.points[frame], Some(samples[frame].point));
         }
+        assert!(result.rejected_frames.contains(&22));
         assert!(result.interpolated[22]);
         assert!((result.points[22].unwrap()[0] - (0.20 + 22.0 * 0.004)).abs() < 1e-9);
-        assert!(!result.interpolated[11]);
-        assert_eq!(result.observed_frames, 39);
+        assert_eq!(result.observed_frames, 41);
     }
 
     #[test]
-    fn ball_stabilizer_weak_observations_never_create_a_track_without_strong_anchors() {
-        let weak_only = (0..37)
+    fn ball_stabilizer_does_not_require_strong_anchors() {
+        let samples = (0..37)
             .map(|frame| ScoredBallSample {
                 frame,
                 point: [0.2 + frame as f64 * 0.003, 0.4],
-                confidence: 0.65,
+                confidence: 0.05,
             })
             .collect::<Vec<_>>();
         let result =
-            stabilize_ball_motion(&weak_only, 37, BallStabilizerSettings::default()).unwrap();
-        assert_eq!(result.observed_frames, 0);
-        assert!(result.points.iter().all(Option::is_none));
+            stabilize_ball_motion(&samples, 37, BallStabilizerSettings::default()).unwrap();
+        assert_eq!(result.observed_frames, 37);
+        assert!(result.points.iter().all(Option::is_some));
         assert!(result.interpolated.iter().all(|&flag| !flag));
     }
 
     #[test]
-    fn ball_stabilizer_weak_observations_do_not_bridge_long_gaps_or_extrapolate() {
+    fn ball_stabilizer_does_not_bridge_long_gaps_or_extrapolate() {
         let samples = (0..44)
+            .filter(|frame| !(6..=37).contains(frame))
             .map(|frame| ScoredBallSample {
                 frame,
                 point: [0.22 + frame as f64 * 0.002, 0.32],
-                confidence: if !(6..=37).contains(&frame) {
-                    0.91
-                } else {
-                    0.62
-                },
+                confidence: 0.05,
             })
             .collect::<Vec<_>>();
         let result =
@@ -1057,12 +1051,18 @@ mod tests {
     }
 
     #[test]
-    fn ball_stabilizer_validates_strict_confidence_and_does_not_extrapolate() {
-        assert!(BallStabilizerSettings {
-            min_confidence: 0.5,
-            ..Default::default()
-        }
-        .validate()
+    fn ball_stabilizer_accepts_old_profile_without_reintroducing_confidence_gate() {
+        let settings: BallStabilizerSettings = serde_json::from_str(
+            r#"{"min_confidence":0.70,"max_gap_frames":12,"max_step_fraction":0.12}"#,
+        )
+        .unwrap();
+        assert_eq!(settings, BallStabilizerSettings::default());
+        assert!(!serde_json::to_string(&settings)
+            .unwrap()
+            .contains("min_confidence"));
+        assert!(serde_json::from_str::<BallStabilizerSettings>(
+            r#"{"unsupported_threshold":0.70}"#
+        )
         .is_err());
         assert!(BallStabilizerSettings {
             max_gap_frames: 99,
@@ -1074,7 +1074,7 @@ mod tests {
             .map(|frame| ScoredBallSample {
                 frame,
                 point: [0.25 + frame as f64 * 0.001, 0.4],
-                confidence: 0.9,
+                confidence: 0.05,
             })
             .collect::<Vec<_>>();
         let result = stabilize_ball_motion(&points, 20, BallStabilizerSettings::default()).unwrap();

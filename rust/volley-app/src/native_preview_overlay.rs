@@ -1007,8 +1007,6 @@ pub struct GpuOverlayQuery {
     #[serde(default)]
     stabilizer: bool,
     #[serde(default)]
-    stabilizer_score: Option<f32>,
-    #[serde(default)]
     stabilizer_gap: Option<usize>,
     #[serde(default)]
     stabilizer_max_step: Option<f64>,
@@ -1319,7 +1317,6 @@ pub async fn gpu(
     }
     let mut settings = volley_core::ball_interpolation::BallStabilizerSettings::default();
     if query.stabilizer {
-        settings.min_confidence = query.stabilizer_score.unwrap_or(settings.min_confidence);
         settings.max_gap_frames = query.stabilizer_gap.unwrap_or(settings.max_gap_frames);
         settings.max_step_fraction = query
             .stabilizer_max_step
@@ -1336,7 +1333,6 @@ pub async fn gpu(
                 start_frame: query.start_frame,
                 count: query.count,
                 stabilizer: query.stabilizer,
-                stabilizer_score: query.stabilizer_score,
                 stabilizer_gap: query.stabilizer_gap,
                 stabilizer_max_step: query.stabilizer_max_step,
             };

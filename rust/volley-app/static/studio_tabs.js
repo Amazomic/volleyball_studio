@@ -216,7 +216,6 @@
   // Mirrors volley-core's validated native defaults (no JS-only processing).
   const postProfile=()=>({
     ball_stabilizer:{
-      min_confidence:inputValue("studio-post-ball-stabilizer-score"),
       max_gap_frames:inputValue("studio-post-ball-stabilizer-gap"),
       max_step_fraction:inputValue("studio-post-ball-stabilizer-step")
     },
@@ -281,9 +280,7 @@
       const row=saved?.fields?.[input.id];
       if(Array.isArray(row)&&row.length===2&&
           (row[0]===input.dataset.default||
-           (input.id==="studio-gpu-threads"&&row[0]==="8"&&input.dataset.default==="0")||
-           (input.id==="studio-post-ball-stabilizer-score"&&
-             row[0]==="0.55"&&input.dataset.default==="0.70"))&&typeof row[1]==="string"&&
+           (input.id==="studio-gpu-threads"&&row[0]==="8"&&input.dataset.default==="0"))&&typeof row[1]==="string"&&
           row[1].length<=64){
         applyFieldValue(input,row[1]);
         if(!input.checkValidity())applyFieldValue(input,input.dataset.default);
@@ -616,7 +613,7 @@
   const graphSettings={
     video:[".analysis-profile-source","#studio-analysis-editor"],
     ball:["#studio-gpu-stride","#studio-gpu-memory","#studio-gpu-threads"],
-    ball_stabilizer:["#studio-post-ball-stabilizer-score","#studio-post-ball-stabilizer-gap","#studio-post-ball-stabilizer-step"],
+    ball_stabilizer:["#studio-post-ball-stabilizer-gap","#studio-post-ball-stabilizer-step"],
     rallies:["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds","#studio-gpu-rally-stationary-ms"],
     players:["#studio-gpu-person-stride"],
     pose:["#studio-gpu-pose-enabled","#studio-gpu-interpolate-pose"],
@@ -635,8 +632,8 @@
   };
   const graphDescriptions={
     video:"Выбор видео, интервалов анализа и разметки площадки.",
-    ball:"VBallNetV4c работает с фиксированным окном из 9 кадров. Память CUDA и потоки CPU — общие настройки нейросетей 1-й фазы. Порог уверенности и интерполяция мяча настраиваются отдельно во 2-й фазе (Ball Stabilizer).",
-    ball_stabilizer:"Ball Stabilizer: удаление ложных VBallNet-позиций и интерполяция коротких пропусков во 2-й фазе перед поиском касаний. Розыгрыши 1-й фазы не меняются.",
+    ball:"VBallNetV4c работает с фиксированным окном из 9 кадров. Память CUDA и потоки CPU — общие настройки нейросетей 1-й фазы. Интерполяция и пространственная фильтрация ложных точек настраиваются отдельно во 2-й фазе (Ball Stabilizer).",
+    ball_stabilizer:"Ball Stabilizer использует все детекции VBallNet: отдалённые ложные точки отбрасываются по соседним положениям и непрерывности траектории. Короткие пропуски интерполируются до поиска касаний; розыгрыши 1-й фазы не меняются.",
     rallies:"Рабочие настройки первичного анализа: длительность траектории, остановка мяча в миллисекундах и объединение без перекрытия удержаний или пропусков детекции от 3 секунд. Эксперименты в «Дебаге» имеют собственные значения и не меняют этот GPU-профиль.",
     players:"RF-DETR Medium ищет игроков только внутри найденных игровых интервалов.",
     pose:"RTMPose-M Body7 получает рамки игроков и исходные пиксели видео.",
@@ -717,7 +714,7 @@
     }
     if(id==="ball"){
       const related=make("div","analysis-flow-dialog-related");
-      const title=make("span","field-label","Порог и интерполяция · 2 фаза");
+      const title=make("span","field-label","Фильтрация и интерполяция · 2 фаза");
       const link=make("button","secondary","Открыть Ball Stabilizer");
       link.type="button";
       link.addEventListener("click",()=>openGraphSettings("ball_stabilizer"));
