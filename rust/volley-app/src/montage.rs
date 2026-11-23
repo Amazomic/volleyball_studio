@@ -31,9 +31,9 @@ use uuid::Uuid;
 use volley_media::{
     montage::{
         can_stream_copy, compose_args_for_layout, compose_follow_args, concat_playlist,
-        encode_flags, native_clip_format, output_profile_for_layout, soundtrack_args,
-        soundtrack_is_audio, verify_mp4_quality, verify_original_segment, CameraPoint,
-        OriginalClip, SelectedClip, VideoLayout,
+        encode_flags, native_clip_format, original_audio_args, output_profile_for_layout,
+        soundtrack_args, soundtrack_is_audio, verify_mp4_quality, verify_original_segment,
+        CameraPoint, OriginalClip, SelectedClip, VideoLayout,
     },
     probe,
 };
@@ -788,6 +788,7 @@ async fn render(plan: Planned, status: Arc<Mutex<JobStatus>>, mut cancel: watch:
         })
         .await
         .map_err(|e| format!("Montage join verify task: {e}"))??;
+        let mut has_audio = plan.audio.is_some();
         let final_path = if let Some(audio) = &plan.audio {
             let with_music = segments.join("with_music.mp4");
             let args = soundtrack_args(
@@ -816,10 +817,26 @@ async fn render(plan: Planned, status: Arc<Mutex<JobStatus>>, mut cancel: watch:
             .map_err(|e| format!("Montage music verify task: {e}"))??;
             with_music
         } else {
-            joined
+            let with_original = segments.join("with_original_audio.mp4");
+            let audio_video = joined.clone();
+            let audio_clips = plan.clips.clone();
+            let audio_output = with_original.clone();
+            let args = tokio::task::spawn_blocking(move || {
+                original_audio_args(&audio_video, &audio_clips, &audio_output, total_duration)
+            }).await.map_err(|e| format!("Montage original audio task: {e}"))??;
+            if let Some(args) = args {
+                status.lock().await.total += 1;
+                run_ffmpeg(
+                    args, total_duration, &status, join_index + 1,
+                    "Сохранение исходного звука", &mut cancel,
+                ).await?;
+                has_audio = true;
+                with_original
+            } else {
+                joined
+            }
         };
         let verify_final = final_path.clone();
-        let has_audio = plan.audio.is_some();
         let quality = tokio::task::spawn_blocking(move || {
             verify_mp4_quality(&verify_final, final_profile, total_duration, has_audio)
         })
@@ -838,6 +855,7 @@ async fn render(plan: Planned, status: Arc<Mutex<JobStatus>>, mut cancel: watch:
             "id":plan.job_id,
             "project_id":plan.project_id,
             "render_source":"original_recording",
+            "audio_source":if plan.audio.is_some() { "music" } else if has_audio { "original_recording" } else { "none" },
             "montage_materials":plan.materials,
             "preferred_rally_run_id":plan.preferred_rally_run_id,
             "original_sources":plan.original_sources.iter().map(|(path,proof)| json!({"source":path,"proof":proof})).collect::<Vec<_>>(),
@@ -1526,6 +1544,210 @@ mod highlight_cancellation_tests {
             recognition_archive: false,
         }))
     }
+
+    #[tokio::test]
+    async fn montage_preserves_original_audio_and_silent_clip_timing() {
+        let root = std::env::temp_dir().join(format!("volley-source-audio-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("original.mp4");
+        let silent = root.join("silent.mp4");
+        let generated = std::process::Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=320x180:r=30:d=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:sample_rate=48000:duration=2",
+                "-af",
+                "volume=enable='lt(t,1)':volume=0",
+                "-c:v",
+                "libx264",
+                "-threads",
+                "1",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-shortest",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let generated = std::process::Command::new("ffmpeg")
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&source)
+            .args(["-an", "-c:v", "copy"])
+            .arg(&silent)
+            .output()
+            .unwrap();
+        assert!(generated.status.success());
+        let output = root.join("render");
+        let clips = vec![
+            OriginalClip::from_analysis(&silent, 0, 14, 0.0).unwrap(),
+            OriginalClip::from_analysis(&source, 0, 14, 1.0).unwrap(),
+        ];
+        let plan_for = |clips: Vec<OriginalClip>, output_dir, audio| {
+            let original_sources = clips
+                .iter()
+                .map(|clip| {
+                    (
+                        clip.source.clone(),
+                        volley_media::preparation::source_provenance(&clip.source).unwrap(),
+                    )
+                })
+                .collect();
+            Planned {
+                project_id: "abcdef012345".into(),
+                job_id: "montage_test".into(),
+                original_sources,
+                materials: Vec::new(),
+                preferred_rally_run_id: None,
+                clips,
+                output_dir,
+                audio,
+                audio_volume: 40.0,
+                encoder: "cpu".into(),
+                layout: VideoLayout::Original,
+                target_duration_sec: None,
+                camera_zoom: default_camera_zoom(),
+                camera_tracks: None,
+                verified_highlights: None,
+                report_outro: None,
+                recognition_sources: Vec::new(),
+            }
+        };
+        let plan = plan_for(clips, output.clone(), None);
+        let status = fixture_status();
+        let (_tx, rx) = watch::channel(false);
+        render(plan, status.clone(), rx).await;
+        let snapshot = status.lock().await;
+        assert_eq!(snapshot.state, "complete", "{}", snapshot.error);
+        verify_mp4_quality(&output.join("montage.mp4"), (320, 180, 30.0), 1.0, true).unwrap();
+        let decoded = std::process::Command::new("ffmpeg")
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(output.join("montage.mp4"))
+            .args(["-vn", "-ac", "1", "-ar", "48000", "-f", "f32le", "pipe:1"])
+            .output()
+            .unwrap();
+        assert!(decoded.status.success());
+        let samples = decoded
+            .stdout
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|sample| f32::from_le_bytes(*sample))
+            .collect::<Vec<_>>();
+        let energy = |start: usize, end: usize| {
+            samples[start..end]
+                .iter()
+                .map(|sample| f64::from(*sample).powi(2))
+                .sum::<f64>()
+                / (end - start) as f64
+        };
+        assert!(energy(4800, 19200) < 0.000001);
+        assert!(energy(28800, 43200) > 0.001);
+        drop(snapshot);
+        for (name, source_path, audio, expected_audio, audio_source) in [
+            ("single", &source, None, true, "original_recording"),
+            ("silent", &silent, None, false, "none"),
+            ("music", &source, Some(source.clone()), true, "music"),
+        ] {
+            let output = root.join(name);
+            let plan = plan_for(
+                vec![OriginalClip::from_analysis(source_path, 0, 14, 1.0).unwrap()],
+                output.clone(),
+                audio,
+            );
+            let status = fixture_status();
+            let (_tx, rx) = watch::channel(false);
+            render(plan, status.clone(), rx).await;
+            let snapshot = status.lock().await;
+            assert_eq!(snapshot.state, "complete", "{name}: {}", snapshot.error);
+            verify_mp4_quality(
+                &output.join("montage.mp4"),
+                (320, 180, 30.0),
+                0.5,
+                expected_audio,
+            )
+            .unwrap();
+            let receipt: Value =
+                serde_json::from_slice(&fs::read(output.join("selection.json")).unwrap()).unwrap();
+            assert_eq!(receipt["audio_source"], audio_source);
+        }
+        let source25 = root.join("original25.mp4");
+        let generated = std::process::Command::new("ffmpeg")
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&source)
+            .args([
+                "-vf", "fps=25", "-c:v", "libx264", "-threads", "1", "-c:a", "copy",
+            ])
+            .arg(&source25)
+            .output()
+            .unwrap();
+        assert!(generated.status.success());
+        for (name, second_source, fps, duration) in [
+            ("native25", &source25, 25.0, 1.04),
+            ("mixed25_30", &source, 30.0, 31.0 / 30.0),
+        ] {
+            let output = root.join(name);
+            let plan = plan_for(
+                vec![
+                    OriginalClip::from_analysis(&source25, 0, 14, 0.0).unwrap(),
+                    OriginalClip::from_analysis(second_source, 0, 14, 1.0).unwrap(),
+                ],
+                output.clone(),
+                None,
+            );
+            let status = fixture_status();
+            let (_tx, rx) = watch::channel(false);
+            render(plan, status.clone(), rx).await;
+            let snapshot = status.lock().await;
+            assert_eq!(snapshot.state, "complete", "{}", snapshot.error);
+            let decoded = std::process::Command::new("ffmpeg")
+                .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
+                .arg(output.join("montage.mp4"))
+                .args(["-vn", "-ac", "1", "-ar", "48000", "-f", "f32le", "pipe:1"])
+                .output()
+                .unwrap();
+            assert!(decoded.status.success());
+            let samples = decoded
+                .stdout
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|sample| f32::from_le_bytes(*sample))
+                .collect::<Vec<_>>();
+            let transition_energy = samples[24240..24720]
+                .iter()
+                .map(|sample| f64::from(*sample).powi(2))
+                .sum::<f64>()
+                / 480.0;
+            assert!(
+                transition_energy < 0.000001,
+                "audio precedes the second video clip: {transition_energy}"
+            );
+            verify_mp4_quality(&output.join("montage.mp4"), (320, 180, fps), duration, true)
+                .unwrap();
+            assert!(
+                (probe(&output.join("montage.mp4")).unwrap().duration_sec - duration).abs() < 0.002
+            );
+            drop(snapshot);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn cancelled_player_montage_deletes_own_output_only() {
         let root =

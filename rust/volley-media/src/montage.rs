@@ -590,7 +590,6 @@ pub fn compose_follow_args(
     Ok(args)
 }
 /// Add a looped soundtrack while keeping the encoded video bit-for-bit.
-/// Since clip extraction discards source audio, soundtrack is the only audio.
 pub fn soundtrack_args(
     video: &Path,
     soundtrack: &Path,
@@ -647,6 +646,101 @@ pub fn soundtrack_args(
         "+faststart".into(),
         output.to_string_lossy().into_owned(),
     ])
+}
+
+pub fn original_audio_args(
+    video: &Path,
+    clips: &[OriginalClip],
+    output: &Path,
+    duration_sec: f64,
+) -> Result<Option<Vec<String>>, String> {
+    if clips.is_empty()
+        || clips.len() > 80
+        || !duration_sec.is_finite()
+        || duration_sec <= 0.0
+        || clips.iter().map(OriginalClip::duration_sec).sum::<f64>() > duration_sec + 0.001
+    {
+        return Err("Некорректная длительность исходного звука".into());
+    }
+    let audio = clips
+        .iter()
+        .map(|clip| soundtrack_is_audio(&clip.source))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !audio.iter().any(|present| *present) {
+        return Ok(None);
+    }
+    let rendered = probe(video)?;
+    let output_fps = rendered
+        .fps
+        .filter(|fps| fps.is_finite() && *fps > 0.0)
+        .ok_or("Неизвестна кадровая частота монтажа")?;
+    let duration_sec = rendered.duration_sec;
+    let mut args = vec![
+        "-nostdin".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-y".into(),
+        "-filter_complex_threads".into(),
+        "2".into(),
+        "-i".into(),
+        video.to_string_lossy().into_owned(),
+    ];
+    let mut filters = Vec::with_capacity(clips.len() + 1);
+    let mut input = 1;
+    for (index, (clip, present)) in clips.iter().zip(audio).enumerate() {
+        let receipt = clip.receipt();
+        let rendered_duration =
+            (receipt.frames as f64 / receipt.native_fps * output_fps).round() / output_fps;
+        let source = if present {
+            args.extend([
+                "-ss".into(),
+                format!("{:.6}", receipt.start_sec),
+                "-t".into(),
+                format!("{:.6}", receipt.duration_sec),
+                "-i".into(),
+                clip.source.to_string_lossy().into_owned(),
+            ]);
+            let source = format!("[{input}:a:0]aresample=48000:async=1:first_pts=0,");
+            input += 1;
+            source
+        } else {
+            "anullsrc=r=48000:cl=stereo,".into()
+        };
+        filters.push(format!(
+            "{source}aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=duration={:.6},apad=whole_dur={rendered_duration:.6},atrim=duration={rendered_duration:.6},asetpts=PTS-STARTPTS[a{index}]",
+            receipt.duration_sec
+        ));
+    }
+    let labels = (0..clips.len())
+        .map(|index| format!("[a{index}]"))
+        .collect::<String>();
+    filters.push(format!(
+        "{labels}concat=n={}:v=0:a=1,apad=whole_dur={duration_sec:.6},atrim=duration={duration_sec:.6}[original]",
+        clips.len()
+    ));
+    args.extend([
+        "-filter_complex".into(),
+        filters.join(";"),
+        "-map".into(),
+        "0:v:0".into(),
+        "-map".into(),
+        "[original]".into(),
+        "-c:v".into(),
+        "copy".into(),
+        "-c:a".into(),
+        "aac".into(),
+        "-b:a".into(),
+        "192k".into(),
+        "-ar".into(),
+        "48000".into(),
+        "-t".into(),
+        format!("{duration_sec:.6}"),
+        "-movflags".into(),
+        "+faststart".into(),
+        output.to_string_lossy().into_owned(),
+    ]);
+    Ok(Some(args))
 }
 
 /// FFprobe evidence for a finished MP4. This validates the VIDEO stream
