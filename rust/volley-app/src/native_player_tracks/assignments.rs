@@ -1366,6 +1366,7 @@ fn cached_photo_comparison(
     hashes: &BTreeMap<String, BTreeSet<String>>,
     model: &str,
     rally_run_id: Option<&str>,
+    eligible_ids: &BTreeSet<u64>,
 ) -> Option<Value> {
     let evidence = doc.get("automatic_identity_evidence")?;
     evidence["matches"].as_object()?;
@@ -1376,9 +1377,29 @@ fn cached_photo_comparison(
         || evidence["album_revisions"] != json!(albums)
         || evidence["reference_photo_sha256"] != json!(hashes)
         || evidence["model_fingerprint"] != model
-        || evidence["reviewed_scope_sha256"] != reviewed_scope_sha256(doc)
     {
         return None;
+    }
+    if evidence["reviewed_scope_sha256"] != reviewed_scope_sha256(doc) {
+        let prior_eligible = evidence["eligible_track_ids"]
+            .as_array()
+            .and_then(|values| {
+                values
+                    .iter()
+                    .map(Value::as_u64)
+                    .collect::<Option<BTreeSet<_>>>()
+            });
+        let fully_covered = prior_eligible
+            .as_ref()
+            .is_some_and(|ids| eligible_ids.is_subset(ids))
+            || eligible_ids.iter().all(|id| {
+                evidence["matches"]
+                    .get(id.to_string())
+                    .is_some_and(Value::is_array)
+            });
+        if !fully_covered {
+            return None;
+        }
     }
     Some(json!({
         "identity_revision":identity_revision,
@@ -1417,6 +1438,21 @@ pub(super) fn save_cached_automatic_photo_links(
         .map_err(storage::bad_request)?;
     let (albums, hashes) = reference_album_snapshot(state, &ctx)
         .ok_or_else(|| storage::conflict("Saved player reference photos changed"))?;
+    let assigned = doc["assignments"]
+        .as_object()
+        .ok_or_else(|| storage::bad_request("Invalid manual assignments in photo cache"))?;
+    let excluded = doc["excluded_ids"]
+        .as_array()
+        .ok_or_else(|| storage::bad_request("Invalid excluded IDs in photo cache"))?
+        .iter()
+        .filter_map(Value::as_u64)
+        .collect::<BTreeSet<_>>();
+    let eligible = ctx
+        .tracks
+        .keys()
+        .filter(|id| !assigned.contains_key(&id.to_string()) && !excluded.contains(id))
+        .copied()
+        .collect::<BTreeSet<_>>();
     let Some(comparison) = cached_photo_comparison(
         &doc,
         &revision(before.as_deref()),
@@ -1424,6 +1460,7 @@ pub(super) fn save_cached_automatic_photo_links(
         &hashes,
         &model,
         req.rally_run_id.as_deref(),
+        &eligible,
     ) else {
         return Ok(None);
     };
@@ -1504,8 +1541,22 @@ fn persist_photo_comparison(
             "Reference photo albums changed during automatic assignment",
         ));
     }
+    let comparison_eligible_ids = scoped
+        .tracks
+        .keys()
+        .filter(|id| {
+            !doc["assignments"]
+                .as_object()
+                .is_some_and(|links| links.contains_key(&id.to_string()))
+                && !doc["excluded_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|value| value.as_u64() == Some(**id)))
+        })
+        .copied()
+        .collect::<Vec<_>>();
     doc["automatic_identity_evidence"] = json!({
         "threshold":threshold, "matches":matches,
+        "eligible_track_ids":comparison_eligible_ids,
         "identity_groups":comparison["identity_groups"],
         "photo_count":comparison["photo_count"],
         "photo_sample_policy":comparison["photo_sample_policy"],
@@ -1609,13 +1660,15 @@ mod cached_auto_match_tests {
     use super::*;
 
     #[test]
-    fn cached_photo_scores_require_exact_reference_provenance() {
+    fn cached_photo_scores_reuse_only_verified_matching_source_and_coverage() {
         let albums = vec![("player".to_owned(), "album-revision".to_owned())];
         let hashes = BTreeMap::from([("player".to_owned(), BTreeSet::from(["a".repeat(64)]))]);
+        let known = BTreeSet::from([7]);
         let mut doc = json!({
             "assignments":{}, "excluded_ids":[],
             "automatic_identity_evidence":{
                 "matches":{"7":[{"player_id":"player","cosine_similarity":0.91,"samples_used":3}]},
+                "eligible_track_ids":[7,8],
                 "photo_sample_policy":"three_observations_v1",
                 "rally_run_id":"rally",
                 "album_revisions":albums,
@@ -1625,33 +1678,29 @@ mod cached_auto_match_tests {
         });
         doc["automatic_identity_evidence"]["reviewed_scope_sha256"] =
             json!(reviewed_scope_sha256(&doc));
+        let cached = |value: &Value, ids: &BTreeSet<u64>| {
+            cached_photo_comparison(
+                value,
+                "identity-v1",
+                &albums,
+                &hashes,
+                "model-v1",
+                Some("rally"),
+                ids,
+            )
+        };
+        assert!(cached(&doc, &known).is_some());
         let mut legacy = doc.clone();
         legacy["automatic_identity_evidence"]["photo_sample_policy"] = Value::Null;
-        assert!(cached_photo_comparison(
-            &legacy,
-            "identity-v1",
-            &albums,
-            &hashes,
-            "model-v1",
-            Some("rally")
-        )
-        .is_none());
-        assert!(cached_photo_comparison(
-            &doc,
-            "identity-v1",
-            &albums,
-            &hashes,
-            "model-v1",
-            Some("rally")
-        )
-        .is_some());
+        assert!(cached(&legacy, &known).is_none());
         assert!(cached_photo_comparison(
             &doc,
             "identity-v1",
             &albums,
             &hashes,
             "model-v2",
-            Some("rally")
+            Some("rally"),
+            &known,
         )
         .is_none());
         assert!(cached_photo_comparison(
@@ -1660,20 +1709,27 @@ mod cached_auto_match_tests {
             &albums,
             &hashes,
             "model-v1",
-            Some("other")
+            Some("other"),
+            &known,
         )
         .is_none());
+
         let mut changed_review = doc.clone();
-        changed_review["assignments"] = json!({"9":"another-player"});
-        assert!(cached_photo_comparison(
-            &changed_review,
-            "identity-v1",
-            &albums,
-            &hashes,
-            "model-v1",
-            Some("rally")
-        )
-        .is_none());
+        changed_review["assignments"] = json!({"8":"player"});
+        assert!(cached(&changed_review, &known).is_some());
+        assert!(cached(&changed_review, &BTreeSet::from([7, 8])).is_some());
+        let mut missing_coverage = changed_review.clone();
+        missing_coverage["automatic_identity_evidence"]["eligible_track_ids"] = json!([7]);
+        assert!(cached(&missing_coverage, &BTreeSet::from([7, 9])).is_none());
+
+        let mut old_evidence = changed_review.clone();
+        old_evidence["automatic_identity_evidence"]
+            .as_object_mut()
+            .unwrap()
+            .remove("eligible_track_ids");
+        assert!(cached(&old_evidence, &known).is_some());
+        assert!(cached(&old_evidence, &BTreeSet::from([7, 8])).is_none());
+
         let changed_albums = vec![("player".to_owned(), "new-revision".to_owned())];
         assert!(cached_photo_comparison(
             &doc,
@@ -1681,7 +1737,8 @@ mod cached_auto_match_tests {
             &changed_albums,
             &hashes,
             "model-v1",
-            Some("rally")
+            Some("rally"),
+            &known,
         )
         .is_none());
         let changed_hashes =
@@ -1692,17 +1749,10 @@ mod cached_auto_match_tests {
             &albums,
             &changed_hashes,
             "model-v1",
-            Some("rally")
+            Some("rally"),
+            &known,
         )
         .is_none());
-        assert!(cached_photo_comparison(
-            &json!({}),
-            "identity-v1",
-            &albums,
-            &hashes,
-            "model-v1",
-            Some("rally")
-        )
-        .is_none());
+        assert!(cached(&json!({}), &known).is_none());
     }
 }

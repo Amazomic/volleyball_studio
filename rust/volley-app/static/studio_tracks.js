@@ -25,7 +25,8 @@
     photoIndices:new Map(),groupNavigation:new Map(),viewPlayer:"",viewConflicts:false,viewExcluded:false,filteredTotal:0,unassignedIds:new Set(),excludedIds:new Set(),identityConflictIds:new Set(),comparisonIds:new Set(),
     photoScoreLoading:false,autoThresholdScope:"",autoAssignPending:null,pendingEditFailure:"",
     unassignedReasons:{},appliedAutoThreshold:75,
-    assignmentQueue:Promise.resolve(),assignmentPending:new Set(),bindingHold:false,bindingEpoch:0
+    assignmentQueue:Promise.resolve(),assignmentPending:new Set(),bindingHold:false,
+    bindingNeedsRefresh:false,bindingEpoch:0
   };
   const node=(tag,klass,text)=>{
     const n=document.createElement(tag);if(klass)n.className=klass;
@@ -225,9 +226,7 @@
       if(!controls)return;
       const members=(controls.dataset.trackIds||"").split(",").map(Number);
       if(!members.some(id=>changed.has(id)))return;
-      if(status)card.dataset.bindStatus=status;
-      else delete card.dataset.bindStatus;
-      const locked=status==="pending"||status==="saved";
+      const locked=status==="pending";
       const check=card.querySelector('input[type="checkbox"]');
       if(check){
         if(locked)check.checked=false;
@@ -266,7 +265,8 @@
     reidUnlock();
   };
   const reset=()=>{
-    state.token++;state.bindingEpoch++;state.bindingHold=false;state.assignmentPending.clear();
+    state.token++;state.bindingEpoch++;state.bindingHold=false;
+    state.bindingNeedsRefresh=false;state.assignmentPending.clear();
     state.selected.clear();state.rallyIds.clear();state.offset=0;state.rows=[];
     state.total=0;state.revision="absent";state.roster=[];state.writable=false;
     state.tracksLoaded=false;state.loadingKey=null;state.grouping=false;
@@ -375,12 +375,34 @@
     const cards=()=>[...ui.list.querySelectorAll("[data-track-card-key]"),
       ...galleryItems.querySelectorAll("[data-track-card-key]")];
     const previous=new Map(cards().map(card=>[card.dataset.trackCardKey,{
-      rect:card.getBoundingClientRect(),portraits:[...card.querySelectorAll(".track-portrait")]
+      card,rect:card.getBoundingClientRect(),portraits:[...card.querySelectorAll(".track-portrait")]
     }]));
     update();
+    const current=cards();
     const motion=document.body.dataset.uiMotion!=="reduce"&&
       !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    for(const card of cards()){
+    const remaining=new Set(current.map(card=>card.dataset.trackCardKey));
+    const departing=[...previous].filter(([key])=>!remaining.has(key));
+    if(motion&&departing.length<=8){
+      const container=document.getElementById?.("studio-players-view");
+      for(const [,old] of departing){
+        const card=old.card;
+        if(!container||typeof card.animate!=="function")continue;
+        card.inert=true;
+        Object.assign(card.style,{
+          position:"fixed",left:old.rect.left+"px",top:old.rect.top+"px",
+          width:old.rect.width+"px",height:old.rect.height+"px",
+          margin:"0",pointerEvents:"none",zIndex:"30"
+        });
+        container.append(card);
+        const animation=card.animate([
+          {opacity:1,transform:"translateY(0) scale(1)"},
+          {opacity:0,transform:"translateY(-6px) scale(.975)"}
+        ],{duration:140,easing:"ease-in",fill:"forwards"});
+        void animation.finished.then(()=>card.remove(),()=>card.remove());
+      }
+    }
+    for(const card of current){
       const old=previous.get(card.dataset.trackCardKey);
       if(old){
         const portraits=[...card.querySelectorAll(".track-portrait")];
@@ -708,7 +730,7 @@
   };
   // Apply the authoritative edit to visible cards immediately. A subsequent
   // read reconciles filtered pages and concurrent edits without blocking UI.
-  const applyLocalTrackEdit=(action,ids,owner,result,preserveSlots=false)=>{
+  const applyLocalTrackEdit=(action,ids,owner,result)=>{
     const changed=new Set(ids.map(Number));
     const ownerName=state.roster.find(p=>p.id===owner)?.name||"";
     for(const row of state.rows){
@@ -735,20 +757,17 @@
     if(!state.viewPlayer&&!state.viewConflicts){
       const visible=state.viewExcluded?state.excludedIds:state.unassignedIds;
       state.filteredTotal=visible.size;
-      if(!preserveSlots){
-        state.rows=state.rows.filter(row=>visible.has(Number(row.track_id)));
-        if(state.filteredTotal&&state.offset>=state.filteredTotal)
-          state.offset=Math.floor((state.filteredTotal-1)/state.limit)*state.limit;
-        if(!state.filteredTotal)state.offset=0;
-      }
-    }else if(state.viewPlayer&&!preserveSlots){
+      state.rows=state.rows.filter(row=>visible.has(Number(row.track_id)));
+      if(state.filteredTotal&&state.offset>=state.filteredTotal)
+        state.offset=Math.floor((state.filteredTotal-1)/state.limit)*state.limit;
+      if(!state.filteredTotal)state.offset=0;
+    }else if(state.viewPlayer){
       state.rows=state.rows.filter(row=>row.assigned_player_id===state.viewPlayer);
     }
     updateUnassignedLabel();
     ui.assigned.textContent=String(result.assigned_count||0);
     ui.excluded.textContent=String(result.excluded_count||0);
-    if(preserveSlots){showBindingStatus(ids,"saved");unlock();}
-    else animateTrackCards(()=>{renderRows();renderGroupCards();unlock();});
+    animateTrackCards(()=>{renderRows();renderGroupCards();unlock();});
   };
   const edit=async (action,chosenIds=null,chosenOwner=null,queued=false)=>{
     const ids=chosenIds||Array.from(state.selected);
@@ -785,12 +804,13 @@
         result.displaced_automatic_track_ids.map(Number):[];
       if(queued)ids.forEach(id=>state.selected.delete(Number(id)));
       else state.selected.clear();
-      applyLocalTrackEdit(action,ids,owner,result,queued);
+      applyLocalTrackEdit(action,ids,owner,result);
+      if(queued)state.bindingNeedsRefresh=true;
       window.dispatchEvent(new CustomEvent("volley:track-assignments-updated",{detail:{
         project_id:project,video,replay_id:replay
       }}));
       confirmed=true;
-      note("Привязки сохранены. Обновляем карточки без блокировки.");
+      note("Привязка сохранена.");
       return true;
     }catch(e){
       if(project===state.project&&video===state.video&&replay===state.replay){
@@ -861,6 +881,12 @@
         requested.forEach(id=>state.assignmentPending.delete(id));
         if(!saved)showBindingStatus(requested,"");
         unlock();
+        if(!state.assignmentPending.size){
+          if(state.bindingNeedsRefresh){
+            state.bindingNeedsRefresh=false;
+            void loadPage({preserveCards:true});
+          }else state.bindingHold=false;
+        }
       }
     }
     if(!saved||epoch!==state.bindingEpoch)return;
@@ -869,8 +895,8 @@
       state.lastDisplacedAutomatic:[];
     const notice=displaced.length?
       " Конфликтующие автопривязки ID "+displaced.join(", ")+" сняты: это существовавшие ID, проверьте их повторно.":"";
-    note("ID "+ids.join(", ")+" привязаны. Непривязанных осталось "+state.unassignedIds.size+
-      ". Следующие карточки — уже обнаруженные ID, а не новые. Фото сохраняются отдельно, можно продолжать работу."+notice,
+    note("Непривязанных Track ID: "+state.unassignedIds.size+
+      ". Эталонные фото сохраняются в фоне, можно продолжать работу."+notice,
       displaced.length>0);
     return enqueuePhotoEnrollment(playerId,async()=>{
       let saved=0,alreadySaved=0,limited=0;
@@ -1473,10 +1499,10 @@
     galleryAuto.classList.add("is-working");
     galleryAuto.setAttribute("aria-busy","true");
     reidUnlock();
-    galleryStatus.textContent="Автопривязка с порогом "+threshold+"% запущена в фоне. Можно продолжать работу.";
-    autoAssignMessage("Обрабатываем совпадения · порог "+threshold+"%");
+    galleryStatus.textContent="Применяем сохранённые оценки сходства от "+threshold+"%. Можно продолжать работу.";
+    autoAssignMessage("Применяем сохранённые совпадения · порог "+threshold+"%");
     window.VolleyballTasks?.set("auto-reid",{
-      label:"Автопривязка ID",stage:"Поиск совпадений по фотографиям",progress:null
+      label:"Автопривязка ID",stage:"Применение сохранённых оценок",progress:null
     });
     try{
       const result=await post("/api/players/native/reid-review",{

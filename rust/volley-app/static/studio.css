@@ -2209,16 +2209,3 @@ body[data-ui-theme="light"] .montage-assembly-meta{background:#edf4fb;color:#345
   line-height:1.4;min-height:2.8em;max-height:2.8em;overflow:hidden;
   display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;
 }
-#studio-players-view .native-track-photo-card[data-bind-status]{position:relative}
-#studio-players-view .native-track-photo-card[data-bind-status]::after{
-  position:absolute;top:9px;left:9px;z-index:3;
-  padding:5px 8px;border-radius:7px;font-size:11px;font-weight:700;
-  pointer-events:none;background:rgba(18,36,57,.94);color:#e8f1ff;
-  border:1px solid #6387bc;
-}
-#studio-players-view .native-track-photo-card[data-bind-status="pending"]::after{
-  content:"Сохраняется…";
-}
-#studio-players-view .native-track-photo-card[data-bind-status="saved"]::after{
-  content:"✓ Привязано";color:#e3f6dd;border-color:#628f69;
-}

@@ -71,9 +71,10 @@ releaseFirstAssignment();
 for(let i=0;i<30;i++)await Promise.resolve();
 assert.deepEqual(assignments,[[7],[8]],
   "Both queued requests are sent in order with confirmed revisions");
-assert.equal(state.bindingHold,true,"Gallery stays stable until explicit refresh");
 assert.equal(state.busy,false);
-assert.equal(state.rows.length,2,"Both cards retain their original positions");
+assert.equal(state.rows.length,0,"Confirmed IDs disappear from the unassigned gallery");
+assert.equal(state.unassignedIds.size,0);
+assert.equal(refreshes,1,"One background reconciliation follows the drained assignment queue");
 assert.equal(referenceRequests.filter(row=>row.action==="read").length,1,
   "Album writes for one player must be serialized");
 
