@@ -1207,7 +1207,17 @@ impl RallyWindows {
     }
 }
 pub(crate) fn verified_track_windows(run: &ValidatedRun) -> Result<RallyWindows, String> {
+    verified_track_windows_with_serves(run).map(|(windows, _)| windows)
+}
+
+pub(crate) fn verified_track_windows_with_serves(
+    run: &ValidatedRun,
+) -> Result<(RallyWindows, Vec<Value>), String> {
     let timeline = generate(run, Choice::Timeline)?.value;
+    let serve_proposals = timeline["serve_proposals"]
+        .as_array()
+        .cloned()
+        .ok_or("Missing verified initial serve proposals")?;
     let rows = timeline["rallies"]
         .as_array()
         .ok_or("Missing verified rally intervals")?;
@@ -1227,10 +1237,13 @@ pub(crate) fn verified_track_windows(run: &ValidatedRun) -> Result<RallyWindows,
     }
     let contexts = serde_json::from_value(timeline["contextual_contacts"].clone())
         .map_err(|e| format!("Invalid final contact context: {e}"))?;
-    Ok(RallyWindows {
-        intervals,
-        contexts,
-    })
+    Ok((
+        RallyWindows {
+            intervals,
+            contexts,
+        },
+        serve_proposals,
+    ))
 }
 
 /// Full native source validation is delegated to generate(), then a second

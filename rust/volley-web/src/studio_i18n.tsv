@@ -672,3 +672,6 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 Сохранить эталон	Save reference
 Пауза → нажмите на точку контакта с мячом → выберите тип касания	Pause → click the ball contact point → choose touch type
 Записать ручные касания и типы в эталон	Save manual touches and types as reference
+
+≈ Подачи	≈ Serves
+≈ Подачи взяты из начала траектории каждого розыгрыша в предпросмотре. Это кандидаты, а не подтверждённые касания; без привязанного Track ID подача учитывается только в общем числе.	≈ Serves come from the beginning of each rally's ball trajectory in Preview. These are candidates, not confirmed touches; without an assigned Track ID, a serve appears only in the total.

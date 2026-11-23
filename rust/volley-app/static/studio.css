@@ -1450,7 +1450,7 @@ body[data-ui-theme="light"] #studio-preview-view .rally-card-progress-filled{
 .report-toolbar h2{margin:0;font-size:1.6rem;letter-spacing:-.02em}
 .report-toolbar button{width:auto}
 #studio-stats-status{margin:10px 0 18px}
-.report-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;overflow:hidden;margin:0 0 10px;background:#36516e;border:1px solid #36516e;border-radius:12px}
+.report-summary{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:1px;overflow:hidden;margin:0 0 10px;background:#36516e;border:1px solid #36516e;border-radius:12px}
 .report-summary>div{padding:19px 22px;background:#172b40;min-width:0}
 .report-summary span,.report-summary strong{display:block}
 .report-summary span{font-size:13px;color:#b4c8dc}

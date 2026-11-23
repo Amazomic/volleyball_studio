@@ -20,7 +20,7 @@ use std::{
 };
 const MAX_SOURCE: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_STATS: u64 = 8 * 1024 * 1024;
-const REPORT_ALGORITHM: &str = "rally-roster-attributed-touches-v4";
+const REPORT_ALGORITHM: &str = "rally-roster-attributed-touches-v5";
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatsSource {
@@ -73,6 +73,27 @@ impl ContactCounts {
     fn report_candidates(&self) -> u64 {
         self.touches + self.unassigned
     }
+}
+
+fn count_initial_serves(
+    proposals: &[Value],
+    owners: &NativeReviewedOwners,
+) -> (BTreeMap<String, u64>, u64) {
+    let mut per_player = BTreeMap::<String, u64>::new();
+    let mut unassigned = 0u64;
+    for proposal in proposals {
+        let athlete = proposal["provisional_track_id"]
+            .as_u64()
+            .filter(|id| !owners.excluded.contains(id))
+            .and_then(|id| owners.owners.get(&id))
+            .filter(|id| owners.roster.contains_key(*id));
+        if let Some(id) = athlete {
+            *per_player.entry(id.clone()).or_default() += 1;
+        } else {
+            unassigned += 1;
+        }
+    }
+    (per_player, unassigned)
 }
 /// Re-verify the exact video-to-touch and frame-to-Track relationship, not
 /// merely that a guessed Track ID appears somewhere in the match.
@@ -276,6 +297,9 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
     let mut generic = 0u64;
     let mut excluded_proposals = 0u64;
     let mut outside_proposals = 0u64;
+    let mut initial_serve_candidates = 0u64;
+    let mut unassigned_initial_serve_candidates = 0u64;
+    let mut player_initial_serves = BTreeMap::<String, u64>::new();
     let mut automatic_identity_ids = BTreeSet::<String>::new();
     let mut automatically_linked_tracks = 0u64;
     let mut rallies = 0u64;
@@ -331,8 +355,15 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
             .join(&run.replay_id);
         let replay =
             safe_file(&root, "tracked_frames.jsonl", MAX_SOURCE).map_err(storage::bad_request)?;
-        let windows =
-            native_rally_evidence::verified_track_windows(&run).map_err(storage::bad_request)?;
+        let (windows, serve_proposals) =
+            native_rally_evidence::verified_track_windows_with_serves(&run)
+                .map_err(storage::bad_request)?;
+        let (credited_serves, unassigned_serves) = count_initial_serves(&serve_proposals, &owners);
+        initial_serve_candidates += serve_proposals.len() as u64;
+        unassigned_initial_serve_candidates += unassigned_serves;
+        for (id, count) in credited_serves {
+            *player_initial_serves.entry(id).or_default() += count;
+        }
         rallies += run.expected_rallies;
         let subtotal = count_native_contacts(&run, &replay, &owners, &windows)
             .map_err(storage::bad_request)?;
@@ -390,6 +421,8 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
             "source_rally_sha256":run.rally_sha,
             "identity_revision":owners.revision,
             "rally_candidates":run.expected_rallies,
+            "initial_serve_candidates":serve_proposals.len(),
+            "unassigned_initial_serve_candidates":unassigned_serves,
             "total_touch_candidates":report_candidates,
             "unassigned_touch_candidates":run_unassigned,
             "unverified_touch_proposals":subtotal.unverified_proposals,
@@ -420,6 +453,7 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
             let unclassified = touches.saturating_sub(actions.values().sum::<u64>());
             json!({
                 "player_id":id,"name":name,"touches":touches,"unclassified_touches":unclassified,
+                "initial_serve_candidates":player_initial_serves.get(id).copied().unwrap_or(0),
                 "activity":activity,
                 "estimated_actions":actions,
                 "identity_source":if automatic_identity_ids.contains(id) {
@@ -438,7 +472,11 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
         )
     );
     let sum: u64 = results.values().sum();
-    if sum + unknown != contacts || players.len() != names.len() {
+    if sum + unknown != contacts
+        || players.len() != names.len()
+        || player_initial_serves.values().sum::<u64>() + unassigned_initial_serve_candidates
+            != initial_serve_candidates
+    {
         return Err(storage::internal(
             "Native stats conservation accounting failed",
         ));
@@ -452,6 +490,8 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
         "sources":sources,"video_count":selected.len(),
         "roster_player_ids":names.keys().collect::<Vec<_>>(),
         "rally_candidates":rallies,
+        "initial_serve_candidates":initial_serve_candidates,
+        "unassigned_initial_serve_candidates":unassigned_initial_serve_candidates,
         "mean_player_touches":mean_touches,
         "estimated_hits":predicted_counts.get("attack").copied().unwrap_or(0) + predicted_counts.get("serve").copied().unwrap_or(0),
         "total_touch_candidates":contacts,
@@ -738,6 +778,26 @@ mod tests {
         };
         (root, run, replay, owner)
     }
+    #[test]
+    fn initial_serves_credit_only_linked_roster_players_without_inventing_touches() {
+        let (root, _, _, mut owners) = fixture();
+        let proposals = vec![
+            json!({"provisional_track_id":7}),
+            json!({"provisional_track_id":8}),
+            json!({"provisional_track_id":null}),
+            json!({"provisional_track_id":99}),
+        ];
+        owners.excluded.insert(8);
+        let (players, unknown) = count_initial_serves(&proposals, &owners);
+        assert_eq!(players, BTreeMap::from([("player1".to_owned(), 1)]));
+        assert_eq!(unknown, 3);
+        assert_eq!(
+            players.values().sum::<u64>() + unknown,
+            proposals.len() as u64
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn unassigned_physical_touch_preserves_report_conservation() {
         let (root, mut run, replay, owners) = fixture();

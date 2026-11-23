@@ -6,7 +6,7 @@
   const ui={project:get("studio-project"),status:get("studio-stats-status"),
     summary:get("studio-stats-summary"),total:get("studio-stats-total"),
     rallies:get("studio-stats-rallies"),attacks:get("studio-stats-attacks"),
-    blocks:get("studio-stats-blocks"),players:get("studio-stats-players"),
+    blocks:get("studio-stats-blocks"),serves:get("studio-stats-serves"),players:get("studio-stats-players"),
     legend:get("studio-activity-legend"),recalculate:get("studio-stats-recalculate")};
   const state={token:0,project:"",selections:new Map(),savedRevision:"absent",photos:new Map()};
   const el=(tag,klass,value)=>{
@@ -125,10 +125,11 @@
     header.append(avatar,identity,touches);
     const metrics=el("div","report-player-metrics");
     const actions=player.estimated_actions||{};
-    for(const [key,label] of [["attack","Атаки"],["serve","Подачи"],["block","Блоки"],
+    for(const [key,label] of [["attack","Атаки"],["serve","≈ Подачи"],["block","Блоки"],
       ["dig","Приёмы"],["overhead_pass","Передачи"]]){
       const metric=el("div","report-player-metric report-action-"+key);
-      metric.append(el("span","",label),el("strong","",classification?(actions[key]??0):"—"));
+      metric.append(el("span","",label),el("strong","",
+        key==="serve"?player.initial_serve_candidates:(classification?(actions[key]??0):"—")));
       metrics.append(metric);
     }
     const footer=el("div","report-player-footer");
@@ -157,6 +158,7 @@
       data.automatic_action_classification_verified!==false||
       !data.estimated_actions||typeof data.estimated_actions!=="object"||
       !finiteCount(data.rally_candidates)||!finiteCount(data.estimated_hits)||
+      !finiteCount(data.initial_serve_candidates)||!finiteCount(data.unassigned_initial_serve_candidates)||
       typeof data.mean_player_touches!=="number"||!Number.isFinite(data.mean_player_touches)||data.mean_player_touches<0||
       data.all_contacts_physically_verified!==true)
       throw Error("Сервер вернул неподтверждённую статистику");
@@ -165,7 +167,7 @@
       data.video_count!==selected.length||data.sources.length!==selected.length)
       throw Error("Не совпадает набор видео в статистике");
     const distinct=new Set();
-    let perSourceTotal=0,perSourceUnknown=0;
+    let perSourceTotal=0,perSourceUnknown=0,perSourceServes=0,perSourceUnknownServes=0;
     for(const src of data.sources){
       if(!state.selections.has(src.video)||state.selections.get(src.video)!==src.rally_run_id||
         distinct.has(src.video)||
@@ -174,11 +176,16 @@
         !(hash(src.identity_revision)||src.identity_revision==="absent")||
         !finiteCount(src.total_touch_candidates)||
         !finiteCount(src.unassigned_touch_candidates)||
-        src.unassigned_touch_candidates>src.total_touch_candidates)
+        !finiteCount(src.initial_serve_candidates)||
+        !finiteCount(src.unassigned_initial_serve_candidates)||
+        src.unassigned_touch_candidates>src.total_touch_candidates||
+        src.unassigned_initial_serve_candidates>src.initial_serve_candidates)
         throw Error("Нарушена версия или целостность источника статистики");
       distinct.add(src.video);
       perSourceTotal+=src.total_touch_candidates;
       perSourceUnknown+=src.unassigned_touch_candidates;
+      perSourceServes+=src.initial_serve_candidates;
+      perSourceUnknownServes+=src.unassigned_initial_serve_candidates;
     }
     const total=data.total_touch_candidates,assigned=data.assigned_touch_candidates,
       unknown=data.unassigned_touch_candidates;
@@ -195,12 +202,18 @@
         !(p.activity===null||(typeof p.activity==="number"&&Number.isFinite(p.activity)&&p.activity>=0)))||
       data.players.reduce((sum,p)=>sum+p.touches,0)!==assigned)
       throw Error("Количество касаний не согласуется с проверенными источниками");
+    if(!data.players.every(p=>finiteCount(p.initial_serve_candidates))||
+      perSourceServes!==data.initial_serve_candidates||
+      perSourceUnknownServes!==data.unassigned_initial_serve_candidates||
+      data.players.reduce((sum,p)=>sum+p.initial_serve_candidates,0)+data.unassigned_initial_serve_candidates!==data.initial_serve_candidates)
+      throw Error("Число начальных подач не соответствует проверенному источнику");
     if (![data.estimated_actions.attack ?? 0,data.estimated_actions.block ?? 0].every(finiteCount))
       throw Error("Некорректное количество игровых действий");
     // The public Report view shows only touches attributed to roster athletes;
     // unmatched source Track IDs remain internal diagnostics, never cards.
     ui.total.textContent=String(assigned);
     ui.rallies.textContent=String(data.rally_candidates);
+    ui.serves.textContent=String(data.initial_serve_candidates);
     ui.attacks.textContent=data.automatic_action_classification?String(data.estimated_actions.attack ?? 0):"—";
     ui.blocks.textContent=data.automatic_action_classification?String(data.estimated_actions.block ?? 0):"—";
     ui.summary.classList.remove("hidden");

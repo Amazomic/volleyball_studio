@@ -30,7 +30,7 @@ class Element {
 }
 const ids=["studio-project","studio-stats-recalculate","studio-stats-status",
   "studio-stats-summary","studio-stats-total","studio-stats-rallies",
-  "studio-stats-attacks","studio-stats-blocks","studio-stats-players","studio-stats-player-detail","studio-activity-legend"];
+  "studio-stats-attacks","studio-stats-blocks","studio-stats-serves","studio-stats-players","studio-stats-player-detail","studio-activity-legend"];
 const nodes=new Map(ids.map(id=>[id,new Element()]));
 nodes.get("studio-project").value="1234abcdef01";
 const sha=c=>c.repeat(64);
@@ -44,20 +44,20 @@ const snapshot=(refreshed=false)=>({
     video,rally_run_id:run,source_replay_id:"b".repeat(32),
     source_replay_sha256:sha("c"),source_touch_id:"d".repeat(32),
     source_touch_sha256:sha("e"),source_rally_sha256:sha("1"),
-    identity_revision:"absent",total_touch_candidates:8,
+    identity_revision:"absent",total_touch_candidates:8,initial_serve_candidates:2,unassigned_initial_serve_candidates:refreshed?0:1,
     unassigned_touch_candidates:refreshed?0:2
   }],
   total_touch_candidates:8,assigned_touch_candidates:refreshed?8:6,
-  rally_candidates:2,mean_player_touches:refreshed?4:3,
+  rally_candidates:2,initial_serve_candidates:2,unassigned_initial_serve_candidates:refreshed?0:1,mean_player_touches:refreshed?4:3,
   estimated_hits:refreshed?2:1,
   unassigned_touch_candidates:refreshed?0:2,
   players:[{
-    player_id:"p1",name:"Player One",touches:6,activity:1,unclassified_touches:0,
+    player_id:"p1",name:"Player One",touches:6,activity:1,unclassified_touches:0,initial_serve_candidates:1,
     identity_source:"manually_reviewed_native_track_ids",
     estimated_actions:{attack:1,block:1,dig:1,serve:1,overhead_pass:2}
   },{
     player_id:"p2",name:"Player Two",touches:refreshed?2:0,
-    activity:refreshed?0.8:0,unclassified_touches:refreshed?1:0,
+    activity:refreshed?0.8:0,unclassified_touches:refreshed?1:0,initial_serve_candidates:refreshed?1:0,
     identity_source:"photo_auto_or_reviewed_native_track_ids",
     estimated_actions:refreshed?{block:1}:{}
   }],
@@ -132,6 +132,7 @@ assert.equal(loaded,1,"first report visit calculates and saves");
 assert.equal($("recalculate").disabled,false);
 assert.equal($("total").textContent,"6","only named players appear in summary");
 assert.equal($("rallies").textContent,"2");
+assert.equal($("serves").textContent,"2","serve proposals from preview must appear in report summary");
 assert.equal($("players").children.length,2);
 const first=$("players").children[0], second=$("players").children[1];
 const find=(node,klass)=>node.className.split(/\s+/).includes(klass)?node:
@@ -159,10 +160,11 @@ assert.match($("status").textContent,/обновлена/);
 assert.ok(find(first,"report-action-attack"),"each player card shows attack statistics without a click");
 assert.match(content(find(first,"report-action-attack")),/Атаки\s+1/);
 assert.match(content(find(first,"report-action-block")),/Блоки\s+1/);
-assert.match(content(find(first,"report-action-serve")),/Подачи\s+1/);
+assert.match(content(find(first,"report-action-serve")),/≈ Подачи\s+1/);
 assert.match(content(find(first,"report-action-dig")),/Приёмы\s+1/);
 assert.match(content(find(first,"report-action-overhead_pass")),/Передачи\s+2/);
 assert.match(content(find(second,"report-player-touch-count")),/0/);
+assert.match(content(find(second,"report-action-serve")),/≈ Подачи\s+0/);
 const firstActivity=find(first,"report-player-activity");
 assert.ok(firstActivity,"player card displays an activity indicator");
 assert.equal(firstActivity.style["--report-activity"],"1");
@@ -188,6 +190,7 @@ assert.equal(recalculations,1);
 assert.equal($("total").textContent,"8");
 assert.match(content(find($("players").children[1],"report-player-touch-count")),/2/);
 assert.match(content(find($("players").children[1],"report-action-block")),/Блоки\s+1/);
+assert.match(content(find($("players").children[1],"report-action-serve")),/≈ Подачи\s+1/);
 assert.match($("status").textContent,/пересчитана/);
 assert.equal($("recalculate").disabled,false);
 
