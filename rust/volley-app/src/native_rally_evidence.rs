@@ -775,6 +775,61 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
         }
     }
     if timeline {
+        let serve_proposals = if run
+            .touch_file
+            .parent()
+            .is_some_and(|dir| dir.join("manifest.json").is_file())
+        {
+            let touch_dir = run.touch_file.parent().ok_or("Missing touch directory")?;
+            let touch_manifest = read_manifest(touch_dir, "Touch")?;
+            if let Some(expected_count) = touch_manifest["initial_serve_proposal_count"].as_u64() {
+                let preliminary = fs::read(safe_file(
+                    touch_dir,
+                    "preliminary_rallies.json",
+                    64 * 1024 * 1024,
+                )?)
+                .map_err(|e| format!("Read initial serve source: {e}"))?;
+                let checksum = format!("{:x}", Sha256::digest(&preliminary));
+                if touch_manifest["preliminary_rally_sha256"].as_str() != Some(checksum.as_str()) {
+                    return Err("Initial serve source SHA mismatch".into());
+                }
+                let preliminary: Value = serde_json::from_slice(&preliminary)
+                    .map_err(|e| format!("Invalid initial serve source: {e}"))?;
+                let proposals = preliminary["initial_serve_proposals"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                if proposals.len() as u64 != expected_count {
+                    return Err("Initial serve count mismatch".into());
+                }
+                proposals
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+        if serve_proposals.len() > intervals.len()
+            || serve_proposals.iter().any(|proposal| {
+                let Some(start) = proposal["rally_start_frame"].as_u64() else {
+                    return true;
+                };
+                let at = proposal["trajectory_start_frame"].as_u64().unwrap_or(start);
+                proposal["kind"] != "serve"
+                    || proposal["source"] != "rally_trajectory_start_v1"
+                    || proposal["identity_verified"] != false
+                    || at < start
+                    || at >= start.saturating_add(30)
+                    || !intervals
+                        .iter()
+                        .any(|interval| interval.start <= at && at <= interval.end)
+                    || proposal["provisional_track_id"]
+                        .as_u64()
+                        .is_some_and(|id| id == 0 || id > i64::MAX as u64)
+            })
+        {
+            return Err("Invalid initial serve proposals".into());
+        }
         // The complete source-scoped index is SHA-verified in one bounded pass,
         // independent of pagination or visual filters.
         let mut contacts = BoundedReader::open(&run.touch_file)?;
@@ -862,6 +917,7 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
                 "raw_touch_candidates": raw_touch_count,
                 "estimated_actions": estimated_actions,
                 "touch_annotations": touch_annotations,
+                "serve_proposals": serve_proposals,
                 "surface_contact_candidates": surface_timeline,
                 "contextual_contacts":timeline_contexts,
                 "authoritative_game_events": false,

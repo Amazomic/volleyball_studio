@@ -324,6 +324,46 @@ fn predicted_action_does_not_bypass_source_track_or_score_validation() {
     fs::remove_dir_all(root).expect("remove test fixture");
 }
 #[test]
+fn timeline_exposes_initial_serves_without_adding_physical_contacts() {
+    let (run, root) = fixture();
+    let proposals = json!([
+        {"rally_start_frame":30,"trajectory_start_frame":30,
+         "provisional_track_id":42,"kind":"serve",
+         "identity_verified":false,"source":"rally_trajectory_start_v1"},
+        {"rally_start_frame":95,"trajectory_start_frame":96,
+         "provisional_track_id":null,"kind":"serve",
+         "identity_verified":false,"source":"rally_trajectory_start_v1"}
+    ]);
+    let preliminary = serde_json::to_vec(&json!({
+        "initial_serve_proposals":proposals,
+    }))
+    .unwrap();
+    fs::write(root.join("preliminary_rallies.json"), &preliminary).unwrap();
+    fs::write(
+        root.join("manifest.json"),
+        serde_json::to_vec(&json!({
+            "initial_serve_proposal_count":2,
+            "preliminary_rally_sha256":format!("{:x}",Sha256::digest(&preliminary))
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let timeline = generate(&run, Choice::Timeline).unwrap();
+    assert_eq!(timeline.value["serve_proposals"], proposals);
+    assert_eq!(timeline.value["raw_touch_candidates"], 6);
+    assert_eq!(
+        timeline.value["touch_annotations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        6
+    );
+    fs::write(root.join("preliminary_rallies.json"), b"tampered").unwrap();
+    assert!(generate(&run, Choice::Timeline).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn timeline_covers_the_whole_video_and_all_verified_touches() {
     let (run, root) = fixture();
     let result = generate(&run, Choice::Timeline).unwrap();

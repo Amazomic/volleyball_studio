@@ -2932,6 +2932,17 @@
           ctx.fillStyle="#10deb2";ctx.fillRect(x,y,Math.max(2,Math.ceil(dpr)),bandHeight);
         }
       }
+      if(!training.active&&overlay.flags.touches&&overlay.actionFlags.serve&&
+        Array.isArray(data.serve_proposals)){
+        for(const serve of data.serve_proposals){
+          const frame=Number(serve.trajectory_start_frame??serve.rally_start_frame);
+          const x=Math.floor(((Number(s.analysisOffset)||0)+frame/fps())/duration*width);
+          if(Number.isFinite(x)&&x>=0&&x<width){
+            ctx.fillStyle="#f3a350";
+            ctx.fillRect(x,y,Math.max(3,Math.ceil(dpr)),bandHeight);
+          }
+        }
+      }
       if(!training.active&&overlay.flags.touches&&Array.isArray(data.touch_annotations)){
         for(const classified of [false,true]){
           for(const touch of data.touch_annotations){
@@ -3777,6 +3788,9 @@
     const validTimeline=Boolean(data)&&data.project_id===s.project&&
       data.rally_run_id===s.run&&data.video===s.video&&
       Array.isArray(data.touch_annotations);
+    const serves=validTimeline&&!overlay.raw&&overlay.flags.touches&&
+      overlay.actionFlags.serve&&Array.isArray(data.serve_proposals)?
+      data.serve_proposals:[];
     const touches=validTimeline&&(typeof training==="undefined"||!training.active)&&
       !overlay.raw&&overlay.flags.touches?data.touch_annotations.filter(event=>
       overlay.actionFlags[cpuTouchKind(event.kind)]):[];
@@ -3799,6 +3813,19 @@
         tick.setAttribute("aria-hidden","true");
         markers.append(tick);
         count++;
+      }
+      for(const serve of serves){
+        const frame=Number(serve.trajectory_start_frame??serve.rally_start_frame);
+        if(!Number.isSafeInteger(frame)||frame<start||frame>end)continue;
+        const tick=make("span","rally-card-touch-tick");
+        tick.style.left=(100*(frame-start)/duration)+"%";
+        tick.style.backgroundColor="#f3a350";
+        tick.style.color="#f3a350";
+        tick.title=second(frame)+" с · ≈ Подача"+
+          (Number.isSafeInteger(serve.provisional_track_id)?
+            " · Track ID "+serve.provisional_track_id:" · игрок пока не определён");
+        tick.setAttribute("aria-hidden","true");
+        markers.append(tick);
       }
       progress.setAttribute("aria-label",
         "Выбрать момент воспроизведения · "+count+" касаний из CPU-постобработки");
@@ -3836,6 +3863,10 @@
         "Загрузка касаний выбранной CPU-постобработки…";
       return;
     }
+    const serves=Array.isArray(data.serve_proposals)?data.serve_proposals.filter(item=>{
+      const frame=Number(item.trajectory_start_frame??item.rally_start_frame);
+      return Number.isSafeInteger(frame)&&frame>=start&&frame<=end;
+    }):[];
     const touches=data.touch_annotations.filter(event=>
       event.frame_index>=start&&event.frame_index<=end);
     const labels={attack:"Атака",block:"Блок",serve:"Подача",
@@ -3854,6 +3885,16 @@
       ". Касаний из CPU-постобработки: "+touches.length+
       ". Оценка типов: "+(breakdown.join(" · ")||"нет данных")+
       ". Классификация автоматическая, не подтверждена вручную.";
+    for(const serve of serves){
+      const frame=Number(serve.trajectory_start_frame??serve.rally_start_frame);
+      const pill=make("span","event-pill",clock(frame)+" · ≈ Подача");
+      pill.title="Начало траектории розыгрыша. "+
+        (Number.isSafeInteger(serve.provisional_track_id)?
+          "Кандидат Track ID "+serve.provisional_track_id:
+          "Подающий не идентифицирован")+". Не подтверждено вручную.";
+      pill.style.borderColor="#f3a350";
+      ui.events.append(pill);
+    }
     for(const touch of touches.slice(0,32)){
       const kind=cpuTouchKind(touch.kind);
       const label=kind!=="unknown_touch"?"≈ "+labels[kind]:"Касание";

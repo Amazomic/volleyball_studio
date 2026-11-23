@@ -1268,6 +1268,61 @@ fn emit_record(
     Ok(())
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct InitialServeProposal {
+    rally_start_frame: u64,
+    trajectory_start_frame: Option<u64>,
+    provisional_track_id: Option<u64>,
+    kind: &'static str,
+    identity_verified: bool,
+    source: &'static str,
+}
+
+fn initial_serve_proposal(frames: &[TouchFrame], rally_start: u64) -> InitialServeProposal {
+    let first_ball = frames.iter().find(|frame| {
+        frame.frame_index >= rally_start
+            && frame.frame_index < rally_start.saturating_add(30)
+            && frame.selected_ball.is_some()
+    });
+    let first_position = first_ball
+        .and_then(|frame| frame.selected_ball.as_ref())
+        .map(|ball| {
+            let [x1, y1, x2, y2] = ball.bbox_xyxy_norm;
+            [(x1 + x2) * 0.5, (y1 + y2) * 0.5]
+        });
+    let candidate = first_position.and_then(|position| {
+        let mut distances = std::collections::BTreeMap::<u64, f64>::new();
+        for frame in frames.iter().filter(|frame| {
+            frame.frame_index >= rally_start && frame.frame_index < rally_start.saturating_add(90)
+        }) {
+            for player in &frame.players {
+                let [x1, y1, x2, y2] = player.bbox_xyxy_norm;
+                let distance = (position[0] - position[0].clamp(x1, x2))
+                    .hypot(position[1] - position[1].clamp(y1, y2));
+                distances
+                    .entry(player.track_id)
+                    .and_modify(|best| *best = best.min(distance))
+                    .or_insert(distance);
+            }
+        }
+        let mut ranked = distances.into_iter().collect::<Vec<_>>();
+        ranked.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let (id, distance) = *ranked.first()?;
+        (distance <= 0.035
+            && ranked
+                .get(1)
+                .is_none_or(|second| second.1 > distance + 0.035))
+        .then_some(id)
+    });
+    InitialServeProposal {
+        rally_start_frame: rally_start,
+        trajectory_start_frame: first_ball.map(|frame| frame.frame_index),
+        provisional_track_id: candidate,
+        kind: "serve",
+        identity_verified: false,
+        source: "rally_trajectory_start_v1",
+    }
+}
 fn select_pending_touch(
     pending: &mut Option<PhysicalTouchCandidate>,
     event: PhysicalTouchCandidate,
@@ -1621,6 +1676,7 @@ fn detect_stream_with_pose(
     let mut emitted: u64 = 0;
     let mut motion_candidates: u64 = 0;
     let mut pending: Option<PhysicalTouchCandidate> = None;
+    let mut initial_serves = Vec::<InitialServeProposal>::new();
     let separation = (settings.min_interval_sec * 30.0).round().max(1.0) as u64;
     let mut process_block = |start: u64,
                              end: u64,
@@ -1677,6 +1733,9 @@ fn detect_stream_with_pose(
         } else {
             clean
         };
+        if start == window.0 {
+            initial_serves.push(initial_serve_proposal(&continuous, window.0));
+        }
         let filtered = if let Some(calibration) = court {
             court_touch::filter_on_court(&continuous, calibration)
         } else {
@@ -1847,6 +1906,14 @@ fn detect_stream_with_pose(
         .get_ref()
         .sync_all()
         .map_err(|e| format!("Sync physical touch candidates: {e}"))?;
+    if preliminary_intervals.is_some() {
+        let path = output.with_file_name("initial_serve_proposals.partial.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&initial_serves).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("Save initial serve proposals: {e}"))?;
+    }
     Ok((
         format!("{:x}", output_hash.finalize()),
         emitted,
@@ -2284,7 +2351,18 @@ fn process_with_ball_scope_and_rally_settings_report(
         if let Some(stabilized) = stabilized {
             record["ball_stabilizer"] = stabilized.summary();
         }
+        let serve_proposals_file = folder.join("initial_serve_proposals.partial.json");
+        let serve_proposals: Value = serde_json::from_slice(
+            &fs::read(&serve_proposals_file)
+                .map_err(|e| format!("Read initial serve proposals: {e}"))?,
+        )
+        .map_err(|e| format!("Invalid initial serve proposals: {e}"))?;
+        fs::remove_file(&serve_proposals_file)
+            .map_err(|e| format!("Remove temporary serve proposals: {e}"))?;
+        record["initial_serve_proposal_count"] =
+            json!(serve_proposals.as_array().map_or(0, Vec::len));
         let preliminary_data = json!({
+            "initial_serve_proposals":serve_proposals,
             "schema":"volley-native-preliminary-continuous-rallies/1",
             "source_replay_id":req.replay_id,
             "source_replay_sha256":sha,
@@ -2380,6 +2458,53 @@ pub async fn status(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn initial_serve_can_link_a_track_visible_after_rally_start() {
+        let mut frames = (100..200)
+            .map(|frame_index| TouchFrame {
+                frame_index,
+                players: Vec::new(),
+                selected_ball: (frame_index < 110).then_some(TouchBall {
+                    source_model: "vballnet".into(),
+                    score: 0.9,
+                    bbox_xyxy_norm: [0.49, 0.49, 0.51, 0.51],
+                }),
+            })
+            .collect::<Vec<_>>();
+        frames[60].players.push(TouchPlayer {
+            track_id: 42,
+            score: 0.9,
+            bbox_xyxy_norm: [0.44, 0.3, 0.56, 0.75],
+            touch_probability: None,
+        });
+        let proposal = initial_serve_proposal(&frames, 100);
+        assert_eq!(proposal.rally_start_frame, 100);
+        assert_eq!(proposal.trajectory_start_frame, Some(100));
+        assert_eq!(proposal.provisional_track_id, Some(42));
+        assert!(!proposal.identity_verified);
+    }
+
+    #[test]
+    fn initial_serve_does_not_guess_between_ambiguous_players() {
+        let frames = vec![TouchFrame {
+            frame_index: 200,
+            selected_ball: Some(TouchBall {
+                source_model: "vballnet".into(),
+                score: 0.9,
+                bbox_xyxy_norm: [0.49, 0.49, 0.51, 0.51],
+            }),
+            players: [7, 8]
+                .map(|track_id| TouchPlayer {
+                    track_id,
+                    score: 0.9,
+                    bbox_xyxy_norm: [0.44, 0.3, 0.56, 0.75],
+                    touch_probability: None,
+                })
+                .to_vec(),
+        }];
+        let proposal = initial_serve_proposal(&frames, 200);
+        assert_eq!(proposal.provisional_track_id, None);
+    }
     #[test]
     fn minimum_contact_confidence_applies_to_all_pose_motion_candidates() {
         let scores = [0.29, 0.48, 0.64, 0.83];
