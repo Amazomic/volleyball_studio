@@ -1420,18 +1420,18 @@ body[data-ui-theme="light"] #studio-preview-view .rally-card-progress-filled{
 #studio-players-view .track-grouping-controls label{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px}
 #studio-players-view .track-grouping-controls input{width:100px}
 #studio-players-view .track-grouping-controls button{padding:7px 11px;font-size:12px}
-#studio-players-view .track-auto-assign-controls{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap;padding:9px 12px;margin:0 0 8px;border:1px solid #344d70;border-radius:9px;background:#15253b}
+#studio-players-view .track-auto-assign-controls{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap;width:100%;max-width:100%;min-width:0;box-sizing:border-box;padding:9px 12px;margin:0 0 8px;border:1px solid #344d70;border-radius:9px;background:#15253b}
 #studio-players-view .track-auto-assign-controls[hidden]{display:none}
 #studio-players-view .track-filter-buttons{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-right:auto}
 #studio-players-view .track-filter-buttons[hidden]{display:none}
-#studio-players-view .track-mode-info{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-right:auto}
+#studio-players-view .track-mode-info{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-right:auto;min-width:0}
 #studio-players-view .track-mode-info>.track-view-label{margin-left:0}
 #studio-players-view .track-auto-assign-controls .track-mode-button{padding:6px 12px}
 #studio-players-view .track-auto-threshold{display:flex;align-items:center;gap:9px;font-size:12px;color:#ccdff5}
 #studio-players-view .track-auto-threshold input{width:min(180px,32vw);accent-color:#73aef5}
 #studio-players-view .track-auto-threshold output{min-width:37px;text-align:right;font-variant-numeric:tabular-nums;color:#f0f7ff}
 #studio-players-view .track-auto-assign-controls button{padding:7px 12px;font-size:12px}
-#studio-players-view .track-auto-assign-status{flex-basis:100%;color:#b9d0ed;text-align:right;font-size:11px}
+#studio-players-view .track-auto-assign-status{flex-basis:100%;min-width:0;overflow-wrap:anywhere;color:#b9d0ed;text-align:right;font-size:11px}
 #studio-players-view .track-auto-assign-status[hidden]{display:none}
 #studio-players-view .track-mode-button{padding:6px 12px;border:1px solid transparent;background:transparent;color:#a8bbd3;border-radius:6px;font-size:12px}
 #studio-players-view .track-mode-button[aria-pressed="true"]{background:#24508a;border-color:#467bc3;color:#fff}

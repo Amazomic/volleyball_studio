@@ -1475,7 +1475,7 @@
       autoAssignInFlight?"Автопривязка выполняется в фоне.":
       "Привязать Track ID к лучшему игроку при сходстве от выбранного порога.");
     galleryAutoThreshold.disabled=state.busy||state.assignmentPending.size>0||autoAssignInFlight||Boolean(state.autoAssignPending);
-    if(autoBlocked&&!autoAssignInFlight&&!state.busy)
+    if(autoBlocked&&!autoAssignInFlight&&!state.busy&&!state.assignmentPending.size)
       autoAssignMessage(autoBlocked,"blocked");
     else if(autoAssignStatus.dataset.kind==="blocked")autoAssignMessage("");
     if(state.autoAssignPending&&!state.photoScoreLoading&&!state.busy&&!state.assignmentPending.size&&!autoAssignInFlight){
