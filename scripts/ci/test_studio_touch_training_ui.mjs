@@ -101,7 +101,7 @@ const context={
         source_replay_sha256:"a".repeat(64),
         rally_count:1,rally_intervals:[{start:95,end:150}],
         proposals:[{frame:100,score:9},{frame:140,score:3}],
-        method:"piecewise_ballistic_direction_v3",
+        method:"touch_detector_v4",
         ball_motion_interpolation:{stage:"ball_motion_interpolation_v1",
           result:{raw_observations:1400,rejected_outliers:2,interpolated_frames:9}},
         impact_settings:Object.fromEntries(Object.entries(payload.impact).reverse()),

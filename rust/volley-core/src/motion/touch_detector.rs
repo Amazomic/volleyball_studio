@@ -468,6 +468,114 @@ fn occluded_vertical_rebounds(
     }
     results
 }
+fn occluded_stationary_launches(
+    points: &[BallObservation],
+    config: DirectionBreakConfig,
+) -> Vec<TrajectoryBreak> {
+    let mut launches = Vec::new();
+    for (index, boundary) in points.windows(2).enumerate() {
+        let missing = boundary[1].frame - boundary[0].frame - 1;
+        if !(3..=10).contains(&missing) || index < 4 || index + 5 >= points.len() {
+            continue;
+        }
+        let before = &points[index - 4..=index];
+        let after = &points[index + 1..=index + 5];
+        if before
+            .windows(2)
+            .chain(after.windows(2))
+            .any(|pair| pair[1].frame - pair[0].frame > 2)
+        {
+            continue;
+        }
+        let duration_before = (before[4].frame - before[0].frame) as f64;
+        let duration_after = (after[4].frame - after[0].frame) as f64;
+        let incoming = [
+            (before[4].x - before[0].x) / duration_before,
+            (before[4].y - before[0].y) / duration_before,
+        ];
+        let outgoing = [
+            (after[4].x - after[0].x) / duration_after,
+            (after[4].y - after[0].y) / duration_after,
+        ];
+        let before_speed = incoming[0].hypot(incoming[1]);
+        let after_speed = outgoing[0].hypot(outgoing[1]);
+        if before_speed >= 3.0 || !(14.0..=60.0).contains(&after_speed) {
+            continue;
+        }
+        if before
+            .iter()
+            .any(|point| (point.x - before[4].x).hypot(point.y - before[4].y) > 14.0)
+        {
+            continue;
+        }
+        let Some(outbound_fit) = fit(after, after[0].frame) else {
+            continue;
+        };
+        if outbound_fit.error > config.max_fit_error_px {
+            continue;
+        }
+        let mut best = None::<(i64, [f64; 2], f64)>;
+        for frame in boundary[0].frame + 1..boundary[1].frame {
+            let dt_before = (frame - before[4].frame) as f64;
+            let dt_after = (frame - after[0].frame) as f64;
+            let projected_before = [
+                before[4].x + incoming[0] * dt_before,
+                before[4].y + incoming[1] * dt_before,
+            ];
+            let projected_after = [
+                after[0].x + outgoing[0] * dt_after,
+                after[0].y + outgoing[1] * dt_after,
+            ];
+            let mismatch = (projected_before[0] - projected_after[0])
+                .hypot(projected_before[1] - projected_after[1]);
+            if best.is_none_or(|(_, _, error)| mismatch < error) {
+                best = Some((
+                    frame,
+                    [
+                        (projected_before[0] + projected_after[0]) * 0.5,
+                        (projected_before[1] + projected_after[1]) * 0.5,
+                    ],
+                    mismatch,
+                ));
+            }
+        }
+        let Some((frame, position, mismatch)) = best else {
+            continue;
+        };
+        if mismatch > config.max_join_error_px.min(20.0) {
+            continue;
+        }
+        let jump = (outgoing[0] - incoming[0]).hypot(outgoing[1] - incoming[1]);
+        if jump < 14.0 {
+            continue;
+        }
+        let angle = if before_speed > 1e-6 {
+            ((incoming[0] * outgoing[0] + incoming[1] * outgoing[1]) / (before_speed * after_speed))
+                .clamp(-1.0, 1.0)
+                .acos()
+                .to_degrees()
+        } else {
+            0.0
+        };
+        launches.push(TrajectoryBreak {
+            frame,
+            position,
+            motion: MotionEvidence {
+                motion_frame: frame,
+                speed_before: before_speed,
+                speed_after: after_speed,
+                angle,
+                residual: jump,
+            },
+            fit_error: mismatch / (missing + 1) as f64,
+            before_frames: before.iter().map(|sample| sample.frame).collect(),
+            after_frames: after.iter().map(|sample| sample.frame).collect(),
+            contact_observed: false,
+        });
+    }
+    launches
+}
+
 pub fn trajectory_direction_breaks(
     points: &[BallObservation],
     config: DirectionBreakConfig,
@@ -645,6 +753,18 @@ pub fn trajectory_direction_breaks(
             found.push(rebound);
         }
     }
+    for launch in occluded_stationary_launches(points, config) {
+        if let Some(existing) = found
+            .iter_mut()
+            .find(|event| event.frame.abs_diff(launch.frame) <= config.min_separation_frames as u64)
+        {
+            if !existing.contact_observed && launch.motion.residual > existing.motion.residual {
+                *existing = launch;
+            }
+        } else {
+            found.push(launch);
+        }
+    }
     found.sort_by_key(|event| event.frame);
     found
 }
@@ -754,6 +874,83 @@ mod tests {
         assert!(
             found.is_empty(),
             "Smooth ascent through natural apex gave a false touch: {found:?}"
+        );
+    }
+
+    fn two_touch_rally_with_six_missing_ball_frames() -> Vec<BallObservation> {
+        (620..=668)
+            .filter(|frame| !(648..=653).contains(frame))
+            .map(|frame| {
+                let (x, y) = if frame <= 631 {
+                    let t = (frame - 631) as f64;
+                    (980.0 - 3.0 * t, 840.0 + 34.0 * t + 0.25 * t * t)
+                } else if frame <= 642 {
+                    let t = (frame - 631) as f64;
+                    (980.0 - 3.0 * t, 840.0 - 35.0 * t + t * t)
+                } else if frame <= 647 {
+                    let t = (frame - 643) as f64;
+                    (947.0 + t * 0.7, 575.0 + t * 0.2)
+                } else {
+                    let t = (frame - 654) as f64;
+                    (955.0 - t * 2.0, 485.0 - 32.0 * t + t * t)
+                };
+                BallObservation { frame, x, y }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn debug_touch_detector_preserves_210_and_217_separate_collisions() {
+        let events = trajectory_direction_breaks(
+            &two_touch_rally_with_six_missing_ball_frames(),
+            DirectionBreakConfig::default(),
+        );
+        assert!(
+            events.iter().any(|e| e.frame.abs_diff(631) <= 2),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e.frame.abs_diff(651) <= 1),
+            "{events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| (643..=648).contains(&e.frame)),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn debug_touch_detector_rejects_spurious_launch_when_gap_is_not_continuous() {
+        let base = two_touch_rally_with_six_missing_ball_frames();
+        let changed = base
+            .iter()
+            .copied()
+            .map(|mut item| {
+                if item.frame >= 654 {
+                    item.x += 135.0;
+                }
+                item
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            trajectory_direction_breaks(&changed, DirectionBreakConfig::default())
+                .iter()
+                .all(|event| !(648..=653).contains(&event.frame))
+        );
+        let slow = base
+            .into_iter()
+            .map(|mut item| {
+                if item.frame >= 654 {
+                    item.x = 955.0;
+                    item.y = 574.0 - (item.frame - 654) as f64 * 2.0;
+                }
+                item
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            trajectory_direction_breaks(&slow, DirectionBreakConfig::default())
+                .iter()
+                .all(|event| !(648..=653).contains(&event.frame))
         );
     }
 

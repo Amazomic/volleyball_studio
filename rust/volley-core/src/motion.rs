@@ -2,8 +2,8 @@
 //! velocity after subtracting gravity.  This mirrors _ball_motion_change
 //! in scripts/volleyball_studio/reprocess.py and never performs inference.
 
-mod trajectory;
-pub use trajectory::{
+mod touch_detector;
+pub use touch_detector::{
     downward_to_upward_breaks, trajectory_breaks, trajectory_breaks_configured,
     trajectory_breaks_in_rallies, trajectory_direction_breaks, DirectionBreakConfig,
     TrajectoryBreak, TrajectoryBreakConfig,

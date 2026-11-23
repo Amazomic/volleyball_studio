@@ -260,7 +260,7 @@ pub async fn calculate(
             min_score: 0.0,
             shift_frames: 0,
             training_videos: 0,
-            detector_version: "piecewise_ballistic_direction_v3",
+            detector_version: "touch_detector_v4",
         };
         let proposals = scores
             .iter()
@@ -278,7 +278,7 @@ pub async fn calculate(
             "ball_motion_interpolation":{"stage":"ball_motion_interpolation_v1","result":preprocessing},
             "metrics_on_labeled_video":metrics,
             "gpu_rerun":false,"player_pose_required":false,
-            "method":"piecewise_ballistic_direction_v3"}))
+            "method":"touch_detector_v4"}))
     })
     .await
     .map_err(|e| storage::internal(format!("Trajectory worker: {e}")))??;

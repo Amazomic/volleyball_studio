@@ -1587,7 +1587,7 @@
     if(annotation.prediction){
       const p=annotation.prediction;
       annotation.metrics.textContent+=" | По мячу "+p.proposals.length+" кандидатов"+
-        (p.method==="piecewise_ballistic_direction_v3"?
+        (p.method==="touch_detector_v4"?
           " · угол излома "+p.impact_settings.min_turn_angle_deg+"°"+
           " · разрыв дуг до "+p.impact_settings.max_join_error_px+" пикс.":
           " · обучающих видео "+p.calibration.training_videos+
@@ -1754,7 +1754,7 @@
       if(result.schema!=="volley-trajectory-touch-proposals/1"||
           result.project_id!==project||result.video!==video||result.rally_run_id!==run||
           !Array.isArray(result.proposals)||!Number.isSafeInteger(result.total_frames)||
-          result.method!=="piecewise_ballistic_direction_v3"||
+          result.method!=="touch_detector_v4"||
           result.ball_motion_interpolation?.stage!=="ball_motion_interpolation_v1"||
           !Number.isSafeInteger(result.ball_motion_interpolation?.result?.rejected_outliers)||
           !Number.isSafeInteger(result.ball_motion_interpolation?.result?.interpolated_frames)||
