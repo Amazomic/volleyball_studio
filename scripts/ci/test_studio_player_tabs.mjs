@@ -1,0 +1,52 @@
+import {readFileSync} from "node:fs";
+import {runInNewContext} from "node:vm";
+import assert from "node:assert/strict";
+
+const source=readFileSync(new URL("../../rust/volley-app/static/studio_tracks.js",import.meta.url),"utf8");
+const start=source.indexOf("  const setMode=mode=>{");
+const end=source.indexOf('  singlesMode.addEventListener("click"',start);
+assert.ok(start>=0&&end>start);
+const element=()=>{
+  const item={children:[],dataset:{},attributes:{},hidden:false,textContent:""};
+  const add=(child,first)=>{
+    if(child.parent)child.parent.children=child.parent.children.filter(value=>value!==child);
+    child.parent=item;
+    if(first)item.children.unshift(child);
+    else item.children.push(child);
+  };
+  item.append=(...children)=>children.forEach(child=>add(child,false));
+  item.prepend=(...children)=>children.slice().reverse().forEach(child=>add(child,true));
+  item.setAttribute=(name,value)=>{item.attributes[name]=value;};
+  return item;
+};
+const state={viewPlayer:"player-a"};
+const tracksPanel=element(),singlesMode=element(),groupsMode=element(),playerMode=element();
+const modeTabs=element(),modeSwitch=element(),modeInfo=element(),autoAssignControls=element();
+const playerGallery=element(),groupingControls=element(),filterBar=element(),viewLabel=element(),viewBar=element();
+modeInfo.append(modeTabs,viewLabel);
+autoAssignControls.append(modeInfo);
+const context={state,tracksPanel,singlesMode,groupsMode,playerMode,modeTabs,modeSwitch,modeInfo,
+  autoAssignControls,playerGallery,groupingControls,filterBar,viewLabel,viewBar};
+runInNewContext(source.slice(start,end)+"\nthis.setMode=setMode;",context);
+context.setMode("singles");
+assert.equal(singlesMode.textContent,"Привязанные ID");
+assert.equal(playerMode.textContent,"Сохранённые фото");
+assert.equal(singlesMode.attributes["aria-pressed"],"true");
+assert.equal(playerGallery.hidden,true);
+assert.equal(autoAssignControls.hidden,true);
+assert.equal(filterBar.hidden,true);
+assert.ok(modeSwitch.children.includes(modeInfo),"linked ID tab remains visible outside hidden auto-assign toolbar");
+assert.equal(modeTabs.attributes["aria-label"],"Разделы игрока");
+context.setMode("player");
+assert.equal(playerGallery.hidden,false);
+assert.equal(playerMode.attributes["aria-pressed"],"true");
+assert.equal(tracksPanel.dataset.trackMode,"player");
+assert.ok(modeSwitch.children.includes(modeInfo),"saved-photo tab remains visible after switching");
+state.viewPlayer="";
+context.setMode("singles");
+assert.equal(singlesMode.textContent,"ID");
+assert.equal(autoAssignControls.hidden,false);
+assert.equal(filterBar.hidden,false);
+assert.ok(autoAssignControls.children.includes(modeInfo));
+assert.equal(modeTabs.attributes["aria-label"],"Вид Track ID");
+console.log("Player linked IDs and saved-photo tabs stay reachable: OK");

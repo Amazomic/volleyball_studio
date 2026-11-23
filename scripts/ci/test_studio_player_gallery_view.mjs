@@ -33,7 +33,7 @@ const galleryState={project:"project",projectPlayerIds:new Set(["a"]),viewPlayer
   identityConflictIds:new Set(),selected:new Set(),offset:48,tracksLoaded:true,unassignedIds:new Set([1,2,3]),excludedIds:new Set([9]),viewExcluded:false};
 const modeSwitch=make("div"),modeTabs=make("div"),autoAssignControls=make("div");
 modeTabs.append(make("button","","ID"),make("button","","Группы ID"));autoAssignControls.append(make("label"),make("button"));
-const galleryContext={state:galleryState,node:make,ui:{list:{before:node=>inserted.push(node)}},
+const galleryContext={state:galleryState,node:make,ui:{list:{before:node=>inserted.push(node)},status:{before:node=>inserted.push(node)}},
   window:{addEventListener:(name,fn)=>{handlers[name]=fn;}},groupsMode:make("button"),
   playerMode:make("button"),modeSwitch,modeTabs,groupingControls:make("div"),autoAssignControls,setMode:mode=>loads.push(mode),loadAlbum:()=>loads.push("album"),loadPage:()=>loads.push(galleryState.viewPlayer)};
 runInNewContext(tracks.slice(viewStart,viewEnd)+"\nthis.updateUnassignedLabel=updateUnassignedLabel;",galleryContext);
@@ -60,7 +60,7 @@ assert.equal(infoLabel.textContent,"Непривязанные Track ID · 2");
 handlers["volley:player-gallery-select"]({detail:{project_id:"project",player_id:"a",name:"Анна"}});
 assert.equal(galleryState.viewPlayer,"a");
 assert.equal(galleryState.offset,0);
-assert.deepEqual(loads,["player","album","a"]);
+assert.deepEqual(loads,["singles","a"],"player selection shows linked IDs before saved photos");
 const back=modeSwitch.children[1].children[0];
 back.events.click();
 assert.equal(galleryState.viewPlayer,"");
@@ -74,7 +74,7 @@ assert.equal(infoLabel.textContent,"Исключённые Track ID · 1");
 excludedToggle.events.click();
 assert.equal(galleryState.viewExcluded,false);
 assert.equal(infoLabel.textContent,"Непривязанные Track ID · 2");
-console.log("Player card opens its photo album: OK");
+console.log("Player card opens its linked IDs: OK");
 const remove=card.children.find(item=>item.tag==="button"&&item.klass==="players-side-remove");
 assert.ok(remove,"Player sidebar must expose the project-unlink control");
 assert.match(remove.title,/фото останутся в библиотеке/);

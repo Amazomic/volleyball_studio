@@ -23,9 +23,9 @@ assert.match(tracks,/filterBar\.append\(conflictToggle,excludedToggle\)/,"confli
 assert.match(tracks,/modeSwitch\.append\(filterBar,viewBar,groupingControls\)/,"filters must occupy the former ID and group position");
 assert.match(tracks,/modeInfo\.append\(modeTabs,viewLabel\)/,"ID selector and Track ID info must share the lower toolbar");
 assert.match(tracks,/autoAssignControls\.prepend\(modeInfo\)/,"lower toolbar begins with mode and Track ID info");
-assert.match(tracks,/if\(mode==="player"\)viewBar\.append\(viewLabel\)/,"player name remains visible when lower toolbar is hidden");
-assert.match(tracks,/else modeInfo\.append\(viewLabel\)/,"Track ID info returns to lower toolbar after album view");
-assert.match(tracks,/filterBar\.hidden=mode==="player"/,"filter buttons must disappear when opening a player album");
+assert.match(tracks,/if\(viewingPlayer\)modeSwitch\.prepend\(modeInfo\)/,"player tabs stay visible when automatic controls are hidden");
+assert.match(tracks,/else autoAssignControls\.prepend\(modeInfo\)/,"ID tabs return to auto-assignment toolbar after leaving player");
+assert.match(tracks,/filterBar\.hidden=viewingPlayer/,"filter buttons must disappear in both player tabs");
 assert.match(css,/\.track-filter-buttons\[hidden\]\{display:none\}/,"hidden player filters must not consume layout space");
 assert.doesNotMatch(tracks,/modeSwitch\.append\(modeTabs\)/,"ID selector must not remain in the upper toolbar");
 assert.doesNotMatch(tracks,/viewBar\.append\([^)]*(?:conflictToggle|excludedToggle)/,"filter toggles must not occupy the mode navigation");
