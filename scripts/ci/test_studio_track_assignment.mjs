@@ -108,6 +108,7 @@ let releasePhotos;
 const pendingPhotos=new Promise(resolve=>{releasePhotos=resolve;});
 const queued=new Map([["player",pendingPhotos]]);
 const refreshRequests=[];
+const refreshTasks=[];
 let onRefresh;
 const refreshButton={disabled:false,addEventListener(name,callback){if(name==="click")onRefresh=callback;}};
 const refreshStatus={hidden:true,textContent:""};
@@ -117,7 +118,10 @@ runInNewContext(source.slice(refreshStart,refreshEnd),{
   refreshReferences:refreshButton,refreshStatus,state:refreshState,
   photoEnrollmentQueues:queued,
   post:async url=>{refreshRequests.push(url);return {added:1,confirmed_tracks:1};},
-  window:{dispatchEvent(){}},Event:class{},
+  window:{dispatchEvent(){},VolleyballTasks:{
+    set(key,task){refreshTasks.push({key,...task});},
+    clear(key){refreshTasks.push({key,cleared:true});}
+  }},Event:class{},
   loadLibraryRoster:async()=>{},
   refreshPhotoMatches:async()=>{refreshRequests.push("matches");return {trackCount:3};},
   autoAssignSimilar:async()=>{refreshRequests.push("auto_assign");}
@@ -125,12 +129,14 @@ runInNewContext(source.slice(refreshStart,refreshEnd),{
 const refreshing=onRefresh();
 await new Promise(resolve=>setImmediate(resolve));
 assert.deepEqual(refreshRequests,[],"Feature refresh must wait for pending manual photo saves");
-assert.match(refreshStatus.textContent,/Дожидаемся сохранения фотографий/);
+assert.equal(refreshStatus.hidden,true,"Processing status is shown in the shared task panel");
+assert.ok(refreshTasks.some(task=>/Ожидание сохранения фотографий/.test(task.stage||"")));
 releasePhotos();
 await refreshing;
 assert.deepEqual(refreshRequests,["/api/players/native/references/refresh","matches","auto_assign"],
   "Refreshing reference photos must finish comparison before automatic assignment");
 assert.match(refreshStatus.textContent,/Сопоставлено ID: 3/);
+assert.ok(refreshTasks.some(task=>task.key==="player-references-refresh"&&task.cleared));
 
 console.log("Group assignment preserves links, bounds photo enrollment and handles reference failures: OK");
 

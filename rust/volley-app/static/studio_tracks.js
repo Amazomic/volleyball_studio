@@ -957,35 +957,49 @@
         return;
       }
       refreshReferences.disabled=true;
-      refreshStatus.hidden=false;
-      refreshStatus.textContent="Проверяем сохранённые фото и признаки подтверждённых ID…";
+      refreshStatus.hidden=true;
+      const updateRefreshTask=stage=>window.VolleyballTasks?.set("player-references-refresh",{
+        label:"Обновление признаков",stage,progress:null
+      });
+      updateRefreshTask("Проверка фотографий и признаков подтверждённых ID");
       try{
         if(photoEnrollmentQueues.size){
-          refreshStatus.textContent="Дожидаемся сохранения фотографий после ручных привязок…";
+          updateRefreshTask("Ожидание сохранения фотографий после привязки");
           await Promise.allSettled([...photoEnrollmentQueues.values()]);
           if(scope.project_id!==state.project||scope.replay_id!==state.replay||
             scope.expected_source_sha256!==state.sourceSha)return;
         }
-        refreshStatus.textContent="Обновляем признаки и выбираем непохожие эталоны…";
+        updateRefreshTask("Обновление признаков и выбор непохожих эталонов");
         const result=await post("/api/players/native/references/refresh",scope);
         if(scope.project_id!==state.project||scope.replay_id!==state.replay)return;
         const photoScope={project_id:scope.project_id,video:scope.video,
           replay_id:scope.replay_id,rally_run_id:scope.rally_run_id,
           expected_source_sha256:scope.expected_source_sha256};
         window.dispatchEvent(new Event("volley:player-photo-saved"));
+        updateRefreshTask("Загрузка обновлённых фотографий игроков");
         await loadLibraryRoster();
-        refreshStatus.textContent="Фотографии обновлены. Пересчитываем сходство всех Track ID…";
+        updateRefreshTask("Пересчёт сходства всех Track ID");
         const comparison=await refreshPhotoMatches(photoScope,state.token);
         if(scope.project_id!==state.project||scope.replay_id!==state.replay)return;
+        if(comparison&&state.writable){
+          updateRefreshTask("Автопривязка Track ID");
+          await autoAssignSimilar();
+        }
+        refreshStatus.hidden=false;
         refreshStatus.textContent="Сопоставлено ID: "+(comparison?.trackCount||0)+
           " · добавлено фото: "+(result.added||0)+
           " · исключено похожих: "+(result.deactivated||0)+
           (result.skipped_ambiguous?" · неоднозначных: "+result.skipped_ambiguous:"")+
           (!result.confirmed_tracks?" · Новые фото сохраняются только из подтверждённых ID.":"");
-        if(comparison&&state.writable)await autoAssignSimilar();
       }catch(error){
-        if(scope.project_id===state.project)refreshStatus.textContent="Ошибка обновления признаков: "+error.message;
-      }finally{refreshReferences.disabled=false;}
+        if(scope.project_id===state.project){
+          refreshStatus.hidden=false;
+          refreshStatus.textContent="Ошибка обновления признаков: "+error.message;
+        }
+      }finally{
+        window.VolleyballTasks?.clear("player-references-refresh");
+        refreshReferences.disabled=false;
+      }
     });
     const resetLinks=node("button","secondary players-reset-track-links","Сброс привязки ИД");
     resetLinks.type="button";
