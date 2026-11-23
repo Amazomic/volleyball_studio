@@ -1002,13 +1002,58 @@ mod ball_confidence_tests {
     }
 }
 
+fn strong_occluded_launch(event: &PhysicalTouchCandidate) -> bool {
+    event.physical_motion_supported
+        && event.provisional_track_id.is_some()
+        && event.ball_occluded_at_contact
+        && event.inferred_body_reach_supported
+        && !event.body_contact_supported
+        && event.contact_landmark.is_none()
+        && event.motion_frame_index == event.frame_index
+        && event.probability.is_finite()
+        && event.probability >= 0.65
+        && event.speed_before_px_frame.is_finite()
+        && (0.0..3.0).contains(&event.speed_before_px_frame)
+        && event.speed_after_px_frame.is_finite()
+        && (14.0..=60.0).contains(&event.speed_after_px_frame)
+        && event.velocity_residual_px_frame.is_finite()
+        && event.velocity_residual_px_frame >= 14.0
+}
+
+fn retain_refined_pose_candidates(events: &mut Vec<PhysicalTouchCandidate>, supported: &[bool]) {
+    let mut flags = supported.iter().copied();
+    events.retain(|event| flags.next().unwrap_or(false) || strong_occluded_launch(event));
+}
+
 fn retain_pose_confirmed_events(events: &mut Vec<PhysicalTouchCandidate>) {
     events.retain(|event| {
         event.physical_motion_supported
-            && event.body_contact_supported
-            && event.contact_landmark.is_some()
             && event.provisional_track_id.is_some()
+            && (event.body_contact_supported && event.contact_landmark.is_some()
+                || strong_occluded_launch(event))
     });
+}
+
+fn is_launch_departure_echo(
+    launch: &PhysicalTouchCandidate,
+    departure: &PhysicalTouchCandidate,
+    separation: u64,
+) -> bool {
+    let elapsed = departure.frame_index.saturating_sub(launch.frame_index);
+    strong_occluded_launch(launch)
+        && departure.frame_index >= launch.frame_index
+        && (1..=separation).contains(&elapsed)
+        && departure.physical_motion_supported
+        && departure.direction_change_deg.is_finite()
+        && departure.direction_change_deg < 25.0
+        && departure.speed_before_px_frame.is_finite()
+        && departure.speed_after_px_frame.is_finite()
+        && departure.speed_after_px_frame > departure.speed_before_px_frame + 8.0
+        && departure.speed_before_px_frame <= launch.speed_after_px_frame
+        && departure.ball_x_px.is_finite()
+        && departure.ball_y_px.is_finite()
+        && (departure.ball_x_px - launch.ball_x_px).hypot(departure.ball_y_px - launch.ball_y_px)
+            <= 16.0 + launch.speed_after_px_frame * elapsed as f64 * 1.45
 }
 
 fn source_frame_contains_track(frames: &[TouchFrame], frame_index: u64, track_id: u64) -> bool {
@@ -1071,6 +1116,114 @@ mod source_track_integrity_tests {
         assert_eq!(pending.unwrap().provisional_track_id, Some(42));
     }
 
+    fn occluded_launch(frame: u64) -> PhysicalTouchCandidate {
+        PhysicalTouchCandidate {
+            frame_index: frame,
+            provisional_track_id: Some(12),
+            probability: 0.82,
+            ball_x_px: 637.5,
+            ball_y_px: 377.5,
+            motion_frame_index: frame,
+            direction_change_deg: 0.0,
+            speed_before_px_frame: 0.7,
+            speed_after_px_frame: 19.2,
+            velocity_residual_px_frame: 19.6,
+            technique: "unknown_touch",
+            action_prediction: None,
+            court: None,
+            physical_motion_supported: true,
+            body_contact_supported: false,
+            contact_landmark: None,
+            contact_pose_sample_frame: None,
+            ball_occluded_at_contact: true,
+            inferred_body_reach_supported: true,
+            athlete_identity_verified: false,
+        }
+    }
+
+    #[test]
+    fn pose_refinement_keeps_only_pose_support_or_strong_occluded_impact() {
+        let launch = occluded_launch(651);
+        let mut weak = occluded_launch(652);
+        weak.ball_occluded_at_contact = false;
+        let mut supported = occluded_launch(660);
+        supported.ball_occluded_at_contact = false;
+        supported.inferred_body_reach_supported = false;
+        supported.body_contact_supported = true;
+        supported.contact_landmark = Some(volley_core::pose_contact::BodyContact {
+            joint_indices: [9, 9],
+            point_px: [637.5, 322.5],
+            distance_px: 5.0,
+            normalized_distance: 0.04,
+        });
+        let mut events = vec![launch, weak, supported];
+        retain_refined_pose_candidates(&mut events, &[false, false, true]);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.frame_index)
+                .collect::<Vec<_>>(),
+            vec![651, 660]
+        );
+    }
+
+    #[test]
+    fn inferred_impact_with_real_stable_launch_survives_pose_requirement() {
+        let launch = occluded_launch(651);
+        let mut events = vec![launch.clone()];
+        retain_pose_confirmed_events(&mut events);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].frame_index, 651);
+        assert!(!events[0].body_contact_supported);
+        for change in 0..7 {
+            let mut weaker = launch.clone();
+            match change {
+                0 => weaker.ball_occluded_at_contact = false,
+                1 => weaker.inferred_body_reach_supported = false,
+                2 => weaker.speed_before_px_frame = 4.0,
+                3 => weaker.speed_after_px_frame = 8.0,
+                4 => weaker.velocity_residual_px_frame = 5.0,
+                5 => weaker.provisional_track_id = None,
+                _ => weaker.physical_motion_supported = false,
+            }
+            let mut results = vec![weaker];
+            retain_pose_confirmed_events(&mut results);
+            assert!(results.is_empty(), "invalid launch variant {change}");
+        }
+    }
+
+    #[test]
+    fn next_frame_pose_departure_does_not_replace_occluded_launch_time() {
+        let launch = occluded_launch(651);
+        let mut departure = occluded_launch(654);
+        departure.ball_y_px = 322.5;
+        departure.ball_occluded_at_contact = false;
+        departure.inferred_body_reach_supported = false;
+        departure.body_contact_supported = true;
+        departure.contact_landmark = Some(volley_core::pose_contact::BodyContact {
+            joint_indices: [9, 9],
+            point_px: [637.5, 322.5],
+            distance_px: 5.0,
+            normalized_distance: 0.04,
+        });
+        departure.direction_change_deg = 7.8;
+        departure.speed_before_px_frame = 8.5;
+        departure.speed_after_px_frame = 31.1;
+        departure.velocity_residual_px_frame = 31.3;
+        departure.probability = 0.77;
+        let mut pending = None;
+        assert!(select_pending_touch(&mut pending, launch, 3).is_none());
+        assert!(select_pending_touch(&mut pending, departure, 3).is_none());
+        assert_eq!(pending.as_ref().unwrap().frame_index, 651);
+        let independent = occluded_launch(660);
+        assert_eq!(
+            select_pending_touch(&mut pending, independent, 3)
+                .unwrap()
+                .frame_index,
+            651
+        );
+    }
+
     #[test]
     fn reconstructed_player_does_not_authorize_missing_source_track() {
         let mut original = (100..103)
@@ -1125,6 +1278,9 @@ fn select_pending_touch(
         }
         if last.is_motion_echo_of(&event) {
             *pending = Some(event);
+            return None;
+        }
+        if is_launch_departure_echo(last, &event, separation) {
             return None;
         }
         if event.frame_index.saturating_sub(last.frame_index) <= separation {
@@ -1283,12 +1439,7 @@ fn refine_pose_events_policy(
             });
     }
     if settings.require_pose {
-        let mut index = 0;
-        events.retain(|_| {
-            let keep = supported[index];
-            index += 1;
-            keep
-        });
+        retain_refined_pose_candidates(events, &supported);
     }
     Ok(())
 }

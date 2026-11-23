@@ -22,7 +22,7 @@ pub use trajectory_tcn::{evaluate_tcn_peaks, trajectory_features};
 /// impact inside the bounded (at most ten-frame) missing-ball island.
 /// Occluded impacts retain observed flight anchors and a same-frame tracked player.
 pub const MAX_OBSERVED_TOUCH_OFFSET_FRAMES: u64 = 9;
-pub const TRAJECTORY_DETECTOR_VERSION: &str = "piecewise_ballistic_motion_v5";
+pub const TRAJECTORY_DETECTOR_VERSION: &str = "piecewise_ballistic_motion_v6";
 pub const INTERPOLATED_BALL_SOURCE: &str = "ball_stabilizer_interpolated";
 
 use crate::{
