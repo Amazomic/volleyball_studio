@@ -159,7 +159,7 @@ pub(super) fn verified_reference_source(
     state: &AppState,
     req: &ReferenceRequest,
 ) -> Result<(), ApiError> {
-    if req.photo_index > 12 {
+    if req.photo_index >= REID_PHOTOS_PER_TRACK {
         return Err(storage::bad_request("Invalid Track ID photo index"));
     }
     let video = req

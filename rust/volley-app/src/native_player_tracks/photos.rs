@@ -45,14 +45,10 @@ pub(super) fn crop_box(
     Ok([left, top, width, height])
 }
 fn photo_candidate(track: &Aggregate, index: usize) -> (u64, [f64; 4]) {
-    let alternatives: Vec<_> = track
-        .photo_samples
-        .iter()
-        .filter(|sample| sample.frame != track.best_frame)
-        .collect();
+    let alternatives = super::photo_comparison::independent_photo_samples(track);
     match index.checked_sub(1) {
         Some(index) if !alternatives.is_empty() => {
-            let sample = alternatives[index % alternatives.len()];
+            let sample = &alternatives[index % alternatives.len()];
             (sample.frame, sample.bbox)
         }
         _ => (track.best_frame, track.best_box),
@@ -174,6 +170,8 @@ mod tests {
     #[test]
     fn photo_candidates_advance_and_wrap_with_their_own_boxes() {
         let track = Aggregate {
+            first: 6,
+            last: 18,
             best_frame: 6,
             best_box: [0.1, 0.2, 0.3, 0.4],
             photo_samples: vec![

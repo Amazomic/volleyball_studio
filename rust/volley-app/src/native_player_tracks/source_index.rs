@@ -59,7 +59,7 @@ pub(super) mod pair_geometry_keys {
     }
 }
 
-const INDEX_CACHE_SCHEMA: &str = "volley-native-track-index/4";
+const INDEX_CACHE_SCHEMA: &str = "volley-native-track-index/5";
 const MAX_INDEX_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -498,17 +498,17 @@ fn observe_track(
     record.last = frame_idx;
     record.last_box = tracked.detection.bbox_xyxy_norm;
     record.observed += 1;
-    if record.photo_samples.is_empty() || frame_idx.is_multiple_of(6) {
-        let sample = PhotoSample {
-            frame: frame_idx,
-            bbox: tracked.detection.bbox_xyxy_norm,
-        };
-        if record.photo_samples.len() < 12 {
-            record.photo_samples.push(sample);
-        } else {
-            let slot = 6 + (frame_idx / 6 % 6) as usize;
-            record.photo_samples[slot] = sample;
-        }
+    record.photo_samples.push(PhotoSample {
+        frame: frame_idx,
+        bbox: tracked.detection.bbox_xyxy_norm,
+    });
+    if record.photo_samples.len() > REID_PHOTOS_PER_TRACK {
+        let discard = (1..record.photo_samples.len() - 1)
+            .min_by_key(|&index| {
+                record.photo_samples[index + 1].frame - record.photo_samples[index - 1].frame
+            })
+            .expect("Five stored observations have an interior sample");
+        record.photo_samples.remove(discard);
     }
     if tracked.detection.score > record.best_score {
         record.best_score = tracked.detection.score;
@@ -916,7 +916,7 @@ mod rally_scope_tests {
     #[test]
     fn long_stitched_track_keeps_original_and_recent_photo_candidates() {
         let mut observations = BTreeMap::new();
-        for frame in 114..586_u64 {
+        for frame in (115..586_u64).step_by(8) {
             let tracked: Tracked = serde_json::from_value(json!({
                 "track_id":3,
                 "is_verified_athlete":false,
@@ -931,7 +931,7 @@ mod rally_scope_tests {
             observe_track(&mut observations, &tracked, frame).unwrap();
         }
         let photos = &observations[&3].photo_samples;
-        assert_eq!(photos.len(), 12);
+        assert_eq!(photos.len(), REID_PHOTOS_PER_TRACK);
         assert!(
             photos.iter().any(|sample| sample.frame <= 150),
             "The original ID 3 photo evidence must survive the long ID 7 continuation"
@@ -1333,7 +1333,7 @@ mod persistent_index_tests {
         let cache_path = stored_index_path(&path, None).unwrap();
         assert!(cache_path.is_file());
         let mut stale: Value = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
-        stale["schema"] = json!("volley-native-track-index/3");
+        stale["schema"] = json!("volley-native-track-index/4");
         stale["tracks"]["7"]["observed"] = json!(1);
         fs::write(&cache_path, serde_json::to_vec(&stale).unwrap()).unwrap();
         TRACK_INDICES.get().unwrap().lock().unwrap().clear();

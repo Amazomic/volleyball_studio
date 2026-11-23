@@ -436,7 +436,8 @@ pub(super) fn photo_match_candidates_with_samples(
         };
         let mut samples = vec![vector.as_slice()];
         if let Some(others) = alternatives.get(&id).filter(|others| {
-            others.len() == 2 && others.iter().all(|other| other.len() == vector.len())
+            others.len() == REID_PHOTOS_PER_TRACK - 1
+                && others.iter().all(|other| other.len() == vector.len())
         }) {
             samples.extend(others.iter().map(Vec::as_slice));
         }

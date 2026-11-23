@@ -374,42 +374,13 @@ pub(super) fn contested_photo_tracks(ctx: &Inputs, matches: &Value) -> BTreeSet<
 
 /// Choose an independently measured crop well away from the best photo.
 /// The index only stores measured (never interpolated) samples inside rallies.
-fn independent_photo_samples(track: &Aggregate) -> Vec<PhotoSample> {
+pub(super) fn independent_photo_samples(track: &Aggregate) -> Vec<PhotoSample> {
     let mut candidates = track.photo_samples.clone();
     candidates.sort_by_key(|sample| sample.frame);
     candidates.dedup_by_key(|sample| sample.frame);
-    let duration = track
-        .last
-        .saturating_sub(track.first)
-        .saturating_add(1)
-        .max(1);
-    let best_part = track
-        .best_frame
-        .saturating_sub(track.first)
-        .saturating_mul(3)
-        / duration;
     let mut used = BTreeSet::from([track.best_frame]);
-    let mut selected = Vec::with_capacity(2);
-    for part in 0..3_u64 {
-        if part == best_part {
-            continue;
-        }
-        let target = track.first + duration.saturating_mul(part * 2 + 1) / 6;
-        if let Some(sample) = candidates
-            .iter()
-            .filter(|sample| {
-                sample.frame >= track.first
-                    && sample.frame <= track.last
-                    && !used.contains(&sample.frame)
-                    && sample.frame.saturating_sub(track.first).saturating_mul(3) / duration == part
-            })
-            .min_by_key(|sample| sample.frame.abs_diff(target))
-        {
-            selected.push(sample.clone());
-            used.insert(sample.frame);
-        }
-    }
-    while selected.len() < 2 {
+    let mut selected = Vec::with_capacity(REID_PHOTOS_PER_TRACK - 1);
+    while selected.len() < REID_PHOTOS_PER_TRACK - 1 {
         let Some(sample) = candidates
             .iter()
             .filter(|sample| {
@@ -429,6 +400,7 @@ fn independent_photo_samples(track: &Aggregate) -> Vec<PhotoSample> {
         selected.push(sample.clone());
         used.insert(sample.frame);
     }
+    selected.sort_by_key(|sample| sample.frame);
     selected
 }
 
@@ -574,7 +546,7 @@ pub(super) fn strict_visual_identity_groups(
                         .as_array()
                         .and_then(|rows| rows.first())
                         .is_some_and(|row| {
-                            row["samples_used"].as_u64() == Some(3)
+                            row["samples_used"].as_u64() == Some(REID_PHOTOS_PER_TRACK as u64)
                                 && row["cosine_similarity"].as_f64().is_some_and(|s| s >= 0.75)
                         })
                 })
@@ -616,7 +588,7 @@ pub(super) async fn compare(
             "identity_revision":snap.identity_revision,
             "album_revisions":snap.albums,
             "model_fingerprint":snap.model,
-            "photo_sample_policy":"three_observations_v1",
+            "photo_sample_policy":PHOTO_SAMPLE_POLICY,
             "auto_assign_enabled":false,"confirmed":false
         }));
     }
@@ -638,7 +610,7 @@ pub(super) async fn compare(
         .collect::<Vec<_>>();
     if ids.is_empty() {
         return Ok(
-            json!({"schema":"volley-native-player-photo-comparison/1","project_id":snap.ctx.project_id,"replay_id":snap.ctx.replay_id,"source_replay_sha256":snap.ctx.source_sha,"player_matches":{},"photo_count":snap.photos.len(),"identity_revision":snap.identity_revision,"album_revisions":snap.albums,"model_fingerprint":snap.model,"photo_sample_policy":"three_observations_v1","auto_assign_enabled":false,"confirmed":false}),
+            json!({"schema":"volley-native-player-photo-comparison/1","project_id":snap.ctx.project_id,"replay_id":snap.ctx.replay_id,"source_replay_sha256":snap.ctx.source_sha,"player_matches":{},"photo_count":snap.photos.len(),"identity_revision":snap.identity_revision,"album_revisions":snap.albums,"model_fingerprint":snap.model,"photo_sample_policy":PHOTO_SAMPLE_POLICY,"auto_assign_enabled":false,"confirmed":false}),
         );
     }
     for chunk in ids.chunks(48) {
@@ -836,7 +808,7 @@ pub(super) async fn compare(
                 continue;
             }
             let samples = independent_photo_samples(track);
-            if samples.len() != 2 {
+            if samples.len() != REID_PHOTOS_PER_TRACK - 1 {
                 continue;
             }
             for (index, sample) in samples.into_iter().enumerate() {
@@ -926,7 +898,7 @@ pub(super) async fn compare(
     let multi_samples = independently_verified
         .into_iter()
         .filter_map(|(id, samples)| {
-            if samples.len() == 2 {
+            if samples.len() == REID_PHOTOS_PER_TRACK - 1 {
                 Some((id, samples.into_values().collect::<Vec<_>>()))
             } else {
                 None
@@ -950,9 +922,9 @@ pub(super) async fn compare(
         "player_matches":matches,
         "identity_groups":identity_groups,
         "photo_count":refs.len(),
-        "independent_photo_checks":multi_samples.len() * 2,
+        "independent_photo_checks":multi_samples.len() * (REID_PHOTOS_PER_TRACK - 1),
         "multiframe_track_count":multi_samples.len(),
-        "photo_sample_policy":"three_observations_v1",
+        "photo_sample_policy":PHOTO_SAMPLE_POLICY,
         "identity_revision":snap.identity_revision,
         "album_revisions":snap.albums,
         "model_fingerprint":snap.model,
@@ -966,7 +938,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn three_real_observations_are_distributed_over_track_duration() {
+    fn five_real_observations_are_distributed_over_track_duration() {
         let track = Aggregate {
             first: 0,
             last: 95,
@@ -987,7 +959,7 @@ mod tests {
                 .iter()
                 .map(|sample| sample.frame)
                 .collect::<Vec<_>>(),
-            vec![16, 86]
+            vec![0, 33, 71, 95]
         );
         let short = Aggregate {
             photo_samples: vec![PhotoSample {
