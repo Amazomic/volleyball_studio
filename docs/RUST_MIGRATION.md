@@ -3632,3 +3632,7 @@ Studio показывает кнопку перехода между debug и re
 - База: c42a9a779c0d423fb49b7719d968417eabafee21 (origin/develop). Владельцы: motion/ground_detector.rs, motion.rs, native_player_tracks/trajectory.rs, touch_annotation/trajectory.rs, touch_annotation/types.rs, static/studio.js, scripts/ci/test_studio_touch_training_ui.mjs.
 - Решение: оставлять независимый от игрока излом как предложение Touch только при отсутствии признаков контакта с землёй; сопоставлять нисходящий→восходящий отскок с сохранённой геометрией, возвращать отдельные near/far/out/line события без изменения GPU и без переобучения.
 - Граница: при отсутствии разметки фильтр не активен; классификация остаётся гипотезой по 2D и не подтверждает судейское решение.
+
+### 2026-11-23 ? Guard against overclassification of player hits as sand
+- Real short-project read-only diagnosis: original 28 Debug trajectory candidates became only 3 candidates and 25 false ground classifications with v1; the 21.03 s player hit was among the incorrect removals.
+- Detector v2 is deliberately terminal-rally-only (last 45 frames), requires a court-surface band and at most 0.09 normalized image margin around the polygon, and also detects a stationary ground landing. Other player-touch trajectory candidates must remain intact. V2 gate and user-project recheck required before marking this fixed.

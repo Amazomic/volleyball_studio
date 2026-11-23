@@ -343,7 +343,7 @@ fn full_video_ball_suggestions_impl(
             &mut Vec<(u64, f64)>,
             &mut Vec<volley_core::motion::GroundContact>,
         ),
-        court: Option<&volley_core::court_geometry::CourtTransform>,
+        court: Option<(&volley_core::court_geometry::CourtTransform, u64)>,
         options: (Option<volley_core::motion::DirectionBreakConfig>, u32, u32),
         reconstruction: &mut BallReconstructionStats,
         canonical: bool,
@@ -394,13 +394,14 @@ fn full_video_ball_suggestions_impl(
                 } else {
                     b.motion.residual / (1.0 + b.fit_error)
                 };
-                if let Some(contact) = court.and_then(|court| {
+                if let Some(contact) = court.and_then(|(court, rally_end)| {
                     volley_core::motion::classify_ground_contact(
                         prepared_points,
                         &b,
                         court,
                         width,
                         height,
+                        rally_end,
                     )
                 }) {
                     events.1.push(contact);
@@ -473,7 +474,7 @@ fn full_video_ball_suggestions_impl(
             emit(
                 &points,
                 (&mut candidates, &mut ground_contacts),
-                court,
+                court.zip(scope.get(scope_index).map(|interval| interval.1)),
                 (impact, run.width, run.height),
                 &mut reconstruction,
                 canonical,
@@ -495,7 +496,7 @@ fn full_video_ball_suggestions_impl(
                 emit(
                     &points,
                     (&mut candidates, &mut ground_contacts),
-                    court,
+                    court.zip(scope.get(scope_index).map(|interval| interval.1)),
                     (impact, run.width, run.height),
                     &mut reconstruction,
                     canonical,
@@ -512,7 +513,7 @@ fn full_video_ball_suggestions_impl(
             emit(
                 &points,
                 (&mut candidates, &mut ground_contacts),
-                court,
+                court.zip(scope.get(scope_index).map(|interval| interval.1)),
                 (impact, run.width, run.height),
                 &mut reconstruction,
                 canonical,
@@ -526,7 +527,7 @@ fn full_video_ball_suggestions_impl(
             emit(
                 &points,
                 (&mut candidates, &mut ground_contacts),
-                court,
+                court.zip(scope.get(scope_index).map(|interval| interval.1)),
                 (impact, run.width, run.height),
                 &mut reconstruction,
                 canonical,
@@ -538,7 +539,7 @@ fn full_video_ball_suggestions_impl(
     emit(
         &points,
         (&mut candidates, &mut ground_contacts),
-        court,
+        court.zip(scope.get(scope_index).map(|interval| interval.1)),
         (impact, run.width, run.height),
         &mut reconstruction,
         canonical,

@@ -64,3 +64,15 @@ Release успешно собран. Штатный Restart отправил SIG
 Владелец новой проверки: rust/volley-core/src/motion/ground_detector.rs. Сохранённая разметка площадки video_edits::court_snapshot передаётся только в CPU-поиск столкновений touch_detector_v4. После подтверждения нисходящего и последующего восходящего движения мяча точка приземления сопоставляется с CourtTransform::tentative_landing. Возвращаются отдельные ground_contacts со значением near_half, far_half, out или line_uncertain; они исключаются из proposals касаний игрока. Без калибровки сцена остаётся прежней, без выдуманного определения стороны. Интерполяция мяча, GPU-артефакты и подтверждённые игроки не переписываются. Статус контакта — гипотеза по видео, а не подтверждённая физическая коллизия: 2D-проекция не доказывает высоту мяча. Классификация типа касания использует тот же фильтр и не принимает устаревший список кандидатов.
 
 Приёмка: Rust unit-тесты падения/подъёма и обеих половин, целевой check/full gate, визуальная проверка двух последних отскоков в Debug после применения. Отдельно проверить спорные эпизоды, где игрок отбивает мяч низко над песком.
+
+### 2026-11-23 ? conservatively bounded court detector v2
+
+Field calibration is necessary but not sufficient to confirm a ground bounce:
+the camera projection of airborne player contacts can still lie inside the
+calibrated polygon. The detector is gated to the final 45 frames of its
+detected rally, requires the ball to reach the visible court band (or the
+immediate out-of-bounds margin), and accepts a decelerating stationary landing
+as well as an upward rebound. Earlier trajectory breaks always remain touch
+candidates. Tests protect the known player contact near 21.03 s from being
+converted into a ground event. Incomplete/uncertain calibration disables
+the additional exclusion rather than weakening player touches.
