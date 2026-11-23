@@ -167,22 +167,27 @@ pub(super) fn scan_trajectory(run: &ValidatedRun) -> Result<Vec<TrajectoryCandid
         })
         .collect())
 }
+pub(super) struct CollisionTrajectoryScan {
+    pub candidates: Vec<TrajectoryCandidate>,
+    pub reconstruction: crate::native_player_tracks::BallReconstructionStats,
+    pub ground_contacts: Vec<volley_core::motion::GroundContact>,
+    pub court_filter_active: bool,
+    pub court_calibration_revision: Option<String>,
+}
+
 pub(super) fn scan_collision_trajectory(
+    state: &AppState,
     run: &ValidatedRun,
     intervals: &[(u64, u64)],
     impact: volley_core::motion::DirectionBreakConfig,
-) -> Result<
-    (
-        Vec<TrajectoryCandidate>,
-        crate::native_player_tracks::BallReconstructionStats,
-    ),
-    ApiError,
-> {
+) -> Result<CollisionTrajectoryScan, ApiError> {
     if !impact.valid() {
         return Err(storage::bad_request("Invalid collision detector settings"));
     }
-    let scan = crate::native_player_tracks::full_video_ball_impacts_with_reconstruction(
-        run, intervals, impact,
+    let snapshot = crate::video_edits::court_snapshot(state, &run.project_id, &run.video)?;
+    let court = snapshot.as_ref().and_then(|value| value.transform.as_ref());
+    let scan = crate::native_player_tracks::full_video_ball_impacts_with_court(
+        run, intervals, impact, court,
     )
     .map_err(storage::bad_request)?;
     let candidates = scan
@@ -193,7 +198,13 @@ pub(super) fn scan_collision_trajectory(
             score: score.clamp(0.0, 10000.0),
         })
         .collect();
-    Ok((candidates, scan.reconstruction))
+    Ok(CollisionTrajectoryScan {
+        candidates,
+        reconstruction: scan.reconstruction,
+        ground_contacts: scan.ground_contacts,
+        court_filter_active: court.is_some(),
+        court_calibration_revision: snapshot.map(|value| value.revision),
+    })
 }
 
 pub(super) fn collision_frames(scores: &[TrajectoryCandidate], total: u64) -> Vec<u64> {
@@ -254,7 +265,12 @@ pub async fn calculate(
             frames.sort_unstable();
             frames
         });
-        let (scores, preprocessing) = scan_collision_trajectory(&run, &intervals, req.impact)?;
+        let scan = scan_collision_trajectory(&state, &run, &intervals, req.impact)?;
+        let scores = scan.candidates;
+        let preprocessing = scan.reconstruction;
+        let ground_contacts = scan.ground_contacts;
+        let court_filter_active = scan.court_filter_active;
+        let court_revision = scan.court_calibration_revision;
         let selected = collision_frames(&scores, run.frames);
         let calibration = TrajectoryProfile {
             min_score: 0.0,
@@ -272,6 +288,10 @@ pub async fn calculate(
             "project_id":run.project_id,"video":run.video,"rally_run_id":run.run_id,
             "source_replay_sha256":run.replay_sha,"total_frames":run.frames,
             "proposals":proposals,"candidate_count":scores.len(),
+            "ground_contacts":ground_contacts,
+            "ground_detector_version":volley_core::motion::GROUND_DETECTOR_VERSION,
+            "court_filter_active":court_filter_active,
+            "court_calibration_revision":court_revision,
             "rally_intervals":intervals.iter().map(|&(start,end)| json!({"start":start,"end":end})).collect::<Vec<_>>(),
             "rally_count":intervals.len(),
             "calibration":calibration,"impact_settings":req.impact,

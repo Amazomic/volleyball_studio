@@ -218,7 +218,7 @@ pub(crate) fn full_video_ball_suggestions_scoped(
     run: &crate::native_rally_evidence::ValidatedRun,
     scope: &[(u64, u64)],
 ) -> Result<(Vec<(u64, f64)>, usize), String> {
-    let result = full_video_ball_suggestions_impl(run, scope, None)?;
+    let result = full_video_ball_suggestions_impl(run, scope, None, None)?;
     Ok((result.events, result.observed))
 }
 
@@ -231,10 +231,12 @@ pub(crate) struct BallReconstructionStats {
 
 pub(crate) struct BallImpactScan {
     pub events: Vec<(u64, f64)>,
+    pub ground_contacts: Vec<volley_core::motion::GroundContact>,
     pub observed: usize,
     pub reconstruction: BallReconstructionStats,
 }
 
+#[cfg(test)]
 pub(crate) fn full_video_ball_impacts_with_reconstruction(
     run: &crate::native_rally_evidence::ValidatedRun,
     scope: &[(u64, u64)],
@@ -243,13 +245,26 @@ pub(crate) fn full_video_ball_impacts_with_reconstruction(
     if !config.valid() {
         return Err("Invalid ball direction change parameters".into());
     }
-    full_video_ball_suggestions_impl(run, scope, Some(config))
+    full_video_ball_suggestions_impl(run, scope, Some(config), None)
+}
+
+pub(crate) fn full_video_ball_impacts_with_court(
+    run: &crate::native_rally_evidence::ValidatedRun,
+    scope: &[(u64, u64)],
+    config: volley_core::motion::DirectionBreakConfig,
+    court: Option<&volley_core::court_geometry::CourtTransform>,
+) -> Result<BallImpactScan, String> {
+    if !config.valid() {
+        return Err("Invalid ball direction change parameters".into());
+    }
+    full_video_ball_suggestions_impl(run, scope, Some(config), court)
 }
 
 fn full_video_ball_suggestions_impl(
     run: &crate::native_rally_evidence::ValidatedRun,
     scope: &[(u64, u64)],
     impact: Option<volley_core::motion::DirectionBreakConfig>,
+    court: Option<&volley_core::court_geometry::CourtTransform>,
 ) -> Result<BallImpactScan, String> {
     if scope
         .iter()
@@ -306,6 +321,7 @@ fn full_video_ball_suggestions_impl(
     let mut reader = BoundedReader::open(&input)?;
     let mut points = Vec::<BallObservation>::new();
     let mut candidates = Vec::<(u64, f64)>::new();
+    let mut ground_contacts = Vec::<volley_core::motion::GroundContact>::new();
     let mut observations = 0usize;
     let mut reconstruction = BallReconstructionStats::default();
     if canonical {
@@ -323,7 +339,11 @@ fn full_video_ball_suggestions_impl(
     let mut scope_index = 0usize;
     fn emit(
         points: &[BallObservation],
-        candidates: &mut Vec<(u64, f64)>,
+        events: (
+            &mut Vec<(u64, f64)>,
+            &mut Vec<volley_core::motion::GroundContact>,
+        ),
+        court: Option<&volley_core::court_geometry::CourtTransform>,
         options: (Option<volley_core::motion::DirectionBreakConfig>, u32, u32),
         reconstruction: &mut BallReconstructionStats,
         canonical: bool,
@@ -374,13 +394,27 @@ fn full_video_ball_suggestions_impl(
                 } else {
                     b.motion.residual / (1.0 + b.fit_error)
                 };
-                candidates.push((b.frame as u64, score));
+                if let Some(contact) = court.and_then(|court| {
+                    volley_core::motion::classify_ground_contact(
+                        prepared_points,
+                        &b,
+                        court,
+                        width,
+                        height,
+                    )
+                }) {
+                    events.1.push(contact);
+                } else {
+                    events.0.push((b.frame as u64, score));
+                }
             }
         }
         if impact.is_none() {
             for b in ball_motion_extrema(points, 5)? {
                 if !synthetic.contains(&(b.frame_index as i64)) {
-                    candidates.push((b.frame_index, b.velocity_residual_px_frame * 0.4));
+                    events
+                        .0
+                        .push((b.frame_index, b.velocity_residual_px_frame * 0.4));
                 }
             }
         }
@@ -438,7 +472,8 @@ fn full_video_ball_suggestions_impl(
         while scope.get(scope_index).is_some_and(|&(_, end)| end < frame) {
             emit(
                 &points,
-                &mut candidates,
+                (&mut candidates, &mut ground_contacts),
+                court,
                 (impact, run.width, run.height),
                 &mut reconstruction,
                 canonical,
@@ -459,7 +494,8 @@ fn full_video_ball_suggestions_impl(
             {
                 emit(
                     &points,
-                    &mut candidates,
+                    (&mut candidates, &mut ground_contacts),
+                    court,
                     (impact, run.width, run.height),
                     &mut reconstruction,
                     canonical,
@@ -475,7 +511,8 @@ fn full_video_ball_suggestions_impl(
         {
             emit(
                 &points,
-                &mut candidates,
+                (&mut candidates, &mut ground_contacts),
+                court,
                 (impact, run.width, run.height),
                 &mut reconstruction,
                 canonical,
@@ -488,7 +525,8 @@ fn full_video_ball_suggestions_impl(
         if points.len() >= 900 {
             emit(
                 &points,
-                &mut candidates,
+                (&mut candidates, &mut ground_contacts),
+                court,
                 (impact, run.width, run.height),
                 &mut reconstruction,
                 canonical,
@@ -499,7 +537,8 @@ fn full_video_ball_suggestions_impl(
     }
     emit(
         &points,
-        &mut candidates,
+        (&mut candidates, &mut ground_contacts),
+        court,
         (impact, run.width, run.height),
         &mut reconstruction,
         canonical,
@@ -523,12 +562,22 @@ fn full_video_ball_suggestions_impl(
             dedup.push(p);
         }
     }
-    if dedup.len() > 32768 {
+    ground_contacts.sort_by_key(|contact| contact.frame);
+    ground_contacts.dedup_by(|a, b| a.frame.abs_diff(b.frame) <= 2);
+    dedup.retain(|(frame, _)| {
+        let index =
+            ground_contacts.partition_point(|contact| contact.frame.saturating_add(2) < *frame);
+        ground_contacts
+            .get(index)
+            .is_none_or(|contact| frame.abs_diff(contact.frame) > 2)
+    });
+    if dedup.len() > 32768 || ground_contacts.len() > 32768 {
         return Err("Too many ball trajectory events".into());
     }
     reconstruction.raw_observations = observations;
     Ok(BallImpactScan {
         events: dedup,
+        ground_contacts,
         observed: observations,
         reconstruction,
     })
@@ -643,6 +692,36 @@ mod scored_trajectory_tests {
             result.events
         );
         assert_eq!(result.reconstruction.rejected_outliers, 8);
+        let court = volley_core::court_geometry::CourtTransform::new([
+            [0.1, 0.2],
+            [0.9, 0.2],
+            [0.9, 0.8],
+            [0.1, 0.8],
+        ])
+        .unwrap();
+        let classified = full_video_ball_impacts_with_court(
+            &run,
+            &[(19, 48)],
+            volley_core::motion::DirectionBreakConfig::default(),
+            Some(&court),
+        )
+        .unwrap();
+        assert!(
+            classified
+                .ground_contacts
+                .iter()
+                .any(|contact| (28..=31).contains(&contact.frame)),
+            "Court bounce should not remain a player touch: {:?}",
+            classified.ground_contacts
+        );
+        assert!(
+            !classified
+                .events
+                .iter()
+                .any(|(frame, _)| (28..=31).contains(frame)),
+            "Ground bounce leaked back into player touches: {:?}",
+            classified.events
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

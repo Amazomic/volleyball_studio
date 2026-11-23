@@ -2,7 +2,9 @@
 //! velocity after subtracting gravity.  This mirrors _ball_motion_change
 //! in scripts/volleyball_studio/reprocess.py and never performs inference.
 
+mod ground_detector;
 mod touch_detector;
+pub use ground_detector::{classify_ground_contact, GroundContact, GROUND_DETECTOR_VERSION};
 pub use touch_detector::{
     downward_to_upward_breaks, trajectory_breaks, trajectory_breaks_configured,
     trajectory_breaks_in_rallies, trajectory_direction_breaks, DirectionBreakConfig,

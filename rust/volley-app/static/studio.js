@@ -742,9 +742,27 @@
     return annotation.prediction.proposals.find(item=>Math.abs(item.frame-frame)<=4)||null;
   };
   const drawTrainingTouchCandidate=(ctx,record,frame,x,y,width,height)=>{
-    const candidate=trainingTouchCandidateAtFrame(frame);
-    if(!candidate||record?.replay_sha256&&annotation.prediction.source_replay_sha256&&
+    if(!showBallCandidates()||!annotationSourceValid()||!annotation.prediction||
+       record?.replay_sha256&&annotation.prediction.source_replay_sha256&&
        record.replay_sha256!==annotation.prediction.source_replay_sha256)return;
+    const ground=annotation.prediction.ground_contacts?.find(item=>Math.abs(item.frame-frame)<=3);
+    if(ground){
+      const [color,half]=groundContactAppearance[ground.landing]||["#ffd166","неизвестно"];
+      const px=x+ground.position[0]*width,py=y+ground.position[1]*height;
+      const label="Удар о песок · "+half;
+      ctx.save();ctx.lineWidth=3;ctx.strokeStyle=color;ctx.fillStyle=color;
+      ctx.beginPath();ctx.arc(px,py,18,0,Math.PI*2);ctx.stroke();
+      ctx.beginPath();ctx.arc(px,py,4,0,Math.PI*2);ctx.fill();
+      ctx.font="bold 13px Inter, sans-serif";ctx.textBaseline="top";
+      const tw=ctx.measureText(label).width;
+      const tx=Math.max(x+8,Math.min(x+width-tw-14,px+20));
+      const ty=Math.max(y+6,Math.min(y+height-23,py-20));
+      ctx.fillStyle="rgba(9,20,35,.94)";ctx.fillRect(tx-5,ty-3,tw+10,20);
+      ctx.fillStyle=color;ctx.fillText(label,tx,ty);ctx.restore();
+      return;
+    }
+    const candidate=trainingTouchCandidateAtFrame(frame);
+    if(!candidate)return;
     const rows=record?.frames||[];
     const detected=rows.find(row=>row.frame===candidate.frame&&Array.isArray(row.ball))||
       rows.find(row=>Math.abs(row.frame-candidate.frame)<=2&&Array.isArray(row.ball));
@@ -1405,6 +1423,12 @@
       " · кадр "+annotationFrame();
 
   };
+  const groundContactAppearance={
+    near_half:["#34d399","ближняя половина"],
+    far_half:["#60a5fa","дальняя половина"],
+    line_uncertain:["#ffd166","линия · неуверенно"],
+    out:["#ff6b6b","за пределами поля"]
+  };
   const drawAnnotation=()=>{
     if(!training.active)return;
     const data=annotation.data,ready=annotationReady();
@@ -1449,12 +1473,28 @@
         });
         annotation.lane.append(marker);
       }
+      for(const ground of (annotation.prediction.ground_contacts||[]).slice(0,600)){
+        const marker=document.createElement("button");
+        marker.type="button";
+        marker.className="studio-trajectory-proposal";
+        marker.hidden=annotation.ballLayerVisible===false;
+        marker.style.left=annotationPosition(ground.frame)+"%";
+        const [color,half]=groundContactAppearance[ground.landing]||["#ffd166","неизвестно"];
+        marker.style.background=color;
+        marker.title="Удар мяча о песок · "+half+" · кадр "+ground.frame;
+        marker.setAttribute("aria-label",marker.title);
+        marker.addEventListener("click",event=>{
+          event.stopPropagation();seekTimeline(ground.frame/fps());hideAnnotationContext();
+        });
+        annotation.lane.append(marker);
+      }
     }
     if(!ready){
       annotation.metrics.textContent=annotation.prediction?
         "По мячу: "+annotation.prediction.proposals.length+" кандидатов · порог "+
         annotation.prediction.calibration.min_score+" · сдвиг "+
-        annotation.prediction.calibration.shift_frames+" кадра. Возьмите результат для правок.":
+        annotation.prediction.calibration.shift_frames+" кадра · ударов о песок "+
+        (annotation.prediction.ground_contacts?.length||0)+". Возьмите результат для правок.":
         "Рассчитайте касания по сохранённой траектории VBallNet или возьмите CPU-метки за основу.";
       annotation.rallies.textContent="Нет размеченных розыгрышей";
       annotationMarkCurrent();return;
@@ -1586,7 +1626,9 @@
       (overall.matched?Number(overall.mean_error_ms).toFixed(1)+" мс":"—");
     if(annotation.prediction){
       const p=annotation.prediction;
-      annotation.metrics.textContent+=" | По мячу "+p.proposals.length+" кандидатов"+
+      annotation.metrics.textContent+=" | По мячу "+p.proposals.length+" кандидатов · песок "+
+        (p.ground_contacts?.length||0)+
+        (p.court_filter_active?" · фильтр площадки":" · площадка не размечена") +
         (p.method==="touch_detector_v4"?
           " · угол излома "+p.impact_settings.min_turn_angle_deg+"°"+
           " · разрыв дуг до "+p.impact_settings.max_join_error_px+" пикс.":
@@ -1753,7 +1795,9 @@
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run||video!==s.video)return;
       if(result.schema!=="volley-trajectory-touch-proposals/1"||
           result.project_id!==project||result.video!==video||result.rally_run_id!==run||
-          !Array.isArray(result.proposals)||!Number.isSafeInteger(result.total_frames)||
+          !Array.isArray(result.proposals)||!Array.isArray(result.ground_contacts)||
+          typeof result.court_filter_active!=="boolean"||
+          !Number.isSafeInteger(result.total_frames)||
           result.method!=="touch_detector_v4"||
           result.ball_motion_interpolation?.stage!=="ball_motion_interpolation_v1"||
           !Number.isSafeInteger(result.ball_motion_interpolation?.result?.rejected_outliers)||
@@ -1765,7 +1809,13 @@
             r.start<0||r.start>=r.end||r.end>=result.total_frames)||
           result.proposals.some(p=>!Number.isSafeInteger(p.frame)||p.frame<0||
             p.frame>=result.total_frames||
-            !result.rally_intervals.some(r=>r.start<=p.frame&&p.frame<=r.end)))
+            !result.rally_intervals.some(r=>r.start<=p.frame&&p.frame<=r.end))||
+          result.ground_contacts.some(g=>!Number.isSafeInteger(g.frame)||g.frame<0||
+            g.frame>=result.total_frames||!groundContactAppearance[g.landing]||
+            !Array.isArray(g.position)||g.position.length!==2||
+            !g.position.every(Number.isFinite)||
+            !result.rally_intervals.some(r=>r.start<=g.frame&&g.frame<=r.end)||
+            result.proposals.some(p=>Math.abs(p.frame-g.frame)<=2)))
         throw Error("Касания выходят за рассчитанные розыгрыши по мячу");
       annotation.prediction=result;annotation.typePrediction=null;
       timelineRallyLayers.candidates.checked=true;
@@ -1776,8 +1826,11 @@
       annotationNotice("Интерполяция мяча: отброшено "+result.ball_motion_interpolation.result.rejected_outliers+
         " ложных точек, восстановлено "+result.ball_motion_interpolation.result.interpolated_frames+
         " пропущенных кадров. Внутри "+result.rally_count+" розыгрышей найдено "+
-        result.proposals.length+" кандидатов касаний. Вне розыгрышей поиск не выполняется. "+
-        "Результаты отображаются в плеере и на шкале; препятствие может быть игроком, сеткой или полом.");
+        result.proposals.length+" кандидатов касаний и "+
+        result.ground_contacts.length+" отдельных ударов о песок. "+
+        (result.court_filter_active?"Половины определены по разметке площадки. ":
+        "Нет разметки площадки — фильтр ударов о песок отключён. ")+
+        "Вне розыгрышей поиск не выполняется. Кандидаты столкновений не подтверждены игроком.");
     }catch(error){
       if(epoch===annotation.epoch)annotationNotice("Ошибка расчёта касаний: "+error.message,true);
     }finally{
@@ -2793,6 +2846,11 @@
           const x=((Number(s.analysisOffset)||0)+proposal.frame/fps())/duration*width;
           const kind=showBallTouchTypes()&&annotation.typePrediction?.touches.find(v=>v.frame===proposal.frame)?.kind;
           ctx.fillStyle=kind?({attack:"#ff6b6b",overhead_pass:"#66c8ff",dig:"#56dfb9",serve:"#f3a350",block:"#ac92ff"}[kind]||"#ffbd55"):"#ffbd55";
+          ctx.fillRect(x-1,y,Math.max(2,Math.ceil(dpr)),bandHeight);
+        }
+        for(const ground of (annotation.prediction.ground_contacts||[])){
+          const x=((Number(s.analysisOffset)||0)+ground.frame/fps())/duration*width;
+          ctx.fillStyle=(groundContactAppearance[ground.landing]||["#ffd166"])[0];
           ctx.fillRect(x-1,y,Math.max(2,Math.ceil(dpr)),bandHeight);
         }
       }
