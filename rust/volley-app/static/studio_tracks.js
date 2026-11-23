@@ -1198,16 +1198,21 @@
     }catch(error){if(project===state.project&&player===state.viewPlayer)playerStatus.textContent="Не удалось загрузить фото: "+error.message;}
   };
   const setMode=mode=>{
+    const viewingPlayer=Boolean(state.viewPlayer);
+    singlesMode.textContent=viewingPlayer?"Привязанные ID":"ID";
+    playerMode.textContent="Сохранённые фото";
+    modeTabs.setAttribute("aria-label",viewingPlayer?"Разделы игрока":"Вид Track ID");
+    if(viewingPlayer)modeSwitch.prepend(modeInfo);
+    else autoAssignControls.prepend(modeInfo);
     tracksPanel.dataset.trackMode=mode;
     singlesMode.setAttribute("aria-pressed",String(mode==="singles"));
     groupsMode.setAttribute("aria-pressed",String(mode==="groups"));
     playerMode.setAttribute("aria-pressed",String(mode==="player"));
     playerGallery.hidden=mode!=="player";
     groupingControls.hidden=mode!=="groups";
-    autoAssignControls.hidden=mode==="player";
-    filterBar.hidden=mode==="player";
-    if(mode==="player")viewBar.append(viewLabel);
-    else modeInfo.append(viewLabel);
+    autoAssignControls.hidden=viewingPlayer;
+    filterBar.hidden=viewingPlayer;
+    modeInfo.append(viewLabel);
   };
   singlesMode.addEventListener("click",()=>setMode("singles"));
   groupsMode.addEventListener("click",()=>setMode("groups"));
@@ -1251,7 +1256,7 @@
     if(detail.project_id!==state.project||!state.projectPlayerIds.has(detail.player_id))return;
     state.viewPlayer=detail.player_id;state.viewConflicts=false;state.viewExcluded=false;state.offset=0;
     viewLabel.textContent=String(detail.name||"");
-    viewBack.hidden=false;groupsMode.hidden=true;playerMode.hidden=false;setMode("player");void loadAlbum();void loadPage();
+    viewBack.hidden=false;groupsMode.hidden=true;playerMode.hidden=false;setMode("singles");void loadPage();
   });
   const conflictToggle=node("button","secondary","Конфликты");
   conflictToggle.type="button";
@@ -1269,8 +1274,8 @@
   filterBar.append(conflictToggle,excludedToggle);
   viewBar.append(viewBack);
   modeSwitch.append(filterBar,viewBar,groupingControls);
-  ui.list.before(modeSwitch);
-  ui.list.before(autoAssignControls);
+  ui.status.before(modeSwitch);
+  ui.status.before(autoAssignControls);
   ui.list.before(playerGallery);
   setMode("singles");
   ui.list.before(groupGallery);

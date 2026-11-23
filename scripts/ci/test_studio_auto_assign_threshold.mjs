@@ -7,8 +7,8 @@ for(const snippet of [
   'galleryAutoThreshold.type="range";galleryAutoThreshold.min="1";galleryAutoThreshold.max="99"',
   'galleryAutoThreshold.value="75"',
   'autoAssignControls.append(galleryAutoLabel,galleryAuto,autoAssignStatus)',
-  'ui.list.before(autoAssignControls)',
-  'autoAssignControls.hidden=mode==="player"'
+  'ui.status.before(autoAssignControls)',
+  'autoAssignControls.hidden=viewingPlayer'
 ])assert.ok(source.includes(snippet),"Missing slider UI: "+snippet);
 const start=source.indexOf("  const autoAssignSimilar=async(forcedThreshold)=>{");
 const end=source.indexOf("  const refreshPhotoMatches=",start);
