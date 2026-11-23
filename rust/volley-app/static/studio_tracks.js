@@ -1121,12 +1121,14 @@
     playerGallery.hidden=mode!=="player";
     groupingControls.hidden=mode!=="groups";
     autoAssignControls.hidden=mode==="player";
+    filterBar.hidden=mode==="player";
+    if(mode==="player")viewBar.append(viewLabel);
+    else modeInfo.append(viewLabel);
   };
   singlesMode.addEventListener("click",()=>setMode("singles"));
   groupsMode.addEventListener("click",()=>setMode("groups"));
   playerMode.addEventListener("click",()=>{setMode("player");void loadAlbum();});
   modeTabs.append(singlesMode,groupsMode,playerMode);
-  modeSwitch.append(modeTabs);
   const groupingControls=node("div","track-grouping-controls");
   const thresholdLabel=node("label","","Сходство ID: ");
   const thresholdValue=node("output","","30%");
@@ -1137,6 +1139,9 @@
   groupingControls.append(thresholdLabel,groupButton);
   const viewBar=node("div","track-view-bar");
   const viewLabel=node("strong","track-view-label","Непривязанные Track ID");
+  const modeInfo=node("div","track-mode-info");
+  modeInfo.append(modeTabs,viewLabel);
+  autoAssignControls.prepend(modeInfo);
   const updateUnassignedLabel=()=>{
     if(!state.viewPlayer)viewLabel.textContent=state.viewExcluded?
       "Исключённые Track ID · "+state.excludedIds.size:state.viewConflicts?
@@ -1179,8 +1184,7 @@
   const filterBar=node("div","track-filter-buttons");
   filterBar.append(conflictToggle,excludedToggle);
   viewBar.append(viewBack);
-  autoAssignControls.prepend(filterBar);
-  modeSwitch.append(viewBar,groupingControls,viewLabel);
+  modeSwitch.append(filterBar,viewBar,groupingControls);
   ui.list.before(modeSwitch);
   ui.list.before(autoAssignControls);
   ui.list.before(playerGallery);

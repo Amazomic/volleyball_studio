@@ -3576,3 +3576,9 @@ Studio показывает кнопку перехода между debug и re
 - Контракт CPU трекинга повышен до `bytetrack_xyah_rally_scoped_lost_weak_boundary_stitch_v6`; существующие replay и ручные назначения не перезаписываются, новое подтверждение ReID идёт по объединённому треку после CPU-пересчёта из сохранённого GPU evidence. Сохраняются SHA-256, атомарная публикация и исходный ряд кадров.
 - Целевые 5 Rust-тестов PASS, включая фактические координаты двух прямоугольников, пересчёт ID 7 → 3, четыре отброшенные дублирующие рамки, отдельные головы, длительное перекрытие, отсутствие головы и защиту от изменённого SHA. `RUST_TEST_THREADS=1 scripts/check-all.ps1` PASS: WASM, fmt, clippy, Rust workspace, 98 Node tests.
 - Независимое измерение accuracy/latency на размеченных матчах и повторная GPU-детекция — NOT TESTED. Пользовательский сохранённый replay использован только для диагностики; тесты создают данные в системном temp.
+
+### 2026-11-23 — Переключатель ID и счётчик перенесены в нижнюю панель
+
+- База origin/develop 5d78310a; владелец UI: rust/volley-app/static/studio_tracks.js, studio.css, регрессии test_studio_group_button_visibility.mjs, test_studio_player_gallery_view.mjs, test_studio_viewport_layout.mjs.
+- Верхняя строка содержит фильтры «Конфликты» и «Исключённые», нижняя панель автопривязки содержит «ID / Группы ID», динамический счётчик «Непривязанные Track ID», порог сходства и кнопку автопривязки. При открытии альбома игрока его имя переносится к кнопке возврата, и скрытые фильтры не занимают место. Алгоритмы идентификации и данные проекта не менялись.
+- TDD: регрессия новых позиций RED до правки, GREEN после; полный scripts/check-all.ps1 PASS: WASM, cargo fmt, clippy, Rust workspace tests и 98 Node gate; node --check, git diff --check PASS. Ручной браузерный QA: NOT TESTED. Применение — после публикации штатной очередью deploy-volley-queue.ps1.
