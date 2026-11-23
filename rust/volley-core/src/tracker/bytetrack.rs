@@ -209,6 +209,8 @@ struct Track {
     predicted_at: u64,
     status: Status,
     observations: u64,
+    pose: Option<PoseEvidence>,
+    pose_frame: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -385,7 +387,14 @@ impl ByteTracker {
                 let duplicate = bbox_iou(other.box_.bbox_xyxy_norm, item.box_.bbox_xyxy_norm)
                     >= self.config.nms_iou
                     || same_head_body_duplicate(&other.box_, &item.box_);
-                !duplicate || self.independently_tracked_bodies(frame, &other.box_, &item.box_)
+                let separate_poses = other
+                    .pose
+                    .and_then(|pose| pose.torso())
+                    .zip(item.pose.and_then(|pose| pose.torso()))
+                    .is_some_and(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1]) > 0.020);
+                !duplicate
+                    || separate_poses
+                    || self.independently_tracked_bodies(frame, &other.box_, &item.box_)
             }) {
                 retained.push(item);
             }
@@ -506,6 +515,8 @@ impl ByteTracker {
                 predicted_at: frame,
                 status: Status::Tentative,
                 observations: 1,
+                pose: high[d].pose,
+                pose_frame: high[d].pose.map(|_| frame),
             });
             emitted.push(TrackedPlayer {
                 track_id: id,
@@ -542,12 +553,15 @@ impl ByteTracker {
         track.last_frame = frame;
         track.status = Status::Tracked;
         track.observations += 1;
+        if let Some(pose) = input.pose {
+            track.pose = Some(pose);
+            track.pose_frame = Some(frame);
+        }
         out.push(TrackedPlayer {
             track_id: track.id,
             detection: input.box_.clone(),
             is_verified_athlete: false,
         });
-        let _ = input.pose; // RTMPose measurements are preserved by the CPU replay.
     }
     fn associate(
         &self,
@@ -581,7 +595,17 @@ impl ByteTracker {
                         min_iou
                     };
                     let threshold = (baseline + strictness).clamp(0.03, 0.90);
-                    (overlap >= threshold && travel <= travel_limit).then_some(overlap)
+                    match (track.pose, observation.pose, track.pose_frame) {
+                        (Some(previous), Some(measured), Some(pose_frame))
+                            if frame.saturating_sub(pose_frame) <= 30 =>
+                        {
+                            let similarity =
+                                previous.similarity(&measured, frame.saturating_sub(pose_frame))?;
+                            (similarity >= 0.50 && travel <= (travel_limit + 0.10).min(0.30))
+                                .then_some(0.80 * similarity + 0.20 * overlap)
+                        }
+                        _ => (overlap >= threshold && travel <= travel_limit).then_some(overlap),
+                    }
                 })
                 .collect::<Vec<_>>();
             let mut available = scores.iter().filter_map(|v| *v).collect::<Vec<_>>();
@@ -664,6 +688,45 @@ mod tests {
     }
     fn tracker() -> ByteTracker {
         ByteTracker::new(TrackingOptions::default()).unwrap()
+    }
+
+    fn measured_pose(x: f64) -> PoseEvidence {
+        let mut joints = [[0.0, 0.0, 0.94]; 17];
+        for (i, joint) in joints.iter_mut().enumerate() {
+            *joint = [
+                x + (i % 3) as f64 * 0.01,
+                0.25 + (i / 3) as f64 * 0.035,
+                0.94,
+            ];
+        }
+        PoseEvidence { joints }
+    }
+
+    #[test]
+    fn measured_pose_keeps_id_when_detector_boxes_swap_between_players() {
+        let mut tracker = tracker();
+        let initial = tracker
+            .process_frame_with_poses(
+                0,
+                &[person(0, 0, 0.20, 0.95), person(0, 1, 0.26, 0.94)],
+                &[Some(measured_pose(0.22)), Some(measured_pose(0.28))],
+            )
+            .unwrap();
+        assert_eq!(initial.tracks.len(), 2);
+        let id_a = initial.tracks[0].track_id;
+        let id_b = initial.tracks[1].track_id;
+        let swapped = tracker
+            .process_frame_with_poses(
+                1,
+                &[person(1, 0, 0.20, 0.95), person(1, 1, 0.26, 0.94)],
+                &[Some(measured_pose(0.28)), Some(measured_pose(0.22))],
+            )
+            .unwrap();
+        assert_eq!(swapped.tracks.len(), 2);
+        assert_eq!(swapped.tracks[0].track_id, id_a);
+        assert_eq!(swapped.tracks[0].detection.query_index, Some(1));
+        assert_eq!(swapped.tracks[1].track_id, id_b);
+        assert_eq!(swapped.tracks[1].detection.query_index, Some(0));
     }
 
     #[test]

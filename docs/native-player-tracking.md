@@ -5,7 +5,7 @@
 
 ## Processing contract
 
-- Source: decoded RF-DETR player_candidates from the immutable GPU fusion.
+- Source: measured RTMPose skeletons when verified pose evidence exists; RF-DETR provides crop proposals and immutable raw detections. Older projects without a pose run still use decoded RF-DETR player candidates.
 - Output: a new, versioned CPU replay under native_cpu_replays. Older CPU
   results are never rewritten by a tracker change.
 - A Track ID represents a provisional trajectory, not a verified athlete.

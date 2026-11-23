@@ -20,6 +20,13 @@ The RF-DETR Medium player-detector pass samples the prepared 30 FPS
 video every configured N frames (10 frames by default, 3 Hz), aligned to global
 frame indices across 9-frame fusion windows. RTMPose runs in a separate stage
 on saved detector boxes and does not repeat person detection. Empty intervening observations are never called model output.
+When verified pose evidence exists, CPU tracking uses only valid measured RTMPose
+skeletons as observations. RF-DETR boxes provide crop proposals but cannot create
+Track IDs without a measured skeleton; unsampled frames do not create observations.
+Legacy RF-DETR-only projects retain a fallback when no pose run exists.
+Associations prioritize torso and joint movement (80%) over predicted box IoU (20%),
+with one-to-one assignment and a bounded movement gate. Provisional IDs are not
+verified athlete identities. CPU association versions preserve previous snapshots.
 Confirmed CPU Track IDs fill bounded gaps between real anchors for smooth
 playback; preview skeletons interpolate only between unambiguous real poses.
 The separate pose-evidence pass keeps its own stride (6 by default, 5 Hz):
