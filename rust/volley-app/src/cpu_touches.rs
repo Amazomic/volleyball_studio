@@ -2347,7 +2347,7 @@ fn process_with_ball_scope_and_rally_settings_report(
             "action_technique_classification_complete":false,
             "automatic_action_predictions_enabled":true,
             "automatic_action_prediction_method":if pose_requested {
-                "pose_keypoints_motion_v1_or_unknown_touch"
+                volley_core::pose_classification::ACTION_PREDICTION_POLICY_VERSION
             } else { "unknown_touch_no_pose" },
             "cpu_processing_complete":false,
         });

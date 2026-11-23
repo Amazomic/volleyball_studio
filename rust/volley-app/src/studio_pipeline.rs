@@ -1266,10 +1266,8 @@ fn cpu_lineage_valid(
         && touches["state"] == "motion_gated_touch_proposals"
         && touches["body_trajectory_intersection_required"] == true
         && touches["settings"]["require_pose"] == true
-        && matches!(
-            touches["automatic_action_prediction_method"].as_str(),
-            Some("pose_keypoints_v1_or_unknown_touch" | "pose_keypoints_motion_v1_or_unknown_touch")
-        )
+        && touches["automatic_action_prediction_method"]
+            == volley_core::pose_classification::ACTION_PREDICTION_POLICY_VERSION
         && touches["preliminary_rally_scope_version"] == "primary_gpu_rally_mask_v1"
         && touches["primary_ball_job_id"] == saved["gpu_jobs"]["ball"]
         && touches["primary_rally_mask_sha256"] == saved["gpu_rally_mask_sha256"]
@@ -4141,7 +4139,7 @@ mod branching_tests {
                     "frames":100,
                     "settings":request.post.ball_stabilizer
                 },
-                "automatic_action_prediction_method":"pose_keypoints_v1_or_unknown_touch",
+                "automatic_action_prediction_method":"pose_keypoints_motion_v2_or_unknown_touch",
                 "preliminary_rally_scope_version":"primary_gpu_rally_mask_v1",
                 "preliminary_rally_settings":request.post.rallies,
                 "primary_ball_job_id":gpu_ball,"primary_rally_mask_sha256":sha,
@@ -4328,6 +4326,10 @@ mod branching_tests {
             serde_json::from_slice(&fs::read(&touch_manifest).unwrap()).unwrap();
         for (field, old_value) in [
             ("body_trajectory_intersection_required", json!(false)),
+            (
+                "automatic_action_prediction_method",
+                json!("pose_keypoints_motion_v1_or_unknown_touch"),
+            ),
             (
                 "automatic_action_prediction_method",
                 json!("pose_keypoints_v1_with_geometry_fallback"),

@@ -3,6 +3,8 @@
 //! No serving or blocking verdict without verified rally/court context.
 use crate::action_prediction::{ActionKind, ActionPrediction, PredictionMethod};
 
+pub const ACTION_PREDICTION_POLICY_VERSION: &str = "pose_keypoints_motion_v2_or_unknown_touch";
+
 #[derive(Clone, Copy, Debug)]
 pub struct PoseEvidence {
     /// COCO17 points [x_norm,y_norm,confidence]; input contains no athlete ID.
