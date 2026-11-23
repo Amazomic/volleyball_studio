@@ -346,6 +346,56 @@ fn index_for(path: &Path, sha: &str, frames: u64) -> Result<ReplayIndex, String>
     Ok(entry)
 }
 
+pub(crate) fn for_each_verified_scoped_frame<F>(
+    path: &Path,
+    sha: &str,
+    frames: u64,
+    scope: &[(u64, u64)],
+    mut visit: F,
+) -> Result<usize, String>
+where
+    F: FnMut(Option<(u64, &[u8])>) -> Result<(), String>,
+{
+    if scope
+        .iter()
+        .any(|&(start, end)| start > end || end >= frames)
+        || scope.windows(2).any(|pair| pair[0].1 >= pair[1].0)
+    {
+        return Err("Invalid verified source search intervals".into());
+    }
+    if scope.is_empty() {
+        return Ok(0);
+    }
+    let index = index_for(path, sha, frames)?;
+    let mut reader =
+        BufReader::new(File::open(path).map_err(|e| format!("Open scoped source: {e}"))?);
+    let mut source_rows_read = 0usize;
+    for &(start, end) in scope {
+        let anchor = start / STRIDE * STRIDE;
+        reader
+            .seek(SeekFrom::Start(index.offsets[(start / STRIDE) as usize]))
+            .map_err(|e| format!("Seek scoped source: {e}"))?;
+        for frame in anchor..=end {
+            let line = bounded_line(&mut reader)?.ok_or("Scoped source is truncated")?;
+            source_rows_read += 1;
+            if frame >= start {
+                visit(Some((frame, &line)))?;
+            }
+        }
+        visit(None)?;
+    }
+    let after = fs::metadata(path).map_err(|e| format!("Scoped source metadata: {e}"))?;
+    if after.len() != index.size
+        || after.modified().ok() != index.modified
+        || volley_media::preparation::file_change_stamp(path, &after) != index.change
+    {
+        return Err("Scoped source changed after index verification".into());
+    }
+    if index.change.is_none() {
+        index_for(path, sha, frames)?;
+    }
+    Ok(source_rows_read)
+}
 fn box_norm(value: &Value) -> Option<[f64; 4]> {
     let array = value.as_array()?;
     if array.len() != 4 {

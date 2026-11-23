@@ -226,6 +226,7 @@ pub(crate) fn full_video_ball_suggestions_scoped(
 pub(crate) struct BallReconstructionStats {
     pub raw_observations: usize,
     pub processed_frames: usize,
+    pub source_rows_read: usize,
     pub rejected_outliers: usize,
     pub interpolated_frames: usize,
 }
@@ -319,7 +320,6 @@ fn full_video_ball_suggestions_impl(
         )
     };
     let canonical = canonical_source.is_some();
-    let mut reader = BoundedReader::open(&input)?;
     let mut points = Vec::<BallObservation>::new();
     let mut candidates = Vec::<(u64, f64)>::new();
     let mut ground_contacts = Vec::<volley_core::motion::GroundContact>::new();
@@ -413,81 +413,97 @@ fn full_video_ball_suggestions_impl(
         }
         Ok(())
     }
-    for frame in 0..run.frames {
-        let bytes = reader.line()?.ok_or("Saved ball trajectory is truncated")?;
-        while scope.get(scope_index).is_some_and(|&(_, end)| end < frame) {
-            emit(
-                &points,
-                (&mut candidates, &mut ground_contacts),
-                court.zip(scope.get(scope_index).map(|interval| interval.1)),
-                (impact, run.width, run.height),
-                &mut reconstruction,
-                canonical,
-                &synthetic,
-            )?;
-            points.clear();
-            synthetic.clear();
-            scope_index += 1;
-        }
-        if !scope
-            .get(scope_index)
-            .is_some_and(|&(start, end)| start <= frame && frame <= end)
-        {
-            continue;
-        }
-        reconstruction.processed_frames += 1;
-        let (position, inferred) = if canonical {
-            let row: crate::cpu_touches::CanonicalBallFrame = serde_json::from_slice(&bytes)
-                .map_err(|e| format!("Invalid saved stabilized ball frame: {e}"))?;
-            row.validate(frame)?;
-            reconstruction.rejected_outliers += usize::from(row.rejected);
-            reconstruction.interpolated_frames += usize::from(row.interpolated);
-            (
-                row.ball.map(|[x, y]| BallObservation {
-                    frame: frame as i64,
-                    x: x * run.width as f64,
-                    y: y * run.height as f64,
-                }),
-                row.interpolated,
-            )
-        } else {
-            let row: Frame = serde_json::from_slice(&bytes)
-                .map_err(|e| format!("Invalid ball replay frame: {e}"))?;
-            if row.frame_index != frame
-                || !row.track_ids_provisional
-                || row.confirmed_athlete_identities
-                || row.touches_confirmed
-            {
-                return Err("Ball source frame state differs from saved replay".into());
-            }
-            let candidate = match row.selected_ball {
-                Some(ball) => {
-                    if ball.source_model != "vballnet"
-                        || ball.detection.class_name != "ball"
-                        || ball.detection.frame_index != frame
-                    {
-                        return Err("Unsupported saved ball detection".into());
-                    }
-                    ball.detection.validate(frame - frame % 9, "ball")?;
-                    (ball.detection.score >= run.min_ball_score).then(|| {
-                        let b = ball.detection.bbox_xyxy_norm;
-                        BallObservation {
-                            frame: frame as i64,
-                            x: (b[0] + b[2]) * run.width as f64 * 0.5,
-                            y: (b[1] + b[3]) * run.height as f64 * 0.5,
-                        }
-                    })
-                }
-                None => None,
+    let source_rows_read = crate::native_preview_overlay::for_each_verified_scoped_frame(
+        &input,
+        &expected_sha,
+        run.frames,
+        scope,
+        |entry| {
+            let Some((frame, bytes)) = entry else {
+                emit(
+                    &points,
+                    (&mut candidates, &mut ground_contacts),
+                    court.zip(scope.get(scope_index).map(|interval| interval.1)),
+                    (impact, run.width, run.height),
+                    &mut reconstruction,
+                    canonical,
+                    &synthetic,
+                )?;
+                points.clear();
+                synthetic.clear();
+                scope_index += 1;
+                return Ok(());
             };
-            (candidate, false)
-        };
-        if inferred {
-            synthetic.insert(frame as i64);
-        }
-        let Some(ball) = position else {
-            if !points.is_empty()
-                && frame as i64 - points.last().unwrap().frame > max_observation_gap
+            reconstruction.processed_frames += 1;
+            let (position, inferred) = if canonical {
+                let row: crate::cpu_touches::CanonicalBallFrame = serde_json::from_slice(bytes)
+                    .map_err(|e| format!("Invalid saved stabilized ball frame: {e}"))?;
+                row.validate(frame)?;
+                reconstruction.rejected_outliers += usize::from(row.rejected);
+                reconstruction.interpolated_frames += usize::from(row.interpolated);
+                (
+                    row.ball.map(|[x, y]| BallObservation {
+                        frame: frame as i64,
+                        x: x * run.width as f64,
+                        y: y * run.height as f64,
+                    }),
+                    row.interpolated,
+                )
+            } else {
+                let row: Frame = serde_json::from_slice(bytes)
+                    .map_err(|e| format!("Invalid ball replay frame: {e}"))?;
+                if row.frame_index != frame
+                    || !row.track_ids_provisional
+                    || row.confirmed_athlete_identities
+                    || row.touches_confirmed
+                {
+                    return Err("Ball source frame state differs from saved replay".into());
+                }
+                let candidate = match row.selected_ball {
+                    Some(ball) => {
+                        if ball.source_model != "vballnet"
+                            || ball.detection.class_name != "ball"
+                            || ball.detection.frame_index != frame
+                        {
+                            return Err("Unsupported saved ball detection".into());
+                        }
+                        ball.detection.validate(frame - frame % 9, "ball")?;
+                        (ball.detection.score >= run.min_ball_score).then(|| {
+                            let b = ball.detection.bbox_xyxy_norm;
+                            BallObservation {
+                                frame: frame as i64,
+                                x: (b[0] + b[2]) * run.width as f64 * 0.5,
+                                y: (b[1] + b[3]) * run.height as f64 * 0.5,
+                            }
+                        })
+                    }
+                    None => None,
+                };
+                (candidate, false)
+            };
+            if inferred {
+                synthetic.insert(frame as i64);
+            }
+            let Some(ball) = position else {
+                if !points.is_empty()
+                    && frame as i64 - points.last().unwrap().frame > max_observation_gap
+                {
+                    emit(
+                        &points,
+                        (&mut candidates, &mut ground_contacts),
+                        court.zip(scope.get(scope_index).map(|interval| interval.1)),
+                        (impact, run.width, run.height),
+                        &mut reconstruction,
+                        canonical,
+                        &synthetic,
+                    )?;
+                    points.clear();
+                }
+                return Ok(());
+            };
+            if points
+                .last()
+                .is_some_and(|p| frame as i64 - p.frame > max_observation_gap)
             {
                 emit(
                     &points,
@@ -500,50 +516,24 @@ fn full_video_ball_suggestions_impl(
                 )?;
                 points.clear();
             }
-            continue;
-        };
-        if points
-            .last()
-            .is_some_and(|p| frame as i64 - p.frame > max_observation_gap)
-        {
-            emit(
-                &points,
-                (&mut candidates, &mut ground_contacts),
-                court.zip(scope.get(scope_index).map(|interval| interval.1)),
-                (impact, run.width, run.height),
-                &mut reconstruction,
-                canonical,
-                &synthetic,
-            )?;
-            points.clear();
-        }
-        points.push(ball);
-        observations += 1;
-        if points.len() >= 900 {
-            emit(
-                &points,
-                (&mut candidates, &mut ground_contacts),
-                court.zip(scope.get(scope_index).map(|interval| interval.1)),
-                (impact, run.width, run.height),
-                &mut reconstruction,
-                canonical,
-                &synthetic,
-            )?;
-            points = points.split_off(points.len() - 24);
-        }
-    }
-    emit(
-        &points,
-        (&mut candidates, &mut ground_contacts),
-        court.zip(scope.get(scope_index).map(|interval| interval.1)),
-        (impact, run.width, run.height),
-        &mut reconstruction,
-        canonical,
-        &synthetic,
+            points.push(ball);
+            observations += 1;
+            if points.len() >= 900 {
+                emit(
+                    &points,
+                    (&mut candidates, &mut ground_contacts),
+                    court.zip(scope.get(scope_index).map(|interval| interval.1)),
+                    (impact, run.width, run.height),
+                    &mut reconstruction,
+                    canonical,
+                    &synthetic,
+                )?;
+                points = points.split_off(points.len() - 24);
+            }
+            Ok(())
+        },
     )?;
-    if reader.line()?.is_some() || reader.finish() != expected_sha {
-        return Err("Saved trajectory SHA-256 differs from selected source".into());
-    }
+    reconstruction.source_rows_read = source_rows_read;
     candidates.sort_by_key(|(f, _)| *f);
     // Local maxima from the two existing estimators refer to the same impact.
     let mut dedup = Vec::<(u64, f64)>::new();
@@ -836,6 +826,7 @@ mod scored_trajectory_tests {
         )
         .unwrap();
         assert_eq!(only_rally.reconstruction.processed_frames, 11);
+        assert_eq!(only_rally.reconstruction.source_rows_read, 31);
         assert_eq!(only_rally.observed, 11);
         assert!(only_rally
             .events
