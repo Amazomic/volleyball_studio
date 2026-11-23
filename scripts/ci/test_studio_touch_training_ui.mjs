@@ -22,11 +22,11 @@ for(const id of ["studio-annotation-calculate","studio-annotation-seed-trajector
   assert.ok(html.includes('id="'+id+'"'),id);
 }
 assert.match(server,/\/api\/training\/trajectory\/calculate"[\s\S]{0,90}touch_annotation::trajectory::calculate/);
-assert.ok(rust.includes("scan_collision_trajectory(&run, &intervals, req.impact)"));
+assert.ok(rust.includes("scan_collision_trajectory(&state, &run, &intervals, req.impact)"));
 assert.ok(!rust.includes('method":"vballnet_trajectory_breaks_and_motion_extrema"'));
 assert.ok(scanner.includes("full_video_ball_impacts_with_reconstruction"));
 assert.ok(scanner.includes("reconstruct_short_ball_motion"));
-assert.ok(typesRust.includes("scan_collision_trajectory(&run, &intervals, req.impact)"));
+assert.ok(typesRust.includes("scan_collision_trajectory(&state, &run, &intervals, req.impact)"));
 assert.match(server,/\/api\/training\/trajectory\/types"[\s\S]{0,100}touch_annotation::types::calculate/);
 assert.ok(typesRust.includes("observed_pose_motion")&&typesRust.includes("refine_with_motion"));
 assert.ok(typesRust.includes("expected != req.frames"),"Types must never invent a second touch detector");
@@ -101,6 +101,8 @@ const context={
         source_replay_sha256:"a".repeat(64),
         rally_count:1,rally_intervals:[{start:95,end:150}],
         proposals:[{frame:100,score:9},{frame:140,score:3}],
+        ground_contacts:[{frame:120,position:[0.4,0.7],landing:"near_half"}],
+        court_filter_active:true,
         method:"touch_detector_v4",
         ball_motion_interpolation:{stage:"ball_motion_interpolation_v1",
           result:{raw_observations:1400,rejected_outliers:2,interpolated_frames:9}},
@@ -142,6 +144,8 @@ assert.equal(calculations.length,1);
 assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].rally)),
   {mode:"continuous",merge_gap_seconds:4,min_trajectory_seconds:1.5,stationary_ball_ms:1000});
 assert.equal(annotation.prediction.proposals.length,2);
+assert.equal(annotation.prediction.ground_contacts.length,1);
+assert.equal(annotation.prediction.ground_contacts[0].landing,"near_half");
 assert.equal(annotation.prediction.ball_motion_interpolation.result.rejected_outliers,2);
 assert.equal(annotation.prediction.ball_motion_interpolation.result.interpolated_frames,9);
 assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].impact)),{

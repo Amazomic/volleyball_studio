@@ -434,6 +434,10 @@ pub(crate) fn camera_signature(rgb: &[u8]) -> Option<Vec<u8>> {
     }
     Some(output)
 }
+fn camera_sample_timestamp(frame: u64, duration: f64) -> Option<f64> {
+    (duration.is_finite() && duration > 0.0)
+        .then(|| (frame as f64 / 30.0).min((duration - 0.25).max(0.0)))
+}
 async fn capture_court(
     state: Arc<AppState>,
     request: &EditRequest,
@@ -470,6 +474,8 @@ async fn capture_court(
         .ok_or_else(|| storage::bad_request("Missing camera frame"))?;
     let filename = video_edits::calibration_source(&state, &request.project_id, video)?;
     let dimensions = volley_media::probe(&filename).map_err(storage::bad_request)?;
+    let sample_seconds = camera_sample_timestamp(frame, dimensions.duration_sec)
+        .ok_or_else(|| storage::bad_request("Invalid camera source duration"))?;
     let mut process = tokio::process::Command::new("ffmpeg");
     process
         .args([
@@ -478,7 +484,7 @@ async fn capture_court(
             "error",
             "-nostdin",
             "-ss",
-            &format!("{:.3}", frame as f64 / 30.0),
+            &format!("{sample_seconds:.3}"),
         ])
         .arg("-i")
         .arg(&filename)
@@ -494,20 +500,31 @@ async fn capture_court(
             "pipe:1",
         ])
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(20), process.output())
         .await
         .map_err(|_| storage::bad_request("Training camera sample timeout"))?
         .map_err(|e| storage::bad_request(format!("FFmpeg camera sample: {e}")))?;
-    let signature = camera_signature(&output.stdout)
-        .ok_or_else(|| storage::bad_request("Could not read camera training frame"))?;
+    if !output.status.success() {
+        let reason = String::from_utf8_lossy(&output.stderr);
+        return Err(storage::bad_request(format!(
+            "FFmpeg camera frame extraction failed: {}",
+            reason.trim().chars().take(240).collect::<String>()
+        )));
+    }
+    let signature = camera_signature(&output.stdout).ok_or_else(|| {
+        storage::bad_request(format!(
+            "Camera training frame unavailable at {sample_seconds:.2}s ({} decoded bytes)",
+            output.stdout.len()
+        ))
+    })?;
     let value = Example::Court {
         id: Uuid::new_v4().to_string(),
         project_id: request.project_id.clone(),
         video: video.into(),
-        frame_index: frame,
+        frame_index: (sample_seconds * 30.0).round() as u64,
         corners,
         net: request.net,
         camera_signature: signature,
@@ -980,6 +997,15 @@ mod tests {
         assert!(camera_signature(&[]).is_none());
         let pixels = vec![100u8; 640 * 360 * 3];
         assert_eq!(camera_signature(&pixels), Some(vec![100u8; 432]));
+    }
+    #[test]
+    fn camera_sample_timestamp_stays_inside_video_at_end() {
+        assert_eq!(camera_sample_timestamp(15, 10.0), Some(0.5));
+        assert_eq!(camera_sample_timestamp(30, 1.0), Some(0.75));
+        assert_eq!(camera_sample_timestamp(90, 1.0), Some(0.75));
+        assert_eq!(camera_sample_timestamp(3, 0.1), Some(0.0));
+        assert_eq!(camera_sample_timestamp(30, 0.0), None);
+        assert_eq!(camera_sample_timestamp(30, f64::NAN), None);
     }
     #[test]
     fn confirmed_pose_and_wrist_motion_match_one_label_but_not_competitor() {

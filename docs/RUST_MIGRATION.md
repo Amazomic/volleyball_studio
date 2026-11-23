@@ -3627,3 +3627,18 @@ Studio показывает кнопку перехода между debug и re
 - Причина: сброс привязок сохранял ранее связанные Track ID в `automatic_suppressed_ids`, поэтому повторная автопривязка пропускала даже кандидатов с оценкой >=75%; устаревший кэш дополнительно требовал ручного пересчёта.
 - Исправление: сброс очищает ссылки и старые запреты без изменения фотографий или признаков. Явное «Автопривязать» использует `auto_assign`, повторно рассматривает ранее подавленные ID и при необходимости рассчитывает совпадения. Автоматическая постобработка `postprocess_auto_assign` по-прежнему уважает ручное подавление, ручные назначения и исключения не заменяются; действуют проверки конфликтов ID.
 - RED → GREEN: новые регрессионные тесты сброса и повторной привязки (3 PASS); обновлён контракт Node интерфейса. `RUST_TEST_THREADS=1 scripts/check-all.ps1`: PASS (WASM, fmt, Clippy, Rust workspace, 98 Node gates); `git diff --check`: PASS. GPU и независимое сравнение на живом матче: NOT TESTED. Применение: очередь сборки после публикации в `develop`.
+
+### 2026-11-23: отделение контактов мяча с песком от Debug Touch Detector
+- База: c42a9a779c0d423fb49b7719d968417eabafee21 (origin/develop). Владельцы: motion/ground_detector.rs, motion.rs, native_player_tracks/trajectory.rs, touch_annotation/trajectory.rs, touch_annotation/types.rs, static/studio.js, scripts/ci/test_studio_touch_training_ui.mjs.
+- Решение: оставлять независимый от игрока излом как предложение Touch только при отсутствии признаков контакта с землёй; сопоставлять нисходящий→восходящий отскок с сохранённой геометрией, возвращать отдельные near/far/out/line события без изменения GPU и без переобучения.
+- Граница: при отсутствии разметки фильтр не активен; классификация остаётся гипотезой по 2D и не подтверждает судейское решение.
+
+### 2026-11-23 ? Guard against overclassification of player hits as sand
+- Real short-project read-only diagnosis: original 28 Debug trajectory candidates became only 3 candidates and 25 false ground classifications with v1; the 21.03 s player hit was among the incorrect removals.
+- Detector v2 is deliberately terminal-rally-only (last 45 frames), requires a court-surface band and at most 0.09 normalized image margin around the polygon, and also detects a stationary ground landing. Other player-touch trajectory candidates must remain intact. V2 gate and user-project recheck required before marking this fixed.
+
+### 2026-11-23 — сохранение обучающей разметки на последнем кадре
+
+- База `c882fa8c`, владелец: `rust/volley-app/src/training_samples.rs`. Редактор передаёт кадр как 30 × секунды; FFmpeg на позиции `-ss 1.000` для синтетического клипа длительностью 1 с завершался с кодом 0, но выдавал 0 байт вместо кадра.
+- Исправлено: точка захвата сигнатуры камеры ограничена значением не позднее 250 мс до конца исходника; в обучающем примере сохраняется выбранный индекс кадра. При сбоях декодирования возвращаются диагностические сведения. Сохранённая пользователем геометрия не меняется.
+- Проверки: RED — тест `camera_sample_timestamp_stays_inside_video_at_end` не компилировался до реализации; GREEN — `scripts/check-all.ps1` PASS (WASM, fmt, Clippy, Rust workspace, 98 Node gates), синтетический FFmpeg-клип PASS (691200 байт после корректировки). Реальная пользовательская сцена и GPU — NOT TESTED. Применение — через очередь `scripts/deploy-volley-queue.ps1` после публикации.

@@ -217,8 +217,8 @@ pub async fn calculate(
         }
         let intervals =
             crate::rally_training_comparison::touch_rally_scope(&state, &run, &req.rally)?;
-        let (scores, _) = trajectory::scan_collision_trajectory(&run, &intervals, req.impact)?;
-        let expected = trajectory::collision_frames(&scores, run.frames);
+        let scan = trajectory::scan_collision_trajectory(&state, &run, &intervals, req.impact)?;
+        let expected = trajectory::collision_frames(&scan.candidates, run.frames);
         if expected != req.frames {
             return Err(storage::conflict(
                 "Touch candidates changed: recalculate ball touches",

@@ -58,3 +58,21 @@ Release успешно собран. Штатный Restart отправил SIG
 Геометрический и pose-motion анализ используют принятые и интерполированные точки при вычислении скорости/изломов. TCN получает непрерывные признаки движения, когда Ball Stabilizer интерполировал пропуск. При этом интерполяция не считается независимым наблюдением мяча: касание не может быть подтверждено одной синтетической точкой, соседние синтетические точки не дисквалифицируют реальный источник VBallNet, а восстановление разрыва проверяет наблюдаемые участки полёта по обе стороны. Ручные подтверждения, неизменяемые GPU/CPU свидетельства и артефакт стабилизатора не переписываются.
 
 У события ≈00:14.0 в сохранённом коротком проекте Ball Stabilizer v6 оставлял ряд кадров без точки, а не интерполировал их через резкий отскок. В таком случае отдельный ограниченный детектор разрыва (v3) по-прежнему сопоставляет два реально наблюдаемых участка; линейная выдуманная траектория через сам удар не создаётся. Новый CPU Touch replay нужен для обновления отображаемых касаний.
+
+## 2026-11-23 — отдельное событие контакта с песком в Debug
+
+Владелец новой проверки: rust/volley-core/src/motion/ground_detector.rs. Сохранённая разметка площадки video_edits::court_snapshot передаётся только в CPU-поиск столкновений touch_detector_v4. После подтверждения нисходящего и последующего восходящего движения мяча точка приземления сопоставляется с CourtTransform::tentative_landing. Возвращаются отдельные ground_contacts со значением near_half, far_half, out или line_uncertain; они исключаются из proposals касаний игрока. Без калибровки сцена остаётся прежней, без выдуманного определения стороны. Интерполяция мяча, GPU-артефакты и подтверждённые игроки не переписываются. Статус контакта — гипотеза по видео, а не подтверждённая физическая коллизия: 2D-проекция не доказывает высоту мяча. Классификация типа касания использует тот же фильтр и не принимает устаревший список кандидатов.
+
+Приёмка: Rust unit-тесты падения/подъёма и обеих половин, целевой check/full gate, визуальная проверка двух последних отскоков в Debug после применения. Отдельно проверить спорные эпизоды, где игрок отбивает мяч низко над песком.
+
+### 2026-11-23 ? conservatively bounded court detector v2
+
+Field calibration is necessary but not sufficient to confirm a ground bounce:
+the camera projection of airborne player contacts can still lie inside the
+calibrated polygon. The detector is gated to the final 45 frames of its
+detected rally, requires the ball to reach the visible court band (or the
+immediate out-of-bounds margin), and accepts a decelerating stationary landing
+as well as an upward rebound. Earlier trajectory breaks always remain touch
+candidates. Tests protect the known player contact near 21.03 s from being
+converted into a ground event. Incomplete/uncertain calibration disables
+the additional exclusion rather than weakening player touches.
