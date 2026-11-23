@@ -1388,7 +1388,7 @@
   const annotationCurrentData=()=>annotation.data&&annotationSourceValid();
   const annotationTrajectoryRallySeeds=()=>{
     const proposed=annotation.prediction;
-    if(!proposed||proposed.rally_source!=="saved_cpu_rallies"||!Array.isArray(proposed.rally_intervals))return [];
+    if(!proposed||proposed.rally_source!=="calculated_ball_trajectory_rallies"||!Array.isArray(proposed.rally_intervals))return [];
     return proposed.rally_intervals.slice(0,1024)
       .filter(r=>Number.isSafeInteger(r.start)&&Number.isSafeInteger(r.end)&&
         r.start>=0&&r.start<r.end&&r.end<(annotation.prediction?.total_frames||annotation.data?.total_frames||0))
@@ -1788,17 +1788,43 @@
     if(annotation.busy||annotation.dirty||!s.run||!annotationSourceValid())return;
     const impact=impactSettingsFromPlayer();
     if(!impact){annotationNotice("Проверьте параметры поиска столкновений.",true);return;}
+    const rallies=comparisonMatches(comparison.data)&&comparison.simulated&&
+      comparison.data.trajectory_status==="ready"?comparison.data:null;
+    if(!rallies){
+      annotationNotice("Сначала нажмите «Рассчитать розыгрыши», затем «Рассчитать касания».",true);
+      return;
+    }
+    if(comparison.recalculate.disabled){
+      annotationNotice("Расчёт розыгрышей ещё выполняется. Касания доступны после завершения.",true);
+      return;
+    }
+    const rally=trainingTouchRallySettings(),parameters=rallies.parameters;
+    if(!parameters||parameters.min_trajectory_seconds!==rally.min_trajectory_seconds||
+      parameters.stationary_ball_ms!==rally.stationary_ball_ms||
+      parameters.merge_gap_seconds!==rally.merge_gap_seconds){
+      annotationNotice("Параметры изменились. Повторно рассчитайте розыгрыши перед поиском касаний.",true);
+      return;
+    }
+    if(!Array.isArray(rallies.trajectory_rallies)){
+      annotationNotice("Некорректные интервалы розыгрышей. Повторите расчёт.",true);
+      return;
+    }
+    const rally_intervals=rallies.trajectory_rallies.map(({start,end})=>({start,end}));
+    const source_replay_sha256=rallies.source_replay_sha256;
+    if(!/^[0-9a-f]{64}$/.test(source_replay_sha256)){
+      annotationNotice("Некорректный источник рассчитанных розыгрышей. Повторите расчёт.",true);
+      return;
+    }
     const epoch=annotation.epoch,project=s.project,run=s.run,video=s.video;
     annotation.busy=true;drawAnnotation();
-    window.VolleyballTasks?.set("training-trajectory",{label:"Дебаг",stage:"Touch Detector · только сохранённые розыгрыши",progress:null});
-    annotationNotice("Ищем столкновения по отклонению от параболического полёта внутри розыгрышей, без GPU…");
-    const rally=trainingTouchRallySettings();
+    window.VolleyballTasks?.set("training-trajectory",{label:"Дебаг",stage:"Touch Detector · розыгрыши по мячу",progress:null});
+    annotationNotice("Ищем изменения траектории мяча только внутри рассчитанных розыгрышей, без GPU…");
     const settingsKey=JSON.stringify({rally,impact});
     try{
       const result=await post("/api/training/trajectory/calculate",{
-        project_id:project,rally_run_id:run,rally,impact
+        project_id:project,rally_run_id:run,source_replay_sha256,rally_intervals,impact
       });
-      if(settingsKey!==JSON.stringify({
+      if(comparison.data!==rallies||settingsKey!==JSON.stringify({
         rally:trainingTouchRallySettings(),impact:impactSettingsFromPlayer()
       }))
         throw Error("Настройки розыгрышей изменились. Повторите расчёт касаний.");
@@ -1813,9 +1839,11 @@
           !Number.isSafeInteger(result.ball_motion_interpolation?.result?.rejected_outliers)||
           !Number.isSafeInteger(result.ball_motion_interpolation?.result?.interpolated_frames)||
           !Number.isSafeInteger(result.ball_motion_interpolation?.result?.processed_frames)||
-          result.rally_source!=="saved_cpu_rallies"||
+          result.rally_source!=="calculated_ball_trajectory_rallies"||
+          result.source_replay_sha256!==source_replay_sha256||
           Object.entries(impact).some(([key,value])=>result.impact_settings?.[key]!==value)||
           !Array.isArray(result.rally_intervals)||
+          JSON.stringify(result.rally_intervals)!==JSON.stringify(rally_intervals)||
           result.rally_count!==result.rally_intervals.length||
           result.ball_motion_interpolation.result.processed_frames!==
             result.rally_intervals.reduce((sum,r)=>sum+r.end-r.start+1,0)||
@@ -1837,7 +1865,7 @@
       drawTimeline();drawOverlay();
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run||video!==s.video)return;
       annotationNotice("Touch Detector: обработано "+result.ball_motion_interpolation.result.processed_frames+
-        " кадров в "+result.rally_count+" сохранённых розыгрышах (вне розыгрышей касания не искались; всего в видео "+result.total_frames+" кадров). Интерполяция мяча: отброшено "+result.ball_motion_interpolation.result.rejected_outliers+
+        " кадров в "+result.rally_count+" рассчитанных по мячу розыгрышах (вне розыгрышей касания не искались; всего в видео "+result.total_frames+" кадров). Интерполяция мяча: отброшено "+result.ball_motion_interpolation.result.rejected_outliers+
         " ложных точек, восстановлено "+result.ball_motion_interpolation.result.interpolated_frames+
         " пропущенных кадров. Найдено "+
         result.proposals.length+" кандидатов касаний и "+
@@ -1867,7 +1895,7 @@
       const result=await post("/api/training/trajectory/types",{
         project_id:project,rally_run_id:run,
         source_replay_sha256:candidates.source_replay_sha256,
-        rally,impact,frames:candidates.proposals.map(item=>item.frame)
+        rally_intervals:candidates.rally_intervals,impact,frames:candidates.proposals.map(item=>item.frame)
       });
       if(epoch!==annotation.epoch||s.project!==project||s.run!==run||s.video!==video||
         annotation.prediction!==candidates)return;
@@ -2288,7 +2316,10 @@
   for(const input of [comparison.minSeconds,comparison.stationaryMs,comparison.minImpacts,comparison.context,
     comparison.duration,comparison.gap])
     input.addEventListener("change",invalidateTrainingTouchPrediction);
-  comparison.recalculate.addEventListener("click",()=>void refreshComparison(true));
+  comparison.recalculate.addEventListener("click",()=>{
+    invalidateTrainingTouchPrediction();
+    void refreshComparison(true);
+  });
   comparison.calibrate.addEventListener("click",()=>void refreshComparison(true,true));
   comparison.filter.addEventListener("change",()=>{comparison.shown=200;renderComparison();});
   const annotationContext={

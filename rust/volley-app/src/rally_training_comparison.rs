@@ -36,19 +36,6 @@ pub struct CompareQuery {
     stationary_ball_ms: Option<u32>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct TouchRallyFilter {
-    mode: String,
-    min_trajectory_seconds: Option<f64>,
-    stationary_ball_ms: Option<u32>,
-    min_impacts: Option<u64>,
-    context_frames: Option<u64>,
-    min_duration_frames: Option<u64>,
-    max_touch_gap_frames: Option<u64>,
-    merge_gap_seconds: f64,
-}
-
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 struct Interval {
     start: u64,
@@ -681,42 +668,6 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
         "published_cpu_unchanged":true}))
 }
 
-pub(crate) fn touch_rally_scope(
-    _state: &AppState,
-    run: &ValidatedRun,
-    filter: &TouchRallyFilter,
-) -> Result<Vec<(u64, u64)>, ApiError> {
-    if !filter.merge_gap_seconds.is_finite() || !(0.0..=60.0).contains(&filter.merge_gap_seconds) {
-        return Err(storage::bad_request("Invalid training rally merge gap"));
-    }
-    if filter.mode != "continuous"
-        || filter.min_impacts.is_some()
-        || filter.context_frames.is_some()
-        || filter.min_duration_frames.is_some()
-        || filter.max_touch_gap_frames.is_some()
-    {
-        return Err(storage::bad_request(
-            "Training rally parameters do not match selected algorithm",
-        ));
-    }
-    crate::inference_full::PrimaryRallySettings {
-        min_trajectory_seconds: filter
-            .min_trajectory_seconds
-            .unwrap_or(DEFAULT_MIN_TRAJECTORY_SECONDS),
-        merge_gap_seconds: filter.merge_gap_seconds,
-        stationary_ball_ms: filter
-            .stationary_ball_ms
-            .unwrap_or(crate::cpu_retrack::ball_track::DEFAULT_STATIONARY_BALL_MS),
-    }
-    .validate()
-    .map_err(storage::bad_request)?;
-    let (rallies, _) = cpu_intervals(run)?;
-    Ok(rallies
-        .into_iter()
-        .map(|row| (row.start, row.end))
-        .collect())
-}
-
 pub async fn get(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CompareQuery>,
@@ -751,21 +702,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(merged, vec![(0, 150), (300, 350)]);
-    }
-
-    #[test]
-    fn training_touch_scope_requires_explicit_rally_parameters() {
-        let good = json!({
-            "mode":"continuous",
-            "min_trajectory_seconds":1.5,
-            "merge_gap_seconds":4.0,
-            "stationary_ball_ms":1000
-        });
-        assert!(serde_json::from_value::<TouchRallyFilter>(good).is_ok());
-        assert!(serde_json::from_value::<TouchRallyFilter>(json!({
-            "mode":"continuous","merge_gap_seconds":4.0,"unknown":true
-        }))
-        .is_err());
     }
 
     #[test]

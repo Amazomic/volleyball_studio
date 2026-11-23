@@ -1,12 +1,40 @@
 //! Saved-trajectory only detector calibration from explicit manual labels.
 //! Correction records are never substituted for model predictions.
 use super::*;
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RallyScopeInterval {
+    start: u64,
+    end: u64,
+}
+pub(super) fn checked_rally_scope(
+    rows: &[RallyScopeInterval],
+    frames: u64,
+) -> Result<Vec<(u64, u64)>, ApiError> {
+    if rows.len() > 4096 {
+        return Err(storage::bad_request("Too many calculated ball rallies"));
+    }
+    let mut scope = Vec::<(u64, u64)>::with_capacity(rows.len());
+    for row in rows {
+        if row.start >= row.end
+            || row.end >= frames
+            || scope.last().is_some_and(|&(_, end)| row.start <= end)
+        {
+            return Err(storage::bad_request(
+                "Invalid calculated ball rally intervals",
+            ));
+        }
+        scope.push((row.start, row.end));
+    }
+    Ok(scope)
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CalculateRequest {
     project_id: String,
     rally_run_id: String,
-    rally: crate::rally_training_comparison::TouchRallyFilter,
+    source_replay_sha256: String,
+    rally_intervals: Vec<RallyScopeInterval>,
     #[serde(default)]
     impact: volley_core::motion::DirectionBreakConfig,
 }
@@ -243,9 +271,10 @@ pub async fn calculate(
     let output = tokio::task::spawn_blocking(move || -> Result<Value, ApiError> {
         let state = worker;
         let run = inspect_project(&state, &req.project_id, &req.rally_run_id)?;
-        let intervals = crate::rally_training_comparison::touch_rally_scope(
-            &state, &run, &req.rally,
-        )?;
+        if run.replay_sha != req.source_replay_sha256 {
+            return Err(storage::conflict("Calculated ball rallies belong to a different replay"));
+        }
+        let intervals = checked_rally_scope(&req.rally_intervals, run.frames)?;
         let source = source_sha(&run)?;
         let lib = lock(|| read(&state))?;
         let labels = lib
@@ -294,7 +323,7 @@ pub async fn calculate(
             "court_calibration_revision":court_revision,
             "rally_intervals":intervals.iter().map(|&(start,end)| json!({"start":start,"end":end})).collect::<Vec<_>>(),
             "rally_count":intervals.len(),
-            "rally_source":"saved_cpu_rallies",
+            "rally_source":"calculated_ball_trajectory_rallies",
             "calibration":calibration,"impact_settings":req.impact,
             "ball_motion_interpolation":{"stage":"ball_motion_interpolation_v1","result":preprocessing},
             "metrics_on_labeled_video":metrics,
@@ -335,6 +364,41 @@ mod tests {
                     .collect(),
                 rallies: vec![],
             }],
+        }
+    }
+    #[test]
+    fn calculated_ball_scope_validates_sorted_nonoverlapping_ranges() {
+        let rows = [
+            RallyScopeInterval { start: 20, end: 50 },
+            RallyScopeInterval {
+                start: 80,
+                end: 120,
+            },
+        ];
+        assert_eq!(
+            checked_rally_scope(&rows, 200).unwrap(),
+            vec![(20, 50), (80, 120)]
+        );
+        assert_eq!(checked_rally_scope(&[], 200).unwrap(), vec![]);
+        for bad in [
+            vec![RallyScopeInterval { start: 20, end: 20 }],
+            vec![RallyScopeInterval {
+                start: 10,
+                end: 200,
+            }],
+            vec![
+                RallyScopeInterval {
+                    start: 80,
+                    end: 120,
+                },
+                RallyScopeInterval { start: 20, end: 50 },
+            ],
+            vec![
+                RallyScopeInterval { start: 20, end: 50 },
+                RallyScopeInterval { start: 45, end: 90 },
+            ],
+        ] {
+            assert!(checked_rally_scope(&bad, 200).is_err());
         }
     }
     #[test]

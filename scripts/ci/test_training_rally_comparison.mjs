@@ -162,7 +162,7 @@ assert.ok(!js.slice(calculateStart,calculateEnd).includes("refreshComparison"),
   assert.ok(first>0&&last>first);
   let nextId=0;
   const edited={data:{total_frames:300,touches:[],rallies:[]},
-    prediction:{total_frames:300,proposals:[{frame:42}],rally_source:"saved_cpu_rallies",
+    prediction:{total_frames:300,proposals:[{frame:42}],rally_source:"calculated_ball_trajectory_rallies",
       rally_intervals:[{start:30,end:180}]}};
   const proposed={data:{schema:"volley-rally-training-comparison/1",
     trajectory_status:"ready",trajectory_rallies:[{start:15,end:260}]}};
@@ -175,7 +175,7 @@ assert.ok(!js.slice(calculateStart,calculateEnd).includes("refreshComparison"),
   const prediction=annotationFromPrediction();
   assert.equal(prediction.touches.length,1);
   assert.equal(prediction.rallies.length,1,
-    "A zero-rally CPU run must seed the editable draft from the ball-motion result");
+    "A zero-rally CPU run must seed its draft from the calculated ball intervals");
   assert.equal(prediction.rallies[0].start,30);
   edited.data.rallies=[{id:"manual",start:40,end:170}];
   assert.equal(annotationFromPrediction().rallies[0].id,"manual",
