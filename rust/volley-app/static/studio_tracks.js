@@ -1396,7 +1396,7 @@
     });
     try{
       const result=await post("/api/players/native/reid-review",{
-        ...scope,action:"postprocess_auto_assign",auto_threshold_percent:threshold
+        ...scope,action:"auto_assign",auto_threshold_percent:threshold
       });
       if(token!==state.token||scope.replay_id!==state.replay)return;
       if(!Number.isSafeInteger(result.automatic_count)||result.automatic_count<0 ||

@@ -769,11 +769,6 @@ pub async fn reid_review(
         {
             return Ok(Json(saved));
         }
-        if req.action == "auto_assign" {
-            return Err(storage::conflict(
-                "Сохранённые совпадения отсутствуют или устарели. Нажмите «Обновить признаки и совпадения», затем повторите автопривязку.",
-            ));
-        }
         let comparison =
             super::photo_comparison::compare(state.clone(), headers, req.clone()).await?;
         let result = tokio::task::spawn_blocking(move || {

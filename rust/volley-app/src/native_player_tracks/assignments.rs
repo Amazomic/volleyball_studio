@@ -1289,6 +1289,12 @@ pub(super) fn refresh_automatic_photo_links(
     refresh_automatic_photo_links_with_groups(ctx, doc, matches, &Value::Null, threshold)
 }
 
+pub(super) fn reenable_user_requested_auto_assignments(doc: &mut Value, action: &str) {
+    if action == "auto_assign" {
+        doc["automatic_suppressed_ids"] = json!([]);
+    }
+}
+
 pub(super) fn refresh_automatic_photo_links_with_groups(
     ctx: &Inputs,
     doc: &Value,
@@ -1476,6 +1482,7 @@ fn persist_photo_comparison(
     } else {
         saved_automatic_photo_threshold(&doc)
     };
+    reenable_user_requested_auto_assignments(&mut doc, &req.action);
     let chosen = if auto_assign {
         let (updated, chosen) = refresh_automatic_photo_links_with_groups(
             &scoped,

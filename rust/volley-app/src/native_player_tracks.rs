@@ -176,6 +176,30 @@ pub(crate) use reference_refresh::*;
 #[cfg(test)]
 mod tests;
 
+fn reset_saved_player_links(doc: &mut Value) -> Result<(usize, bool), String> {
+    let manual = doc["assignments"]
+        .as_object()
+        .ok_or("Invalid manual bindings")?;
+    let automatic = doc["automatic_assignments"].as_object();
+    for id in manual
+        .keys()
+        .chain(automatic.into_iter().flat_map(|links| links.keys()))
+    {
+        id.parse::<u64>().map_err(|_| "Invalid linked ID")?;
+    }
+    let removed = manual.len() + automatic.map_or(0, serde_json::Map::len);
+    let suppressed = doc["automatic_suppressed_ids"]
+        .as_array()
+        .is_some_and(|ids| !ids.is_empty());
+    if removed == 0 && !suppressed {
+        return Ok((0, false));
+    }
+    doc["assignments"] = json!({});
+    doc["automatic_assignments"] = json!({});
+    doc["automatic_suppressed_ids"] = json!([]);
+    Ok((removed, true))
+}
+
 // Reset all saved player Track ID bindings for this project, keeping evidence and albums.
 pub async fn reset_project(
     State(state): State<Arc<AppState>>,
@@ -224,33 +248,12 @@ pub async fn reset_project(
             {
                 return Err(storage::bad_request("Invalid project Track ID bindings"));
             }
-            let manual = doc["assignments"]
-                .as_object()
-                .ok_or_else(|| storage::bad_request("Invalid manual bindings"))?
-                .clone();
-            let automatic = doc["automatic_assignments"]
-                .as_object()
-                .cloned()
-                .unwrap_or_default();
-            if manual.is_empty() && automatic.is_empty() {
+            let (removed, changed) =
+                reset_saved_player_links(&mut doc).map_err(storage::bad_request)?;
+            if !changed {
                 continue;
             }
-            let mut suppressed: BTreeSet<u64> = doc["automatic_suppressed_ids"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_u64)
-                .collect();
-            for key in manual.keys().chain(automatic.keys()) {
-                let id = key
-                    .parse::<u64>()
-                    .map_err(|_| storage::bad_request("Invalid linked ID"))?;
-                suppressed.insert(id);
-            }
-            count += manual.len() + automatic.len();
-            doc["assignments"] = json!({});
-            doc["automatic_assignments"] = json!({});
-            doc["automatic_suppressed_ids"] = json!(suppressed);
+            count += removed;
             versioned_store::write_json_checked(&directory, &path, &doc, MAX_LINKS)
                 .map_err(storage::bad_request)?;
             versions += 1;

@@ -2788,3 +2788,58 @@ fn ambiguous_or_unverified_visual_group_does_not_invent_an_athlete() {
     assert!(!chosen.contains_key(&8));
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn reset_player_links_allows_auto_assignment_again_above_seventy_five_percent() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let ctx = context(&root, sha, tracks);
+    let mut doc = base_document(&ctx);
+    doc["assignments"] = json!({"7":"abcdef012345"});
+    doc["automatic_assignments"] = json!({"8":"abcdef012345"});
+    doc["automatic_suppressed_ids"] = json!([7, 8]);
+    let (removed, changed) = reset_saved_player_links(&mut doc).unwrap();
+    assert_eq!(removed, 2);
+    assert!(changed);
+    assert_eq!(doc["assignments"], json!({}));
+    assert_eq!(doc["automatic_assignments"], json!({}));
+    assert_eq!(doc["automatic_suppressed_ids"], json!([]));
+    let matches =
+        json!({"7":[{"player_id":"abcdef012345", "cosine_similarity":0.91, "samples_used":3}]});
+    let (_, linked) = refresh_automatic_photo_links(&ctx, &doc, &matches, 0.75).unwrap();
+    assert_eq!(linked.get(&7).map(String::as_str), Some("abcdef012345"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reset_player_links_removes_old_suppression_without_existing_links() {
+    let mut doc = json!({"assignments":{},"automatic_assignments":{},
+        "automatic_suppressed_ids":[7],"excluded_ids":[9]});
+    let (removed, changed) = reset_saved_player_links(&mut doc).unwrap();
+    assert_eq!(removed, 0);
+    assert!(changed);
+    assert_eq!(doc["automatic_suppressed_ids"], json!([]));
+    assert_eq!(doc["excluded_ids"], json!([9]));
+}
+
+#[test]
+fn explicit_auto_assignment_recovers_links_suppressed_by_a_previous_reset() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let ctx = context(&root, sha, tracks);
+    let mut doc = base_document(&ctx);
+    doc["automatic_suppressed_ids"] = json!([7]);
+    let matches = json!({"7":[{"player_id":"abcdef012345",
+        "cosine_similarity":0.91, "samples_used":3}]});
+    assert!(refresh_automatic_photo_links(&ctx, &doc, &matches, 0.75)
+        .unwrap()
+        .1
+        .is_empty());
+    reenable_user_requested_auto_assignments(&mut doc, "postprocess_auto_assign");
+    assert_eq!(doc["automatic_suppressed_ids"], json!([7]));
+    reenable_user_requested_auto_assignments(&mut doc, "auto_assign");
+    let (_, chosen) = refresh_automatic_photo_links(&ctx, &doc, &matches, 0.75).unwrap();
+    assert_eq!(chosen.get(&7).map(String::as_str), Some("abcdef012345"));
+    assert_eq!(doc["automatic_suppressed_ids"], json!([]));
+    fs::remove_dir_all(root).unwrap();
+}

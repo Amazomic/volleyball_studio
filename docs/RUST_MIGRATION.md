@@ -3612,7 +3612,6 @@ Studio показывает кнопку перехода между debug и re
 - `rust/volley-app/src/touch_annotation/trajectory.rs`, `rust/volley-app/static/studio.js`: версия результата `touch_detector_v4` и согласованная проверка ответа API. Обновлены Node-контракт и пути владельца в `docs/RUST_CANONICAL_OWNERS.json` и `docs/TOUCH_ANNOTATION_DATASET.md`. Существующая кнопка «Рассчитать касания» и URL сохранены.
 - RED→GREEN: `debug_touch_detector_preserves_210_and_217_separate_collisions`, `debug_touch_detector_rejects_spurious_launch_when_gap_is_not_continuous`; 307 тестов `volley-core` PASS. `scripts/check-all.ps1` PASS: Rust fmt/Clippy/workspace tests, WASM и 98 Node gates. GPU не запускался; проверка нового ответа API на пользовательских данных — отдельно после публикации.
 
-
 ### 2026-11-23 — Устойчивость запуска задач, статусы ReID и экономия CPU
 
 - База origin/develop c42a9a77; ветка codex/20261123/rust-architecture-hardening. Изменены владельцы studio_pipeline.rs, inference_full.rs, quick_reel.rs, quick_reel_pipeline.rs, native_player_tracks/embedding_jobs.rs, cpu_touches.rs и UI-адаптер studio_tabs.js.
@@ -3621,3 +3620,10 @@ Studio показывает кнопку перехода между debug и re
 - FFmpeg ReID кропы выполняются не более чем двумя параллельными задачами с прежними аргументами. SHA проверки видео, модели и replay сохранены, порядок результатов возвращён. В касаниях удалено копирование полного блока после Ball Stabilizer / ball mask, source Track ID проверяется по исходному кольцевому буферу.
 - Проверки: scripts/check-all.ps1 PASS (WASM, fmt, Clippy -D warnings, workspace tests, 98 Node gates), admission и completion quality, 5 source-track тестов PASS. Синтетические FFmpeg кропы 6/6 SHA-256 идентичны (последовательно 282 мс; параллельно 152 мс на тестовом клипе; реальный прирост не доказан).
 - Ограничения: полный GPU/CPU benchmark, межпроцессная нагрузка и browser E2E не запускались. Структурный монолит studio_pipeline.rs требует отдельного рефакторинга; source_index.rs уже очищает Weak gates в исходной базе. Деплой — штатной очередью из чистой ветки develop.
+
+### 2026-11-23 — Повторная автопривязка игроков после сброса Track ID
+
+- База `c42a9a77` (`origin/develop`); владельцы: `rust/volley-app/src/native_player_tracks.rs`, `rust/volley-app/src/native_player_tracks/assignments.rs`, `rust/volley-app/src/native_player_tracks/reid_handlers.rs`, `rust/volley-app/src/native_player_tracks/tests.rs`, `rust/volley-app/static/studio_tracks.js`, `scripts/ci/test_studio_auto_assign_threshold.mjs`.
+- Причина: сброс привязок сохранял ранее связанные Track ID в `automatic_suppressed_ids`, поэтому повторная автопривязка пропускала даже кандидатов с оценкой >=75%; устаревший кэш дополнительно требовал ручного пересчёта.
+- Исправление: сброс очищает ссылки и старые запреты без изменения фотографий или признаков. Явное «Автопривязать» использует `auto_assign`, повторно рассматривает ранее подавленные ID и при необходимости рассчитывает совпадения. Автоматическая постобработка `postprocess_auto_assign` по-прежнему уважает ручное подавление, ручные назначения и исключения не заменяются; действуют проверки конфликтов ID.
+- RED → GREEN: новые регрессионные тесты сброса и повторной привязки (3 PASS); обновлён контракт Node интерфейса. `RUST_TEST_THREADS=1 scripts/check-all.ps1`: PASS (WASM, fmt, Clippy, Rust workspace, 98 Node gates); `git diff --check`: PASS. GPU и независимое сравнение на живом матче: NOT TESTED. Применение: очередь сборки после публикации в `develop`.
