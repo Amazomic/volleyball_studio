@@ -27,7 +27,9 @@ assert.ok(rust.includes("scan_collision_trajectory(&state, &run, &intervals, req
 assert.ok(!rust.includes('method":"vballnet_trajectory_breaks_and_motion_extrema"'));
 assert.ok(scanner.includes("full_video_ball_impacts_with_reconstruction"));
 assert.ok(scanner.includes("reconstruct_short_ball_motion"));
-assert.match(rallyScope,/let \(rallies, _\) = cpu_intervals\(run\)\?/);
+assert.ok(!rust.includes("touch_rally_scope("),"Touch calculation must not substitute CPU intervals");
+assert.match(js,/comparison\.recalculate\.addEventListener\("click",\(\)=>\{\s*invalidateTrainingTouchPrediction\(\)/,
+  "Recalculating rallies must invalidate previously computed touches");
 assert.ok(scanner.includes("reconstruction.processed_frames += 1"));
 assert.ok(scanner.includes("reader.finish() != expected_sha"));
 assert.ok(typesRust.includes("scan_collision_trajectory(&state, &run, &intervals, req.impact)"));
@@ -80,8 +82,12 @@ const timeline={data:{
 const ui={video:{currentTime:3.333,addEventListener(){}}};
 let drawn=0;
 const context={
-  $,s,timeline,ui,trainingNames:{attack:"Атака",dig:"Приём снизу",overhead_pass:"Передача сверху"},comparison:{epoch:0,data:{trajectory_status:"ready",trajectory_rallies:[{start:80,end:180}]},
-    mode:{value:"continuous"},minSeconds:{value:"1.5"},stationaryMs:{value:"1000"}},
+  $,s,timeline,ui,trainingNames:{attack:"Атака",dig:"Приём снизу",overhead_pass:"Передача сверху"},comparison:{epoch:0,simulated:true,
+    data:{trajectory_status:"ready",trajectory_rallies:[{start:80,end:180}],
+      source_replay_sha256:"a".repeat(64),parameters:{
+        min_trajectory_seconds:1.5,stationary_ball_ms:1000,merge_gap_seconds:4}},
+    mode:{value:"continuous"},minSeconds:{value:"1.5"},stationaryMs:{value:"1000"},
+    recalculate:{disabled:false}},
   comparisonMatches:data=>data?.trajectory_status==="ready",
   trainingGapSeconds:()=>4,
   document:{createElement:()=>new Element()},
@@ -104,13 +110,13 @@ const context={
       return {schema:"volley-trajectory-touch-proposals/1",project_id:"p",
         rally_run_id:"r",video:"match.mp4",total_frames:200,
         source_replay_sha256:"a".repeat(64),
-        rally_count:1,rally_source:"saved_cpu_rallies",rally_intervals:[{start:95,end:150}],
+        rally_count:1,rally_source:"calculated_ball_trajectory_rallies",rally_intervals:[{start:80,end:180}],
         proposals:[{frame:100,score:9},{frame:140,score:3}],
         ground_contacts:[{frame:120,position:[0.4,0.7],landing:"near_half"}],
         court_filter_active:true,
         method:"touch_detector_v4",
         ball_motion_interpolation:{stage:"ball_motion_interpolation_v1",
-          result:{raw_observations:40,processed_frames:56,rejected_outliers:2,interpolated_frames:9}},
+          result:{raw_observations:40,processed_frames:101,rejected_outliers:2,interpolated_frames:9}},
         impact_settings:Object.fromEntries(Object.entries(payload.impact).reverse()),
         calibration:{min_score:0,shift_frames:0,training_videos:0},
         metrics_on_labeled_video:null};
@@ -145,18 +151,25 @@ assert.equal(comparisonRefreshes,0,"Opening Debug must not start a full-video ra
 assert.equal(annotation.data.revision,0);
 assert.equal(annotation.calculate.disabled,false);
 assert.equal(annotation.save.disabled,true);
+context.comparison.simulated=true;
+context.comparison.data={trajectory_status:"ready",trajectory_rallies:[{start:80,end:180}],
+  source_replay_sha256:"a".repeat(64),parameters:{
+    min_trajectory_seconds:1.5,stationary_ball_ms:1000,merge_gap_seconds:4}};
 await elements.get("studio-annotation-calculate").click();
 assert.equal(calculations.length,1);
 assert.equal(comparisonRefreshes,0,"Touch calculation must not launch full-video rally comparison");
-assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].rally)),
-  {mode:"continuous",merge_gap_seconds:4,min_trajectory_seconds:1.5,stationary_ball_ms:1000});
+assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].rally_intervals)),
+  [{start:80,end:180}],"Touch calculation must use calculated ball rally intervals");
+assert.equal(calculations[0].source_replay_sha256,"a".repeat(64));
+assert.equal(Object.hasOwn(calculations[0],"rally"),false,
+  "Touch calculation must not re-run CPU rally scope");
 assert.equal(annotation.prediction.proposals.length,2);
 assert.equal(annotation.prediction.ground_contacts.length,1);
 assert.equal(annotation.prediction.ground_contacts[0].landing,"near_half");
 assert.equal(annotation.prediction.ball_motion_interpolation.result.rejected_outliers,2);
 assert.equal(annotation.prediction.ball_motion_interpolation.result.interpolated_frames,9);
-assert.equal(annotation.prediction.ball_motion_interpolation.result.processed_frames,56);
-assert.match(elements.get("studio-annotation-status").textContent,/обработано 56 кадров в 1 сохранённых розыгрышах/);
+assert.equal(annotation.prediction.ball_motion_interpolation.result.processed_frames,101);
+assert.match(elements.get("studio-annotation-status").textContent,/обработано 101 кадров в 1 рассчитанных по мячу розыгрышах/);
 assert.match(elements.get("studio-annotation-status").textContent,/вне розыгрышей касания не искались/);
 assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].impact)),{
   min_turn_angle_deg:45,max_join_error_px:28,
@@ -165,6 +178,8 @@ assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].impact)),{
 assert.equal(annotation.classify.disabled,false,"Type stage requires ball candidates");
 await elements.get("studio-annotation-classify").click();
 assert.deepEqual(JSON.parse(JSON.stringify(classifications[0].frames)),[100,140]);
+assert.deepEqual(JSON.parse(JSON.stringify(classifications[0].rally_intervals)),
+  [{start:80,end:180}],"Types must reuse the same ball rally scope");
 assert.deepEqual(JSON.parse(JSON.stringify(classifications[0].impact)),
   JSON.parse(JSON.stringify(calculations[0].impact)));
 assert.equal(classifications[0].source_replay_sha256,"a".repeat(64));
@@ -180,8 +195,8 @@ elements.get("studio-annotation-seed-trajectory").click();
 assert.equal(annotation.dirty,true);
 assert.equal(annotation.data.touches.length,2);
 assert.equal(annotation.data.rallies.length,1);
-assert.equal(annotation.data.rallies[0].start,95,"Adoption must use the saved CPU rally start");
-assert.equal(annotation.data.rallies[0].end,150);
+assert.equal(annotation.data.rallies[0].start,80,"Adoption must use the calculated ball rally start");
+assert.equal(annotation.data.rallies[0].end,180);
 assert.equal(elements.get("studio-annotation-calculate").disabled,true);
 assert.equal(writeActions.length,0,"Adopting candidates is a local edit");
 const touched=annotation.data.touches[0];
@@ -199,6 +214,10 @@ assert.equal(annotation.data.revision,1);
 assert.equal(annotation.prediction,null,"Saved labels require a fresh calculation");
 assert.equal(annotation.typePrediction,null,"Saved labels must invalidate classified proposals");
 assert.equal(elements.get("studio-annotation-calculate").disabled,false);
+context.comparison.simulated=true;
+context.comparison.data={trajectory_status:"ready",trajectory_rallies:[{start:80,end:180}],
+  source_replay_sha256:"a".repeat(64),parameters:{
+    min_trajectory_seconds:1.5,stationary_ball_ms:1000,merge_gap_seconds:4}};
 await elements.get("studio-annotation-calculate").click();
 assert.equal(calculations.length,2);
 assert.equal(comparisonRefreshes,0,"Repeated touch calculation must stay within saved rallies");
@@ -213,7 +232,21 @@ assert.equal(calculations[2].impact.min_turn_angle_deg,75);
 invalidateTrainingTouchPrediction();
 assert.equal(annotation.prediction,null,"Changing rally settings must invalidate old touch candidates");
 assert.ok(drawn>=4);
+context.comparison.data=null;
+const beforeMissingRallies=calculations.length;
+await elements.get("studio-annotation-calculate").click();
+assert.equal(calculations.length,beforeMissingRallies,
+  "Without a calculated rally result the touch API must not be called");
+assert.match(elements.get("studio-annotation-status").textContent,/Сначала нажмите «Рассчитать розыгрыши»/);
+context.comparison.data={trajectory_status:"ready",trajectory_rallies:[{start:80,end:180}],
+  source_replay_sha256:"a".repeat(64),parameters:{
+    min_trajectory_seconds:1.5,stationary_ball_ms:1000,merge_gap_seconds:4}};
+context.comparison.recalculate.disabled=true;
+await elements.get("studio-annotation-calculate").click();
+assert.equal(calculations.length,beforeMissingRallies,
+  "Touches must not run while a newer rally calculation is in flight");
+assert.match(elements.get("studio-annotation-status").textContent,/Расчёт розыгрышей ещё выполняется/);
 assert.ok(logs.some(entry=>entry.key==="training-trajectory"&&
-  entry.task.stage==="Touch Detector · только сохранённые розыгрыши"));
+  entry.task.stage==="Touch Detector · розыгрыши по мячу"));
 assert.ok(logs.some(entry=>entry.key==="training-annotation"));
 console.log("PASS: ballistic collision parameters -> calculate -> classify -> edit -> save -> invalidate and recalculate");

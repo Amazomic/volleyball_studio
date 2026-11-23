@@ -13,7 +13,7 @@ pub(crate) struct ClassifyRequest {
     project_id: String,
     rally_run_id: String,
     source_replay_sha256: String,
-    rally: crate::rally_training_comparison::TouchRallyFilter,
+    rally_intervals: Vec<trajectory::RallyScopeInterval>,
     #[serde(default)]
     impact: volley_core::motion::DirectionBreakConfig,
     frames: Vec<u64>,
@@ -215,8 +215,7 @@ pub async fn calculate(
         if run.replay_sha != req.source_replay_sha256 {
             return Err(storage::conflict("Ball candidate replay changed"));
         }
-        let intervals =
-            crate::rally_training_comparison::touch_rally_scope(&state, &run, &req.rally)?;
+        let intervals = trajectory::checked_rally_scope(&req.rally_intervals, run.frames)?;
         let scan = trajectory::scan_collision_trajectory(&state, &run, &intervals, req.impact)?;
         let expected = trajectory::collision_frames(&scan.candidates, run.frames);
         if expected != req.frames {
