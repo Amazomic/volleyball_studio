@@ -567,7 +567,32 @@ pub async fn start(
     headers: HeaderMap,
     Json(request): Json<StartRequest>,
 ) -> ApiResult<Value> {
+    let _admission = crate::studio_pipeline::admission_guard().await;
+    start_internal(state, headers, request, false).await
+}
+
+pub(crate) async fn start_integrated(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<StartRequest>,
+) -> ApiResult<Value> {
+    start_internal(state, headers, request, true).await
+}
+
+async fn start_internal(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    request: StartRequest,
+    integrated: bool,
+) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
+    if !integrated
+        && (crate::studio_pipeline::has_active().await || state.quick_reel.has_active().await)
+    {
+        return Err(storage::conflict(
+            "GPU занят анализом Studio или быстрым рилсом",
+        ));
+    }
     if !state.writes_enabled {
         return Err(storage::conflict(
             "GPU-запуск возможен только в рабочем хранилище",

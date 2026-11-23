@@ -1122,8 +1122,11 @@ pub async fn start(
 ) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
     ensure_write(&state)?;
-    if crate::studio_pipeline::has_active().await {
-        return Err(storage::conflict("Полный анализ студии уже выполняется"));
+    let _admission = crate::studio_pipeline::admission_guard().await;
+    if crate::studio_pipeline::has_active().await || state.full_inference.has_active().await {
+        return Err(storage::conflict(
+            "GPU занят анализом Studio или отдельной GPU-задачей",
+        ));
     }
     // In-process single flight. The separate file lock also protects
     // multiple Rust servers that happen to share the same dev data root.

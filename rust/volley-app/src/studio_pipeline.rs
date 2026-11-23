@@ -635,6 +635,11 @@ fn manager() -> &'static Mutex<Option<Running>> {
     static MANAGER: OnceLock<Mutex<Option<Running>>> = OnceLock::new();
     MANAGER.get_or_init(|| Mutex::new(None))
 }
+
+pub(crate) async fn admission_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static ADMISSION: OnceLock<Mutex<()>> = OnceLock::new();
+    ADMISSION.get_or_init(|| Mutex::new(())).lock().await
+}
 pub(crate) async fn has_active() -> bool {
     manager().lock().await.is_some()
 }
@@ -1662,9 +1667,10 @@ async fn gpu(
         "inference_full::start",
         payload,
     )?;
-    let Json(start) = inference_full::start(State(app.clone()), HeaderMap::new(), Json(config))
-        .await
-        .map_err(reason)?;
+    let Json(start) =
+        inference_full::start_integrated(State(app.clone()), HeaderMap::new(), Json(config))
+            .await
+            .map_err(reason)?;
     let id = require_id(&start, "job_id")?;
     let mut last_phase = String::new();
     let mut last_bucket = -1i32;
@@ -1873,6 +1879,9 @@ async fn pipeline(
         status["gpu_reused"] = json!(true);
         status["result_reused"] = json!(true);
         status["reused_from_id"] = existing["id"].clone();
+        status["automatic_identity"] = existing["automatic_identity"].clone();
+        status["automatic_identity_complete"] = existing["automatic_identity_complete"].clone();
+        status["automatic_identity_error"] = existing["automatic_identity_error"].clone();
         log_event(
             path,
             "Повторное использование",
@@ -2425,6 +2434,30 @@ async fn pipeline(
     }
     Ok(())
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CompletionQuality {
+    Complete,
+    IdentityFailed,
+    IdentityReviewRequired,
+}
+
+fn completion_quality(mode: PipelineMode, status: &Value) -> CompletionQuality {
+    if mode == PipelineMode::Gpu {
+        return CompletionQuality::Complete;
+    }
+    if status["automatic_identity_error"]
+        .as_str()
+        .is_some_and(|error| !error.is_empty())
+    {
+        CompletionQuality::IdentityFailed
+    } else if status["automatic_identity_complete"] == false {
+        CompletionQuality::IdentityReviewRequired
+    } else {
+        CompletionQuality::Complete
+    }
+}
+
 fn cancelled_outcome(outcome: Result<(), String>, cancelled: bool) -> Result<(), String> {
     if cancelled {
         Err("cancelled".into())
@@ -2481,10 +2514,18 @@ async fn perform(
     match outcome {
         Ok(()) => {
             status["status"] = json!("complete");
-            status["stage"] = json!(match request.mode {
-                PipelineMode::Full => "GPU и CPU завершены",
-                PipelineMode::Gpu => "Первичный GPU-анализ завершён",
-                PipelineMode::Post => "Новая CPU-постобработка завершена",
+            let quality = completion_quality(request.mode, &status);
+            status["completion_quality"] = json!(quality);
+            status["stage"] = json!(if quality == CompletionQuality::IdentityFailed {
+                "Анализ завершён · автопривязка игроков не выполнена"
+            } else if quality == CompletionQuality::IdentityReviewRequired {
+                "Анализ завершён · остались непривязанные ID"
+            } else {
+                match request.mode {
+                    PipelineMode::Full => "GPU и CPU завершены",
+                    PipelineMode::Gpu => "Первичный GPU-анализ завершён",
+                    PipelineMode::Post => "Новая CPU-постобработка завершена",
+                }
             });
             status["progress_percent"] = json!(100.0);
             status["pipeline_complete"] = json!(request.mode != PipelineMode::Gpu);
@@ -2632,6 +2673,7 @@ pub async fn start(
             "Видео не принадлежит выбранному проекту",
         ));
     }
+    let _admission = admission_guard().await;
     let mut slot = manager().lock().await;
     // If the HTTP response was lost after scheduling, replaying the same
     // client token must recover the saved run rather than launch a duplicate.
@@ -2694,7 +2736,7 @@ pub async fn start(
         "gpu_rally_mask":null,"gpu_rally_mask_sha256":null,
         "postprocessing_id":null,"current_gpu_job_id":null,
         "source_identity":null,"gpu_reused":false,"result_reused":false,
-        "reused_from_id":null,"pipeline_complete":false,"error":null
+        "reused_from_id":null,"pipeline_complete":false,"completion_quality":null,"error":null
     });
     save(&path, &status).map_err(storage::internal)?;
     log_native(
@@ -3069,6 +3111,58 @@ mod tests {
             pipeline_stage_id("Монтажная временная разметка"),
             "material"
         );
+    }
+
+    #[test]
+    fn completion_quality_distinguishes_identity_failure_from_pending_review() {
+        assert_eq!(json!(CompletionQuality::IdentityFailed), "identity_failed");
+        assert_eq!(
+            json!(CompletionQuality::IdentityReviewRequired),
+            "identity_review_required"
+        );
+        assert_eq!(
+            completion_quality(
+                PipelineMode::Full,
+                &json!({"automatic_identity_error":"OpenVINO unavailable"})
+            ),
+            CompletionQuality::IdentityFailed
+        );
+        assert_eq!(
+            completion_quality(
+                PipelineMode::Post,
+                &json!({"automatic_identity_complete":false})
+            ),
+            CompletionQuality::IdentityReviewRequired
+        );
+        assert_eq!(
+            completion_quality(
+                PipelineMode::Post,
+                &json!({"automatic_identity_complete":true})
+            ),
+            CompletionQuality::Complete
+        );
+        assert_eq!(
+            completion_quality(
+                PipelineMode::Gpu,
+                &json!({"automatic_identity_error":"OpenVINO unavailable"})
+            ),
+            CompletionQuality::Complete
+        );
+    }
+
+    #[tokio::test]
+    async fn admission_serializes_incompatible_run_starts() {
+        let first = admission_guard().await;
+        let next = tokio::spawn(async move {
+            let _second = admission_guard().await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!next.is_finished());
+        drop(first);
+        tokio::time::timeout(std::time::Duration::from_secs(5), next)
+            .await
+            .expect("second admission must proceed after first releases")
+            .expect("waiting admission must finish");
     }
 
     #[test]

@@ -1669,15 +1669,14 @@ fn detect_stream_with_pose(
             gate_ball_confidence(&mut block, settings.min_ball_score);
         }
         let clean = if stabilized.is_some() {
-            block.clone()
+            block
         } else if let Some(mask) = ball_mask {
-            let mut clean = block.clone();
-            for frame in &mut clean {
+            for frame in &mut block {
                 if !mask.accepted[frame.frame_index as usize] {
                     frame.selected_ball = None;
                 }
             }
-            clean
+            block
         } else {
             exclude_ball_teleports(&block, width, height)
         };
@@ -1873,7 +1872,9 @@ fn detect_stream_with_pose(
                 let Some(track_id) = event.provisional_track_id else {
                     continue;
                 };
-                if !source_frame_contains_track(&block, event.frame_index, track_id)
+                let (first_slice, second_slice) = input.as_slices();
+                if !(source_frame_contains_track(first_slice, event.frame_index, track_id)
+                    || source_frame_contains_track(second_slice, event.frame_index, track_id))
                     || stabilized.is_some_and(|v| {
                         v.motion.interpolated.get(event.frame_index as usize) == Some(&true)
                     })

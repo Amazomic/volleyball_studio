@@ -172,7 +172,7 @@ async fn quick_gpu_model(
         return Err("cancelled".into());
     }
     let Json(start) =
-        inference_full::start(State(work.app.clone()), HeaderMap::new(), Json(request))
+        inference_full::start_integrated(State(work.app.clone()), HeaderMap::new(), Json(request))
             .await
             .map_err(reason)?;
     let job_id = require_id(&start, "job_id")?;

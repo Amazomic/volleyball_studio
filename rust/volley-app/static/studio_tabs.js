@@ -897,7 +897,9 @@
           !(id==="pose"&&run?.gpu_jobs?.pose)||
         id==="pose"&&run?.profile?.gpu?.pose_enabled===false||
         id==="touch_types"&&!classification);
-      node.classList.toggle("is-failed",run?.status==="failed"&&id===currentId);
+      node.classList.toggle("is-failed",
+        run?.status==="failed"&&id===currentId||
+        id==="identity"&&run?.completion_quality==="identity_failed");
       const pct=stageProgressPercent(entry,!!running,done);
       node.style.setProperty("--stage-progress",(pct??0)+"%");
       node.classList.toggle("is-progress-unknown",!!running&&pct===null);
@@ -1026,7 +1028,11 @@
     target.append(
       make("strong","analysis-flow-result-title","Последний запуск · "+mode),
       make("span","analysis-flow-result-status",
-        (statuses[source.status]||"Ожидание данных")+
+        (source.status==="complete"&&source.completion_quality==="identity_failed"?
+          "Ошибка автопривязки":
+         source.status==="complete"&&source.completion_quality==="identity_review_required"?
+          "Нужна проверка ID":
+          statuses[source.status]||"Ожидание данных")+
         (elapsed==null?"":" · "+historyDuration(Number(elapsed)))+timestamp)
     );
   };
@@ -1078,7 +1084,9 @@
       "Всего · "+historyDuration(row.duration_ms):"";
     const clock=historyClock(current);
     if(current.status==="queued")return "Ожидает запуска";
-    const prefix=current.status==="complete"?"Завершён":
+    const prefix=current.status==="complete"?
+      (current.completion_quality==="identity_failed"?"Ошибка автопривязки":
+       current.completion_quality==="identity_review_required"?"Нужна проверка ID":"Завершён"):
       current.status==="failed"?"Ошибка":
       current.status==="cancelled"?"Отменён":
       current.status==="interrupted"?"Прерван":"Выполняется";
@@ -1149,12 +1157,17 @@
     for(const row of rows){
       const current=latest&&latest.id===row.id?latest:null;
       const currentStatus=current?.status||row.status;
+      const quality=(current||row).completion_quality;
+      const statusLabel=currentStatus==="complete"&&quality==="identity_failed"?
+        "Ошибка автопривязки":
+        currentStatus==="complete"&&quality==="identity_review_required"?
+          "Нужна проверка ID":statuses[currentStatus]||String(currentStatus||"—");
       const details=make("details","analysis-history-run"),summary=make("summary");
       details.dataset.runId=row.id;
       summary.append(make("strong","",(labels[row.mode]||labels.full)+" · "+String(row.video||"—")));
       const date=Number.isFinite(row.started_ms)?new Date(row.started_ms).toLocaleString():"Дата недоступна";
       summary.append(make("span","analysis-history-date",date),
-        make("span","analysis-history-status",statuses[currentStatus]||String(currentStatus||"—")),
+        make("span","analysis-history-status",statusLabel),
         make("span","analysis-history-runtime",historyTimeLine(row,current)));
       if(row.result_reused===true)summary.append(make("span","","Готовый результат"));
       else if(row.gpu_reused===true)summary.append(make("span","","GPU использован повторно"));
@@ -1199,7 +1212,10 @@
     const statuses={queued:"В очереди",running:"Выполняется",cancelling:"Останавливается",
       complete:"Завершён",failed:"Ошибка",cancelled:"Отменён",interrupted:"Прерван"};
     const label=item.querySelector(".analysis-history-status");
-    if(label)label.textContent=statuses[status.status]||String(status.status);
+    if(label)label.textContent=status.status==="complete"&&
+      status.completion_quality==="identity_failed"?"Ошибка автопривязки":
+      status.status==="complete"&&status.completion_quality==="identity_review_required"?
+        "Нужна проверка ID":statuses[status.status]||String(status.status);
     const stage=item.querySelector(".analysis-history-live-stage");
     if(stage)stage.textContent=liveHistoryLine(status);
     const runtime=item.querySelector(".analysis-history-runtime");
@@ -1287,8 +1303,16 @@
         stage+" · "+(Number.isFinite(percent)?percent.toFixed(1)+"%":"—"));
     }else{
       window.VolleyballTasks?.clear("analysis");
+      const identityFailed=status.completion_quality==="identity_failed";
+      const identityReview=status.completion_quality==="identity_review_required";
       saveMessage(status.status==="complete"?
-        (mode==="gpu"?"Новый GPU-анализ сохранён. Версия доступна в шапке.":
+        (identityFailed?
+          "Анализ сохранён, но автопривязка игроков не выполнена: "+
+            String(status.automatic_identity_error||"не удалось вычислить совпадения")+
+            ". Проверьте вкладку «Игроки» и повторите обновление признаков.":
+         identityReview?
+          "Анализ сохранён. Остались непривязанные Track ID — проверьте вкладку «Игроки».":
+         mode==="gpu"?"Новый GPU-анализ сохранён. Версия доступна в шапке.":
          mode==="post"?"Создан новый вариант CPU-постобработки для выбранного GPU.":
          status.result_reused===true?
           "Настройки совпали: выбраны готовые версии GPU и CPU.":
@@ -1299,7 +1323,8 @@
         status.status==="failed"||status.status==="interrupted"?
           "Ошибка анализа: "+String(status.error||stage):
           "Готово к новому запуску.",
-        status.status==="failed"||status.status==="interrupted");
+        status.status==="failed"||status.status==="interrupted"||
+          identityFailed||identityReview);
     }
     if(notifyCompletion&&status.status==="complete"&&status.id!==state.completedId&&
         status.project_id===projectId()){

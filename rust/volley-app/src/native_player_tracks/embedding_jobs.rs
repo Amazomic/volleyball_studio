@@ -15,6 +15,60 @@ pub struct EmbeddingRequest {
 
 const MAX_EMBEDDING_BATCH_TRACKS: usize = native_reid_cache::MAX_CACHE_BATCH_TRACKS;
 
+async fn decode_embedding_crop(
+    source: std::path::PathBuf,
+    analysis_offset: f64,
+    track_id: u64,
+    best_frame: u64,
+    [x, y, w, h]: [u32; 4],
+) -> Result<(u64, u64, Vec<f32>), ApiError> {
+    let secs = format!("{:.6}", analysis_offset + best_frame as f64 / 30.0);
+    let vf = format!(
+        "crop={w}:{h}:{x}:{y},scale={}:{}:flags=bilinear,format=bgr24",
+        volley_inference::reid_openvino::WIDTH,
+        volley_inference::reid_openvino::HEIGHT
+    );
+    let mut command = tokio::process::Command::new("ffmpeg");
+    command
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            &secs,
+            "-i",
+        ])
+        .arg(&source)
+        .args([
+            "-vf",
+            &vf,
+            "-frames:v",
+            "1",
+            "-an",
+            "-pix_fmt",
+            "bgr24",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ]);
+    command.kill_on_drop(true);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(35), command.output())
+        .await
+        .map_err(|_| storage::bad_request("ReID video crop timed out"))?
+        .map_err(|e| storage::bad_request(format!("FFmpeg ReID crop: {e}")))?;
+    if !result.status.success()
+        || result.stdout.len() != volley_inference::reid_openvino::PIXELS * 3
+    {
+        return Err(storage::bad_request(
+            "Cannot decode an exact BGR Track ID crop",
+        ));
+    }
+    let chw = volley_inference::reid_openvino::bgr24_to_nchw(&result.stdout)
+        .map_err(storage::bad_request)?;
+    Ok((track_id, best_frame, chw))
+}
+
 pub async fn embeddings(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -148,56 +202,34 @@ pub async fn embeddings(
         .await
         .map_err(|e| storage::internal(format!("ReID media slot: {e}")))?;
     let mut frames = Vec::with_capacity(crops.len());
-    for &(track_id, best_frame, [x, y, w, h]) in &crops {
+    let order = crops
+        .iter()
+        .enumerate()
+        .map(|(position, (id, _, _))| (*id, position))
+        .collect::<BTreeMap<_, _>>();
+    let mut decoders = tokio::task::JoinSet::new();
+    for &(track_id, best_frame, crop) in &crops {
         if selected.contains_key(&track_id) {
             continue;
         }
-        let secs = format!("{:.6}", analysis_offset + best_frame as f64 / 30.0);
-        let vf = format!(
-            "crop={w}:{h}:{x}:{y},scale={}:{}:flags=bilinear,format=bgr24",
-            volley_inference::reid_openvino::WIDTH,
-            volley_inference::reid_openvino::HEIGHT
-        );
-        let mut command = tokio::process::Command::new("ffmpeg");
-        command
-            .args([
-                "-nostdin",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-ss",
-                &secs,
-                "-i",
-            ])
-            .arg(&source_file)
-            .args([
-                "-vf",
-                &vf,
-                "-frames:v",
-                "1",
-                "-an",
-                "-pix_fmt",
-                "bgr24",
-                "-f",
-                "rawvideo",
-                "pipe:1",
-            ]);
-        command.kill_on_drop(true);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(35), command.output())
-            .await
-            .map_err(|_| storage::bad_request("ReID video crop timed out"))?
-            .map_err(|e| storage::bad_request(format!("FFmpeg ReID crop: {e}")))?;
-        if !result.status.success()
-            || result.stdout.len() != volley_inference::reid_openvino::PIXELS * 3
-        {
-            return Err(storage::bad_request(
-                "Cannot decode an exact BGR Track ID crop",
-            ));
+        if decoders.len() >= 2 {
+            let completed = decoders
+                .join_next()
+                .await
+                .ok_or_else(|| storage::internal("ReID decode worker disappeared"))?;
+            frames.push(
+                completed.map_err(|e| storage::internal(format!("ReID crop worker: {e}")))??,
+            );
         }
-        let chw = volley_inference::reid_openvino::bgr24_to_nchw(&result.stdout)
-            .map_err(storage::bad_request)?;
-        frames.push((track_id, best_frame, chw));
+        let source = source_file.clone();
+        decoders.spawn(async move {
+            decode_embedding_crop(source, analysis_offset, track_id, best_frame, crop).await
+        });
     }
+    while let Some(completed) = decoders.join_next().await {
+        frames.push(completed.map_err(|e| storage::internal(format!("ReID crop worker: {e}")))??);
+    }
+    frames.sort_by_key(|(track_id, _, _)| order.get(track_id).copied().unwrap_or(usize::MAX));
     let computed = if frames.is_empty() {
         Vec::<(u64, Vec<f32>)>::new()
     } else {

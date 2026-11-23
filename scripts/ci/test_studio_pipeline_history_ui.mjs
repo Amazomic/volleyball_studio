@@ -118,6 +118,13 @@ assert.equal(ui.historyList.children.length,1,"Active run remains visible regard
 state.historyFilter="all";
 result.updateLiveHistory({...running,status:"complete",stage:"Готово",progress_percent:100});
 assert.equal(ui.historyList.children[0].querySelector(".analysis-history-status").textContent,"Завершён");
+result.updateLiveHistory({...running,status:"complete",completion_quality:"identity_failed",
+  automatic_identity_error:"OpenVINO unavailable"});
+assert.equal(ui.historyList.children[0].querySelector(".analysis-history-status").textContent,
+  "Ошибка автопривязки","The saved run must expose a failed ReID stage");
+result.updateLiveHistory({...running,status:"complete",completion_quality:"identity_review_required"});
+assert.equal(ui.historyList.children[0].querySelector(".analysis-history-status").textContent,
+  "Нужна проверка ID","Unassigned athletes must not masquerade as verified");
 
 project="ddddaaaabbbb";
 state.historyRows=[];state.historyFilter="all";
