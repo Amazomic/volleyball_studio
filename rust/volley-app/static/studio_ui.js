@@ -180,7 +180,7 @@
 // Browser APIs (DOM, fetch, storage) must remain JS: user-visible decisions,
 // navigation validation, loading epochs and locale values come from WASM.
 (()=>{
-  const tabs=["preview","analysis","players","montage","quick","report","training"];
+  const tabs=["preview","analysis","players","montage","quick","report"];
   const $=id=>document.getElementById(id);
   const KEY="volley.rust.ui.preferences.v1";
   const KEYS={tab:0,locale:1,theme:2,density:3,reduced_motion:4};
@@ -380,7 +380,7 @@
         "volley_ui_current_load"]){
       if(typeof exports[key]!=="function")throw Error("Missing interface module export "+key);
     }
-    if(exports.volley_ui_api_version()!==1||exports.volley_ui_tab_count()!==7)
+    if(exports.volley_ui_api_version()!==1||exports.volley_ui_tab_count()!==6)
       throw Error("Unsupported interface module contract");
     wasm=exports;
     window.VolleyStudioChain?.setRuntime(exports);

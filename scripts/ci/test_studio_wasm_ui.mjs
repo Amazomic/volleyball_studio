@@ -21,8 +21,8 @@ assert.match(playersCss,/@media\(max-width:650px\)\{\s*#studio-players-view \.pl
   "Narrow Players layout must render the roster above the Track ID gallery");
 assert.match(playersCss,/grid-area:roster;position:sticky;top:18px;align-self:start/,
   "Desktop roster must align with the gallery top and stick near the viewport top");
-assert.deepEqual(navOrder,["players","analysis","preview","training","report","montage"],
-  "Sidebar must include the dedicated training route");
+assert.deepEqual(navOrder,["players","analysis","preview","report","montage"],
+  "Sidebar must omit the removed Debug tab");
 const reportStart=markup.indexOf('id="studio-report-view"');
 const statsStart=markup.indexOf('id="studio-native-stats-panel"');
 assert.ok(reportStart>0&&statsStart>reportStart,
@@ -43,7 +43,7 @@ const profileSelects=[...markup.matchAll(/<select[^>]*id="(studio-(?:gpu|post)[^
 assert.deepEqual(profileSelects.map(attrs=>attrs.id).sort(),
   ["studio-gpu-pose-enabled"]);
 
-const names=["preview","analysis","players","montage","quick","report","training"];
+const names=["preview","analysis","players","montage","quick","report"];
 class Node {
   constructor(tag="div"){
     this.nodeType=1;this.tagName=tag.toUpperCase();this.children=[];
@@ -102,7 +102,7 @@ const ids=[
   "studio-player-create","studio-player-name","studio-player-list","studio-player-count",
   "studio-player-refresh"
 ];
-for(const kind of ["preview","analysis","players","report","montage","training"])
+for(const kind of ["preview","analysis","players","report","montage"])
   ids.push("studio-nav-"+kind);
 ids.push("studio-quick-open");
 const stored=new Map(),calls=[];
@@ -272,15 +272,11 @@ for(let i=0;i<names.length;i++){
   a.nodes.get(name==="quick"?"studio-quick-open":"studio-nav-"+name).dispatch("click");
   await tick();
   assert.equal(a.runtime.get("tab"),i,"WASM tab authority "+name);
-  const correct=name==="training"?"studio-preview-view":"studio-"+name+"-view";
+  const correct="studio-"+name+"-view";
   assert.equal(a.nodes.get(correct).classList.contains("hidden"),false,
     "Tab DOM visibility "+name);
   assert.equal(a.nodes.get(name==="quick"?"studio-quick-open":"studio-nav-"+name).classList.contains("active"),true);
   assert.equal(a.location.hash,"#"+name);
-  if(name==="training"){
-    assert.equal(a.nodes.get("studio-preview-view").classList.contains("training-workspace"),true);
-    assert.equal(a.nodes.get("studio-preview-view").classList.contains("hidden"),false);
-  }
 }
 assert.ok(a.requests.some(x=>x.path==="/api/projects"),"Analysis fetched project list");
  a.nodes.get("studio-history-clear").dispatch("click");
@@ -401,10 +397,12 @@ assert.equal(a.runtime.currentLoad("analysis",old),false);
 assert.equal(a.runtime.currentLoad("analysis",newer),true);
 assert.equal(a.runtime.navigate("invalid"),"preview");
 assert.equal(a.runtime.get("tab"),0);
-const directTraining=createTestEnvironment("#training");
-await directTraining.runtime.ready;await tick();
-assert.equal(directTraining.runtime.get("tab"),6,"Deep link restores the training route");
-assert.equal(directTraining.nodes.get("studio-preview-view").classList.contains("training-workspace"),true);
+const removedDebug=createTestEnvironment("#training");
+await removedDebug.runtime.ready;await tick();
+assert.equal(removedDebug.runtime.get("tab"),0,"Old Debug deep links must open the standard preview");
+assert.equal(removedDebug.nodes.get("studio-preview-view").classList.contains("training-workspace"),false);
+assert.equal(removedDebug.nodes.get("studio-nav-preview").classList.contains("active"),true);
+assert.equal(removedDebug.runtime.navigate("training"),"preview","Removed tab cannot be reactivated");
 
 const b=createTestEnvironment("#players");
 await b.runtime.ready;await tick();
@@ -426,4 +424,4 @@ await tick();
 assert.equal(delayed.nodes.get("studio-player-list").children.length,1);
 assert.equal(delayed.nodes.get("studio-player-list").children[0].textContent,
   "Загрузка библиотеки игроков…","Old player response must not replace the new tab state");
-console.log("Real Rust/WASM browser bridge: seven routes/deep links, safe loading, bilingual labels, persisted visual settings and golden full-pipeline defaults passed");
+console.log("Real Rust/WASM browser bridge: six routes/deep links, safe loading, bilingual labels, persisted visual settings and golden full-pipeline defaults passed");

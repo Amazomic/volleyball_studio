@@ -42,7 +42,7 @@ const window={
   dispatchEvent(){}
 };
 const state={tab:"preview",formProject:"project-1",playersLoaded:true};
-const runtime={navigate:tab=>tab,beginLoad(){}};
+const runtime={navigate:tab=>["preview","analysis","players","report","montage","quick"].includes(tab)?tab:"preview",beginLoad(){}};
 const context={
   document,window,ui,state,runtime,projectId:()=>"project-1",
   loadVideos:()=>Promise.resolve(),loadPlayers:()=>Promise.resolve(),
@@ -66,10 +66,9 @@ assert.equal(previewVideo.paused,true,"Reopening preview must not auto-resume");
 
 previewVideo.paused=false;
 context.switchTab("training");
-assert.equal(ui.preview.hidden.value,false,"Training reuses the existing viewer");
-assert.equal(previewVideo.paused,false,"Entering training preserves the preview player");
-context.switchTab("preview");
-assert.equal(previewVideo.paused,false,"Returning from training preserves playback position");
+assert.equal(ui.preview.hidden.value,false,"Removed Debug route falls back to preview");
+assert.equal(state.tab,"preview","Debug cannot become the active tab");
+assert.equal(previewVideo.paused,false,"A stale Debug link must not interrupt preview playback");
 
 editorVideo.paused=false;
 fire("play",editorVideo);

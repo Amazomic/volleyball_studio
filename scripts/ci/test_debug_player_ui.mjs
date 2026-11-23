@@ -7,8 +7,9 @@ const css = read("rust/volley-app/static/studio.css");
 const js = read("rust/volley-app/static/studio.js");
 const i18n = read("rust/volley-web/src/studio_i18n.tsv");
 
-assert.match(html, /id="studio-nav-training"[^>]*>[^<]*<span>[^<]*<\/span> Дебаг<\/a>/);
-assert.match(html, /class="studio-training-caption">Дебаг<\/span>/);
+assert.doesNotMatch(html,/id="studio-nav-training"|data-studio-tab="training"/,
+  "Debug must not be accessible as a tab");
+assert.doesNotMatch(html,/class="studio-training-caption"/);
 assert.ok(i18n.includes("Дебаг\tDebug"));
 
 const viewerHead = html.indexOf('<div class="viewer-head">');

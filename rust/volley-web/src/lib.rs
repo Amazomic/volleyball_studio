@@ -95,7 +95,7 @@ pub extern "C" fn volley_selection_at(index: u32) -> i32 {
 
 /// Authoritative WASM state for navigation and browser-only UI preferences.
 /// JS remains the platform adapter for DOM, files, media and same-origin HTTP.
-const UI_TAB_COUNT: u32 = 7;
+const UI_TAB_COUNT: u32 = 6;
 const TEXT_BYTES: usize = 512;
 const EXTRA_TEXT: &str = include_str!("studio_i18n.tsv");
 #[derive(Clone, Copy)]
@@ -376,14 +376,12 @@ mod tests {
     #[test]
     fn navigation_preferences_and_stale_response_tokens_are_validated_in_rust() {
         volley_ui_reset();
-        assert_eq!(volley_ui_tab_count(), 7);
+        assert_eq!(volley_ui_tab_count(), 6);
         assert_eq!(volley_ui_set(0, 4), 1);
         assert_eq!(volley_ui_get(0), 4);
         assert_eq!(volley_ui_set(0, 5), 1);
         assert_eq!(volley_ui_get(0), 5);
-        assert_eq!(volley_ui_set(0, 6), 1);
-        assert_eq!(volley_ui_get(0), 6);
-        assert_eq!(volley_ui_set(0, 7), 0);
+        assert_eq!(volley_ui_set(0, 6), 0);
         for key in 1..=4 {
             assert_eq!(volley_ui_set(key, 1), 1);
             assert_eq!(volley_ui_get(key), 1);
@@ -397,8 +395,8 @@ mod tests {
         let second = volley_ui_begin_load(2);
         assert_eq!(volley_ui_current_load(2, first), 0);
         assert_eq!(volley_ui_current_load(2, second), 1);
-        assert_eq!(volley_ui_current_load(7, second), 0);
-        assert_eq!(volley_ui_begin_load(7), 0);
+        assert_eq!(volley_ui_current_load(6, second), 0);
+        assert_eq!(volley_ui_begin_load(6), 0);
         assert_eq!(volley_ui_text_copy(0), 1);
         UI_TEXT.with(|buf| assert_eq!(&buf.borrow()[..volley_ui_text_len() as usize], b"Preview"));
         assert_eq!(volley_ui_text_copy(volley_ui_text_count()), 0);
