@@ -1397,7 +1397,19 @@ fn cached_photo_comparison(
                     .get(id.to_string())
                     .is_some_and(Value::is_array)
             });
-        if !fully_covered {
+        let saved_photo_coverage = eligible_ids
+            .iter()
+            .filter_map(|id| evidence["matches"].get(id.to_string()))
+            .map(Value::as_array)
+            .collect::<Option<Vec<_>>>()
+            .is_some_and(|rows| {
+                rows.iter().any(|rows| !rows.is_empty())
+                    && rows
+                        .iter()
+                        .flat_map(|rows| rows.iter())
+                        .all(|row| row["reference_kind"] == "saved_photo")
+            });
+        if !fully_covered && !saved_photo_coverage {
             return None;
         }
     }
@@ -1658,6 +1670,51 @@ pub(super) fn save_photo_match_suggestions(
 #[cfg(test)]
 mod cached_auto_match_tests {
     use super::*;
+
+    #[test]
+    fn cached_saved_photo_scores_survive_unscored_track_after_manual_review() {
+        let albums = vec![("player".to_owned(), "album-revision".to_owned())];
+        let hashes = BTreeMap::from([("player".to_owned(), BTreeSet::from(["a".repeat(64)]))]);
+        let doc = json!({
+            "assignments":{"8":"player"}, "excluded_ids":[],
+            "automatic_identity_evidence":{
+                "matches":{"773":[{"player_id":"player","cosine_similarity":0.7355,
+                    "samples_used":3,"reference_kind":"saved_photo"}]},
+                "photo_sample_policy":"three_observations_v1",
+                "rally_run_id":"rally", "album_revisions":albums,
+                "reference_photo_sha256":hashes, "model_fingerprint":"model-v1",
+                "reviewed_scope_sha256":"prior-manual-review"
+            }
+        });
+        let cached = cached_photo_comparison(
+            &doc,
+            "identity-v2",
+            &albums,
+            &hashes,
+            "model-v1",
+            Some("rally"),
+            &BTreeSet::from([773, 1973]),
+        )
+        .expect("missing scores for one ID must not block saved photo matches for another");
+        assert_eq!(
+            cached["player_matches"]["773"][0]["cosine_similarity"],
+            0.7355
+        );
+        assert!(cached["player_matches"]["1973"].is_null());
+        let mut reviewed_anchor = doc.clone();
+        reviewed_anchor["automatic_identity_evidence"]["matches"]["773"][0]["reference_kind"] =
+            json!("reviewed_track");
+        assert!(cached_photo_comparison(
+            &reviewed_anchor,
+            "identity-v2",
+            &albums,
+            &hashes,
+            "model-v1",
+            Some("rally"),
+            &BTreeSet::from([773, 1973]),
+        )
+        .is_none());
+    }
 
     #[test]
     fn cached_photo_scores_reuse_only_verified_matching_source_and_coverage() {
