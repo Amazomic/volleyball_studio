@@ -29,7 +29,7 @@ $release=Join-Path $repo "rust\target\release\volley-app.exe"
 $data=if($DataRoot){$DataRoot}elseif($env:VOLLEY_STUDIO_DATA_ROOT){$env:VOLLEY_STUDIO_DATA_ROOT}else{Join-Path $env:LOCALAPPDATA "VolleyballStudio\data"}
 $bindUrl="http://$Bind"
 $ort=if($OrtLibrary){$OrtLibrary}else{$env:ORT_DYLIB_PATH}
-$openvino=if($OpenvinoLibrary){$OpenvinoLibrary}else{$env:VOLLEY_OPENVINO_C_LIB}
+$openvino=& (Join-Path $PSScriptRoot "find-openvino-runtime.ps1") -ExplicitLibrary $OpenvinoLibrary
 
 function Git-Value([string[]]$GitArgs) {
     $output=@(& git -C $repo @GitArgs 2>&1)
@@ -86,6 +86,9 @@ function Assert-FreePort {
     }
 }
 function Configure-Environment {
+    if(-not $openvino){
+        throw "Native OpenVINO C runtime missing. Run scripts/setup-openvino-windows.ps1 before starting Studio"
+    }
     $settings=@{
         VOLLEY_RUST_BIND=$Bind
         VOLLEY_REPOSITORY_ROOT=$repo
@@ -146,6 +149,9 @@ function Test-NativeDependencies {
     $provider=Join-Path (Split-Path -Parent $ort) "onnxruntime_providers_cuda.dll"
     if(-not (Test-Path -LiteralPath $provider)){
         throw "Native CUDA provider missing: $provider"
+    }
+    if(-not $openvino){
+        throw "Native OpenVINO C runtime missing. Run scripts/setup-openvino-windows.ps1"
     }
     Write-Output "Native Windows dependencies present; actual GPU inference smoke is still required"
 }
