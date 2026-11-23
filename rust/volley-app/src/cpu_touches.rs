@@ -165,7 +165,7 @@ struct SelectedBall {
     detection: Candidate,
 }
 #[derive(Deserialize)]
-struct TrackedFrame {
+pub(crate) struct TrackedFrame {
     frame_index: u64,
     tracked_players: Vec<TrackedCandidate>,
     selected_ball: Option<SelectedBall>,
@@ -174,7 +174,7 @@ struct TrackedFrame {
     touches_confirmed: bool,
 }
 
-fn transform_frame(item: TrackedFrame, expected: u64) -> Result<TouchFrame, String> {
+pub(crate) fn transform_frame(item: TrackedFrame, expected: u64) -> Result<TouchFrame, String> {
     if item.frame_index != expected
         || !item.track_ids_provisional
         || item.confirmed_athlete_identities
@@ -1269,7 +1269,7 @@ fn emit_record(
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct InitialServeProposal {
+pub(crate) struct InitialServeProposal {
     rally_start_frame: u64,
     trajectory_start_frame: Option<u64>,
     provisional_track_id: Option<u64>,
@@ -1278,7 +1278,10 @@ struct InitialServeProposal {
     source: &'static str,
 }
 
-fn initial_serve_proposal(frames: &[TouchFrame], rally_start: u64) -> InitialServeProposal {
+pub(crate) fn initial_serve_proposal(
+    frames: &[TouchFrame],
+    rally_start: u64,
+) -> InitialServeProposal {
     let first_ball = frames.iter().find(|frame| {
         frame.frame_index >= rally_start
             && frame.frame_index < rally_start.saturating_add(30)

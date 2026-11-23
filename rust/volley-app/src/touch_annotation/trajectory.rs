@@ -235,6 +235,56 @@ pub(super) fn scan_collision_trajectory(
     })
 }
 
+fn initial_rally_serve_proposals(
+    run: &ValidatedRun,
+    intervals: &[(u64, u64)],
+) -> Result<Vec<crate::cpu_touches::InitialServeProposal>, ApiError> {
+    let project_root = run
+        .touch_file
+        .parent()
+        .and_then(|dir| dir.parent())
+        .and_then(|dir| dir.parent())
+        .ok_or_else(|| storage::bad_request("Missing project replay root"))?;
+    let replay = storage::safe_file(
+        &project_root.join("native_cpu_replays").join(&run.replay_id),
+        "tracked_frames.jsonl",
+        64 * 1024 * 1024 * 1024,
+    )
+    .map_err(storage::bad_request)?;
+    let scope = intervals
+        .iter()
+        .map(|&(start, end)| (start, end.min(start.saturating_add(89))))
+        .collect::<Vec<_>>();
+    let mut collected = Vec::new();
+    let mut proposals = Vec::with_capacity(scope.len());
+    let mut position = 0usize;
+    crate::native_preview_overlay::for_each_verified_scoped_frame(
+        &replay,
+        &run.replay_sha,
+        run.frames,
+        &scope,
+        |row| {
+            if let Some((frame, bytes)) = row {
+                let item: crate::cpu_touches::TrackedFrame = serde_json::from_slice(bytes)
+                    .map_err(|e| format!("Invalid serve frame source: {e}"))?;
+                collected.push(crate::cpu_touches::transform_frame(item, frame)?);
+            } else {
+                proposals.push(crate::cpu_touches::initial_serve_proposal(
+                    &collected,
+                    intervals[position].0,
+                ));
+                collected.clear();
+                position += 1;
+            }
+            Ok(())
+        },
+    )
+    .map_err(storage::bad_request)?;
+    if position != intervals.len() {
+        return Err(storage::bad_request("Incomplete initial serve source"));
+    }
+    Ok(proposals)
+}
 pub(super) fn collision_frames(scores: &[TrajectoryCandidate], total: u64) -> Vec<u64> {
     let mut frames = scores
         .iter()
@@ -301,6 +351,7 @@ pub async fn calculate(
         let court_filter_active = scan.court_filter_active;
         let court_revision = scan.court_calibration_revision;
         let selected = collision_frames(&scores, run.frames);
+        let initial_serves = initial_rally_serve_proposals(&run, &intervals)?;
         let calibration = TrajectoryProfile {
             min_score: 0.0,
             shift_frames: 0,
@@ -317,6 +368,7 @@ pub async fn calculate(
             "project_id":run.project_id,"video":run.video,"rally_run_id":run.run_id,
             "source_replay_sha256":run.replay_sha,"total_frames":run.frames,
             "proposals":proposals,"candidate_count":scores.len(),
+            "serve_proposals":initial_serves,
             "ground_contacts":ground_contacts,
             "ground_detector_version":volley_core::motion::GROUND_DETECTOR_VERSION,
             "court_filter_active":court_filter_active,
