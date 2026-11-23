@@ -1,14 +1,57 @@
 #[test]
+fn old_three_photo_matches_are_not_reported_as_current_gallery_evidence() {
+    let old = json!({"automatic_identity_evidence":{
+        "photo_sample_policy":"three_observations_v1",
+        "matches":{"7":[{"player_id":"abcdef012345","cosine_similarity":0.91,"samples_used":3}]}
+    }});
+    assert!(gallery_photo_hints(&old).as_object().unwrap().is_empty());
+}
+
+#[test]
+fn five_independent_photos_are_compared_per_track_id() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let ctx = context(&root, sha, tracks);
+    let vectors = BTreeMap::from([(7, vec![1.0_f32, 0.0])]);
+    let alternatives = BTreeMap::from([(7, vec![vec![1.0_f32, 0.0]; 4])]);
+    let references = vec![PhotoReference {
+        player_id: "abcdef012345".into(),
+        vector: vec![1.0, 0.0],
+        project_id: "other".into(),
+        video: "other.mp4".into(),
+        replay_id: "other".into(),
+        track_id: 17,
+    }];
+    let result = photo_match_candidates_with_samples(
+        &ctx,
+        &base_document(&ctx),
+        &vectors,
+        &alternatives,
+        &references,
+    )
+    .unwrap();
+    assert_eq!(result["7"][0]["samples_used"], 5);
+    assert_eq!(
+        result["7"][0]["sample_similarities"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn automatic_links_abstain_on_inconsistent_three_photo_evidence() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
     let mut ctx = context(&root, sha, tracks);
     ctx.roster.insert("123456abcdef".into(), "Player B".into());
     let matches = json!({"7":[
-        {"player_id":"abcdef012345","cosine_similarity":0.81,"samples_used":3,
-         "sample_similarities":[0.99,0.93,0.51]},
-        {"player_id":"123456abcdef","cosine_similarity":0.43,"samples_used":3,
-         "sample_similarities":[0.42,0.43,0.44]}
+        {"player_id":"abcdef012345","cosine_similarity":0.81,"samples_used":5,
+         "sample_similarities":[0.99,0.93,0.86,0.78,0.51]},
+        {"player_id":"123456abcdef","cosine_similarity":0.43,"samples_used":5,
+         "sample_similarities":[0.42,0.43,0.44,0.43,0.43]}
     ]});
     assert!(
         choose_automatic_photo_links(&ctx, &base_document(&ctx), &matches)
@@ -25,8 +68,8 @@ fn automatic_links_reject_nearly_equal_athlete_scores() {
     let mut ctx = context(&root, sha, tracks);
     ctx.roster.insert("123456abcdef".into(), "Player B".into());
     let matches = json!({"7":[
-        {"player_id":"abcdef012345","cosine_similarity":0.76,"samples_used":3},
-        {"player_id":"123456abcdef","cosine_similarity":0.75,"samples_used":3}
+        {"player_id":"abcdef012345","cosine_similarity":0.76,"samples_used":5},
+        {"player_id":"123456abcdef","cosine_similarity":0.75,"samples_used":5}
     ]});
     let selected = choose_automatic_photo_links(&ctx, &base_document(&ctx), &matches).unwrap();
     assert!(selected.is_empty());
@@ -35,10 +78,10 @@ fn automatic_links_reject_nearly_equal_athlete_scores() {
 
 #[test]
 fn gallery_photo_hints_omit_heavy_evidence_and_limit_candidates() {
-    let doc = json!({"automatic_identity_evidence":{"matches":{"7":[
-        {"player_id":"a","cosine_similarity":0.89,"samples_used":3,"sample_similarities":[0.8,0.9,0.97],"reference_track_id":11,"reference_kind":"saved_photo","name":"Player A"},
-        {"player_id":"b","cosine_similarity":0.85,"samples_used":3,"sample_similarities":[0.8,0.87,0.88],"reference_track_id":12,"reference_kind":"saved_photo"},
-        {"player_id":"c","cosine_similarity":0.60,"samples_used":3,"sample_similarities":[0.6,0.6,0.6],"reference_track_id":13,"reference_kind":"saved_photo"}
+    let doc = json!({"automatic_identity_evidence":{"photo_sample_policy":"five_observations_v2","matches":{"7":[
+        {"player_id":"a","cosine_similarity":0.89,"samples_used":5,"sample_similarities":[0.8,0.9,0.97],"reference_track_id":11,"reference_kind":"saved_photo","name":"Player A"},
+        {"player_id":"b","cosine_similarity":0.85,"samples_used":5,"sample_similarities":[0.8,0.87,0.88],"reference_track_id":12,"reference_kind":"saved_photo"},
+        {"player_id":"c","cosine_similarity":0.60,"samples_used":5,"sample_similarities":[0.6,0.6,0.6],"reference_track_id":13,"reference_kind":"saved_photo"}
     ]}}});
     let hints = gallery_photo_hints(&doc);
     let options = hints["7"].as_array().unwrap();
@@ -63,8 +106,8 @@ fn automatic_links_keep_decisive_athlete_scores() {
     let mut ctx = context(&root, sha, tracks);
     ctx.roster.insert("123456abcdef".into(), "Player B".into());
     let matches = json!({"7":[
-        {"player_id":"abcdef012345","cosine_similarity":0.81,"samples_used":3},
-        {"player_id":"123456abcdef","cosine_similarity":0.49,"samples_used":3}
+        {"player_id":"abcdef012345","cosine_similarity":0.81,"samples_used":5},
+        {"player_id":"123456abcdef","cosine_similarity":0.49,"samples_used":5}
     ]});
     let selected = choose_automatic_photo_links(&ctx, &base_document(&ctx), &matches).unwrap();
     assert_eq!(selected.get(&7).map(String::as_str), Some("abcdef012345"));
@@ -553,8 +596,8 @@ fn manual_assignment_displaces_overlapping_automatic_id_without_distinct_pair() 
     doc["automatic_assignments"] = json!({"13":"123456abcdef"});
     doc["automatic_suppressed_ids"] = json!([12]);
     doc["automatic_identity_evidence"] = json!({
-        "photo_sample_policy":"three_observations_v1",
-        "matches":{"13":[{"player_id":"123456abcdef","cosine_similarity":0.83,"samples_used":3}]}
+        "photo_sample_policy":"five_observations_v2",
+        "matches":{"13":[{"player_id":"123456abcdef","cosine_similarity":0.83,"samples_used":5}]}
     });
     reconcile_automatic_photo_links(&ctx, &mut doc).unwrap();
     assert_eq!(doc["automatic_assignments"], json!({"13":"123456abcdef"}));
@@ -671,15 +714,15 @@ fn overlapping_duplicate_boxes_do_not_block_high_confidence_photo_links() {
     assert!(!tracks_co_visible(&ctx.tracks[&7], &ctx.tracks[&8]));
     assert_eq!(measured_conflict_frame(&ctx, 7, 8), None);
     let matches = json!({
-        "7":[{"player_id":"abcdef012345","cosine_similarity":0.87,"samples_used":3}],
-        "8":[{"player_id":"abcdef012345","cosine_similarity":0.85,"samples_used":3}]
+        "7":[{"player_id":"abcdef012345","cosine_similarity":0.87,"samples_used":5}],
+        "8":[{"player_id":"abcdef012345","cosine_similarity":0.85,"samples_used":5}]
     });
     let chosen = choose_automatic_photo_links(&ctx, &base_document(&ctx), &matches).unwrap();
     assert_eq!(chosen.len(), 2);
     let mut doc = base_document(&ctx);
     doc["automatic_assignments"] = json!({"7":"abcdef012345"});
     doc["automatic_identity_evidence"]["matches"] = matches;
-    doc["automatic_identity_evidence"]["photo_sample_policy"] = json!("three_observations_v1");
+    doc["automatic_identity_evidence"]["photo_sample_policy"] = json!("five_observations_v2");
     reconcile_automatic_photo_links(&ctx, &mut doc).unwrap();
     assert_eq!(
         doc["automatic_assignments"],
@@ -713,8 +756,8 @@ fn measured_distinct_players_remain_incompatible_despite_photo_similarity() {
     assert!(tracks_co_visible(&ctx.tracks[&7], &ctx.tracks[&8]));
     assert_eq!(measured_conflict_frame(&ctx, 7, 8), Some(4));
     let matches = json!({
-        "7":[{"player_id":"abcdef012345","cosine_similarity":0.91,"samples_used":3}],
-        "8":[{"player_id":"abcdef012345","cosine_similarity":0.89,"samples_used":3}]
+        "7":[{"player_id":"abcdef012345","cosine_similarity":0.91,"samples_used":5}],
+        "8":[{"player_id":"abcdef012345","cosine_similarity":0.89,"samples_used":5}]
     });
     assert_eq!(
         choose_automatic_photo_links(&ctx, &base_document(&ctx), &matches)
@@ -806,7 +849,7 @@ fn manual_confirmation_keeps_unrelated_existing_auto_link() {
             {"player_id":"123456abcdef","cosine_similarity":0.88}
         ]
     });
-    doc["automatic_identity_evidence"]["photo_sample_policy"] = json!("three_observations_v1");
+    doc["automatic_identity_evidence"]["photo_sample_policy"] = json!("five_observations_v2");
     reconcile_automatic_photo_links(&ctx, &mut doc).unwrap();
     assert_eq!(doc["automatic_assignments"], json!({"7":"abcdef012345"}));
     let unassigned = filtered_page(&ctx, &doc, "rev", 0, 10, Some("unassigned"), None).unwrap();
@@ -1098,9 +1141,9 @@ fn saved_threshold_is_used_to_reconcile_auto_matches_and_restore_slider() {
     doc["automatic_assignments"] = json!({"7":"abcdef012345"});
     doc["automatic_identity_evidence"] = json!({
         "threshold":0.94,
-        "photo_sample_policy":"three_observations_v1",
+        "photo_sample_policy":"five_observations_v2",
         "matches":{"7":[{"player_id":"abcdef012345","cosine_similarity":0.91,
-            "samples_used":3}]}
+            "samples_used":5}]}
     });
     reconcile_automatic_photo_links(&ctx, &mut doc).unwrap();
     assert_eq!(doc["automatic_assignments"], json!({}));
@@ -1309,12 +1352,12 @@ fn reviewed_group_counts_only_unassigned_tracks_and_recomputes_average() {
 fn legacy_automatic_similarity_threshold_is_not_reused() {
     let mut doc = json!({"automatic_identity_evidence":{"threshold":0.35}});
     assert_eq!(saved_automatic_photo_threshold(&doc), 0.75);
-    doc["automatic_identity_evidence"]["photo_sample_policy"] = json!("three_observations_v1");
+    doc["automatic_identity_evidence"]["photo_sample_policy"] = json!("five_observations_v2");
     assert_eq!(saved_automatic_photo_threshold(&doc), 0.35);
 }
 
 #[test]
-fn auto_assignment_requires_three_samples_when_sample_count_is_known() {
+fn auto_assignment_requires_five_samples_when_sample_count_is_known() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
     let ctx = context(&root, sha, tracks);
@@ -1325,7 +1368,7 @@ fn auto_assignment_requires_three_samples_when_sample_count_is_known() {
         .unwrap()
         .is_empty());
     let complete = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.75,
-        "samples_used":3}]});
+        "samples_used":5}]});
     assert_eq!(
         choose_automatic_photo_links(&ctx, &doc, &complete)
             .unwrap()
@@ -1334,7 +1377,7 @@ fn auto_assignment_requires_three_samples_when_sample_count_is_known() {
         Some("abcdef012345")
     );
     let below = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.749,
-        "samples_used":3}]});
+        "samples_used":5}]});
     assert!(choose_automatic_photo_links(&ctx, &doc, &below)
         .unwrap()
         .is_empty());
@@ -1352,8 +1395,8 @@ fn competing_player_photo_with_identity_switch_stays_unassigned() {
     ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [12, 13]).unwrap();
     let main = BTreeMap::from([(12, vec![0.90, 0.43]), (13, vec![0.95, 0.31])]);
     let alternatives = BTreeMap::from([
-        (12, vec![vec![0.96, 0.28], vec![0.96, 0.28]]),
-        (13, vec![vec![0.10, 0.995], vec![0.10, 0.995]]),
+        (12, vec![vec![0.96, 0.28]; 4]),
+        (13, vec![vec![0.10, 0.995]; 4]),
     ]);
     let references = vec![
         PhotoReference {
@@ -1391,10 +1434,10 @@ fn competing_player_photo_with_identity_switch_stays_unassigned() {
     .unwrap();
     assert_eq!(verified["12"][0]["player_id"], "abcdef012345");
     assert_eq!(verified["13"][0]["player_id"], "123456abcdef");
-    assert_eq!(verified["13"][0]["samples_used"], 3);
+    assert_eq!(verified["13"][0]["samples_used"], 5);
     assert!(verified["13"][0]["sample_similarities"]
         .as_array()
-        .is_some_and(|scores| scores.len() == 3));
+        .is_some_and(|scores| scores.len() == 5));
 
     let chosen = choose_automatic_photo_links(&ctx, &base_document(&ctx), &verified).unwrap();
     assert_eq!(chosen.get(&12).map(String::as_str), Some("abcdef012345"));
@@ -2505,8 +2548,8 @@ fn automatic_reid_explains_why_specific_tracks_remain_unassigned() {
     let doc = json!({"automatic_suppressed_ids":[11]});
     let matches = json!({
         "8":[{"player_id":"abcdef012345","cosine_similarity":0.90,"samples_used":1}],
-        "9":[{"player_id":"abcdef012345","cosine_similarity":0.68,"samples_used":3}],
-        "10":[{"player_id":"abcdef012345","cosine_similarity":0.88,"samples_used":3}]
+        "9":[{"player_id":"abcdef012345","cosine_similarity":0.68,"samples_used":5}],
+        "10":[{"player_id":"abcdef012345","cosine_similarity":0.88,"samples_used":5}]
     });
     assert_eq!(
         automatic_unassigned_reason(7, &doc, &matches, 0.75),
@@ -2544,12 +2587,12 @@ fn paginated_gallery_explains_every_pending_id_without_claiming_manual_links() {
     doc["automatic_suppressed_ids"] = json!([11]);
     doc["automatic_identity_evidence"] = json!({
         "threshold":0.75,
-        "photo_sample_policy":"three_observations_v1",
+        "photo_sample_policy":"five_observations_v2",
         "photo_count":3,
         "matches":{
             "8":[{"player_id":"abcdef012345","cosine_similarity":0.90,"samples_used":1}],
-            "9":[{"player_id":"abcdef012345","cosine_similarity":0.68,"samples_used":3}],
-            "10":[{"player_id":"abcdef012345","cosine_similarity":0.88,"samples_used":3}]
+            "9":[{"player_id":"abcdef012345","cosine_similarity":0.68,"samples_used":5}],
+            "10":[{"player_id":"abcdef012345","cosine_similarity":0.88,"samples_used":5}]
         }
     });
     let view = filtered_page(&ctx, &doc, "revision", 0, 1, Some("unassigned"), None).unwrap();
@@ -2583,10 +2626,10 @@ fn refreshing_photo_scores_revalidates_old_automatic_links_without_assigning_new
     doc["automatic_assignments"] = json!({"7":"abcdef012345"});
     doc["automatic_identity_evidence"] = json!({
         "threshold":0.75,
-        "photo_sample_policy":"three_observations_v1",
+        "photo_sample_policy":"five_observations_v2",
         "matches":{
-            "7":[{"player_id":"abcdef012345","cosine_similarity":0.9,"samples_used":3}],
-            "8":[{"player_id":"abcdef012345","cosine_similarity":0.95,"samples_used":3}]
+            "7":[{"player_id":"abcdef012345","cosine_similarity":0.9,"samples_used":5}],
+            "8":[{"player_id":"abcdef012345","cosine_similarity":0.95,"samples_used":5}]
         }
     });
     reconcile_saved_automatic_photo_links(&ctx, &mut doc).unwrap();
@@ -2755,7 +2798,7 @@ fn large_reid_match_evidence_fits_native_assignment_sidecar() {
                         "name":format!("Игрок {player}"),
                         "cosine_similarity":0.813456789123_f64,
                         "sample_similarities":[0.811123456789,0.812123456789,0.817123456789],
-                        "samples_used":3,
+                        "samples_used":5,
                         "reference_track_id":track + 4000,
                         "reference_kind":"saved_photo"
                     })
@@ -2793,7 +2836,7 @@ fn strict_reid_group_links_a_short_fragment_only_with_three_frame_anchor() {
     embedding[0] = 1.0;
     let vectors = BTreeMap::from([(7, embedding.clone()), (8, embedding)]);
     let matches = json!({
-        "7":[{"player_id":"abcdef012345","cosine_similarity":0.86,"samples_used":3}],
+        "7":[{"player_id":"abcdef012345","cosine_similarity":0.86,"samples_used":5}],
         "8":[{"player_id":"abcdef012345","cosine_similarity":0.70,"samples_used":1}]
     });
     let groups = photo_comparison::strict_visual_identity_groups(&ctx, &vectors, &matches);
@@ -2842,7 +2885,7 @@ fn ambiguous_or_unverified_visual_group_does_not_invent_an_athlete() {
     embedding[0] = 1.0;
     let vectors = BTreeMap::from([(7, embedding.clone()), (8, embedding)]);
     let ambiguous = json!({
-        "7":[{"player_id":"abcdef012345","cosine_similarity":0.90,"samples_used":3}],
+        "7":[{"player_id":"abcdef012345","cosine_similarity":0.90,"samples_used":5}],
         "8":[{"player_id":"abcdef012345","cosine_similarity":0.72,"samples_used":1},
              {"player_id":"123456abcdef","cosine_similarity":0.68,"samples_used":1}]
     });
@@ -2878,7 +2921,7 @@ fn reset_player_links_allows_auto_assignment_again_above_seventy_five_percent() 
     assert_eq!(doc["automatic_assignments"], json!({}));
     assert_eq!(doc["automatic_suppressed_ids"], json!([]));
     let matches =
-        json!({"7":[{"player_id":"abcdef012345", "cosine_similarity":0.91, "samples_used":3}]});
+        json!({"7":[{"player_id":"abcdef012345", "cosine_similarity":0.91, "samples_used":5}]});
     let (_, linked) = refresh_automatic_photo_links(&ctx, &doc, &matches, 0.75).unwrap();
     assert_eq!(linked.get(&7).map(String::as_str), Some("abcdef012345"));
     fs::remove_dir_all(root).unwrap();
@@ -2903,7 +2946,7 @@ fn explicit_auto_assignment_recovers_links_suppressed_by_a_previous_reset() {
     let mut doc = base_document(&ctx);
     doc["automatic_suppressed_ids"] = json!([7]);
     let matches = json!({"7":[{"player_id":"abcdef012345",
-        "cosine_similarity":0.91, "samples_used":3}]});
+        "cosine_similarity":0.91, "samples_used":5}]});
     assert!(refresh_automatic_photo_links(&ctx, &doc, &matches, 0.75)
         .unwrap()
         .1

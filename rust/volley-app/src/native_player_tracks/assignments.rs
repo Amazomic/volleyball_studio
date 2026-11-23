@@ -3,7 +3,7 @@ use super::*;
 const AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD: f64 = 0.75;
 
 pub(super) fn saved_automatic_photo_threshold(doc: &Value) -> f64 {
-    if doc["automatic_identity_evidence"]["photo_sample_policy"] != "three_observations_v1" {
+    if doc["automatic_identity_evidence"]["photo_sample_policy"] != PHOTO_SAMPLE_POLICY {
         return AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD;
     }
     doc["automatic_identity_evidence"]["threshold"]
@@ -212,7 +212,10 @@ pub(super) fn choose_automatic_photo_links_at_threshold(
             continue;
         }
         for row in rows.as_array().ok_or("Invalid candidate list")? {
-            if row["samples_used"].as_u64().is_some_and(|count| count != 3) {
+            if row["samples_used"]
+                .as_u64()
+                .is_some_and(|count| count != REID_PHOTOS_PER_TRACK as u64)
+            {
                 continue;
             }
             let Some(owner) = row["player_id"]
@@ -275,7 +278,10 @@ pub(super) fn choose_automatic_photo_links_at_threshold(
             continue;
         };
         if let Some(raw_scores) = best_evidence.get("sample_similarities") {
-            let Some(samples) = raw_scores.as_array().filter(|samples| samples.len() == 3) else {
+            let Some(samples) = raw_scores
+                .as_array()
+                .filter(|samples| samples.len() == REID_PHOTOS_PER_TRACK)
+            else {
                 continue;
             };
             let scores = samples
@@ -302,7 +308,7 @@ pub(super) fn choose_automatic_photo_links_at_threshold(
             .filter(|row| {
                 row["player_id"].as_str().is_some_and(|candidate| {
                     candidate != owner && ctx.roster.contains_key(candidate)
-                }) && row["samples_used"].as_u64() == Some(3)
+                }) && row["samples_used"].as_u64() == Some(REID_PHOTOS_PER_TRACK as u64)
             })
             .filter_map(|row| row["cosine_similarity"].as_f64())
             .filter(|score| score.is_finite() && (0.0..=1.0).contains(score))
@@ -429,7 +435,7 @@ pub(super) fn choose_automatic_photo_links_with_groups(
                 || score - competitor < 0.08
                 || best["samples_used"]
                     .as_u64()
-                    .is_none_or(|count| count == 0 || count > 3)
+                    .is_none_or(|count| count == 0 || count > REID_PHOTOS_PER_TRACK as u64)
             {
                 continue;
             }
@@ -468,7 +474,7 @@ pub(super) fn reconcile_automatic_photo_links(ctx: &Inputs, doc: &mut Value) -> 
     }
     // Without the original per-athlete similarities these automatic identity
     // claims cannot be checked, so they are not safe to display as names.
-    if doc["automatic_identity_evidence"]["photo_sample_policy"] != "three_observations_v1" {
+    if doc["automatic_identity_evidence"]["photo_sample_policy"] != PHOTO_SAMPLE_POLICY {
         doc["automatic_assignments"] = json!({});
         return Ok(());
     }
@@ -711,6 +717,9 @@ pub(super) fn validated(raw: Option<&[u8]>, ctx: &Inputs) -> Result<Value, Strin
 }
 pub(super) fn gallery_photo_hints(doc: &Value) -> Value {
     let mut hints = serde_json::Map::new();
+    if doc["automatic_identity_evidence"]["photo_sample_policy"] != PHOTO_SAMPLE_POLICY {
+        return Value::Object(hints);
+    }
     if let Some(matches) = doc["automatic_identity_evidence"]["matches"].as_object() {
         for (id, rows) in matches {
             if let Some(rows) = rows.as_array() {
@@ -853,7 +862,7 @@ pub(super) fn filtered_page(
                 .filter_map(|row| {
                     let player = row["player_id"].as_str()?;
                     let score = row["cosine_similarity"].as_f64()?;
-                    (row["samples_used"].as_u64() == Some(3)
+                    (row["samples_used"].as_u64() == Some(REID_PHOTOS_PER_TRACK as u64)
                         && score >= saved_automatic_photo_threshold(doc))
                     .then_some((score, player))
                 })
@@ -917,7 +926,7 @@ pub(super) fn filtered_page(
         "identity_conflict_track_ids":actual_conflicts,
         "roster":roster,"tracks":rows,
         "automatic_identity_matches":gallery_photo_hints(doc),
-        "similarity_status":if doc["automatic_identity_evidence"]["matches"].as_object().is_none() {
+        "similarity_status":if doc["automatic_identity_evidence"]["photo_sample_policy"] != PHOTO_SAMPLE_POLICY || doc["automatic_identity_evidence"]["matches"].as_object().is_none() {
             "not_calculated"
         } else if doc["automatic_identity_evidence"]["photo_count"] == 0 {
             "no_reference_photos"
@@ -1414,7 +1423,7 @@ pub(super) fn automatic_unassigned_reason(
         return "no_photo_match";
     };
     if rows.iter().any(|row| {
-        row["samples_used"].as_u64() == Some(3)
+        row["samples_used"].as_u64() == Some(REID_PHOTOS_PER_TRACK as u64)
             && row["cosine_similarity"]
                 .as_f64()
                 .is_some_and(|score| score >= threshold)
@@ -1423,7 +1432,7 @@ pub(super) fn automatic_unassigned_reason(
     }
     if rows
         .iter()
-        .all(|row| row["samples_used"].as_u64() != Some(3))
+        .all(|row| row["samples_used"].as_u64() != Some(REID_PHOTOS_PER_TRACK as u64))
     {
         return "insufficient_observations";
     }
@@ -1441,7 +1450,7 @@ fn cached_photo_comparison(
 ) -> Option<Value> {
     let evidence = doc.get("automatic_identity_evidence")?;
     evidence["matches"].as_object()?;
-    if evidence["photo_sample_policy"] != "three_observations_v1" {
+    if evidence["photo_sample_policy"] != PHOTO_SAMPLE_POLICY {
         return None;
     }
     if evidence["rally_run_id"] != json!(rally_run_id)
@@ -1751,7 +1760,7 @@ mod cached_auto_match_tests {
             "automatic_identity_evidence":{
                 "matches":{"773":[{"player_id":"player","cosine_similarity":0.7355,
                     "samples_used":3,"reference_kind":"saved_photo"}]},
-                "photo_sample_policy":"three_observations_v1",
+                "photo_sample_policy":PHOTO_SAMPLE_POLICY,
                 "rally_run_id":"rally", "album_revisions":albums,
                 "reference_photo_sha256":hashes, "model_fingerprint":"model-v1",
                 "reviewed_scope_sha256":"prior-manual-review"
@@ -1797,7 +1806,7 @@ mod cached_auto_match_tests {
             "automatic_identity_evidence":{
                 "matches":{"7":[{"player_id":"player","cosine_similarity":0.91,"samples_used":3}]},
                 "eligible_track_ids":[7,8],
-                "photo_sample_policy":"three_observations_v1",
+                "photo_sample_policy":PHOTO_SAMPLE_POLICY,
                 "rally_run_id":"rally",
                 "album_revisions":albums,
                 "reference_photo_sha256":hashes,

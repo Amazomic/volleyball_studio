@@ -659,7 +659,7 @@ fn replay_frames_verified(
     drop(writer);
     let observed_sha = format!("{:x}", sha.finalize());
     let (stitched_sha, merged, removed_duplicate_boxes) =
-        track_stitch::stitch(output, &observed_sha, count)?;
+        track_stitch::stitch(output, &observed_sha, count, scope)?;
     totals.duplicate_track_ids_merged = merged;
     totals.detections = totals
         .detections

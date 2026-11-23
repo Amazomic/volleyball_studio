@@ -551,7 +551,7 @@
     showPhoto();
     button.append(image,fallback);
     button.addEventListener("click",()=>{
-      photoIndex=(photoIndex+1)%13;state.photoIndices.set(id,photoIndex);showPhoto();
+      photoIndex=(photoIndex+1)%5;state.photoIndices.set(id,photoIndex);showPhoto();
     });
     return button;
   };
@@ -1366,7 +1366,7 @@
       };
       const changePhoto=delta=>{
         const id=currentId();
-        state.photoIndices.set(id,((state.photoIndices.get(id)||0)+delta+13)%13);
+        state.photoIndices.set(id,((state.photoIndices.get(id)||0)+delta+5)%5);
         showPhoto();
       };
       const arrow=(kind,sign,label,handler)=>{

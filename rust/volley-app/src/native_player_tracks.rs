@@ -36,6 +36,8 @@ use volley_core::{
 };
 
 pub(crate) const MAX_TRACKS: usize = 20_000;
+const REID_PHOTOS_PER_TRACK: usize = 5;
+const PHOTO_SAMPLE_POLICY: &str = "five_observations_v2";
 const MAX_MANIFEST: u64 = 16 * 1024;
 const MAX_EVIDENCE: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_LINKS: u64 = 64 * 1024 * 1024;

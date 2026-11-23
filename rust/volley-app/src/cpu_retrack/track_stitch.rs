@@ -1,4 +1,4 @@
-use super::{BoundedReader, MAX_ROW_BYTES};
+use super::{BoundedReader, PlayerFrameScope, MAX_ROW_BYTES};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -8,7 +8,7 @@ use std::{
     io::{BufWriter, Write},
     path::Path,
 };
-use volley_core::fusion::Candidate;
+use volley_core::{bbox_iou, fusion::Candidate};
 
 #[derive(Deserialize)]
 struct Frame {
@@ -29,6 +29,8 @@ struct Track {
     observed: u64,
     first_head: Option<(u64, [f64; 2])>,
     last_head: Option<(u64, [f64; 2])>,
+    first_box: Option<[f64; 4]>,
+    last_box: Option<[f64; 4]>,
 }
 
 #[derive(Default)]
@@ -70,6 +72,7 @@ fn find_handoffs(
     source: &Path,
     expected_sha: &str,
     frames: u64,
+    scope: Option<&PlayerFrameScope>,
 ) -> Result<BTreeMap<u64, u64>, String> {
     let mut tracks = BTreeMap::<u64, Track>::new();
     let mut pairs = BTreeMap::<(u64, u64), Simultaneous>::new();
@@ -88,6 +91,10 @@ fn find_handoffs(
             track.start.get_or_insert(frame);
             track.end = frame;
             track.observed += 1;
+            track
+                .first_box
+                .get_or_insert(observation.detection.bbox_xyxy_norm);
+            track.last_box = Some(observation.detection.bbox_xyxy_norm);
             if let Some(head) = observation.detection.head_point_norm {
                 if head.iter().all(|value| value.is_finite()) {
                     track.first_head.get_or_insert((frame, head));
@@ -172,6 +179,61 @@ fn find_handoffs(
             }
         }
     }
+    let mut gap_candidates = Vec::<(f64, u64, u64)>::new();
+    for (&old_id, old) in &tracks {
+        if used.contains(&old_id) || old.observed < 12 {
+            continue;
+        }
+        let (Some((old_at, old_head)), Some(old_box)) = (old.last_head, old.last_box) else {
+            continue;
+        };
+        if old.end.saturating_sub(old_at) > 3 {
+            continue;
+        }
+        for (&new_id, new) in &tracks {
+            if old_id == new_id || used.contains(&new_id) || new.observed < 12 {
+                continue;
+            }
+            let (Some(start), Some((new_at, new_head)), Some(new_box)) =
+                (new.start, new.first_head, new.first_box)
+            else {
+                continue;
+            };
+            if start <= old.end
+                || start - old.end > 13
+                || new_at.saturating_sub(start) > 3
+                || !scope.is_some_and(|mask| mask.same_interval(old.end, start))
+            {
+                continue;
+            }
+            if bbox_iou(old_box, new_box) < 0.25 {
+                continue;
+            }
+            let displacement = (old_head[0] - new_head[0]).hypot(old_head[1] - new_head[1]);
+            if displacement <= 0.012 + (start - old.end) as f64 * 0.0006 {
+                gap_candidates.push((displacement, old_id, new_id));
+            }
+        }
+    }
+    gap_candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for &(distance, old_id, new_id) in &gap_candidates {
+        if used.contains(&old_id) || used.contains(&new_id) {
+            continue;
+        }
+        if gap_candidates
+            .iter()
+            .any(|&(other_distance, other_old, other_new)| {
+                (other_old == old_id && other_new != new_id
+                    || other_new == new_id && other_old != old_id)
+                    && other_distance <= distance + 0.006
+            })
+        {
+            continue;
+        }
+        used.insert(old_id);
+        used.insert(new_id);
+        aliases.insert(new_id, old_id);
+    }
     Ok(aliases)
 }
 
@@ -179,8 +241,9 @@ pub(super) fn stitch(
     source: &Path,
     expected_sha: &str,
     frames: u64,
+    scope: Option<&PlayerFrameScope>,
 ) -> Result<(String, u64, u64), String> {
-    let aliases = find_handoffs(source, expected_sha, frames)?;
+    let aliases = find_handoffs(source, expected_sha, frames, scope)?;
     if aliases.is_empty() {
         return Ok((expected_sha.to_owned(), 0, 0));
     }
@@ -282,6 +345,14 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    fn rally_scope(selected: Vec<(u64, u64)>) -> PlayerFrameScope {
+        PlayerFrameScope {
+            selected,
+            ball_job_id: "fixture".into(),
+            mask_sha256: "a".repeat(64),
+        }
+    }
+
     fn candidate(frame: u64, bbox: [f64; 4], head: Option<[f64; 2]>) -> Value {
         json!({
             "frame_index":frame,
@@ -366,8 +437,11 @@ mod tests {
     #[test]
     fn stitches_id3_to_id7_before_reid_using_head_and_complementary_crops() {
         let (path, sha, count) = fixture(false, false, false);
-        assert_eq!(find_handoffs(&path, &sha, count).unwrap().get(&7), Some(&3));
-        let (rewritten, merged, dropped) = stitch(&path, &sha, count).unwrap();
+        assert_eq!(
+            find_handoffs(&path, &sha, count, None).unwrap().get(&7),
+            Some(&3)
+        );
+        let (rewritten, merged, dropped) = stitch(&path, &sha, count, None).unwrap();
         assert_eq!(merged, 1);
         assert_eq!(dropped, 4);
         let contents = fs::read_to_string(&path).unwrap();
@@ -392,24 +466,117 @@ mod tests {
     #[test]
     fn separate_heads_cannot_be_stitched() {
         let (path, sha, frames) = fixture(true, false, false);
-        assert!(find_handoffs(&path, &sha, frames).unwrap().is_empty());
-        assert_eq!(stitch(&path, &sha, frames).unwrap(), (sha, 0, 0));
+        assert!(find_handoffs(&path, &sha, frames, None).unwrap().is_empty());
+        assert_eq!(stitch(&path, &sha, frames, None).unwrap(), (sha, 0, 0));
         fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn sustained_independent_overlap_cannot_be_stitched() {
         let (path, sha, frames) = fixture(false, true, false);
-        assert!(find_handoffs(&path, &sha, frames).unwrap().is_empty());
-        assert_eq!(stitch(&path, &sha, frames).unwrap(), (sha, 0, 0));
+        assert!(find_handoffs(&path, &sha, frames, None).unwrap().is_empty());
+        assert_eq!(stitch(&path, &sha, frames, None).unwrap(), (sha, 0, 0));
         fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn no_independent_head_anchors_means_no_stitch() {
         let (path, sha, frames) = fixture(false, false, true);
-        assert!(find_handoffs(&path, &sha, frames).unwrap().is_empty());
-        assert_eq!(stitch(&path, &sha, frames).unwrap(), (sha, 0, 0));
+        assert!(find_handoffs(&path, &sha, frames, None).unwrap().is_empty());
+        assert_eq!(stitch(&path, &sha, frames, None).unwrap(), (sha, 0, 0));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn short_pose_gap_stitches_same_body_without_shared_observations() {
+        let path = std::env::temp_dir().join(format!("volley-gap-stitch-{}.jsonl", Uuid::new_v4()));
+        let mut raw = Vec::new();
+        for frame in 0..48_u64 {
+            let person = if frame <= 17 {
+                Some(3)
+            } else if (23..=47).contains(&frame) {
+                Some(7)
+            } else {
+                None
+            };
+            let players = person
+                .map(|id| {
+                    vec![json!({
+                        "track_id": id,
+                        "measurement_source": "rtmpose_rgb",
+                        "detection": candidate(frame, [0.50, 0.35, 0.58, 0.67], Some([0.54, 0.39]))
+                    })]
+                })
+                .unwrap_or_default();
+            raw.extend(
+                serde_json::to_vec(&json!({
+                    "frame_index":frame,
+                    "tracked_players":players,
+                    "new_track_diagnostics":[],
+                    "ball_candidates":[]
+                }))
+                .unwrap(),
+            );
+            raw.push(b'\n');
+        }
+        fs::write(&path, &raw).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&raw));
+        let separated = rally_scope(vec![(0, 17), (23, 47)]);
+        assert_eq!(
+            stitch(&path, &sha, 48, Some(&separated)).unwrap(),
+            (sha.clone(), 0, 0)
+        );
+        let rally = rally_scope(vec![(0, 47)]);
+        let (updated, merged, removed) = stitch(&path, &sha, 48, Some(&rally)).unwrap();
+        assert_eq!((merged, removed), (1, 0));
+        assert_ne!(updated, sha);
+        for line in fs::read_to_string(&path).unwrap().lines() {
+            let row: Value = serde_json::from_str(line).unwrap();
+            for player in row["tracked_players"].as_array().unwrap() {
+                assert_eq!(player["track_id"], 3);
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn ambiguous_short_gap_does_not_steal_player_identity() {
+        let path =
+            std::env::temp_dir().join(format!("volley-ambiguous-gap-{}.jsonl", Uuid::new_v4()));
+        let mut raw = Vec::new();
+        for frame in 0..48_u64 {
+            let mut players = Vec::new();
+            for (id, start, end, head) in [
+                (3, 0, 17, [0.530, 0.39]),
+                (4, 0, 17, [0.550, 0.39]),
+                (7, 23, 47, [0.540, 0.39]),
+            ] {
+                if (start..=end).contains(&frame) {
+                    players.push(json!({
+                        "track_id":id,
+                        "measurement_source":"rtmpose_rgb",
+                        "detection":candidate(frame, [head[0]-0.035, 0.35, head[0]+0.035, 0.67], Some(head))
+                    }));
+                }
+            }
+            raw.extend(
+                serde_json::to_vec(&json!({
+                    "frame_index":frame,
+                    "tracked_players":players,
+                    "new_track_diagnostics":[],
+                    "ball_candidates":[]
+                }))
+                .unwrap(),
+            );
+            raw.push(b'\n');
+        }
+        fs::write(&path, &raw).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&raw));
+        let rally = rally_scope(vec![(0, 47)]);
+        assert!(find_handoffs(&path, &sha, 48, Some(&rally))
+            .unwrap()
+            .is_empty());
+        assert_eq!(stitch(&path, &sha, 48, Some(&rally)).unwrap(), (sha, 0, 0));
         fs::remove_file(path).unwrap();
     }
 
@@ -417,7 +584,7 @@ mod tests {
     fn hash_mismatch_never_modifies_source() {
         let (path, sha, frames) = fixture(false, false, false);
         let actual = fs::read(&path).unwrap();
-        assert!(stitch(&path, &"0".repeat(64), frames).is_err());
+        assert!(stitch(&path, &"0".repeat(64), frames, None).is_err());
         assert_eq!(actual, fs::read(&path).unwrap());
         fs::remove_file(path).unwrap();
         assert_eq!(sha.len(), 64);
