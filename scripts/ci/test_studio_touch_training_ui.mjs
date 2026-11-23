@@ -10,6 +10,7 @@ const typesRust=read("rust/volley-app/src/touch_annotation/types.rs");
 const server=read("rust/volley-app/src/main.rs");
 const annotationSource=read("rust/volley-app/src/touch_annotation.rs");
 const scanner=read("rust/volley-app/src/native_player_tracks/trajectory.rs");
+const rallyScope=read("rust/volley-app/src/rally_training_comparison.rs");
 assert.equal((html.match(/id="studio-timeline-track"/g)||[]).length,1);
 assert.ok(html.indexOf('id="studio-impact-settings"') > html.indexOf('class="viewer-head"'));
 assert.ok(html.indexOf('id="studio-impact-settings"') < html.indexOf('class="video-wrap"'),
@@ -26,6 +27,9 @@ assert.ok(rust.includes("scan_collision_trajectory(&state, &run, &intervals, req
 assert.ok(!rust.includes('method":"vballnet_trajectory_breaks_and_motion_extrema"'));
 assert.ok(scanner.includes("full_video_ball_impacts_with_reconstruction"));
 assert.ok(scanner.includes("reconstruct_short_ball_motion"));
+assert.match(rallyScope,/let \(rallies, _\) = cpu_intervals\(run\)\?/);
+assert.ok(scanner.includes("reconstruction.processed_frames += 1"));
+assert.ok(scanner.includes("reader.finish() != expected_sha"));
 assert.ok(typesRust.includes("scan_collision_trajectory(&state, &run, &intervals, req.impact)"));
 assert.match(server,/\/api\/training\/trajectory\/types"[\s\S]{0,100}touch_annotation::types::calculate/);
 assert.ok(typesRust.includes("observed_pose_motion")&&typesRust.includes("refine_with_motion"));
@@ -99,13 +103,13 @@ const context={
       return {schema:"volley-trajectory-touch-proposals/1",project_id:"p",
         rally_run_id:"r",video:"match.mp4",total_frames:200,
         source_replay_sha256:"a".repeat(64),
-        rally_count:1,rally_intervals:[{start:95,end:150}],
+        rally_count:1,rally_source:"saved_cpu_rallies",rally_intervals:[{start:95,end:150}],
         proposals:[{frame:100,score:9},{frame:140,score:3}],
         ground_contacts:[{frame:120,position:[0.4,0.7],landing:"near_half"}],
         court_filter_active:true,
         method:"touch_detector_v4",
         ball_motion_interpolation:{stage:"ball_motion_interpolation_v1",
-          result:{raw_observations:1400,rejected_outliers:2,interpolated_frames:9}},
+          result:{raw_observations:40,processed_frames:56,rejected_outliers:2,interpolated_frames:9}},
         impact_settings:Object.fromEntries(Object.entries(payload.impact).reverse()),
         calibration:{min_score:0,shift_frames:0,training_videos:0},
         metrics_on_labeled_video:null};
@@ -148,6 +152,8 @@ assert.equal(annotation.prediction.ground_contacts.length,1);
 assert.equal(annotation.prediction.ground_contacts[0].landing,"near_half");
 assert.equal(annotation.prediction.ball_motion_interpolation.result.rejected_outliers,2);
 assert.equal(annotation.prediction.ball_motion_interpolation.result.interpolated_frames,9);
+assert.equal(annotation.prediction.ball_motion_interpolation.result.processed_frames,56);
+assert.match(elements.get("studio-annotation-status").textContent,/56 из 200 кадров/);
 assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].impact)),{
   min_turn_angle_deg:45,max_join_error_px:28,
   max_fit_error_px:4,min_separation_frames:6

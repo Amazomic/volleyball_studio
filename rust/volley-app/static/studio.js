@@ -1802,9 +1802,13 @@
           result.ball_motion_interpolation?.stage!=="ball_motion_interpolation_v1"||
           !Number.isSafeInteger(result.ball_motion_interpolation?.result?.rejected_outliers)||
           !Number.isSafeInteger(result.ball_motion_interpolation?.result?.interpolated_frames)||
+          !Number.isSafeInteger(result.ball_motion_interpolation?.result?.processed_frames)||
+          result.rally_source!=="saved_cpu_rallies"||
           Object.entries(impact).some(([key,value])=>result.impact_settings?.[key]!==value)||
           !Array.isArray(result.rally_intervals)||
           result.rally_count!==result.rally_intervals.length||
+          result.ball_motion_interpolation.result.processed_frames!==
+            result.rally_intervals.reduce((sum,r)=>sum+r.end-r.start+1,0)||
           result.rally_intervals.some(r=>!Number.isSafeInteger(r.start)||!Number.isSafeInteger(r.end)||
             r.start<0||r.start>=r.end||r.end>=result.total_frames)||
           result.proposals.some(p=>!Number.isSafeInteger(p.frame)||p.frame<0||
@@ -1823,7 +1827,8 @@
       drawTimeline();drawOverlay();
       await refreshComparison(true);
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run||video!==s.video)return;
-      annotationNotice("Интерполяция мяча: отброшено "+result.ball_motion_interpolation.result.rejected_outliers+
+      annotationNotice("Проверено "+result.ball_motion_interpolation.result.processed_frames+
+        " из "+result.total_frames+" кадров в сохранённых розыгрышах. Интерполяция мяча: отброшено "+result.ball_motion_interpolation.result.rejected_outliers+
         " ложных точек, восстановлено "+result.ball_motion_interpolation.result.interpolated_frames+
         " пропущенных кадров. Внутри "+result.rally_count+" розыгрышей найдено "+
         result.proposals.length+" кандидатов касаний и "+

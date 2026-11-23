@@ -682,54 +682,39 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
 }
 
 pub(crate) fn touch_rally_scope(
-    state: &AppState,
+    _state: &AppState,
     run: &ValidatedRun,
     filter: &TouchRallyFilter,
 ) -> Result<Vec<(u64, u64)>, ApiError> {
     if !filter.merge_gap_seconds.is_finite() || !(0.0..=60.0).contains(&filter.merge_gap_seconds) {
         return Err(storage::bad_request("Invalid training rally merge gap"));
     }
-    let query = CompareQuery {
-        project_id: run.project_id.clone(),
-        rally_run_id: run.run_id.clone(),
-        mode: Some(filter.mode.clone()),
-        min_trajectory_seconds: filter.min_trajectory_seconds,
-        merge_gap_seconds: Some(filter.merge_gap_seconds),
-        stationary_ball_ms: filter.stationary_ball_ms,
-        min_impacts: filter.min_impacts,
-        context_frames: filter.context_frames,
-        min_duration_frames: filter.min_duration_frames,
-        max_touch_gap_frames: filter.max_touch_gap_frames,
-        simulate: Some(true),
-        calibrate: Some(false),
-    };
-    let result = compare(state, run, &query)?;
-    if result["trajectory_status"] != "ready" {
+    if filter.mode != "continuous"
+        || filter.min_impacts.is_some()
+        || filter.context_frames.is_some()
+        || filter.min_duration_frames.is_some()
+        || filter.max_touch_gap_frames.is_some()
+    {
         return Err(storage::bad_request(
-            "Ball rally detection is unavailable for touch training",
+            "Training rally parameters do not match selected algorithm",
         ));
     }
-    let rows = result["trajectory_rallies"]
-        .as_array()
-        .ok_or_else(|| storage::bad_request("Missing ball rally intervals"))?;
-    if rows.len() > MAX_COMPARE_INTERVALS {
-        return Err(storage::bad_request("Too many ball rally intervals"));
+    crate::inference_full::PrimaryRallySettings {
+        min_trajectory_seconds: filter
+            .min_trajectory_seconds
+            .unwrap_or(DEFAULT_MIN_TRAJECTORY_SECONDS),
+        merge_gap_seconds: filter.merge_gap_seconds,
+        stationary_ball_ms: filter
+            .stationary_ball_ms
+            .unwrap_or(crate::cpu_retrack::ball_track::DEFAULT_STATIONARY_BALL_MS),
     }
-    let ranges = rows
-        .iter()
-        .map(|row| {
-            Interval::new(
-                row["start"]
-                    .as_u64()
-                    .ok_or_else(|| storage::bad_request("Invalid ball rally start"))?,
-                row["end"]
-                    .as_u64()
-                    .ok_or_else(|| storage::bad_request("Invalid ball rally end"))?,
-                run.frames,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(ranges.into_iter().map(|row| (row.start, row.end)).collect())
+    .validate()
+    .map_err(storage::bad_request)?;
+    let (rallies, _) = cpu_intervals(run)?;
+    Ok(rallies
+        .into_iter()
+        .map(|row| (row.start, row.end))
+        .collect())
 }
 
 pub async fn get(

@@ -225,6 +225,7 @@ pub(crate) fn full_video_ball_suggestions_scoped(
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub(crate) struct BallReconstructionStats {
     pub raw_observations: usize,
+    pub processed_frames: usize,
     pub rejected_outliers: usize,
     pub interpolated_frames: usize,
 }
@@ -324,16 +325,6 @@ fn full_video_ball_suggestions_impl(
     let mut ground_contacts = Vec::<volley_core::motion::GroundContact>::new();
     let mut observations = 0usize;
     let mut reconstruction = BallReconstructionStats::default();
-    if canonical {
-        reconstruction.rejected_outliers = manifest["ball_stabilizer"]["rejected_frames"]
-            .as_u64()
-            .ok_or("Missing stabilized rejection count")?
-            as usize;
-        reconstruction.interpolated_frames = manifest["ball_stabilizer"]["interpolated_frames"]
-            .as_u64()
-            .ok_or("Missing stabilized interpolation count")?
-            as usize;
-    }
     let mut synthetic = std::collections::HashSet::<i64>::new();
     let max_observation_gap = if canonical && impact.is_some() { 10 } else { 4 };
     let mut scope_index = 0usize;
@@ -424,10 +415,33 @@ fn full_video_ball_suggestions_impl(
     }
     for frame in 0..run.frames {
         let bytes = reader.line()?.ok_or("Saved ball trajectory is truncated")?;
+        while scope.get(scope_index).is_some_and(|&(_, end)| end < frame) {
+            emit(
+                &points,
+                (&mut candidates, &mut ground_contacts),
+                court.zip(scope.get(scope_index).map(|interval| interval.1)),
+                (impact, run.width, run.height),
+                &mut reconstruction,
+                canonical,
+                &synthetic,
+            )?;
+            points.clear();
+            synthetic.clear();
+            scope_index += 1;
+        }
+        if !scope
+            .get(scope_index)
+            .is_some_and(|&(start, end)| start <= frame && frame <= end)
+        {
+            continue;
+        }
+        reconstruction.processed_frames += 1;
         let (position, inferred) = if canonical {
             let row: crate::cpu_touches::CanonicalBallFrame = serde_json::from_slice(&bytes)
                 .map_err(|e| format!("Invalid saved stabilized ball frame: {e}"))?;
             row.validate(frame)?;
+            reconstruction.rejected_outliers += usize::from(row.rejected);
+            reconstruction.interpolated_frames += usize::from(row.interpolated);
             (
                 row.ball.map(|[x, y]| BallObservation {
                     frame: frame as i64,
@@ -470,25 +484,6 @@ fn full_video_ball_suggestions_impl(
         };
         if inferred {
             synthetic.insert(frame as i64);
-        }
-        while scope.get(scope_index).is_some_and(|&(_, end)| end < frame) {
-            emit(
-                &points,
-                (&mut candidates, &mut ground_contacts),
-                court.zip(scope.get(scope_index).map(|interval| interval.1)),
-                (impact, run.width, run.height),
-                &mut reconstruction,
-                canonical,
-                &synthetic,
-            )?;
-            points.clear();
-            scope_index += 1;
-        }
-        if !scope
-            .get(scope_index)
-            .is_some_and(|&(start, end)| start <= frame && frame <= end)
-        {
-            continue;
         }
         let Some(ball) = position else {
             if !points.is_empty()
@@ -620,7 +615,7 @@ mod scored_trajectory_tests {
             };
             let row = json!({
                 "frame":frame,"ball":ball,"interpolated":false,
-                "rejected":(30..=37).contains(&frame)
+                "rejected":(30..=37).contains(&frame) || frame == 4
             });
             bytes.extend(serde_json::to_vec(&row).unwrap());
             bytes.push(b'\n');
@@ -633,7 +628,7 @@ mod scored_trajectory_tests {
             "artifact_id":artifact_id,"trajectory_file":"trajectory.jsonl",
             "trajectory_sha256":sha,"frames":frames,"settings":settings,
             "confidence_frames":observed,"observed_frames":observed,
-            "rejected_frames":8,"interpolated_frames":0
+            "rejected_frames":9,"interpolated_frames":0
         });
         let manifest = json!({
             "schema":"volley-native-stabilized-ball-trajectory/1","state":"complete",
@@ -642,7 +637,7 @@ mod scored_trajectory_tests {
             "frames":frames,"algorithm_version":"ball_stabilizer_v6",
             "settings":settings,"file":"trajectory.jsonl","sha256":sha,
             "confidence_frames":observed,"observed_frames":observed,
-            "rejected_frames":8,"interpolated_frames":0
+            "rejected_frames":9,"interpolated_frames":0
         });
         std::fs::write(
             stabilizer.join("manifest.json"),
@@ -694,6 +689,7 @@ mod scored_trajectory_tests {
             result.events
         );
         assert_eq!(result.reconstruction.rejected_outliers, 8);
+        assert_eq!(result.reconstruction.processed_frames, 30);
         let court = volley_core::court_geometry::CourtTransform::new([
             [0.1, 0.2],
             [0.9, 0.2],
@@ -828,6 +824,23 @@ mod scored_trajectory_tests {
         let mut corrupted = run;
         corrupted.replay_sha = "0".repeat(64);
         assert!(full_video_ball_suggestions(&corrupted).is_err());
+        let mut damaged_outside_scope = b"not-json\n".to_vec();
+        damaged_outside_scope
+            .extend_from_slice(&bytes[bytes.iter().position(|&byte| byte == b'\n').unwrap() + 1..]);
+        std::fs::write(&replay, &damaged_outside_scope).unwrap();
+        corrupted.replay_sha = format!("{:x}", Sha256::digest(&damaged_outside_scope));
+        let only_rally = full_video_ball_impacts_with_reconstruction(
+            &corrupted,
+            &[(20, 30)],
+            volley_core::motion::DirectionBreakConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(only_rally.reconstruction.processed_frames, 11);
+        assert_eq!(only_rally.observed, 11);
+        assert!(only_rally
+            .events
+            .iter()
+            .all(|(frame, _)| (20..=30).contains(frame)));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

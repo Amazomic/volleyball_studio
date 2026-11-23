@@ -294,6 +294,7 @@ pub async fn calculate(
             "court_calibration_revision":court_revision,
             "rally_intervals":intervals.iter().map(|&(start,end)| json!({"start":start,"end":end})).collect::<Vec<_>>(),
             "rally_count":intervals.len(),
+            "rally_source":"saved_cpu_rallies",
             "calibration":calibration,"impact_settings":req.impact,
             "ball_motion_interpolation":{"stage":"ball_motion_interpolation_v1","result":preprocessing},
             "metrics_on_labeled_video":metrics,
