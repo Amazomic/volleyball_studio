@@ -59,7 +59,7 @@ pub(super) mod pair_geometry_keys {
     }
 }
 
-const INDEX_CACHE_SCHEMA: &str = "volley-native-track-index/3";
+const INDEX_CACHE_SCHEMA: &str = "volley-native-track-index/4";
 const MAX_INDEX_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -506,7 +506,7 @@ fn observe_track(
         if record.photo_samples.len() < 12 {
             record.photo_samples.push(sample);
         } else {
-            let slot = (frame_idx / 6 % 12) as usize;
+            let slot = 6 + (frame_idx / 6 % 6) as usize;
             record.photo_samples[slot] = sample;
         }
     }
@@ -914,6 +914,38 @@ mod rally_scope_tests {
     use uuid::Uuid;
 
     #[test]
+    fn long_stitched_track_keeps_original_and_recent_photo_candidates() {
+        let mut observations = BTreeMap::new();
+        for frame in 114..586_u64 {
+            let tracked: Tracked = serde_json::from_value(json!({
+                "track_id":3,
+                "is_verified_athlete":false,
+                "detection":{
+                    "frame_index":frame,"class_name":"player","score":0.75,
+                    "query_index":0,
+                    "bbox_xyxy_norm":[0.55,0.44,0.59,0.56],
+                    "head_point_norm":[0.57,0.45]
+                }
+            }))
+            .unwrap();
+            observe_track(&mut observations, &tracked, frame).unwrap();
+        }
+        let photos = &observations[&3].photo_samples;
+        assert_eq!(photos.len(), 12);
+        assert!(
+            photos.iter().any(|sample| sample.frame <= 150),
+            "The original ID 3 photo evidence must survive the long ID 7 continuation"
+        );
+        assert!(
+            photos.iter().any(|sample| sample.frame >= 530),
+            "Recent photo evidence must also survive a long joined track"
+        );
+        assert!(photos
+            .iter()
+            .all(|sample| (114..586).contains(&sample.frame)));
+    }
+
+    #[test]
     fn exact_rally_intervals_exclude_intermission_ids_and_photo_candidates() {
         let root = std::env::temp_dir().join(format!("volley-rally-index-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
@@ -1301,7 +1333,7 @@ mod persistent_index_tests {
         let cache_path = stored_index_path(&path, None).unwrap();
         assert!(cache_path.is_file());
         let mut stale: Value = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
-        stale["schema"] = json!("volley-native-track-index/2");
+        stale["schema"] = json!("volley-native-track-index/3");
         stale["tracks"]["7"]["observed"] = json!(1);
         fs::write(&cache_path, serde_json::to_vec(&stale).unwrap()).unwrap();
         TRACK_INDICES.get().unwrap().lock().unwrap().clear();
