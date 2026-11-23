@@ -55,7 +55,14 @@ let seeked=null,paused=false;
 const sidebar=[];
 
 const s={project:"p",run:"r",video:"source.mp4"};
+const debugAnnotation={prediction:null};
+const countStart=js.indexOf("  const trainingTouchCountSummary=()=>");
+const countEnd=js.indexOf("  const annotationNewId=()=>",countStart);
+assert.ok(countStart>0&&countEnd>countStart);
+const touchCounts=runInNewContext(js.slice(countStart,countEnd)+
+  "\ntrainingTouchCountSummary",{annotation:debugAnnotation,annotationSourceValid:()=>true});
 const context={
+  trainingTouchCountSummary:touchCounts,
   $,s,document:{createElement:()=>new Node()},
   window:{VolleyballTasks:{
     set:(key,details)=>sidebar.push({type:"set",key,details}),
@@ -99,6 +106,12 @@ assert.equal(elements.get("studio-comparison-metrics").children.length,2,
 assert.ok(elements.get("studio-comparison-metrics").children.every(
   metric=>!metric.children[0]?.textContent.includes("CPU")));
 assert.match(elements.get("studio-simulation-summary").textContent,/Устойчивая траектория/);
+debugAnnotation.prediction={proposals:[{frame:40},{frame:90}],ground_contacts:[{frame:95}]};
+renderComparison();
+assert.match(elements.get("studio-simulation-summary").textContent,/Касания: 2 \(кандидаты\) · песок: 1/);
+debugAnnotation.prediction=null;
+renderComparison();
+assert.doesNotMatch(elements.get("studio-simulation-summary").textContent,/Касания:/);
 assert.equal(comparison.calibrate.disabled,true,"Legacy impact calibration must remain disabled");
 s.run="another";
 renderComparison();

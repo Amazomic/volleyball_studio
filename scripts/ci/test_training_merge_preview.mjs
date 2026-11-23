@@ -56,7 +56,13 @@ const layers={gap:{value:"4"},cpuSummary:textNode(),ballSummary:textNode(),
   provenance:textNode(),touches:{checked:true},ball:{checked:true},
   candidates:{checked:false}};
 const annotation={prediction:null};
+const countStart=js.indexOf("  const trainingTouchCountSummary=()=>");
+const countEnd=js.indexOf("  const annotationNewId=()=>",countStart);
+assert.ok(countStart>0&&countEnd>countStart);
+const touchCounts=runInNewContext(js.slice(countStart,countEnd)+
+  "\ntrainingTouchCountSummary",{annotation,annotationSourceValid:()=>true});
 const context={timelineRallyLayers:layers,timeline,s,comparison,annotation,
+  trainingTouchCountSummary:touchCounts,
   training:{active:true},reference:{active:false},mergeTrainingIntervals:merge,fps:()=>30,
   comparisonMatches:data=>Boolean(data),annotationSourceValid:()=>true};
 const helpers=runInNewContext(js.slice(p,q)+
@@ -71,6 +77,13 @@ helpers.updateTrainingSummaries(groups);
 assert.equal(layers.cpuSummary.textContent,"Устаревший способ отключён");
 assert.equal(layers.ballSummary.textContent,"1 розыгрыш · 0:06");
 assert.match(layers.provenance.textContent,/Нет расчёта касаний · используется только VBallNet/);
+annotation.prediction={proposals:[{frame:40},{frame:85}],ground_contacts:[{frame:90}],rally_count:1};
+helpers.updateTrainingSummaries(groups);
+assert.match(timeline.status.textContent,/Касания: 2/);
+assert.match(timeline.status.textContent,/песок: 1/);
+annotation.prediction=null;
+helpers.updateTrainingSummaries(groups);
+assert.doesNotMatch(timeline.status.textContent,/Касания:/);
 assert.equal(helpers.showBallCandidates(),false);
 layers.candidates.checked=true;
 assert.equal(helpers.showBallCandidates(),true);

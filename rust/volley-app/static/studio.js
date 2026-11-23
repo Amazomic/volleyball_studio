@@ -1381,6 +1381,11 @@
   const annotationReady=()=>annotation.data&&Array.isArray(annotation.data.touches);
   const annotationSource=()=>[s.project,s.run,s.video].join("\u0000");
   const annotationSourceValid=()=>annotation.source===annotationSource();
+  const trainingTouchCountSummary=()=>{
+    const result=annotation.prediction&&annotationSourceValid()?annotation.prediction:null;
+    return result?"Касания: "+result.proposals.length+" (кандидаты) · песок: "+
+      (result.ground_contacts?.length||0):"";
+  };
   const annotationNewId=()=>window.crypto?.randomUUID?.()||
     "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{
       const n=Math.floor(Math.random()*16);return (c==="x"?n:(n&3|8)).toString(16);
@@ -1476,7 +1481,7 @@
       for(const ground of (annotation.prediction.ground_contacts||[]).slice(0,600)){
         const marker=document.createElement("button");
         marker.type="button";
-        marker.className="studio-trajectory-proposal";
+        marker.className="studio-trajectory-proposal studio-trajectory-ground";
         marker.hidden=annotation.ballLayerVisible===false;
         marker.style.left=annotationPosition(ground.frame)+"%";
         const [color,half]=groundContactAppearance[ground.landing]||["#ffd166","неизвестно"];
@@ -2117,6 +2122,8 @@
       "Алгоритм по мячу: "+simulated.length+
       " возможных касаний внутри · "+unassigned.length+
       " перегибов вне розыгрышей":"Нажмите «Смоделировать»";
+    const touchCounts=trainingTouchCountSummary();
+    if(touchCounts)comparison.summary.textContent+=" · "+touchCounts;
 
     addMetric("По мячу до объединения",String(data.trajectory_rallies.length));
     if(!continuous){
@@ -2770,7 +2777,8 @@
       annotation.prediction.proposals:null;
     if(training.active&&timeline.data)timeline.status.textContent=
       "Розыгрыши по мячу: "+groups.ball.length+
-      " · пауза < "+trainingGapSeconds()+" с";
+      " · пауза < "+trainingGapSeconds()+" с"+
+      (trainingTouchCountSummary()?" · "+trainingTouchCountSummary():"");
     timelineRallyLayers.provenance.textContent=prediction?
       prediction.length+" кандидатов · в "+annotation.prediction.rally_count+" розыгрышах VBallNet":
       "Нет расчёта касаний · используется только VBallNet";
@@ -2896,12 +2904,12 @@
           const x=((Number(s.analysisOffset)||0)+proposal.frame/fps())/duration*width;
           const kind=showBallTouchTypes()&&annotation.typePrediction?.touches.find(v=>v.frame===proposal.frame)?.kind;
           ctx.fillStyle=kind?({attack:"#ff6b6b",overhead_pass:"#66c8ff",dig:"#56dfb9",serve:"#f3a350",block:"#ac92ff"}[kind]||"#ffbd55"):"#ffbd55";
-          ctx.fillRect(x-1,y,Math.max(2,Math.ceil(dpr)),bandHeight);
+          ctx.fillRect(Math.floor(x),y+bandHeight-8,1,5);
         }
         for(const ground of (annotation.prediction.ground_contacts||[])){
           const x=((Number(s.analysisOffset)||0)+ground.frame/fps())/duration*width;
           ctx.fillStyle=(groundContactAppearance[ground.landing]||["#ffd166"])[0];
-          ctx.fillRect(x-1,y,Math.max(2,Math.ceil(dpr)),bandHeight);
+          ctx.fillRect(Math.floor(x),y+bandHeight-16,2,6);
         }
       }
       if(training.active&&(reference.active||timelineRallyLayers.touches.checked)&&annotationReady()&&
