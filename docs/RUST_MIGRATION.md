@@ -3636,3 +3636,9 @@ Studio показывает кнопку перехода между debug и re
 ### 2026-11-23 ? Guard against overclassification of player hits as sand
 - Real short-project read-only diagnosis: original 28 Debug trajectory candidates became only 3 candidates and 25 false ground classifications with v1; the 21.03 s player hit was among the incorrect removals.
 - Detector v2 is deliberately terminal-rally-only (last 45 frames), requires a court-surface band and at most 0.09 normalized image margin around the polygon, and also detects a stationary ground landing. Other player-touch trajectory candidates must remain intact. V2 gate and user-project recheck required before marking this fixed.
+
+### 2026-11-23 — сохранение обучающей разметки на последнем кадре
+
+- База `c882fa8c`, владелец: `rust/volley-app/src/training_samples.rs`. Редактор передаёт кадр как 30 × секунды; FFmpeg на позиции `-ss 1.000` для синтетического клипа длительностью 1 с завершался с кодом 0, но выдавал 0 байт вместо кадра.
+- Исправлено: точка захвата сигнатуры камеры ограничена значением не позднее 250 мс до конца исходника; в обучающем примере сохраняется выбранный индекс кадра. При сбоях декодирования возвращаются диагностические сведения. Сохранённая пользователем геометрия не меняется.
+- Проверки: RED — тест `camera_sample_timestamp_stays_inside_video_at_end` не компилировался до реализации; GREEN — `scripts/check-all.ps1` PASS (WASM, fmt, Clippy, Rust workspace, 98 Node gates), синтетический FFmpeg-клип PASS (691200 байт после корректировки). Реальная пользовательская сцена и GPU — NOT TESTED. Применение — через очередь `scripts/deploy-volley-queue.ps1` после публикации.
