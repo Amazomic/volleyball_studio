@@ -269,6 +269,33 @@ pub(crate) async fn try_shutdown(state: &AppState, gate: &ShutdownGate) -> bool 
     // New HTTP work has been excluded since begin_shutdown was called.
     true
 }
+#[cfg(windows)]
+pub(crate) async fn windows_shutdown(
+    headers: axum::http::HeaderMap,
+    state: Arc<AppState>,
+    gate: Arc<ShutdownGate>,
+    notify: Arc<tokio::sync::Notify>,
+) -> axum::http::StatusCode {
+    use axum::http::StatusCode;
+    if let Err(status) = validate_local_request(&headers) {
+        return status;
+    }
+    let Ok(token) = std::env::var("VOLLEY_SHUTDOWN_TOKEN") else {
+        return StatusCode::FORBIDDEN;
+    };
+    let supplied = headers
+        .get("x-volley-shutdown-token")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if token.len() < 32 || token != supplied {
+        return StatusCode::FORBIDDEN;
+    }
+    if !try_shutdown(&state, &gate).await {
+        return StatusCode::CONFLICT;
+    }
+    notify.notify_one();
+    StatusCode::ACCEPTED
+}
 use crate::AppState;
 use axum::{response::IntoResponse, Json};
 use serde::Serialize;

@@ -8,7 +8,7 @@ Keep shared rules here and details in linked documents. Follow the requested sco
 
 - На HOME-PC сборка, тесты, инференс GPU и запуск Volleyball Studio выполняются **нативно в Windows 11**: PowerShell/CMD, Windows Rust target `x86_64-pc-windows-msvc`, Windows FFmpeg, ONNX Runtime/CUDA DLL и пути Windows. Не использовать WSL/Ubuntu, `wsl.exe` или Linux ELF для этих операций без нового прямого разрешения пользователя.
 - Docker Desktop может пользоваться WSL2 как внутренним механизмом Docker, но **не** как средой запуска самой Studio. WSL разрешён для диагностики и обслуживания ранее созданного Linux-диска, если это не прерывает рабочую Studio и пользовательские задания.
-- Текущие `start-volley-ui.cmd` и `scripts/start-volley-rust-dev.ps1` пока вызывают WSL и **не соответствуют** требованию Windows-native. Сначала перенести их сборку, запуск и безопасное развёртывание через `scripts/deploy-volley-queue.ps1` на проверенный Windows executable. До успешной миграции **не запускать новое развёртывание через WSL, не подменять Windows-исполнение PowerShell-обёрткой и не завершать действующий сервер силой**; зафиксировать конкретный блокер и статус «Не завершено».
+- Штатный `start-volley-ui.cmd` вызывает Windows-native `scripts/start-volley-rust-dev.ps1`: собирает Windows `.exe`, запускает и останавливает только верифицированный PID с защищённым HTTP-завершением; финальное развёртывание выполняет `scripts/deploy-volley-queue.ps1`. Временные Linux/WSL-зависимости и старый `scripts/volley-rust.sh` не использовать как fallback. Если порт `8875` по-прежнему обслуживается прежней WSL Studio, не останавливать её, пока данные, CUDA/ORT и запуск новой Studio не проверены; сообщать о блокировке, не заявляя завершённый Windows-deploy.
 
 ## Start with the task
 

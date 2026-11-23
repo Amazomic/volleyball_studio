@@ -18,79 +18,66 @@ Download both formats from [GitHub Releases](https://github.com/Amazomic/volleyb
 
 `master` не изменять без прямого указания пользователя. Если активен другой агент, не использовать его дерево. Если `/internal/rewrite-status` сообщает активные задания, запуск небезопасен или скомпилированный SHA отличается — не прерывать Studio и сообщить «Не завершено» вместо заявления о готовом результате. Только после успешной проверки дать ссылку [на локальную Studio](http://127.0.0.1:8875/studio), указав commit SHA. Ссылка предназначена для компьютера с запущенной Studio.
 
-## Build from source on Windows / WSL (developer workflow)
+## Build from source on Windows (developer workflow)
 ### Очередь финальной сборки Studio
 
 После каждого push в `origin/develop` **вместо самостоятельного перезапуска** используйте одну команду (из любого отдельного task-worktree):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-volley-queue.ps1 -DeploymentRoot 'C:\Users\amazomic\AppData\Local\SentinelX\workspace\volley-live-develop-branch-20261122'
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-volley-queue.ps1 -DeploymentRoot 'C:/Users/amazomic/AppData/Local/SentinelX/workspace/volley-native-deploy'
 ```
 
 `DeploymentRoot` — путь к выделенному чистому клону с веткой `develop`; его можно сохранить в `VOLLEY_STUDIO_DEPLOY_ROOT`. Одновременные вызовы сериализуются через OS mutex, берут только свежий `origin/develop` и пропускают сборку, если точный SHA уже обслуживается. Скрипт сначала собирает `/build`, затем при отсутствии активных задач использует штатные `/stop` и `/daemon` и сверяет SHA на `/studio`. При ошибке не останавливает неизвестные процессы. Прямой `/restart` остаётся аварийной ручной командой, не механизмом штатного завершения задач.
 
-The following `start-volley-ui.cmd` commands apply to a **repository checkout**, not a downloaded beta ZIP. Starting, detaching or restarting the source Studio is allowed only from an independent clean Git clone with checked-out `develop` at the exact `origin/develop` SHA. The Rust native entrypoint also enforces develop, origin/develop and clean tracked content plus staged changes for source checkouts, with CRLF-normalized comparisons when WSL reads a Windows checkout, preventing direct-binary bypass. Standalone release archives without Git metadata remain supported. Feature branches, `master`, detached HEAD and outdated develop are rejected before a build or shutdown; `status`, `stop`, `doctor` and `check` remain available for diagnosis and safe recovery. A separate clone avoids disturbing an existing dirty `develop` worktree. The source launcher compiles as needed and uses the isolated WSL sandbox; its defaults differ from the prebuilt Windows launcher.
+The following `start-volley-ui.cmd` commands apply to a **repository checkout**, not a downloaded beta ZIP. Starting, detaching or restarting the source Studio is allowed only from an independent clean Git clone with checked-out `develop` at the exact `origin/develop` SHA. The Rust native entrypoint also enforces develop, origin/develop and clean tracked content plus staged changes for source checkouts, with platform-native Git validation, preventing direct-binary bypass. Standalone release archives without Git metadata remain supported. Feature branches, `master`, detached HEAD and outdated develop are rejected before a build or shutdown; `status`, `stop`, `doctor` and `check` remain available for diagnosis and safe recovery. A separate clone avoids disturbing an existing dirty `develop` worktree. The source launcher builds and runs a native Windows executable using an isolated Windows data root; data from the old WSL sandbox must be migrated and verified separately.
 
 The Rust launcher never starts/stops Python or changes original videos,
 historical results, or the global player cache.
 
-## Windows and WSL — one working instance
+## Native Windows source launch — one working Studio
 
-Prerequisites: Ubuntu-25.04 in WSL, Rust offline toolchain, FFmpeg and
-FFprobe, Node.js only for CI, local NVIDIA GPU and explicitly provisioned
-Linux ONNX Runtime for CUDA inference.
+Prerequisites: Windows 11, native Rust `x86_64-pc-windows-msvc` (including
+`wasm32-unknown-unknown` for the web UI), Visual Studio MSVC, Git Bash for
+Linux-script syntax checks, FFmpeg/FFprobe on `PATH`, ONNX Runtime
+`onnxruntime.dll` and `onnxruntime_providers_cuda.dll` with matching NVIDIA
+CUDA/cuDNN DLLs for actual GPU inference. Set `ORT_DYLIB_PATH` to the
+absolute path to the native Windows runtime DLL; a CPU-only library does not
+satisfy GPU readiness. Models must be populated in the clean deployment clone.
 
-Use from the checkout root:
-
-~~~bat
-start-volley-ui.cmd
-start-volley-ui.cmd /status
-start-volley-ui.cmd /stop
-start-volley-ui.cmd /restart
-start-volley-ui.cmd /doctor
-start-volley-ui.cmd /check
-~~~
-
-The source-built app stays in the foreground at http://127.0.0.1:8875/studio. The legacy /studio/rust path redirects here.
-Legacy Python port 8765 is never automatically touched or killed.
-A second launch reuses the running Rust process, and an exclusive file
-lock based on the **canonical repository root** prevents a second
-instance on another port or with a different Rust data directory.
-
-PowerShell supports optional settings and the same safe actions:
+The Windows source launcher no longer invokes `wsl.exe` or a Linux ELF.
+Invoke it only from a clean, separate `develop` checkout with HEAD equal to
+`origin/develop`. The queue remains the sole final deployment mechanism.
 
 ~~~powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-volley-rust-dev.ps1 -Action Start
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-volley-rust-dev.ps1 -Action Status
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-volley-rust-dev.ps1 -Action Restart
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-volley-rust-dev.ps1 -Action Doctor
+.\start-volley-ui.cmd /doctor
+.\start-volley-ui.cmd /status
+.\start-volley-ui.cmd /build
+.\start-volley-ui.cmd /daemon
+.\start-volley-ui.cmd /stop
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-volley-rust-dev.ps1 -Action Status -Bind 127.0.0.1:8876
 ~~~
 
-Optional parameters: -Bind 127.0.0.1:8875, -Distro Ubuntu-25.04,
--DataRoot /absolute/wsl/path, -ReadOnly, -OrtLibrary /absolute/wsl/path/
-libonnxruntime.so and -OpenvinoLibrary /absolute/wsl/path/libopenvino_c.so.
-Writable Rust data defaults to $HOME/.cache/volley-rust-sandbox outside
-the repository. Original models, videos, Python runs and source code
-are not modified.
+`/build` builds WASM and native Windows `volley-app.exe` and copies the
+binary to a SHA-named file in `.studio-runtime/bin/`; this avoids
+Windows locking the running executable while a newer commit builds.
+`/daemon` launches the staged binary and records its PID, executable
+path, port, SHA and a private shutdown token. `/stop` validates
+HTTP identity, Win32 executable and the absence of active jobs/streams,
+then sends an authenticated local request; no forced process termination.
+An unknown port owner, including the previous WSL instance, blocks the switch.
 
-Before sending SIGTERM, the WSL controller verifies the returned PID,
-the expected Rust executable path and checkout working directory using
-/proc, and GET /internal/rewrite-status must report shutdown_safe=true
-and active_jobs=[]. GPU inference, FFmpeg montage, CPU processing, video
-preparation, Quick Reel jobs and in-flight HTTP response bodies block restart.
-In particular, an open Range video/audio stream remains active until its
-response body finishes or the client disconnects. While another response
-is open, status reports shutdown_safe=false and active_jobs includes
-http_responses. On Linux/WSL, each accepted TCP socket is configured
-with TCP_USER_TIMEOUT=120 seconds: if buffered bytes cannot be transmitted
-because the client has a zero receive window, the kernel closes the stalled
-connection and releases the HTTP shutdown guard. Active progressing video
-streams are not subject to a 120-second total-duration limit. An older
-running binary must be safely restarted to gain this protection.
-Close active browser playback and retry the guarded restart;
-do not escalate from a refusal to SIGKILL. SIGINT and SIGTERM both use native
-Tokio graceful shutdown; no force kill, Python process kill,
-or generic port-based termination is present.
+Writable data defaults to `%LOCALAPPDATA%/VolleyballStudio/data` or
+`VOLLEY_STUDIO_DATA_ROOT`. `-DataRoot C:/absolute/path` selects a
+separate Windows data directory. Use `-ReadOnly` for disposable
+smoke tests only. Existing WSL data under
+`/home/amazomic/.cache/volley-rust-sandbox` does **not** migrate
+automatically. Preserve it until uploads, project revisions, media paths,
+models, GPU runtime and saved evidence are validated on Windows. Do not
+replace the running WSL server because a Windows executable serves a blank
+UI. A test on `8876` is not a completed cutover to `8875`.
+
+Historical Linux/WSL and Docker launch scripts remain for Linux releases
+and isolated Docker checks; HOME-PC Studio must use Windows-native launch.
 
 ## Native offline Linux source build
 

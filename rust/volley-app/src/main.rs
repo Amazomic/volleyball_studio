@@ -438,7 +438,13 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
 
 /// Refuse OS termination when native jobs or in-flight HTTP work remain.
 /// Launcher never escalates to SIGKILL: a later SIGTERM may retry once idle.
-async fn shutdown_signal(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) {
+async fn shutdown_signal(
+    state: Arc<AppState>,
+    gate: Arc<runtime::ShutdownGate>,
+    shutdown_requested: Arc<tokio::sync::Notify>,
+) {
+    #[cfg(not(windows))]
+    let _ = &shutdown_requested;
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -455,6 +461,12 @@ async fn shutdown_signal(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>)
         }
     }
     loop {
+        #[cfg(windows)]
+        tokio::select! {
+            _ = shutdown_requested.notified() => return,
+            _ = tokio::signal::ctrl_c() => {}
+        }
+        #[cfg(not(windows))]
         let _ = tokio::signal::ctrl_c().await;
         if runtime::try_shutdown(&state, &gate).await {
             return;
@@ -521,6 +533,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "Volleyball Studio (development, INCOMPLETE): http://{addr}/internal/rewrite-status (isolated writes={writes_enabled})"
     );
     let gate = Arc::new(runtime::ShutdownGate::default());
+    let shutdown_requested = Arc::new(tokio::sync::Notify::new());
+    let router = app_with_gate(state.clone(), gate.clone());
+    #[cfg(windows)]
+    let router = router.route(
+        "/internal/windows-shutdown",
+        post({
+            let state = state.clone();
+            let gate = gate.clone();
+            let notify = shutdown_requested.clone();
+            move |headers: axum::http::HeaderMap| {
+                let state = state.clone();
+                let gate = gate.clone();
+                let notify = notify.clone();
+                async move { runtime::windows_shutdown(headers, state, gate, notify).await }
+            }
+        }),
+    );
     axum::serve(
         listener.tap_io(|socket| {
             #[cfg(target_os = "linux")]
@@ -532,9 +561,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             #[cfg(not(target_os = "linux"))]
             let _ = socket;
         }),
-        app_with_gate(state.clone(), gate.clone()),
+        router,
     )
-    .with_graceful_shutdown(shutdown_signal(state, gate))
+    .with_graceful_shutdown(shutdown_signal(state, gate, shutdown_requested))
     .await?;
     Ok(())
 }

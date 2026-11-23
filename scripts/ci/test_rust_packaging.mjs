@@ -5,6 +5,9 @@ import {fileURLToPath} from "node:url";
 import assert from "node:assert/strict";
 
 const root=join(fileURLToPath(new URL("../..",import.meta.url)));
+const bashExecutable=process.platform==="win32"
+  ?join(process.env.ProgramFiles??"C:\\Program Files","Git","bin","bash.exe")
+  :"bash";
 const attrs=readFileSync(join(root,".gitattributes"),"utf8");
 assert.match(attrs,/^\*\.sh text eol=lf$/m,
   "Windows autocrlf=true must not corrupt WSL Bash scripts");
@@ -14,18 +17,18 @@ for(const script of ["scripts/volley-rust.sh",
   "scripts/ci/test_rust_docker_smoke.sh",
   "scripts/ci/test_rust_faults.sh","scripts/ci/test_rust_shutdown_race.sh",
   "scripts/ci/build_rust_docker_local.sh"]){
-  execFileSync("bash",["-n",script],{cwd:root});
+  execFileSync(bashExecutable,["-n",script],{cwd:root});
   assert.ok(!readFileSync(join(root,script)).includes(13),
     "CRLF corrupts Bash under Windows autocrlf: "+script);
 }
 const ortInstall=content("scripts/setup_rust_ort_cuda.sh");
 assert.ok(!readFileSync(join(root,"scripts/setup_rust_ort_cuda.sh")).includes(13),
   "ORT install script must retain LF in Windows checkouts");
-execFileSync("bash",["-n","scripts/setup_rust_ort_cuda.sh"],{cwd:root});
+execFileSync(bashExecutable,["-n","scripts/setup_rust_ort_cuda.sh"],{cwd:root});
 const ortSmoke=content("scripts/ci/test_rust_cuda_runtime.sh");
 assert.ok(!readFileSync(join(root,"scripts/ci/test_rust_cuda_runtime.sh")).includes(13),
   "CUDA smoke script must retain LF in Windows checkouts");
-execFileSync("bash",["-n","scripts/ci/test_rust_cuda_runtime.sh"],{cwd:root});
+execFileSync(bashExecutable,["-n","scripts/ci/test_rust_cuda_runtime.sh"],{cwd:root});
 for(const value of ["onnxruntime-linux-x64-gpu-1.22.0.tgz",
   "2a19dbfa403672ec27378c3d40a68f793ac7a6327712cd0e8240a86be2b10c55",
   "onnxruntime-gpu[cuda,cudnn]==1.22.0","--target"]){
@@ -49,7 +52,7 @@ assert.match(server,/from_fn_with_state\(\s*gate,\s*runtime::guard_request,/,
   "All Rust HTTP requests must cross the stage83 shutdown gate");
 for(const term of ["runtime::exclusive_instance","runtime::rewrite_status",
   "shutdown_signal","SignalKind::terminate",
-  "with_graceful_shutdown(shutdown_signal(state, gate))",
+  "with_graceful_shutdown(shutdown_signal(state, gate, shutdown_requested))",
   "app_with_gate"]){
   assert.ok(server.includes(term),"Missing safe runtime policy: "+term);
 }
@@ -71,11 +74,16 @@ for(const detail of ['"$debug (deleted)"','"$release (deleted)"',
 }
 assert.doesNotMatch(bash,/kill -KILL|kill -9|pkill|taskkill|python\d?\s/);
 const ps=content("scripts/start-volley-rust-dev.ps1");
-assert.match(ps,/Ubuntu-25\.04/);
-assert.match(ps,/\$processExit=\$LASTEXITCODE/);
-assert.match(ps,/\$originalErrorAction=\$ErrorActionPreference/);
 assert.match(ps,/127\.0\.0\.1:8875/);
-assert.match(ps,/wsl\.exe -d \$Distro --exec bash/);
+assert.doesNotMatch(ps,/wsl\.exe|Ubuntu-25\.04|volley-rust\.sh/);
+for(const token of ["Assert-Owner","Stop-Windows","windows-shutdown",
+  "Get-Candidate","VOLLEY_RUST_DATA_ROOT","Start-Process",
+  "WINDOWS_BUILD","WINDOWS_STARTED"]){
+  assert.ok(ps.includes(token),"Missing native Windows launcher contract: "+token);
+}
+for(const token of ["windows_shutdown","VOLLEY_SHUTDOWN_TOKEN","x-volley-shutdown-token"]){
+  assert.ok(daemon.includes(token),"Missing authenticated Windows shutdown: "+token);
+}
 assert.match(ps,/ValidateSet\("Start","Detach","Status","Stop","Restart","Build","Doctor","Check"\)/);
 assert.doesNotMatch(ps,/Stop-Process|taskkill|python\.exe/);
 const cmd=content("start-volley-ui.cmd");
