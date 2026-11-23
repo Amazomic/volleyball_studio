@@ -4,6 +4,12 @@ Keep shared rules here and details in linked documents. Follow the requested sco
 
 **Обязательный для всех агентов контракт:** [docs/AGENT_DELIVERY_POLICY.md](docs/AGENT_DELIVERY_POLICY.md). Каждая задача делается в новой локальной ветке и отдельном worktree, затем проверяется, сливается интегратором в `develop`, пушится **только** в `origin/develop` и применяется к работающей Studio с проверкой точного SHA сборки. `master` не изменять, не сливать и не пушить без прямого указания пользователя — включая релизы. Ответ **«Выполнил»** возможен только после проверенной пересборки и развёртывания со ссылкой на Studio. Все параллельные агенты работают только в своих task-ветках.
 
+## Windows-native execution (mandatory)
+
+- На HOME-PC сборка, тесты, инференс GPU и запуск Volleyball Studio выполняются **нативно в Windows 11**: PowerShell/CMD, Windows Rust target `x86_64-pc-windows-msvc`, Windows FFmpeg, ONNX Runtime/CUDA DLL и пути Windows. Не использовать WSL/Ubuntu, `wsl.exe` или Linux ELF для этих операций без нового прямого разрешения пользователя.
+- Docker Desktop может пользоваться WSL2 как внутренним механизмом Docker, но **не** как средой запуска самой Studio. WSL разрешён для диагностики и обслуживания ранее созданного Linux-диска, если это не прерывает рабочую Studio и пользовательские задания.
+- Текущие `start-volley-ui.cmd` и `scripts/start-volley-rust-dev.ps1` пока вызывают WSL и **не соответствуют** требованию Windows-native. Сначала перенести их сборку, запуск и безопасное развёртывание через `scripts/deploy-volley-queue.ps1` на проверенный Windows executable. До успешной миграции **не запускать новое развёртывание через WSL, не подменять Windows-исполнение PowerShell-обёрткой и не завершать действующий сервер силой**; зафиксировать конкретный блокер и статус «Не завершено».
+
 ## Start with the task
 
 1. Run `git status --short --branch`, `git log -5 --oneline`, `git rev-parse HEAD`, `git worktree list --porcelain`; create a fresh local task branch and isolated worktree from current `origin/develop` before editing. Preserve existing changes/untracked files; commit only your paths. Recheck status before committing.
