@@ -75,8 +75,16 @@ const context={
   annotationFrame:()=>60,
   editAnnotation:(action,fields)=>edits.push({action,fields}),
   seekTimeline:seconds=>seeks.push(seconds),
-  annotationClock:frame=>(frame/30).toFixed(2)+" с"
+  annotationClock:frame=>(frame/30).toFixed(2)+" с",
+  hideAnnotationContext:()=>{}
 };
+const helperStart=js.indexOf("  const annotationSourceTime=frame=>");
+const helperEnd=js.indexOf("  const annotationNotice=",helperStart);
+assert.ok(helperStart>=0&&helperEnd>helperStart);
+const {annotationSourceTime,annotationFrameAtPosition}=runInNewContext(
+  js.slice(helperStart,helperEnd)+"\n({annotationSourceTime,annotationFrameAtPosition})",
+  {s:context.s,fps:context.fps,timelineDuration:()=>context.timelineDuration()});
+Object.assign(context,{annotationSourceTime,annotationFrameAtPosition});
 const slice=js.slice(js.indexOf("  const annotationReady="),js.indexOf("  const refreshAnnotation="));
 assert.ok(slice.includes('querySelectorAll(".studio-annotation-tick,.studio-trajectory-proposal")'));
 const draw=runInNewContext(slice+"\n({drawAnnotation})",context).drawAnnotation;
@@ -101,6 +109,26 @@ assert.deepEqual(JSON.parse(JSON.stringify(edits)),[{action:"move_touch",fields:
 assert.deepEqual(seeks,[]);
 draw();
 assert.equal(lane.children.filter(row=>!row.removed&&row===canvas).length,1);
+
+context.s.analysisOffset=1572.17;
+context.timelineDuration=()=>7065.669;
+draw();
+const movedTick=lane.querySelectorAll(".studio-annotation-tick")[0];
+const expectedLeft=100*(1572.17+60/30)/7065.669;
+assert.ok(Math.abs(Number.parseFloat(movedTick.style.left)-expectedLeft)<0.00001,
+  "Saved touch must be placed at source video time, not the local analysis minute");
+const sourceFraction=(1572.17+150/30)/7065.669;
+const sourcePointer={button:0,pointerId:9,clientX:10+sourceFraction*300,
+  preventDefault(){},stopPropagation(){}};
+movedTick.listeners.get("pointerdown")(sourcePointer);
+movedTick.listeners.get("pointermove")(sourcePointer);
+movedTick.listeners.get("pointerup")(sourcePointer);
+assert.deepEqual(JSON.parse(JSON.stringify(edits.at(-1))),
+  {action:"move_touch",fields:{id:"touch-1",frame:150}},
+  "Dragging on full source-video ruler must return a local analysis frame");
+annotation.touchList.children[0].listeners.get("click")();
+assert.ok(Math.abs(seeks.at(-1)-(1572.17+60/30))<0.00001,
+  "Selecting a saved touch must seek to source video time");
 
 const layout={children:[],append(element){
   if(element.parentElement&&element.parentElement!==this)

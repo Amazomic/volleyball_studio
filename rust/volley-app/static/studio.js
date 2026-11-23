@@ -1370,10 +1370,17 @@
       reference.counts.textContent="Ошибка выбора видео: "+error.message;
     });
   });
+  const annotationSourceTime=frame=>(Number(s.analysisOffset)||0)+frame/fps();
+  const annotationLocalFrame=seconds=>Math.round(
+    (seconds-(Number(s.analysisOffset)||0))*fps());
+  const annotationFrameAtPosition=(fraction,totalFrames)=>Math.max(0,Math.min(
+    totalFrames-1,annotationLocalFrame(
+      Math.max(0,Math.min(1,fraction))*timelineDuration())));
   const annotationFrame=()=>Math.max(0,Math.min(
     (annotation.data?.total_frames||1)-1,
-    Math.round((Number(ui.video.currentTime)||s.seekAt||0)*fps())));
-  const annotationClock=frame=>(frame/fps()).toFixed(3).replace(".",",")+" с";
+    annotationLocalFrame(Number.isFinite(ui.video.currentTime)?
+      ui.video.currentTime:(Number(s.seekAt)||0))));
+  const annotationClock=frame=>annotationSourceTime(frame).toFixed(3).replace(".",",")+" с";
   const annotationNotice=(value,error=false)=>{
     annotation.status.textContent=value;
     annotation.status.classList.toggle("is-error",error);
@@ -1420,7 +1427,8 @@
     .sort((a,b)=>(a.frame??a.start)-(b.frame??b.start));
   const annotationPosition=frame=>{
     const duration=timelineDuration();
-    return 100*Math.max(0,Math.min(1,frame/fps()/Math.max(1/fps(),duration)));
+    return 100*Math.max(0,Math.min(1,
+      annotationSourceTime(frame)/Math.max(1/fps(),duration)));
   };
   const annotationMarkCurrent=()=>{
     if(!training.active)return;
@@ -1470,11 +1478,11 @@
             " · "+trainingNames[annotation.typePrediction.touches.find(v=>v.frame===item.frame).kind]: "");
         marker.setAttribute("aria-label",marker.title);
         marker.addEventListener("click",event=>{
-          event.stopPropagation();seekTimeline(item.frame/fps());hideAnnotationContext();
+          event.stopPropagation();seekTimeline(annotationSourceTime(item.frame));hideAnnotationContext();
         });
         marker.addEventListener("contextmenu",event=>{
           event.preventDefault();event.stopPropagation();
-          seekTimeline(item.frame/fps());showAnnotationContext(item.frame,event);
+          seekTimeline(annotationSourceTime(item.frame));showAnnotationContext(item.frame,event);
         });
         annotation.lane.append(marker);
       }
@@ -1489,7 +1497,7 @@
         marker.title="Удар мяча о песок · "+half+" · кадр "+ground.frame;
         marker.setAttribute("aria-label",marker.title);
         marker.addEventListener("click",event=>{
-          event.stopPropagation();seekTimeline(ground.frame/fps());hideAnnotationContext();
+          event.stopPropagation();seekTimeline(annotationSourceTime(ground.frame));hideAnnotationContext();
         });
         annotation.lane.append(marker);
       }
@@ -1531,8 +1539,8 @@
         e.stopPropagation();
         const box=annotation.lane.getBoundingClientRect();
         if(!box.width)return;
-        pointer.frame=Math.max(0,Math.min(data.total_frames-1,Math.round(
-          (e.clientX-box.left)/box.width*(data.total_frames-1))));
+        pointer.frame=annotationFrameAtPosition(
+          (e.clientX-box.left)/box.width,data.total_frames);
         tick.style.left=annotationPosition(pointer.frame)+"%";
       });
       tick.addEventListener("pointerup",e=>{
@@ -1542,18 +1550,18 @@
         pointer=null;
         if(destination!==item.frame)editAnnotation("move_touch",{id:item.id,frame:destination});
         else {
-          seekTimeline(item.frame/fps());drawAnnotation();hideAnnotationContext();
+          seekTimeline(annotationSourceTime(item.frame));drawAnnotation();hideAnnotationContext();
         }
       });
       tick.addEventListener("pointercancel",e=>{e.stopPropagation();pointer=null;drawAnnotation();});
       tick.addEventListener("click",e=>{
         e.stopPropagation();
-        if(reference.active)seekTimeline((Number(s.analysisOffset)||0)+item.frame/fps());
+        if(reference.active)seekTimeline(annotationSourceTime(item.frame));
       });
       tick.addEventListener("contextmenu",e=>{
         e.preventDefault();e.stopPropagation();
         if(reference.active)return;
-        annotation.touchId=item.id;seekTimeline(item.frame/fps());
+        annotation.touchId=item.id;seekTimeline(annotationSourceTime(item.frame));
         showAnnotationContext(item.frame,e,item.id);
       });
       tick.addEventListener("keydown",e=>{
@@ -1578,13 +1586,13 @@
       row.textContent="● "+annotationClock(item.frame);
       row.title="Выбрать касание и перейти к нему";
       row.addEventListener("click",()=>{
-        annotation.touchId=item.id;seekTimeline(item.frame/fps());drawAnnotation();
+        annotation.touchId=item.id;seekTimeline(annotationSourceTime(item.frame));drawAnnotation();
         hideAnnotationContext();
       });
       row.addEventListener("contextmenu",event=>{
         if(reference.active)return;
         event.preventDefault();annotation.touchId=item.id;
-        seekTimeline(item.frame/fps());showAnnotationContext(item.frame,event,item.id);
+        seekTimeline(annotationSourceTime(item.frame));showAnnotationContext(item.frame,event,item.id);
       });
       annotation.touchList.append(row);
     }
@@ -1599,12 +1607,12 @@
         annotationClock(item.end);
       jump.addEventListener("click",()=>{
         annotation.rallyId=item.id;annotation.pendingStart=null;
-        seekTimeline(item.start/fps());drawAnnotation();hideAnnotationContext();
+        seekTimeline(annotationSourceTime(item.start));drawAnnotation();hideAnnotationContext();
       });
       jump.addEventListener("contextmenu",event=>{
         if(reference.active)return;
         event.preventDefault();annotation.rallyId=item.id;
-        seekTimeline(item.start/fps());showAnnotationContext(item.start,event);
+        seekTimeline(annotationSourceTime(item.start));showAnnotationContext(item.start,event);
       });
       const remove=document.createElement("button");remove.type="button";
       remove.className="secondary";remove.textContent="×";remove.title="Удалить розыгрыш";
