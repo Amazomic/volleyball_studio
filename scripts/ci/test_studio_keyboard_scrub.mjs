@@ -4,7 +4,7 @@ import {runInNewContext} from "node:vm";
 
 const js=readFileSync(new URL("../../rust/volley-app/static/studio.js",import.meta.url),"utf8");
 const start=js.indexOf("  // Left/right arrows scrub the one source-wide timeline");
-const end=js.indexOf("  // Space controls the player",start);
+const end=js.indexOf("  // Only text editing owns Space.",start);
 assert.ok(start>=0&&end>start,"Global accelerated timeline scrub handler must exist");
 assert.match(js,/const steps=\{PageDown:-30,PageUp:30\}/,
   "Focused timeline slider must not also apply an independent arrow seek");

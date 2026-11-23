@@ -90,6 +90,11 @@ assert.equal(reportAudio.paused,true,"Leaving the page must pause active audio/v
 assert.match(preview,/const previewIsVisible=\(\)=>!document\.hidden&&/);
 assert.match(preview,/if\(!s\.videoKey\|\|!previewIsVisible\(\)\)return;/);
 assert.match(preview,/if\(previewIsVisible\(\)(?:&&!deferredPlay)?\)ui\.video\.play\(\)/);
-assert.match(preview,/event\.target\?\.isContentEditable\|\|!s\.videoKey\|\|!previewIsVisible\(\)\)return;/);
+assert.match(preview,/!s\.videoKey\|\|!previewIsVisible\(\)\|\|/,
+  "Hidden or unloaded preview must not intercept Space");
+assert.match(preview,/isTypingSpaceTarget\(event\.target\)/,
+  "Text editing must retain Space for native input");
+assert.match(preview,/if\(!event\.repeat\)toggleVideoPlayback\(\);/,
+  "Space key-repeat must not toggle playback again");
 
 console.log("Studio media lifecycle: hidden tabs, browser background and page exit: OK");

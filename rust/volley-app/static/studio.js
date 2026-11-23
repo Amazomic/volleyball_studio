@@ -4948,17 +4948,26 @@
   document.addEventListener("visibilitychange",()=>{
     if(document.hidden)stopArrowScrub();
   });
-  // Space controls the player from anywhere on the page, except editable controls.
-  // Capture prevents a focused card/button from also processing the same keypress.
+  // Only text editing owns Space. Range sliders, buttons and timeline cards
+  // must not steal the preview's play/pause shortcut after they receive focus.
+  const isTypingSpaceTarget=target=>{
+    const tag=target?.tagName?.toUpperCase();
+    return target?.isContentEditable||
+      !!target?.closest?.('[contenteditable], [role="textbox"]')||
+      tag==="TEXTAREA"||tag==="SELECT"||
+      (tag==="INPUT"&&!["button","submit","reset","checkbox","radio",
+        "range","color","file"].includes(target.type?.toLowerCase()||"text"));
+  };
   document.addEventListener("keydown",event=>{
     if(event.code!=="Space"&&event.key!==" ")return;
-    if(event.repeat||event.altKey||event.ctrlKey||event.metaKey)return;
-    if(["INPUT","TEXTAREA","SELECT"].includes(event.target?.tagName)||
-       event.target?.closest?.(".rally-card-progress")||
-       event.target?.isContentEditable||!s.videoKey||!previewIsVisible())return;
+    if(event.altKey||event.ctrlKey||event.metaKey||event.isComposing||
+       !s.videoKey||!previewIsVisible()||
+       isTypingSpaceTarget(event.target)||event.target?.closest?.("dialog[open]"))return;
+    // Consume repeats as well: otherwise a held key scrolls the page or
+    // activates a focused button after the first playback toggle.
     event.preventDefault();
     event.stopPropagation();
-    toggleVideoPlayback();
+    if(!event.repeat)toggleVideoPlayback();
   },true);
   ui.video.addEventListener("keydown",event=>{
     if(event.key==="k"||event.key==="K"){
