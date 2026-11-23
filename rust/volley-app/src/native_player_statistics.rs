@@ -69,6 +69,11 @@ struct ContactCounts {
     generic_touches: u64,
     outside_rally_proposals: u64,
 }
+impl ContactCounts {
+    fn report_candidates(&self) -> u64 {
+        self.touches + self.unassigned
+    }
+}
 /// Re-verify the exact video-to-touch and frame-to-Track relationship, not
 /// merely that a guessed Track ID appears somewhere in the match.
 fn count_native_contacts(
@@ -331,7 +336,8 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
         rallies += run.expected_rallies;
         let subtotal = count_native_contacts(&run, &replay, &owners, &windows)
             .map_err(storage::bad_request)?;
-        contacts += subtotal.touches;
+        let report_candidates = subtotal.report_candidates();
+        contacts += report_candidates;
         unknown += subtotal.unassigned;
         unverified += subtotal.unverified_proposals;
         generic += subtotal.generic_touches;
@@ -384,7 +390,7 @@ fn calculate(state: &AppState, request: &Request) -> Result<Value, ApiError> {
             "source_rally_sha256":run.rally_sha,
             "identity_revision":owners.revision,
             "rally_candidates":run.expected_rallies,
-            "total_touch_candidates":subtotal.touches,
+            "total_touch_candidates":report_candidates,
             "unassigned_touch_candidates":run_unassigned,
             "unverified_touch_proposals":subtotal.unverified_proposals,
             "generic_touch_candidates":subtotal.generic_touches,
@@ -732,6 +738,43 @@ mod tests {
         };
         (root, run, replay, owner)
     }
+    #[test]
+    fn unassigned_physical_touch_preserves_report_conservation() {
+        let (root, mut run, replay, owners) = fixture();
+        let mut modified = Vec::new();
+        for line in fs::read_to_string(&run.touch_file).unwrap().lines() {
+            let mut event: Value = serde_json::from_str(line).unwrap();
+            if event["frame_index"] == 20 {
+                event["provisional_track_id"] = Value::Null;
+                event["body_contact_supported"] = json!(false);
+                event["contact_landmark"] = Value::Null;
+                event["action_prediction"] = Value::Null;
+            }
+            modified.extend(serde_json::to_vec(&event).unwrap());
+            modified.push(b'\n');
+        }
+        fs::write(&run.touch_file, &modified).unwrap();
+        run.touch_sha = format!("{:x}", Sha256::digest(&modified));
+        let counted = count_native_contacts(
+            &run,
+            &replay,
+            &owners,
+            &native_rally_evidence::RallyWindows {
+                intervals: vec![(0, 79)],
+                contexts: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(counted.touches, 4);
+        assert_eq!(counted.unassigned, 1);
+        assert_eq!(counted.report_candidates(), 5);
+        assert_eq!(
+            counted.per_track.values().sum::<u64>() + counted.unassigned,
+            counted.report_candidates()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn conflicting_same_frame_does_not_credit_touch_but_later_frame_does() {
         let (root, mut run, replay, mut owners) = fixture();
