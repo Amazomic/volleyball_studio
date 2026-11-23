@@ -33,6 +33,21 @@ fn distance(a: [f64; 2], b: [f64; 2]) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1])
 }
 
+fn segment_distance(point: [f64; 2], from: [f64; 2], to: [f64; 2]) -> f64 {
+    let delta = [to[0] - from[0], to[1] - from[1]];
+    let length_sq = delta[0] * delta[0] + delta[1] * delta[1];
+    if length_sq <= f64::EPSILON {
+        return distance(point, from);
+    }
+    let fraction = (((point[0] - from[0]) * delta[0] + (point[1] - from[1]) * delta[1])
+        / length_sq)
+        .clamp(0.0, 1.0);
+    distance(
+        point,
+        [from[0] + delta[0] * fraction, from[1] + delta[1] * fraction],
+    )
+}
+
 pub fn contact_distance(e: &PoseEvidence, min_confidence: f64) -> Option<f64> {
     if !min_confidence.is_finite()
         || !(0.0..=1.0).contains(&min_confidence)
@@ -113,8 +128,7 @@ pub fn refine(e: &PoseEvidence, geometry: &ActionPrediction) -> Option<ActionPre
         else {
             continue;
         };
-        let proximity = distance(w, ball) / height;
-        // A single wrist projected onto a passing ball is not physical evidence.
+        let proximity = (distance(w, ball) / height).min(segment_distance(ball, el, w) / height);
         if proximity > 0.30 || distance(w, el) / height > 0.85 {
             continue;
         }
@@ -123,7 +137,6 @@ pub fn refine(e: &PoseEvidence, geometry: &ActionPrediction) -> Option<ActionPre
     if arms.is_empty() {
         return None;
     }
-    // Use the wrist with the strongest geometric proximity to the ball.
     arms.sort_by(|a, b| a.3.total_cmp(&b.3));
     let (_, elbow, wrist, nearest) = arms[0];
     let shoulders = [shoulder_left, shoulder_right]
@@ -154,7 +167,12 @@ pub fn refine(e: &PoseEvidence, geometry: &ActionPrediction) -> Option<ActionPre
             return None;
         }
         ActionKind::Dig
-    } else if both_hands_near {
+    } else if both_hands_near
+        || (elbow[1] >= shoulder_y + height * 0.08
+            && wrist[1] >= shoulder_y - height * 0.04
+            && wrist[1] <= elbow[1] + height * 0.10
+            && nearest <= 0.18)
+    {
         ActionKind::Dig
     } else {
         return None;
@@ -306,6 +324,41 @@ mod tests {
             whole_body_after[joint][1] = whole_body[joint][1] + 0.13;
         }
         assert!(refine_with_motion(&e, &geom(), &whole_body, &whole_body_after).is_none());
+    }
+
+    #[test]
+    fn crouched_forearm_receive_with_one_visible_wrist_is_dig() {
+        let mut e = data();
+        e.player_bbox_norm = [0.35, 0.17, 0.65, 0.90];
+        e.keypoints[5] = [0.43, 0.48, 0.95];
+        e.keypoints[6] = [0.57, 0.48, 0.95];
+        e.keypoints[7] = [0.45, 0.61, 0.95];
+        e.keypoints[9] = [0.50, 0.57, 0.95];
+        e.keypoints[10][2] = 0.0;
+        e.ball_x_norm = 0.49;
+        e.ball_y_norm = 0.57;
+        let mut before = e.keypoints;
+        let mut after = e.keypoints;
+        before[9][1] = 0.62;
+        after[9][1] = 0.52;
+        let predicted = refine_with_motion(&e, &geom(), &before, &after).unwrap();
+        assert_eq!(predicted.kind, ActionKind::Dig);
+        assert_eq!(predicted.method, PredictionMethod::PoseKeypointsMotionV1);
+    }
+
+    #[test]
+    fn forearm_receive_uses_contact_segment_not_only_wrist_location() {
+        let mut e = data();
+        e.player_bbox_norm = [0.20, 0.10, 0.92, 0.95];
+        e.keypoints[5] = [0.43, 0.45, 0.95];
+        e.keypoints[6] = [0.56, 0.45, 0.95];
+        e.keypoints[7] = [0.50, 0.63, 0.95];
+        e.keypoints[8] = [0.54, 0.64, 0.95];
+        e.keypoints[9] = [0.80, 0.56, 0.95];
+        e.keypoints[10] = [0.81, 0.57, 0.95];
+        e.ball_x_norm = 0.64;
+        e.ball_y_norm = 0.60;
+        assert_eq!(refine(&e, &geom()).unwrap().kind, ActionKind::Dig);
     }
 
     #[test]
