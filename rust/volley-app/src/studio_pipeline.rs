@@ -2559,6 +2559,64 @@ async fn perform(
     }
 }
 
+fn record_pipeline_worker_failure(
+    path: &Path,
+    project_id: &str,
+    id: &str,
+    error: &str,
+) -> Result<(), String> {
+    let mut status = read(path).map_err(|e| format!("Чтение аварийного статуса анализа: {e:?}"))?;
+    if status["schema"] != SCHEMA || status["project_id"] != project_id || status["id"] != id {
+        return Err("Аварийный статус принадлежит другому анализу".into());
+    }
+    if ["complete", "failed", "cancelled"].contains(&status["status"].as_str().unwrap_or("")) {
+        return Ok(());
+    }
+    let failed_stage = status["stage"].as_str().unwrap_or("Анализ").to_owned();
+    status["status"] = json!("failed");
+    status["stage"] = json!("Ошибка анализа");
+    status["failed_stage"] = json!(failed_stage);
+    status["error"] = json!(error);
+    status["pipeline_complete"] = json!(false);
+    status["current_gpu_job_id"] = Value::Null;
+    finish_timed_stage(&mut status);
+    save(path, &status)?;
+    log_event(path, &failed_stage, "error", error)
+}
+
+async fn supervise_pipeline_worker(
+    worker: tokio::task::JoinHandle<()>,
+    active: &Mutex<Option<Running>>,
+    path: &Path,
+    project_id: &str,
+    id: &str,
+) {
+    let Err(join_error) = worker.await else {
+        return;
+    };
+    let message = if join_error.is_panic() {
+        let panic = join_error.into_panic();
+        let detail = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("неизвестная ошибка");
+        format!("Аварийное завершение обработчика анализа: {detail}")
+    } else {
+        format!("Фоновая задача анализа неожиданно прервана: {join_error}")
+    };
+    let mut slot = active.lock().await;
+    if !slot
+        .as_ref()
+        .is_some_and(|run| run.project_id == project_id && run.id == id)
+    {
+        return;
+    }
+    if let Err(error) = record_pipeline_worker_failure(path, project_id, id, &message) {
+        eprintln!("Pipeline worker {id} failed: {message}; status write: {error}");
+    }
+    *slot = None;
+}
 pub async fn start(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2744,7 +2802,21 @@ pub async fn start(
         cancel: cancelled.clone(),
     });
     drop(_guard);
-    tokio::spawn(perform(state, request, id.clone(), cancelled, path, status));
+    let supervised_project = request.project_id.clone();
+    let supervised_id = id.clone();
+    let worker_id = id.clone();
+    let supervised_path = path.clone();
+    tokio::spawn(async move {
+        let worker = tokio::spawn(perform(state, request, worker_id, cancelled, path, status));
+        supervise_pipeline_worker(
+            worker,
+            manager(),
+            &supervised_path,
+            &supervised_project,
+            &supervised_id,
+        )
+        .await;
+    });
     Ok(Json(json!({"schema":SCHEMA,"id":id,"status":"queued"})))
 }
 // A pipeline's comparable completed runs cannot change while it is active.
@@ -3010,6 +3082,67 @@ mod tests {
         assert!(!status_uses_analysis(&status, "match.mp4", "unrelated"));
     }
 
+    #[tokio::test]
+    async fn crashed_analysis_worker_records_failure_and_frees_run_slot() {
+        let root = std::env::temp_dir().join(format!("volley-pipeline-panic-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("status.json");
+        let run_id = "panic-worker";
+        let project_id = "isolated-test";
+        save(
+            &path,
+            &json!({
+                "schema": SCHEMA,
+                "id": run_id,
+                "project_id": project_id,
+                "status": "running",
+                "stage": "Ball Stabilizer",
+                "pipeline_complete": false,
+                "stages": [{"started_ms": epoch_ms(), "finished_ms": null}],
+                "finished_ms": null,
+                "current_gpu_job_id": null,
+            }),
+        )
+        .unwrap();
+        let slot = Mutex::new(Some(Running {
+            id: run_id.into(),
+            project_id: project_id.into(),
+            cancel: Arc::new(AtomicBool::new(false)),
+        }));
+        let worker = tokio::spawn(async { panic!("segment end is observed") });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            supervise_pipeline_worker(worker, &slot, &path, project_id, run_id),
+        )
+        .await
+        .unwrap();
+        assert!(slot.lock().await.is_none());
+        let result = read(&path).unwrap();
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["failed_stage"], "Ball Stabilizer");
+        assert!(result["error"]
+            .as_str()
+            .unwrap()
+            .contains("segment end is observed"));
+        assert!(result["finished_ms"].as_u64().is_some());
+        assert!(result["stages"][0]["finished_ms"].as_u64().is_some());
+        let events = fs::read_to_string(path.with_file_name("events.jsonl")).unwrap();
+        assert!(events.contains("segment end is observed"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn crashed_analysis_worker_releases_slot_even_if_status_is_unreadable() {
+        let slot = Mutex::new(Some(Running {
+            id: "panic-worker".into(),
+            project_id: "isolated-test".into(),
+            cancel: Arc::new(AtomicBool::new(false)),
+        }));
+        let missing = std::env::temp_dir().join(format!("missing-pipeline-{}", Uuid::new_v4()));
+        let worker = tokio::spawn(async { panic!("unrecoverable worker") });
+        supervise_pipeline_worker(worker, &slot, &missing, "isolated-test", "panic-worker").await;
+        assert!(slot.lock().await.is_none());
+    }
     #[test]
     fn clear_history_excludes_active_run_after_background_scan() {
         let root =

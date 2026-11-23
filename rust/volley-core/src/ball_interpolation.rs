@@ -513,6 +513,7 @@ pub fn stabilize_ball_motion(
         }
         segments.push((index, index, 1));
     }
+    let mut rejected_islands = Vec::new();
     for triple in segments.windows(3) {
         let (_, before_end, before_count) = triple[0];
         let (island_start, island_end, island_count) = triple[1];
@@ -542,15 +543,18 @@ pub fn stabilize_ball_motion(
             && (before[0] - after[0]).hypot(before[1] - after[1])
                 <= settings.max_step_fraction * (after_start - before_end) as f64
         {
-            for (index, slot) in points
-                .iter_mut()
-                .enumerate()
-                .take(island_end + 1)
-                .skip(island_start)
-            {
-                if slot.take().is_some() {
-                    rejected_frames.push(index);
-                }
+            rejected_islands.push((island_start, island_end));
+        }
+    }
+    for (island_start, island_end) in rejected_islands {
+        for (index, slot) in points
+            .iter_mut()
+            .enumerate()
+            .take(island_end + 1)
+            .skip(island_start)
+        {
+            if slot.take().is_some() {
+                rejected_frames.push(index);
             }
         }
     }
@@ -981,6 +985,28 @@ fn valid_point(point: [f64; 2]) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn ball_stabilizer_does_not_panic_when_adjacent_segment_windows_share_a_rejected_island() {
+        let mut samples = Vec::new();
+        for (start, end, x, y) in [
+            (0, 3, 0.20, 0.30),
+            (8, 10, 0.80, 0.78),
+            (15, 18, 0.23, 0.32),
+            (23, 26, 0.55, 0.39),
+        ] {
+            for frame in start..=end {
+                samples.push(ScoredBallSample {
+                    frame,
+                    point: [x + (frame - start) as f64 * 0.003, y],
+                    confidence: 0.82,
+                });
+            }
+        }
+        let result = stabilize_ball_motion(&samples, 27, BallStabilizerSettings::default())
+            .expect("overlapping segment windows must not access removed observations");
+        assert!((8..=10).all(|frame| result.rejected_frames.contains(&frame)));
+        assert!(result.points[15].is_some());
+    }
     #[test]
     fn ball_stabilizer_keeps_lock_through_long_false_detection_burst() {
         let samples = (0..66)
