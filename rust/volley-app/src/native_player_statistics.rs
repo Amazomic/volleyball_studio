@@ -75,6 +75,17 @@ impl ContactCounts {
     }
 }
 
+pub(crate) fn initial_serve_owner<'a>(
+    proposal: &Value,
+    owners: &'a NativeReviewedOwners,
+) -> Option<&'a String> {
+    proposal["provisional_track_id"]
+        .as_u64()
+        .filter(|id| !owners.excluded.contains(id))
+        .and_then(|id| owners.owners.get(&id))
+        .filter(|id| owners.roster.contains_key(*id))
+}
+
 fn count_initial_serves(
     proposals: &[Value],
     owners: &NativeReviewedOwners,
@@ -82,12 +93,7 @@ fn count_initial_serves(
     let mut per_player = BTreeMap::<String, u64>::new();
     let mut unassigned = 0u64;
     for proposal in proposals {
-        let athlete = proposal["provisional_track_id"]
-            .as_u64()
-            .filter(|id| !owners.excluded.contains(id))
-            .and_then(|id| owners.owners.get(&id))
-            .filter(|id| owners.roster.contains_key(*id));
-        if let Some(id) = athlete {
+        if let Some(id) = initial_serve_owner(proposal, owners) {
             *per_player.entry(id.clone()).or_default() += 1;
         } else {
             unassigned += 1;

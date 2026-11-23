@@ -422,9 +422,13 @@
     ui.previewList.append(head);
     if(person){
       const row=document.createElement("p");
-      row.textContent="Касаний выбранного типа: "+
+      row.textContent="Подходящих событий: "+
+        Number(result.selected_matching_player_events||0)+
+        " (подтверждённых касаний: "+
         result.selected_verified_player_contacts+
-        " (тип определён анализом; ручных уточнений: "+
+        "; начальных подач-кандидатов: "+
+        Number(result.selected_initial_serve_candidates||0)+
+        "; ручных уточнений: "+
         result.selected_manually_reviewed_actions+
         "). В рилс входят только короткие фрагменты.";
       ui.previewList.append(row);

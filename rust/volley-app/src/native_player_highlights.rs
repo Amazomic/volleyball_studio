@@ -88,6 +88,7 @@ struct Candidate {
     start: u64,
     end: u64,
     verified_attacks: u64,
+    initial_serves: u64,
     human_reviewed: u64,
     frames: Vec<u64>,
 }
@@ -98,8 +99,14 @@ impl Candidate {
             "rally_run_id":self.rally_run_id,"video":self.video,
             "detected_start_frame":self.start,"detected_end_frame":self.end,
             "verified_player_actions":self.verified_attacks,
+            "initial_serve_candidates":self.initial_serves,
+            "matched_player_events":self.frames.len(),
             "human_reviewed_actions":self.human_reviewed,
-            "action_label_source":"pose_supported_prediction_or_explicit_review",
+            "action_label_source":if self.initial_serves > 0 {
+                "report_trajectory_serve_candidate_or_pose_supported_contact"
+            } else {
+                "pose_supported_prediction_or_explicit_review"
+            },
             "athlete_link_source":"reviewed_or_auto_linked_roster_player"
         })
     }
@@ -197,10 +204,45 @@ fn reviewed_action_labels(response: &Value) -> Result<BTreeMap<(u64, u64), Strin
     }
     Ok(labels)
 }
+fn select_initial_serve_frames(
+    proposals: &[Value],
+    owners: &native_player_tracks::NativeReviewedOwners,
+    player_id: &str,
+) -> Vec<u64> {
+    proposals
+        .iter()
+        .filter(|proposal| {
+            native_player_statistics::initial_serve_owner(proposal, owners)
+                .is_some_and(|owner| owner == player_id)
+        })
+        .filter_map(|proposal| {
+            proposal["trajectory_start_frame"]
+                .as_u64()
+                .or_else(|| proposal["rally_start_frame"].as_u64())
+        })
+        .collect()
+}
+
 fn rally_for_frame(intervals: &[(String, u64, u64)], frame: u64) -> Option<usize> {
     let index = intervals.partition_point(|(_, start, _)| *start <= frame);
     index.checked_sub(1).filter(|i| frame <= intervals[*i].2)
 }
+
+fn append_initial_serves(
+    intervals: &[(String, u64, u64)],
+    frames: &[u64],
+    per_rally: &mut [Vec<u64>],
+    per_rally_serves: &mut [u64],
+) -> Result<(), String> {
+    for &frame in frames {
+        let index = rally_for_frame(intervals, frame)
+            .ok_or("Report initial serve falls outside montage rallies")?;
+        per_rally[index].push(frame);
+        per_rally_serves[index] += 1;
+    }
+    Ok(())
+}
+
 struct Plan {
     response: Value,
     clips: Vec<SelectedClip>,
@@ -317,11 +359,25 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
                 "Action labels have a mismatched source/version",
             ));
         }
+        let (windows, serve_proposals) =
+            native_rally_evidence::verified_track_windows_with_serves(&run)
+                .map_err(storage::bad_request)?;
         let intervals =
             native_rally_evidence::verified_rally_intervals(&run).map_err(storage::bad_request)?;
+        if windows.intervals
+            != intervals
+                .iter()
+                .map(|(_, start, end)| (*start, *end))
+                .collect::<Vec<_>>()
+        {
+            return Err(storage::conflict(
+                "Report and montage rally intervals differ",
+            ));
+        }
         let manual_labels = reviewed_action_labels(&reviewed).map_err(storage::conflict)?;
         let mut per_rally = vec![Vec::<u64>::new(); intervals.len()];
         let mut per_rally_manual = vec![0_u64; intervals.len()];
+        let mut per_rally_serves = vec![0_u64; intervals.len()];
         for (frame, manually_reviewed) in select_player_actions(
             &report_contacts,
             &owners,
@@ -334,7 +390,24 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
                 per_rally_manual[index] += u64::from(manually_reviewed);
             }
         }
+        let physical_counts = per_rally
+            .iter()
+            .map(|frames| frames.len() as u64)
+            .collect::<Vec<_>>();
+        if matches!(request.action_kind.as_str(), "serve" | "all") {
+            let serve_frames =
+                select_initial_serve_frames(&serve_proposals, &owners, &request.player_id);
+            append_initial_serves(
+                &intervals,
+                &serve_frames,
+                &mut per_rally,
+                &mut per_rally_serves,
+            )
+            .map_err(storage::conflict)?;
+        }
         for (i, (id, start, end)) in intervals.into_iter().enumerate() {
+            per_rally[i].sort_unstable();
+            per_rally[i].dedup();
             if per_rally[i].is_empty() {
                 continue;
             }
@@ -345,7 +418,8 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
                 video: run.video.clone(),
                 start,
                 end,
-                verified_attacks: per_rally[i].len() as u64,
+                verified_attacks: physical_counts[i],
+                initial_serves: per_rally_serves[i],
                 human_reviewed: per_rally_manual[i],
                 frames: per_rally[i].clone(),
             });
@@ -359,14 +433,19 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
             "excluded_track_ids":owners.excluded,
             "automatic_track_ids":automatic_track_ids,
             "action_revision":reviewed["revision"],
+            "initial_serve_sha256":format!("{:x}", Sha256::digest(
+                serde_json::to_vec(&serve_proposals)
+                    .map_err(|e| storage::internal(format!("Encode serve proposals: {e}")))?
+            )),
             "identity_source":"report_roster_reviewed_and_reconciled_auto",
-            "action_source":"report_pose_contacts_predicted_or_human_reviewed"
+            "action_source":"report_pose_contacts_and_trajectory_serve_candidates"
         }));
         runs.insert(run.run_id.clone(), run);
     }
     candidates.sort_by(|a, b| {
-        b.verified_attacks
-            .cmp(&a.verified_attacks)
+        b.frames
+            .len()
+            .cmp(&a.frames.len())
             .then_with(|| a.video.cmp(&b.video))
             .then_with(|| a.start.cmp(&b.start))
             .then_with(|| a.key.cmp(&b.key))
@@ -485,6 +564,8 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
         None
     };
     let attack_total = selected.iter().map(|c| c.verified_attacks).sum::<u64>();
+    let serve_total = selected.iter().map(|c| c.initial_serves).sum::<u64>();
+    let matched_total = selected.iter().map(|c| c.frames.len() as u64).sum::<u64>();
     let reviewed_total = selected.iter().map(|c| c.human_reviewed).sum::<u64>();
     let view = json!({
         "schema":"volley-native-reviewed-player-highlights/1",
@@ -500,6 +581,8 @@ fn plan(state: &AppState, request: &Request) -> Result<Plan, ApiError> {
         "selected":selected.iter().map(Candidate::view).collect::<Vec<_>>(),
         "selected_verified_attacks":attack_total,
         "selected_verified_player_contacts":attack_total,
+        "selected_initial_serve_candidates":serve_total,
+        "selected_matching_player_events":matched_total,
         "selected_manually_reviewed_actions":reviewed_total,
         "selected_clips":clips.len(),
         "short_contact_segments_only":true,
@@ -550,7 +633,7 @@ pub async fn highlights(
     }
     if planned.clips.is_empty() {
         return Err(storage::bad_request(
-            "Для выбранного игрока и типа действий нет касаний внутри розыгрышей",
+            "Для выбранного игрока и типа действий нет подходящих событий внутри розыгрышей",
         ));
     }
     let evidence = json!({
@@ -563,6 +646,7 @@ pub async fn highlights(
         "selection_mode":planned.response["selection_mode"],
         "estimated_attack_count":if planned.response["action_kind"]=="attack" {planned.response["selected_verified_attacks"].clone()} else {json!(0)},
         "pose_verified_contact_count":planned.response["selected_verified_player_contacts"],
+        "initial_serve_candidate_count":planned.response["selected_initial_serve_candidates"],
         "manually_reviewed_action_count":planned.response["selected_manually_reviewed_actions"],
         "action_kind":planned.response["action_kind"],
         "human_review_only":false,
@@ -616,6 +700,7 @@ mod tests {
             start: 100,
             end: 180,
             verified_attacks: count,
+            initial_serves: 0,
             human_reviewed: 0,
             frames: vec![120],
         }
@@ -713,6 +798,45 @@ mod tests {
         spoof["reviewed_actions"][0]["action_source"] = json!("automatic_reid");
         assert!(reviewed_action_labels(&spoof).is_err());
     }
+    #[test]
+    fn report_initial_serves_are_available_without_physical_contacts() {
+        let mut owners = native_player_tracks::NativeReviewedOwners {
+            source_sha: "a".repeat(64),
+            revision: "stable".into(),
+            owners: BTreeMap::from([
+                (7, "player-a".into()),
+                (8, "player-b".into()),
+                (9, "player-a".into()),
+            ]),
+            excluded: BTreeSet::from([9]),
+            roster: BTreeMap::from([
+                ("player-a".into(), "Alice".into()),
+                ("player-b".into(), "Bob".into()),
+            ]),
+        };
+        let proposals = vec![
+            json!({"rally_start_frame":10,"trajectory_start_frame":12,"provisional_track_id":7}),
+            json!({"rally_start_frame":30,"trajectory_start_frame":31,"provisional_track_id":8}),
+            json!({"rally_start_frame":30,"trajectory_start_frame":32,"provisional_track_id":null}),
+            json!({"rally_start_frame":30,"trajectory_start_frame":33,"provisional_track_id":9}),
+        ];
+        let intervals = vec![("first".into(), 10, 20), ("second".into(), 30, 40)];
+        let selected = select_initial_serve_frames(&proposals, &owners, "player-a");
+        assert_eq!(selected, vec![12]);
+        let mut contacts = vec![Vec::new(), Vec::new()];
+        let mut counts = vec![0, 0];
+        append_initial_serves(&intervals, &selected, &mut contacts, &mut counts).unwrap();
+        assert_eq!(contacts, vec![vec![12], Vec::<u64>::new()]);
+        assert_eq!(counts, vec![1, 0]);
+        assert!(append_initial_serves(&intervals, &[21], &mut contacts, &mut counts).is_err());
+        assert_eq!(
+            select_initial_serve_frames(&proposals, &owners, "player-b"),
+            vec![31]
+        );
+        owners.excluded.insert(7);
+        assert!(select_initial_serve_frames(&proposals, &owners, "player-a").is_empty());
+    }
+
     #[test]
     fn selected_contacts_are_restricted_to_verified_rallies() {
         let intervals = vec![("rally-1".into(), 10, 20), ("rally-2".into(), 30, 40)];
