@@ -1387,9 +1387,9 @@
     });
   const annotationCurrentData=()=>annotation.data&&annotationSourceValid();
   const annotationTrajectoryRallySeeds=()=>{
-    const proposed=comparison.data;
-    if(!comparisonMatches(proposed)||proposed.trajectory_status!=="ready")return [];
-    return proposed.trajectory_rallies.slice(0,1024)
+    const proposed=annotation.prediction;
+    if(!proposed||proposed.rally_source!=="saved_cpu_rallies"||!Array.isArray(proposed.rally_intervals))return [];
+    return proposed.rally_intervals.slice(0,1024)
       .filter(r=>Number.isSafeInteger(r.start)&&Number.isSafeInteger(r.end)&&
         r.start>=0&&r.start<r.end&&r.end<(annotation.prediction?.total_frames||annotation.data?.total_frames||0))
       .map(r=>({id:annotationNewId(),start:r.start,end:r.end}));
@@ -1642,7 +1642,17 @@
     if(annotation.dirty)annotation.metrics.textContent+=" | НЕ СОХРАНЕНО";
     annotationMarkCurrent();
   };
+  const resetTrainingComparison=()=>{
+    comparison.epoch++;
+    comparison.data=null;
+    comparison.sourceKey="";
+    comparison.simulated=false;
+    if(comparison.status)comparison.status.textContent="Сравнение выполняется отдельно по кнопке «Рассчитать розыгрыши».";
+    if(typeof renderComparison==="function")renderComparison();
+    window.VolleyballTasks?.clear("training-simulation");
+  };
   const refreshAnnotation=async()=>{
+    resetTrainingComparison();
     const project=s.project,run=s.run;
     if(annotation.dirty){
       annotationNotice("Есть несохранённая разметка. Сохраните данные касаний перед сменой CPU-версии.",true);
@@ -1666,14 +1676,14 @@
         throw Error("Неверный источник эталонной разметки");
       annotation.data=data;drawAnnotation();
       if(reference.active)cards();
-      void refreshComparison();
+
       annotationNotice(data.reviewed?"Эталон проверен. Метрики рассчитаны по исходным CPU-детекциям.":
         "Корректируйте касания и границы, затем завершите проверку видео.");
     }catch(error){
       if(epoch!==annotation.epoch)return;
       annotationNotice("Не удалось загрузить метки: "+error.message,true);drawAnnotation();
       if(reference.active)cards();
-      void refreshComparison();
+
     }
   };
   const editAnnotation=async(action,fields={})=>{
@@ -1690,7 +1700,7 @@
         if(epoch!==annotation.epoch||project!==s.project||run!==s.run)return;
         annotation.data=result;
         annotationNotice("Видео подтверждено. Эталон сохранён независимо от CPU-детектора.");
-        void refreshComparison(true);
+        resetTrainingComparison();
       }catch(error){annotationNotice("Ошибка подтверждения: "+error.message,true);}
       finally{annotation.busy=false;window.VolleyballTasks?.clear("training-annotation");drawAnnotation();}
       return;
@@ -1780,7 +1790,7 @@
     if(!impact){annotationNotice("Проверьте параметры поиска столкновений.",true);return;}
     const epoch=annotation.epoch,project=s.project,run=s.run,video=s.video;
     annotation.busy=true;drawAnnotation();
-    window.VolleyballTasks?.set("training-trajectory",{label:"Дебаг",stage:"Интерполяция мяча → поиск изломов",progress:null});
+    window.VolleyballTasks?.set("training-trajectory",{label:"Дебаг",stage:"Touch Detector · только сохранённые розыгрыши",progress:null});
     annotationNotice("Ищем столкновения по отклонению от параболического полёта внутри розыгрышей, без GPU…");
     const rally=trainingTouchRallySettings();
     const settingsKey=JSON.stringify({rally,impact});
@@ -1825,12 +1835,11 @@
       timelineRallyLayers.candidates.checked=true;
       updateTrainingRallyLayers();
       drawTimeline();drawOverlay();
-      await refreshComparison(true);
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run||video!==s.video)return;
-      annotationNotice("Проверено "+result.ball_motion_interpolation.result.processed_frames+
-        " из "+result.total_frames+" кадров в сохранённых розыгрышах. Интерполяция мяча: отброшено "+result.ball_motion_interpolation.result.rejected_outliers+
+      annotationNotice("Touch Detector: обработано "+result.ball_motion_interpolation.result.processed_frames+
+        " кадров в "+result.rally_count+" сохранённых розыгрышах (вне розыгрышей касания не искались; всего в видео "+result.total_frames+" кадров). Интерполяция мяча: отброшено "+result.ball_motion_interpolation.result.rejected_outliers+
         " ложных точек, восстановлено "+result.ball_motion_interpolation.result.interpolated_frames+
-        " пропущенных кадров. Внутри "+result.rally_count+" розыгрышей найдено "+
+        " пропущенных кадров. Найдено "+
         result.proposals.length+" кандидатов касаний и "+
         result.ground_contacts.length+" отдельных ударов о песок. "+
         (result.court_filter_active?"Половины определены по разметке площадки. ":
@@ -1914,7 +1923,7 @@
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run||video!==s.video)return;
       if(result.schema!=="volley-touch-annotations/1"||result.video!==video)throw Error("Неверное подтверждение сохранения");
       annotation.data=result;annotation.dirty=false;annotation.prediction=null;annotation.typePrediction=null;
-      drawTimeline();drawOverlay();void refreshComparison(true);
+      drawTimeline();drawOverlay();resetTrainingComparison();
       annotationNotice("Данные сохранены. Повторите расчёт касаний — алгоритм использует исправления для подбора порога и сдвига.");
     }catch(error){
       if(epoch===annotation.epoch)annotationNotice("Ошибка сохранения: "+error.message,true);
@@ -2037,24 +2046,27 @@
   const renderComparison=()=>{
     const data=comparisonMatches(comparison.data)?comparison.data:null;
     const ready=data?.trajectory_status==="ready";
+    const selected=Boolean(training.active&&s.project&&s.run&&s.video);
     comparison.metrics.replaceChildren();
     comparison.differences.replaceChildren();
     comparison.touches.replaceChildren();
     updateComparisonModeSettings();
     for(const input of [comparison.minImpacts,comparison.context,comparison.duration,comparison.gap])
-      input.disabled=!data||continuousComparisonMode();
-    comparison.minSeconds.disabled=!data||!continuousComparisonMode();
-    comparison.stationaryMs.disabled=!data||!continuousComparisonMode();
-    comparison.recalculate.disabled=!data;
+      input.disabled=!selected||continuousComparisonMode();
+    comparison.minSeconds.disabled=!selected||!continuousComparisonMode();
+    comparison.stationaryMs.disabled=!selected||!continuousComparisonMode();
+    comparison.recalculate.disabled=!selected;
     comparison.calibrate.disabled=!data || continuousComparisonMode() || !data.reference_reviewed;
     if(!data){
       comparison.summary.textContent="Результат моделирования ещё не рассчитан";
       comparison.metrics.textContent="Сравнение ещё не загружено.";
-      comparison.differences.textContent="Выберите CPU-анализ для просмотра расхождений.";
+      comparison.differences.textContent=selected?
+        "Для сравнения отдельно нажмите «Рассчитать розыгрыши».":
+        "Выберите CPU-анализ для просмотра расхождений.";
       return;
     }
     if(!ready){
-      comparison.summary.textContent="Нажмите «Смоделировать» для расчёта по сохранённому треку мяча";
+      comparison.summary.textContent="Нажмите «Рассчитать розыгрыши» для расчёта по сохранённому треку мяча";
       comparison.metrics.textContent="Розыгрыши по траектории ещё не рассчитаны.";
       comparison.differences.textContent="Непрерывная траектория будет рассчитана из сохранённого трека мяча без повторного GPU-инференса.";
       return;

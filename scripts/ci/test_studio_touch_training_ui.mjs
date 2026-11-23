@@ -61,6 +61,7 @@ const $=id=>{
   return elements.get(id);
 };
 const logs=[],writeActions=[],calculations=[],classifications=[];
+let comparisonRefreshes=0;
 for(const [id,value] of [
   ["studio-impact-angle","45"],["studio-impact-join","28"],
   ["studio-impact-fit-error","4"],["studio-impact-min-separation","6"]
@@ -79,7 +80,7 @@ const timeline={data:{
 const ui={video:{currentTime:3.333,addEventListener(){}}};
 let drawn=0;
 const context={
-  $,s,timeline,ui,trainingNames:{attack:"Атака",dig:"Приём снизу",overhead_pass:"Передача сверху"},comparison:{data:{trajectory_status:"ready",trajectory_rallies:[{start:95,end:150}]},
+  $,s,timeline,ui,trainingNames:{attack:"Атака",dig:"Приём снизу",overhead_pass:"Передача сверху"},comparison:{epoch:0,data:{trajectory_status:"ready",trajectory_rallies:[{start:80,end:180}]},
     mode:{value:"continuous"},minSeconds:{value:"1.5"},stationaryMs:{value:"1000"}},
   comparisonMatches:data=>data?.trajectory_status==="ready",
   trainingGapSeconds:()=>4,
@@ -91,7 +92,7 @@ const context={
   fps:()=>30,
   timelineDuration:()=>200/30,
   drawTimeline:()=>{drawn++;},drawOverlay:()=>{},seekTimeline:()=>{},showAnnotationContext:()=>{},
-  refreshComparison:async()=>{},
+  refreshComparison:async()=>{comparisonRefreshes++;},
   timelineRallyLayers:{candidates:{checked:false},types:{checked:false}},
   updateTrainingRallyLayers:()=>{},
   training:{active:true},
@@ -140,11 +141,13 @@ const api=runInNewContext(js.slice(start,end)+
 const {annotation,refreshAnnotation,editAnnotation,invalidateTrainingTouchPrediction}=api;
 
 await refreshAnnotation();
+assert.equal(comparisonRefreshes,0,"Opening Debug must not start a full-video rally simulation");
 assert.equal(annotation.data.revision,0);
 assert.equal(annotation.calculate.disabled,false);
 assert.equal(annotation.save.disabled,true);
 await elements.get("studio-annotation-calculate").click();
 assert.equal(calculations.length,1);
+assert.equal(comparisonRefreshes,0,"Touch calculation must not launch full-video rally comparison");
 assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].rally)),
   {mode:"continuous",merge_gap_seconds:4,min_trajectory_seconds:1.5,stationary_ball_ms:1000});
 assert.equal(annotation.prediction.proposals.length,2);
@@ -153,7 +156,8 @@ assert.equal(annotation.prediction.ground_contacts[0].landing,"near_half");
 assert.equal(annotation.prediction.ball_motion_interpolation.result.rejected_outliers,2);
 assert.equal(annotation.prediction.ball_motion_interpolation.result.interpolated_frames,9);
 assert.equal(annotation.prediction.ball_motion_interpolation.result.processed_frames,56);
-assert.match(elements.get("studio-annotation-status").textContent,/56 из 200 кадров/);
+assert.match(elements.get("studio-annotation-status").textContent,/обработано 56 кадров в 1 сохранённых розыгрышах/);
+assert.match(elements.get("studio-annotation-status").textContent,/вне розыгрышей касания не искались/);
 assert.deepEqual(JSON.parse(JSON.stringify(calculations[0].impact)),{
   min_turn_angle_deg:45,max_join_error_px:28,
   max_fit_error_px:4,min_separation_frames:6
@@ -176,6 +180,8 @@ elements.get("studio-annotation-seed-trajectory").click();
 assert.equal(annotation.dirty,true);
 assert.equal(annotation.data.touches.length,2);
 assert.equal(annotation.data.rallies.length,1);
+assert.equal(annotation.data.rallies[0].start,95,"Adoption must use the saved CPU rally start");
+assert.equal(annotation.data.rallies[0].end,150);
 assert.equal(elements.get("studio-annotation-calculate").disabled,true);
 assert.equal(writeActions.length,0,"Adopting candidates is a local edit");
 const touched=annotation.data.touches[0];
@@ -195,6 +201,7 @@ assert.equal(annotation.typePrediction,null,"Saved labels must invalidate classi
 assert.equal(elements.get("studio-annotation-calculate").disabled,false);
 await elements.get("studio-annotation-calculate").click();
 assert.equal(calculations.length,2);
+assert.equal(comparisonRefreshes,0,"Repeated touch calculation must stay within saved rallies");
 assert.equal(annotation.prediction.calibration.shift_frames,0);
 assert.equal(annotation.prediction.calibration.training_videos,0);
 assert.equal(annotation.prediction.proposals[0].frame,100);
@@ -206,6 +213,7 @@ assert.equal(calculations[2].impact.min_turn_angle_deg,75);
 invalidateTrainingTouchPrediction();
 assert.equal(annotation.prediction,null,"Changing rally settings must invalidate old touch candidates");
 assert.ok(drawn>=4);
-assert.ok(logs.some(entry=>entry.key==="training-trajectory"));
+assert.ok(logs.some(entry=>entry.key==="training-trajectory"&&
+  entry.task.stage==="Touch Detector · только сохранённые розыгрыши"));
 assert.ok(logs.some(entry=>entry.key==="training-annotation"));
 console.log("PASS: ballistic collision parameters -> calculate -> classify -> edit -> save -> invalidate and recalculate");

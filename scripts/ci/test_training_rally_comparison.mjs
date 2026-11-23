@@ -22,7 +22,7 @@ assert.equal((html.match(/id="studio-timeline-track"/g)||[]).length,1);
 assert.ok(html.includes('id="studio-training-pose-advanced"'));
 assert.ok(js.includes('training.poseAdvanced.open'));
 assert.ok(js.includes('request(url("/api/training/rally-comparison",options))'));
-assert.ok(js.includes('void refreshComparison();'));
+assert.ok(!js.includes('void refreshComparison();'),"Opening Debug must not recalculate full-video rallies");
 assert.ok(js.includes('void refreshComparison(true);'));
 assert.ok(js.includes('void refreshComparison(true,true)'));
 assert.ok(rust.includes('fn fit_trajectory_settings('));
@@ -102,7 +102,12 @@ assert.match(elements.get("studio-simulation-summary").textContent,/Устойч
 assert.equal(comparison.calibrate.disabled,true,"Legacy impact calibration must remain disabled");
 s.run="another";
 renderComparison();
-assert.equal(comparison.recalculate.disabled,true,"Stale source cannot simulate");
+assert.equal(comparison.recalculate.disabled,false,"A selected run must allow manual rally calculation even without cached comparison");
+assert.equal(comparison.minSeconds.disabled,false,"Rally parameters must remain editable before manual calculation");
+s.run="";
+renderComparison();
+assert.equal(comparison.recalculate.disabled,true,"Without a selected run the simulation is disabled");
+s.run="another";
 assert.match(elements.get("studio-comparison-differences").textContent,/Выберите CPU-анализ/);
 let release;
 context.request=()=>new Promise(resolve=>{release=resolve;});
@@ -133,6 +138,9 @@ assert.equal(comparison.calibrate.disabled,true);
 assert.equal(comparison.impactSettings.hidden,true);
 assert.equal(comparison.continuousSettings.hidden,false);
 assert.equal(comparison.recalculate.textContent,"Рассчитать розыгрыши");
+comparison.data=null;
+renderComparison();
+assert.equal(comparison.recalculate.disabled,false,"Manual rally button must stay available after clearing results");
 assert.equal(comparison.minSeconds.disabled,false);
 assert.equal(comparison.stationaryMs.disabled,false);
 assert.equal(comparison.minImpacts.disabled,true);
@@ -143,16 +151,21 @@ assert.doesNotMatch(html,/<option value="impacts">/);
 assert.match(html,/class="studio-training-compare-review" hidden/);
 assert.match(html,/id="studio-comparison-min-seconds"[^>]*value="1\.5"/);
 assert.match(rust,/Only continuous-ball rally detection is supported/);
-assert.ok(js.includes("await refreshComparison(true);"));
+const calculateStart=js.indexOf("  const calculateTrajectory=async()=>");
+const calculateEnd=js.indexOf("  const calculateTouchTypes=async()=>",calculateStart);
+assert.ok(calculateStart>0&&calculateEnd>calculateStart);
+assert.ok(!js.slice(calculateStart,calculateEnd).includes("refreshComparison"),
+  "Touch calculation must not trigger any separate full-video comparison");
 {
   const first=js.indexOf("  const annotationTrajectoryRallySeeds=()=>");
   const last=js.indexOf("  const annotationSavePresentation=",first);
   assert.ok(first>0&&last>first);
   let nextId=0;
   const edited={data:{total_frames:300,touches:[],rallies:[]},
-    prediction:{total_frames:300,proposals:[{frame:42}]}};
+    prediction:{total_frames:300,proposals:[{frame:42}],rally_source:"saved_cpu_rallies",
+      rally_intervals:[{start:30,end:180}]}};
   const proposed={data:{schema:"volley-rally-training-comparison/1",
-    trajectory_status:"ready",trajectory_rallies:[{start:30,end:180}]}};
+    trajectory_status:"ready",trajectory_rallies:[{start:15,end:260}]}};
   const {annotationFromPrediction}=runInNewContext(js.slice(first,last)+
     "\n({annotationFromPrediction})",{
     annotation:edited,comparison:proposed,timeline:{data:{rallies:[]}},
