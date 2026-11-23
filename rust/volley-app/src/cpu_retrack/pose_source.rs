@@ -43,7 +43,6 @@ pub(super) struct PoseRows {
     next: Option<Value>,
     consumed: u64,
     pose_rows: u64,
-    recent_pose_crops: Vec<([f64; 4], u64)>,
 }
 
 impl PoseRows {
@@ -57,7 +56,6 @@ impl PoseRows {
             next: None,
             consumed: 0,
             pose_rows: 0,
-            recent_pose_crops: Vec::new(),
         };
         rows.next = rows.read_one()?;
         Ok(rows)
@@ -95,7 +93,7 @@ impl PoseRows {
     pub fn frame(
         &mut self,
         frame: u64,
-        detector: &[Candidate],
+        _detector: &[Candidate],
     ) -> Result<PoseFrameProjection, String> {
         let sample = match self.next.as_ref().and_then(|row| row["frame"].as_u64()) {
             Some(at) if at < frame => {
@@ -108,27 +106,11 @@ impl PoseRows {
             }
             _ => None,
         };
-        self.recent_pose_crops
-            .retain(|(_, observed)| frame.saturating_sub(*observed) <= 12);
         let Some(sample) = sample else {
-            // Detector samples can fall between adjacent RTMPose samples. A
-            // second detector crop of the *same* skeleton must not mint a new
-            // provisional ID just because its bounding box is taller.
-            let raw = detector
-                .iter()
-                .filter(|candidate| {
-                    !self
-                        .recent_pose_crops
-                        .iter()
-                        .any(|(crop, _)| bbox_iou(*crop, candidate.bbox_xyxy_norm) > 0.23)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            return Ok((raw, vec![], 0));
+            return Ok((Vec::new(), Vec::new(), 0));
         };
         let mut candidates = Vec::new();
         let mut landmarks = Vec::new();
-        let mut crops = Vec::new();
         for pose in sample["players"]
             .as_array()
             .ok_or("Missing RTMPose players")?
@@ -217,28 +199,8 @@ impl PoseRows {
                 head_point_norm: head,
             });
             landmarks.push(Some(evidence));
-            crops.push(bbox);
-            self.recent_pose_crops.push((bbox, frame));
         }
         let pose_count = candidates.len() as u64;
-        for raw in detector {
-            if candidates.len() >= 128 {
-                break;
-            }
-            if crops
-                .iter()
-                .any(|&crop| bbox_iou(crop, raw.bbox_xyxy_norm) > 0.25)
-                || candidates
-                    .iter()
-                    .any(|pose| bbox_iou(pose.bbox_xyxy_norm, raw.bbox_xyxy_norm) > 0.28)
-            {
-                continue;
-            }
-            let mut candidate = raw.clone();
-            candidate.query_index = Some(candidates.len());
-            candidates.push(candidate);
-            landmarks.push(None);
-        }
         self.pose_rows += pose_count;
         Ok((candidates, landmarks, pose_count))
     }
@@ -253,7 +215,6 @@ impl PoseRows {
             }
             _ => (),
         }
-        self.recent_pose_crops.clear();
         Ok(())
     }
 
@@ -348,11 +309,23 @@ mod tests {
             folder: dir.clone(),
         };
         let mut input = PoseRows::open(&snapshot).unwrap();
-        let (candidates, joints, n) = input.frame(0, &[]).unwrap();
+        let unrelated = Candidate {
+            frame_index: 0,
+            class_name: "player".into(),
+            score: 0.95,
+            bbox_xyxy_norm: [0.75, 0.20, 0.86, 0.80],
+            query_index: Some(0),
+            touch_probability: None,
+            head_point_norm: None,
+        };
+        let (candidates, joints, n) = input.frame(0, std::slice::from_ref(&unrelated)).unwrap();
+        assert_eq!(candidates.len(), 1);
         assert_eq!(n, 1);
         assert!(candidates[0].head_point_norm.is_some());
         assert!(joints[0].as_ref().unwrap().valid());
-        assert!(input.frame(1, &[]).unwrap().0.is_empty());
+        let mut next_unrelated = unrelated;
+        next_unrelated.frame_index = 1;
+        assert!(input.frame(1, &[next_unrelated]).unwrap().0.is_empty());
         input.finish(3).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }

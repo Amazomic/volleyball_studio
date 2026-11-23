@@ -3596,3 +3596,11 @@ Studio показывает кнопку перехода между debug и re
 - База `origin/develop` `16c513af`, задача `50beecdb`; владелец `rust/volley-app/src/native_player_tracks/source_index.rs`, потребитель — `native_player_tracks/photo_comparison.rs`. Схема сравнения трёх независимых фото не меняется.
 - Регрессия на длинный объединённый трек из 472 кадров RED до исправления, GREEN после. Полный `RUST_TEST_THREADS=1 scripts/check-all.ps1` PASS: WASM, fmt, Clippy -D warnings, Rust workspace tests, 98 Node gates; `git diff --check` PASS.
 - Измерение accuracy на независимых матчах и повторный GPU-инференс — NOT TESTED. Перепроверка сходства и автопривязки на живом коротком проекте — после публикации/развёртывания.
+
+### 2026-11-23 — Track ID на основе измеренных поз RTMPose
+
+- База `16c513af` (origin/develop), владельцы: `rust/volley-core/src/tracker/bytetrack.rs`, `rust/volley-app/src/cpu_retrack/pose_source.rs` и `cpu_retrack.rs`. GPU evidence не меняется, старые CPU replay остаются неизменными.
+- Причина: ByteTrack сохранял скелеты для вывода, но при ассоциации ID игнорировал их и использовал IoU рамок. При доступном pose run оставались RF-DETR-only кандидаты, создающие дополнительные ID.
+- Решение: измеренные RTMPose-позы — единственные наблюдения для новых ID при наличии pose run; первичный вес суставов/корпуса 0.80 и IoU 0.20, однозначное сопоставление и ограничение движения. Без pose run сохраняется RF-DETR fallback. Версия ассоциации `bytetrack_rtmpose_primary_pose_association_v7`.
+- RED→GREEN: тест перестановки рамок двух игроков до исправления FAIL, после PASS; тест подавления сторонних RF-DETR-кандидатов в pose replay PASS. `cargo test -p volley-core`: 306 PASS. `scripts/check-all.ps1`: PASS (WASM, fmt, clippy -D warnings, Rust workspace, 98 Node gates).
+- Ограничения: реальный матч, GPU, оценка ID switches/false merges и точность RTMPose NOT TESTED. Применение к живой Studio не выполнялось до сравнительной приёмки на независимом видео.
