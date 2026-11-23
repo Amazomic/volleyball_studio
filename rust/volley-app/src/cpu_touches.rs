@@ -1696,6 +1696,7 @@ fn detect_stream_with_pose(
                 start,
                 end,
                 settings,
+                court.map(|court| (court, window.1)),
             )?;
             attach_touch_source_evidence(
                 &mut events,

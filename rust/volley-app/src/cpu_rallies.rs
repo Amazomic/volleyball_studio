@@ -116,15 +116,16 @@ impl MotionContact {
         if self.frame_index >= frames
             || !self.physical_motion_supported
             || self.athlete_identity_verified
-            // A new CPU rally may contain no Touch without a real source-frame ID.
             || (self.body_contact_supported && self.provisional_track_id.is_none())
             || self
                 .contact_landmark
                 .as_ref()
                 .is_some_and(|part| !part.valid(width, height))
             || self.contact_pose_sample_frame.is_some_and(|at| {
-                !self.body_contact_supported || self.contact_landmark.is_none()
-                    || at >= frames || at.abs_diff(self.frame_index) > 3
+                !self.body_contact_supported
+                    || self.contact_landmark.is_none()
+                    || at >= frames
+                    || at.abs_diff(self.frame_index) > 3
             })
             || (self.ball_occluded_at_contact
                 && !self.body_contact_supported
