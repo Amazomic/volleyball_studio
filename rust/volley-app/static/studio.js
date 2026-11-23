@@ -1843,7 +1843,9 @@
           result.source_replay_sha256!==source_replay_sha256||
           Object.entries(impact).some(([key,value])=>result.impact_settings?.[key]!==value)||
           !Array.isArray(result.rally_intervals)||
-          JSON.stringify(result.rally_intervals)!==JSON.stringify(rally_intervals)||
+          result.rally_intervals.length!==rally_intervals.length||
+          result.rally_intervals.some((interval,i)=>interval.start!==rally_intervals[i].start||
+            interval.end!==rally_intervals[i].end)||
           result.rally_count!==result.rally_intervals.length||
           result.ball_motion_interpolation.result.processed_frames!==
             result.rally_intervals.reduce((sum,r)=>sum+r.end-r.start+1,0)||

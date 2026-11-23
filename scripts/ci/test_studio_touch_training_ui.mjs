@@ -110,7 +110,7 @@ const context={
       return {schema:"volley-trajectory-touch-proposals/1",project_id:"p",
         rally_run_id:"r",video:"match.mp4",total_frames:200,
         source_replay_sha256:"a".repeat(64),
-        rally_count:1,rally_source:"calculated_ball_trajectory_rallies",rally_intervals:[{start:80,end:180}],
+        rally_count:1,rally_source:"calculated_ball_trajectory_rallies",rally_intervals:[{end:180,start:80}],
         proposals:[{frame:100,score:9},{frame:140,score:3}],
         ground_contacts:[{frame:120,position:[0.4,0.7],landing:"near_half"}],
         court_filter_active:true,
