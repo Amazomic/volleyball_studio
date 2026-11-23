@@ -564,7 +564,7 @@ pub fn compose_follow_args(
         let y = format!("max(0\\,min(ih-oh\\,ih*({center_y})-oh/2))");
         filters.push(format!(
             "[{index}:v:0]setpts=PTS-STARTPTS,fps={fps:.8},\
-             crop={crop_w}:{crop_h}:{x}:{y}:exact=1,\
+             crop={crop_w}:{crop_h}:{x}:{y}:exact=0,\
              scale={width}:{height}:flags=lanczos,setsar=1,format=yuv420p[v{index}]"
         ));
         refs.push_str(&format!("[v{index}]"));

@@ -385,6 +385,42 @@ fn portrait_native_source_needs_no_scaling_and_layout_is_explicit() {
 }
 
 #[test]
+fn follow_camera_keeps_chroma_subsampling_aligned_for_both_encoders() {
+    let formats = [(640, 360, "h264".to_owned(), 30.0)];
+    let points = [vec![
+        CameraPoint {
+            time_sec: 0.0,
+            x: 0.501,
+            y: 0.5,
+        },
+        CameraPoint {
+            time_sec: 0.5,
+            x: 0.503,
+            y: 0.5,
+        },
+    ]];
+    for hardware in [false, true] {
+        let args = compose_follow_args(
+            &[PathBuf::from("input.mp4")],
+            &formats,
+            &points,
+            1.0,
+            Path::new("portrait.mp4"),
+            hardware,
+        )
+        .unwrap();
+        let filter = args
+            .windows(2)
+            .find(|pair| pair[0] == "-filter_complex")
+            .unwrap()[1]
+            .as_str();
+        assert!(filter.contains("crop=202:360:"));
+        assert!(filter.contains("format=yuv420p"));
+        assert!(filter.contains(":exact=0"));
+    }
+}
+
+#[test]
 fn verified_moving_ball_camera_crops_landscape_to_portrait() {
     if !ffmpeg_ready() {
         return;
