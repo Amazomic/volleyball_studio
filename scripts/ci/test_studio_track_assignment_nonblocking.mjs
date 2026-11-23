@@ -6,12 +6,14 @@ const source=readFileSync(new URL("../../rust/volley-app/static/studio_tracks.js
 const start=source.indexOf("  const applyLocalTrackEdit=");
 const end=source.indexOf("  // Native appearance matches",start);
 assert.ok(start>0&&end>start,"Edit and enrollment must be owned by one handler");
-let releaseAlbum;
+let releaseAlbum,releaseFirstAssignment;
 const pausedAlbum=new Promise(resolve=>{releaseAlbum=resolve;});
+const pausedFirstAssignment=new Promise(resolve=>{releaseFirstAssignment=resolve;});
 const sha="a".repeat(64), assignments=[],referenceRequests=[],notes=[];
 const state={
   project:"project",video:"match.mp4",replay:"source",rallyRun:"run",
   sourceSha:sha,revision:"rev0",busy:false,rosterBusy:false,writable:true,
+  assignmentPending:new Set(),bindingEpoch:0,tracksLoaded:true,token:1,
   selected:new Set(),projectPlayerIds:new Set(["player"]),
   photoIndices:new Map(),roster:[{id:"player",name:"Игрок"}],
   rows:[{track_id:7,assigned_player_id:null},{track_id:8,assigned_player_id:null}],
@@ -22,6 +24,7 @@ let refreshes=0,enrolled=0;
 const context={
   state,ui:{player:{value:"player"},assigned:{},excluded:{}},
   updateUnassignedLabel:()=>{},renderRows:()=>{},renderGroupCards:()=>{},
+  showBindingStatus:()=>{},
   animateTrackCards:callback=>callback(),unlock:()=>{},
   note:(message,error)=>notes.push([message,error]),
   loadPage:()=>{refreshes++;return new Promise(()=>{});},
@@ -30,6 +33,7 @@ const context={
       assert.equal(body.expected_revision,"rev"+assignments.length,
         "Next assignment must use the server-confirmed revision");
       assignments.push([...body.track_ids]);
+      if(assignments.length===1)await pausedFirstAssignment;
       return {revision:"rev"+assignments.length,assigned_count:assignments.length,
         excluded_count:0,
         unassigned_track_ids:[7,8].filter(id=>!assignments.flat().includes(id)),
@@ -53,16 +57,23 @@ runInNewContext(source.slice(start,end)+"\nthis.bindSelected=bindSelected;",cont
 const first=context.bindSelected([7],"player");
 for(let i=0;i<15;i++)await Promise.resolve();
 assert.deepEqual(assignments,[[7]]);
-assert.equal(state.busy,false,"Photo enrollment must not hold the global assignment lock");
-assert.equal(state.rows.some(row=>row.track_id===7),false,"Assigned card disappears immediately");
-assert.equal(refreshes,1,"Gallery reconciliation is scheduled, never awaited");
+assert.equal(state.busy,false,"Pending POST must not lock the rest of the gallery");
+assert.equal(state.assignmentPending.size,1);
+assert.equal(state.rows.length,2,"Card grid must not reflow during the request");
+assert.equal(refreshes,0,"Automatic reconciliation must not shift cards");
 
 const second=context.bindSelected([8],"player");
 for(let i=0;i<15;i++)await Promise.resolve();
+assert.deepEqual(assignments,[[7]],
+  "Second request waits for server revision while the next click is accepted");
+assert.equal(state.assignmentPending.size,2,"Both cards may be pending independently");
+releaseFirstAssignment();
+for(let i=0;i<30;i++)await Promise.resolve();
 assert.deepEqual(assignments,[[7],[8]],
-  "A second assignment must work before first photo enrollment completes");
+  "Both queued requests are sent in order with confirmed revisions");
+assert.equal(state.bindingHold,true,"Gallery stays stable until explicit refresh");
 assert.equal(state.busy,false);
-assert.equal(state.rows.length,0,"Second card disappears without waiting for gallery reload");
+assert.equal(state.rows.length,2,"Both cards retain their original positions");
 assert.equal(referenceRequests.filter(row=>row.action==="read").length,1,
   "Album writes for one player must be serialized");
 

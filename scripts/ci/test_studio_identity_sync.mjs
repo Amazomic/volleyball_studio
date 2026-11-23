@@ -32,7 +32,8 @@ const slice=(start,end)=> {
     project:"project",video:"match.mp4",replay:"replay",rallyRun:"run",
     token:0,selected:new Set(),viewPlayer:"",viewConflicts:false,
     offset:0,limit:24,revision:"old-revision",sourceSha:"a".repeat(64),
-    groupRevision:null,groups:[],grouped:new Set(),playerMatches:{},tracksLoaded:true
+    groupRevision:null,groups:[],grouped:new Set(),playerMatches:{},tracksLoaded:true,
+    assignmentPending:new Set()
   };
   const response={schema:"volley-native-player-track-links/1",
     source_replay_sha256:"a".repeat(64),automatic_reid_binding:true,

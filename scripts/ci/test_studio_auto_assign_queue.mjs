@@ -9,7 +9,7 @@ assert.ok(start>0&&end>start);
 const state={
   project:"p",video:"match.mp4",replay:"r",rallyRun:"run",sourceSha:"a".repeat(64),
   token:1,busy:false,writable:true,total:3,roster:[{id:"playerA"}],
-  photoScoreLoading:true,autoAssignPending:null,
+  photoScoreLoading:true,autoAssignPending:null,assignmentPending:new Set(),
   unassignedIds:new Set([1]),comparisonIds:new Set([1]),selected:new Set()
 };
 const controls=Object.fromEntries([

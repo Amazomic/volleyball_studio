@@ -9,7 +9,8 @@ let finish;
 const request=new Promise(resolve=>{finish=resolve;});
 const list={children:["existing cards"],replaceChildren(...children){this.children=children;}};
 const state={project:"p",video:"v",replay:"r",rallyRun:"rally",token:0,selected:new Set(),
-  offset:0,limit:24,viewPlayer:"",sourceSha:"",groupLoaded:true,roster:[],revision:"absent"};
+  offset:0,limit:24,viewPlayer:"",sourceSha:"",groupLoaded:true,roster:[],revision:"absent",
+  assignmentPending:new Set()};
 const calls=[];
 const context={state,ui:{list,total:{},assigned:{},excluded:{}},galleryAutoThreshold:{value:"80"},galleryAutoValue:{textContent:""},node:()=>"loading",
   unlock:()=>{},note:()=>{},path:()=>"url",read:()=>request,

@@ -9,14 +9,14 @@ assert.ok(start>=0&&end>start);
 const calls=[],messages=[],events=[];
 const sha="a".repeat(64);
 const state={project:"p",video:"match.mp4",replay:"r",rallyRun:"run",sourceSha:sha,unassignedIds:new Set(),
-  busy:false,rosterBusy:false,projectPlayerIds:new Set(["player"]),
-  photoIndices:new Map([[7,2],[8,4]])};
+  busy:false,rosterBusy:false,projectPlayerIds:new Set(["player"]),assignmentPending:new Set(),
+  photoIndices:new Map([[7,2],[8,4]]),selected:new Set()};
 const savedPhoto=(track_id,photo_index)=>({
   project_id:"p",video:"match.mp4",replay_id:"r",rally_run_id:"run",
   track_id,photo_index,source_replay_sha256:sha
 });
 let photos=[savedPhoto(8,4)],revision=0;
-const context={state,unlock:()=>{},
+const context={state,unlock:()=>{},showBindingStatus:()=>{},
   edit:async(action,ids,player)=>{
     calls.push({action,ids,player});
     // The selected gallery disappears after assignment.
@@ -37,7 +37,7 @@ runInNewContext(source.slice(start,end)+"\nthis.bindSelected=bindSelected;",cont
 await context.bindSelected([7,8,9],"player");
 const enrolls=calls.filter(call=>call.body?.action==="enroll");
 assert.equal(calls[0].action,"assign");
-assert.deepEqual(calls[0].ids,[7,8,9]);
+assert.deepEqual(Array.from(calls[0].ids),[7,8,9]);
 assert.equal(calls[1].body.action,"read");
 assert.deepEqual(enrolls.map(call=>call.body.track_id),[7,9],
   "Every unsaved group member must contribute an image; existing ID 8 is skipped");

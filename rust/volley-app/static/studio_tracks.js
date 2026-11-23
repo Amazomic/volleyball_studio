@@ -24,7 +24,8 @@
     rosterEpoch:0,rosterBusy:false,rosterLoaded:false,tracksLoaded:false,loadingKey:null,grouping:false,
     photoIndices:new Map(),groupNavigation:new Map(),viewPlayer:"",viewConflicts:false,viewExcluded:false,filteredTotal:0,unassignedIds:new Set(),excludedIds:new Set(),identityConflictIds:new Set(),comparisonIds:new Set(),
     photoScoreLoading:false,autoThresholdScope:"",autoAssignPending:null,pendingEditFailure:"",
-    unassignedReasons:{},appliedAutoThreshold:75
+    unassignedReasons:{},appliedAutoThreshold:75,
+    assignmentQueue:Promise.resolve(),assignmentPending:new Set(),bindingHold:false,bindingEpoch:0
   };
   const node=(tag,klass,text)=>{
     const n=document.createElement(tag);if(klass)n.className=klass;
@@ -53,6 +54,7 @@
       error=true;
     }
     ui.status.textContent=String(value);
+    ui.status.title=String(value);
     ui.status.classList.toggle("track-error",error);
   };
   const options=(select,rows,valueField,labelField,placeholder)=>{
@@ -215,28 +217,57 @@
   rosterAddAll.addEventListener("click",()=>attachPlayers(
     state.libraryPlayers.filter(p=>!state.projectPlayerIds.has(p.id)).map(p=>p.id)
   ));
+  const showBindingStatus=(ids,status)=>{
+    if(!state.tracksLoaded)return;
+    const changed=new Set(ids.map(Number));
+    tracksPanel.querySelectorAll("[data-track-card-key]").forEach(card=>{
+      const controls=card.querySelector(".track-card-link-actions");
+      if(!controls)return;
+      const members=(controls.dataset.trackIds||"").split(",").map(Number);
+      if(!members.some(id=>changed.has(id)))return;
+      if(status)card.dataset.bindStatus=status;
+      else delete card.dataset.bindStatus;
+      const locked=status==="pending"||status==="saved";
+      const check=card.querySelector('input[type="checkbox"]');
+      if(check){
+        if(locked)check.checked=false;
+        check.disabled=locked;
+      }
+      card.querySelectorAll(".track-group-select").forEach(button=>{
+        button.disabled=locked||Number(controls.dataset.trackCount)>200;
+      });
+    });
+  };
   const updateCardLink=controls=>{
     const select=controls.querySelector("select");
     const link=controls.querySelector("button");
+    const ids=(controls.dataset.trackIds||"").split(",").map(Number);
+    const blocked=ids.some(id=>state.assignmentPending.has(id)||
+      (state.tracksLoaded&&!state.unassignedIds.has(id)));
     link.disabled=!state.writable||state.busy||state.rosterBusy||
-      !select.value||Number(controls.dataset.trackCount)>200;
+      blocked||!select.value||Number(controls.dataset.trackCount)>200;
   };
   const unlock=()=>{
-    const selected=state.selected.size>0 && !state.busy && state.writable;
-    ui.assign.disabled=!selected||!ui.player.value||state.rosterBusy;
-    ui.unassign.disabled=!selected;
-    ui.exclude.disabled=!selected;
-    ui.restore.disabled=!selected;
-    ui.prev.disabled=state.busy||state.offset===0;
-    ui.next.disabled=state.busy||state.offset+state.limit>=state.filteredTotal;
+    const selected=state.selected.size>0&&!state.busy&&state.writable;
+    const canAssign=selected&&[...state.selected].every(id=>
+      !state.assignmentPending.has(id)&&
+      (!state.tracksLoaded||state.unassignedIds.has(id)));
+    ui.assign.disabled=!canAssign||!ui.player.value||state.rosterBusy;
+    ui.unassign.disabled=!selected||state.assignmentPending.size>0;
+    ui.exclude.disabled=!selected||state.assignmentPending.size>0;
+    ui.restore.disabled=!selected||state.assignmentPending.size>0;
+    ui.prev.disabled=state.busy||state.assignmentPending.size>0||state.offset===0;
+    ui.next.disabled=state.busy||state.assignmentPending.size>0||state.offset+state.limit>=state.filteredTotal;
+    ui.refresh.disabled=state.busy||state.assignmentPending.size>0;
     tracksPanel.querySelectorAll(".track-card-link-actions").forEach(updateCardLink);
     tracksPanel.querySelectorAll(".track-remove-assignment").forEach(button=>{
-      button.disabled=state.busy||!state.writable;
+      button.disabled=state.busy||state.assignmentPending.size>0||!state.writable;
     });
     reidUnlock();
   };
   const reset=()=>{
-    state.token++;state.selected.clear();state.rallyIds.clear();state.offset=0;state.rows=[];
+    state.token++;state.bindingEpoch++;state.bindingHold=false;state.assignmentPending.clear();
+    state.selected.clear();state.rallyIds.clear();state.offset=0;state.rows=[];
     state.total=0;state.revision="absent";state.roster=[];state.writable=false;
     state.tracksLoaded=false;state.loadingKey=null;state.grouping=false;
     state.photoIndices.clear();state.groupNavigation.clear();
@@ -369,6 +400,8 @@
   const loadPage=async({preserveCards=false}={})=>{
     const project=state.project,video=state.video,replay=state.replay;
     if(!project||!video||!replay)return;
+    if(state.assignmentPending.size){note("Сохранение привязок выполняется. Список не перестраивается.");return;}
+    state.bindingHold=false;
     const token=++state.token;
     state.selected.clear();unlock();
     if(!preserveCards)ui.list.replaceChildren(node("div","empty-state","Загрузка сохранённого индекса Track ID…"));
@@ -535,6 +568,7 @@
     const candidates=playerCandidates(ids);
     const controls=node("div","track-card-link-actions");
     controls.dataset.trackCount=String(ids.length);
+    controls.dataset.trackIds=ids.join(",");
     const select=node("select");
     select.setAttribute("aria-label","Назначить игрока для "+ids.map(id=>"ID "+id).join(", "));
     const reliableDefault=ids.length===1||(candidates[0]?.supported||0)===ids.length;
@@ -674,7 +708,7 @@
   };
   // Apply the authoritative edit to visible cards immediately. A subsequent
   // read reconciles filtered pages and concurrent edits without blocking UI.
-  const applyLocalTrackEdit=(action,ids,owner,result)=>{
+  const applyLocalTrackEdit=(action,ids,owner,result,preserveSlots=false)=>{
     const changed=new Set(ids.map(Number));
     const ownerName=state.roster.find(p=>p.id===owner)?.name||"";
     for(const row of state.rows){
@@ -701,27 +735,31 @@
     if(!state.viewPlayer&&!state.viewConflicts){
       const visible=state.viewExcluded?state.excludedIds:state.unassignedIds;
       state.filteredTotal=visible.size;
-      state.rows=state.rows.filter(row=>visible.has(Number(row.track_id)));
-      if(state.filteredTotal&&state.offset>=state.filteredTotal)
-        state.offset=Math.floor((state.filteredTotal-1)/state.limit)*state.limit;
-      if(!state.filteredTotal)state.offset=0;
-    }else if(state.viewPlayer){
+      if(!preserveSlots){
+        state.rows=state.rows.filter(row=>visible.has(Number(row.track_id)));
+        if(state.filteredTotal&&state.offset>=state.filteredTotal)
+          state.offset=Math.floor((state.filteredTotal-1)/state.limit)*state.limit;
+        if(!state.filteredTotal)state.offset=0;
+      }
+    }else if(state.viewPlayer&&!preserveSlots){
       state.rows=state.rows.filter(row=>row.assigned_player_id===state.viewPlayer);
     }
     updateUnassignedLabel();
     ui.assigned.textContent=String(result.assigned_count||0);
     ui.excluded.textContent=String(result.excluded_count||0);
-    animateTrackCards(()=>{renderRows();renderGroupCards();unlock();});
+    if(preserveSlots){showBindingStatus(ids,"saved");unlock();}
+    else animateTrackCards(()=>{renderRows();renderGroupCards();unlock();});
   };
-  const edit=async (action,chosenIds=null,chosenOwner=null)=>{
+  const edit=async (action,chosenIds=null,chosenOwner=null,queued=false)=>{
     const ids=chosenIds||Array.from(state.selected);
     const owner=chosenOwner||ui.player.value;
-    if(state.busy||!ids.length||ids.length>200||!state.replay)return false;
+    if(state.busy||(!queued&&state.assignmentPending?.size)||!ids.length||ids.length>200||!state.replay)return false;
     if(action==="assign"&&!owner){note("Выберите игрока.",true);return false;}
     const project=state.project,video=state.video,replay=state.replay;
+    const epoch=state.bindingEpoch;
     const revision=state.revision,offset=state.offset;
     let confirmed=false;
-    state.busy=true;unlock();
+    if(!queued){state.busy=true;unlock();}
     try{
       const payload={project_id:project,video,replay_id:replay,
         rally_run_id:state.rallyRun,
@@ -736,17 +774,18 @@
           project_id:project,video,replay_id:replay,rally_run_id:state.rallyRun,
           offset:0,limit:1,view:"unassigned"
         }));
-        if(project!==state.project||video!==state.video||replay!==state.replay)return false;
+        if(project!==state.project||video!==state.video||replay!==state.replay||epoch!==state.bindingEpoch)return false;
         payload.expected_revision=String(refreshed.revision);
         result=await post("/api/players/native/tracks",payload);
       }
-      if(project!==state.project||video!==state.video||replay!==state.replay)return false;
+      if(project!==state.project||video!==state.video||replay!==state.replay||epoch!==state.bindingEpoch)return false;
       state.pendingEditFailure="";
       state.revision=String(result.revision);
       state.lastDisplacedAutomatic=Array.isArray(result.displaced_automatic_track_ids)?
         result.displaced_automatic_track_ids.map(Number):[];
-      state.selected.clear();
-      applyLocalTrackEdit(action,ids,owner,result);
+      if(queued)ids.forEach(id=>state.selected.delete(Number(id)));
+      else state.selected.clear();
+      applyLocalTrackEdit(action,ids,owner,result,queued);
       window.dispatchEvent(new CustomEvent("volley:track-assignments-updated",{detail:{
         project_id:project,video,replay_id:replay
       }}));
@@ -762,9 +801,11 @@
     }finally{
       // Only the assignment POST owns the global mutation lock. Heavy
       // gallery/ReID reads and photo enrollment do not.
-      state.busy=false;unlock();
-      if(confirmed&&project===state.project&&video===state.video&&replay===state.replay)
-        void loadPage({preserveCards:true});
+      if(!queued){
+        state.busy=false;unlock();
+        if(confirmed&&project===state.project&&video===state.video&&replay===state.replay)
+          void loadPage({preserveCards:true});
+      }
     }
   };
   // Multiple photo saves for the same athlete need ordered album revisions.
@@ -782,6 +823,13 @@
   const bindSelected=async (ids,playerId)=>{
     if(!playerId||state.busy||state.rosterBusy||!ids.length||
       !state.projectPlayerIds.has(playerId))return;
+    const requested=[...new Set(ids.map(Number))];
+    state.assignmentPending ||=new Set();
+    if(requested.some(id=>state.assignmentPending.has(id)))return;
+    if(state.tracksLoaded&&requested.some(id=>!state.unassignedIds.has(id))){
+      note("Состав группы изменился. Обновите список перед повторной привязкой.",true);
+      return;
+    }
     const scope={project_id:state.project,player_id:playerId,video:state.video,
       replay_id:state.replay,rally_run_id:state.rallyRun,
       expected_source_sha256:state.sourceSha};
@@ -793,7 +841,29 @@
       (observed.get(b)||0)-(observed.get(a)||0)).slice(0,3).map(trackId=>({
       trackId,photoIndex:state.photoIndices.get(trackId)||0
     }));
-    if(!await edit("assign",ids,playerId))return;
+    const epoch=state.bindingEpoch;
+    state.bindingHold=true;
+    if(state.tracksLoaded)state.token++;
+    requested.forEach(id=>{state.assignmentPending.add(id);state.selected.delete(id);});
+    showBindingStatus(requested,"pending");
+    unlock();
+    const task=(state.assignmentQueue||Promise.resolve()).then(()=>{
+      if(epoch!==state.bindingEpoch||scope.project_id!==state.project||
+        scope.video!==state.video||scope.replay_id!==state.replay||
+        scope.rally_run_id!==state.rallyRun)return false;
+      return edit("assign",requested,playerId,true);
+    }).catch(error=>{note(String(error.message||error),true);return false;});
+    state.assignmentQueue=task;
+    let saved=false;
+    try{saved=await task;}
+    finally{
+      if(epoch===state.bindingEpoch){
+        requested.forEach(id=>state.assignmentPending.delete(id));
+        if(!saved)showBindingStatus(requested,"");
+        unlock();
+      }
+    }
+    if(!saved||epoch!==state.bindingEpoch)return;
     if(scope.project_id!==state.project||scope.replay_id!==state.replay)return;
     const displaced=Array.isArray(state.lastDisplacedAutomatic)?
       state.lastDisplacedAutomatic:[];
@@ -1355,8 +1425,8 @@
   };
   let autoAssignInFlight=false;
   const reidUnlock=()=>{
-    const ready=reviewReady()&&!state.busy;
-    reviewThreshold.disabled=state.busy;
+    const ready=reviewReady()&&!state.busy&&!state.assignmentPending.size;
+    reviewThreshold.disabled=state.busy||state.assignmentPending.size>0;
     groupButton.disabled=!ready||!state.writable||!state.unassignedIds.size||Boolean(state.viewPlayer);
     reviewRead.disabled=!ready;
     reviewExtract.disabled=!ready||state.selected.size<1||state.selected.size>8;
@@ -1368,16 +1438,16 @@
       !state.writable?"Привязки недоступны для записи.":
       !state.total?"В выбранной обработке нет Track ID.":
       !state.roster.length?"Добавьте игроков в состав проекта.":
-      state.busy?"Другая операция ещё выполняется.":"";
+      state.busy||state.assignmentPending.size?"Другая операция ещё выполняется.":"";
     galleryAuto.disabled=Boolean(autoBlocked||autoAssignInFlight||state.autoAssignPending);
     galleryAuto.title=autoBlocked||(
       autoAssignInFlight?"Автопривязка выполняется в фоне.":
       "Привязать Track ID к лучшему игроку при сходстве от выбранного порога.");
-    galleryAutoThreshold.disabled=state.busy||autoAssignInFlight||Boolean(state.autoAssignPending);
+    galleryAutoThreshold.disabled=state.busy||state.assignmentPending.size>0||autoAssignInFlight||Boolean(state.autoAssignPending);
     if(autoBlocked&&!autoAssignInFlight&&!state.busy)
       autoAssignMessage(autoBlocked,"blocked");
     else if(autoAssignStatus.dataset.kind==="blocked")autoAssignMessage("");
-    if(state.autoAssignPending&&!state.photoScoreLoading&&!state.busy&&!autoAssignInFlight){
+    if(state.autoAssignPending&&!state.photoScoreLoading&&!state.busy&&!state.assignmentPending.size&&!autoAssignInFlight){
       const queued=state.autoAssignPending;
       state.autoAssignPending=null;
       if(queued.scope===autoAssignScope())queueMicrotask(()=>void autoAssignSimilar(queued.threshold));
@@ -1542,7 +1612,7 @@
     try{
       const record=await post("/api/players/native/reid-review",{...scope,action:"read"});
       if(token!==state.token||scope.replay_id!==state.replay)return;
-      state.groupRevision=String(record.revision);reviewRender(record,{deferRender});
+      state.groupRevision=String(record.revision);reviewRender(record,{deferRender:deferRender||state.bindingHold});
       return true;
     }catch(e){
       if(token!==state.token||scope.replay_id!==state.replay)return;
@@ -1550,7 +1620,7 @@
       state.groups=[];state.grouped.clear();state.singleCount=state.total;
       // Preserve persisted photo scores when group loading fails.
       galleryStatus.textContent="Не удалось загрузить группы: "+e.message;
-      if(!deferRender){renderGroupCards();renderRows();}reviewNote(e.message,true);
+      if(!deferRender&&!state.bindingHold){renderGroupCards();renderRows();}reviewNote(e.message,true);
     }finally{reidUnlock();}
   };
   groupButton.addEventListener("click",async()=>{
@@ -1742,7 +1812,8 @@
     if(active())void loadLibraryRoster();
   });
   window.addEventListener("volley:player-photo-saved",()=>{
-    if(active()&&state.tracksLoaded)void loadPage({preserveCards:true});
+    if(active()&&state.tracksLoaded&&!state.bindingHold&&!state.assignmentPending.size)
+      void loadPage({preserveCards:true});
   });
   if(active())loadVideos();
 })();
