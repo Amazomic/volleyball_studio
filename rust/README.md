@@ -28,6 +28,14 @@ launcher option -OpenvinoLibrary /absolute/wsl/path/libopenvino_c.so.
 Run cargo test --workspace --offline with VOLLEY_TEST_OPENVINO_C_LIB set
 to the same native .so to execute the real-model smoke test. These
 temporary, SHA-bound vectors are only visual suggestions, not identities.
+
+On native Windows, install the runtime once with
+`powershell -ExecutionPolicy Bypass -File scripts/setup-openvino-windows.ps1`
+from the repository root. The launcher discovers
+`%LOCALAPPDATA%\VolleyballStudio\native-deps\openvino\openvino\libs\openvino_c.dll`
+or a 64-bit Python OpenVINO installation. `-OpenvinoLibrary` and
+`VOLLEY_OPENVINO_C_LIB` override discovery; invalid paths fail at startup
+rather than silently disabling ReID.
 Manually reviewed native player reference JPEGs have a separate, versioned,
 reversible global athlete album under the isolated Rust data root. Use
 POST /api/players/native/references (read/enroll/undo) and GET
