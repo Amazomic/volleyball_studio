@@ -361,13 +361,14 @@ fn full_video_ball_suggestions_impl(
         };
         for b in breaks {
             if b.frame >= 0
-                && !synthetic.contains(&b.frame)
-                && !prepared.as_ref().is_some_and(|reconstructed| {
-                    reconstructed
-                        .interpolated_frames
-                        .binary_search(&b.frame)
-                        .is_ok()
-                })
+                && ((impact.is_some() && !b.contact_observed)
+                    || (!synthetic.contains(&b.frame)
+                        && !prepared.as_ref().is_some_and(|reconstructed| {
+                            reconstructed
+                                .interpolated_frames
+                                .binary_search(&b.frame)
+                                .is_ok()
+                        })))
             {
                 let score = if impact.is_some() {
                     b.motion.angle / (1.0 + b.fit_error)

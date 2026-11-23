@@ -36,7 +36,7 @@ const profileInputs=[...markup.matchAll(/<input[^>]*id="(studio-(?:gpu|post)[^"]
     for(const attr of row[0].matchAll(/([\w-]+)="([^"]*)"/g))attrs[attr[1]]=attr[2];
     return attrs;
   });
-assert.equal(profileInputs.length,39,"GPU + CPU post-processing profile fields");
+assert.equal(profileInputs.length,38,"GPU + CPU post-processing profile fields");
 const profileSelects=[...markup.matchAll(/<select[^>]*id="(studio-(?:gpu|post)[^"]*)"[^>]*>/g)]
   .map(row=>Object.fromEntries([...row[0].matchAll(/([\w-]+)="([^"]*)"/g)]
     .map(attr=>[attr[1],attr[2]])));
@@ -308,7 +308,8 @@ assert.equal(golden.post.tracking.min_player_score,0.28);
 assert.equal(golden.post.tracking.nms_iou,0.72);
 assert.equal(golden.post.tracking.min_track_observations,12);
 assert.equal(golden.post.touches.threshold,0.48);
-assert.equal(golden.post.touches.algorithm,"pose_motion");
+assert.equal(golden.post.touches.algorithm,"ball_trajectory");
+assert.equal(golden.post.touches.require_pose,false);
 assert.equal(golden.post.touches.min_ball_score,0.35);
 assert.equal(golden.post.rallies.min_ball_score,0.35);
 assert.equal(golden.post.rallies.min_rally_frames,45);

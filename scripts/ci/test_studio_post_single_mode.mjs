@@ -42,24 +42,24 @@ const a=tabs.indexOf("  const postProfile=()=>({");
 const b=tabs.indexOf("  const allProfileFields=()=>",a);
 assert.ok(a>=0&&b>a,"Postprocessing request factory is missing");
 const env={
-  $:id=>({checked:id==="studio-post-tcn-experimental"?false:true,value:"1",id}),
+  $:id=>({checked:true,value:"1",id}),
   inputValue:id=>({"studio-post-auto-assign-threshold":75,
     "studio-post-lost-low-gap":30,"studio-post-lost-low-iou":0.30}[id]??0.48)
 };
 runInNewContext(tabs.slice(a,b)+"\nthis.profile=postProfile;",env);
 const profile=env.profile();
-assert.equal(profile.touches.algorithm,"pose_motion");
-assert.match(panel,/id="studio-post-tcn-experimental"/,
-  "TCN must be an explicitly opted-in advanced feature, not a default selector");
+assert.equal(profile.touches.algorithm,"ball_trajectory");
+assert.doesNotMatch(panel,/id="studio-post-tcn-experimental"/,
+  "Alternate touch detectors must be absent from the active UI");
 env.$=id=>({checked:true,value:"1",id});
-assert.equal(env.profile().touches.algorithm,"trajectory_tcn",
-  "TCN opt-in must be passed to backend");
+assert.equal(env.profile().touches.algorithm,"ball_trajectory",
+  "Unrelated toggles cannot replace Touch Detector");
 assert.equal(profile.touches.threshold,0.48);
 assert.equal(profile.auto_assign_threshold_percent,75);
-assert.equal(profile.touches.require_pose,true);
+assert.equal(profile.touches.require_pose,false);
 assert.equal(profile.interpolate_players,true);
 assert.equal(profile.tracking.lost_low_confidence_max_gap_frames,30);
 assert.equal(profile.tracking.lost_low_confidence_min_iou,0.30);
 assert.doesNotMatch(tabs,/\$\("studio-post-touch-algorithm"\)/,
   "No hidden DOM dependency on the removed algorithm selector");
-console.log("Postprocessing: one pose_motion algorithm, parameters only in closed details: OK");
+console.log("Postprocessing: one ball_trajectory detector, parameters only in closed details: OK");

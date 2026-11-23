@@ -234,14 +234,14 @@
       ambiguity_margin:inputValue("studio-post-margin")
     },
     touches:{
-      algorithm:$("studio-post-tcn-experimental").checked?"trajectory_tcn":"pose_motion", // PoseMotion default; explicit experimental opt-in.
+      algorithm:"ball_trajectory",
       threshold:inputValue("studio-post-touch-threshold"),
       min_ball_score:inputValue("studio-post-ball-score"),
       smooth:inputValue("studio-post-smooth"),
       min_gap:inputValue("studio-post-touch-gap"),
       max_reach_ratio:inputValue("studio-post-reach"),
       min_interval_sec:inputValue("studio-post-interval"),
-      require_pose:true,
+      require_pose:false,
       pose_min_confidence:inputValue("studio-post-pose-confidence"),
       pose_max_distance:inputValue("studio-post-pose-distance"),
       occluded_min_turn_deg:inputValue("studio-post-occluded-turn")
@@ -310,9 +310,6 @@
         "Изменено параметров: "+changed.length+
         ". При изменении GPU создаётся новая 1 фаза; при изменении только CPU — новая 2 фаза.":
         "Эталонный профиль активен. Совпадающие готовые версии используются повторно.";
-      if($("studio-post-tcn-experimental").checked){
-        ui.profileDelta.textContent+=" Экспериментальная TCN: требуется обученная модель models/volley3d_touch_tcn.onnx.";
-      }
     }
     const running=Boolean(state.pipelineId);
     ui.start.textContent=running?
@@ -458,15 +455,14 @@
   pipelineNames.set("publish","Публикация");
   pipelineNames.set("material","Результат");
   const pipelineModelMeta=(id,run)=>{
-    const tcn=run?.profile?.post?.touches?.algorithm==="trajectory_tcn"||
-      (!run&&$("studio-post-tcn-experimental")?.checked);
     const known={
       ball:["VballNetV4c","model"],
       ball_stabilizer:["Ball Stabilizer","algorithm"],
       players:["RF-DETR Medium","model"],
       pose:["RTMPose-M Body7","model"],
       tracking:["ByteTrack","algorithm"],
-      touch_types:tcn?["Volley3D TCN","model"]:["PoseMotion","algorithm"]
+      touches:["Touch Detector","algorithm"],
+      touch_types:["RTMPose + геометрия","classifier"]
     };
     return known[id]||null;
   };
@@ -620,14 +616,13 @@
     fusion:["#studio-gpu-memory","#studio-gpu-threads"],
     tracking:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap",
       "#studio-post-lost-low-gap","#studio-post-lost-low-iou","#studio-post-min-track-frames","#studio-post-nms","#studio-post-assignment","#studio-post-margin"],
-    touches:["#studio-post-touch-threshold","#studio-post-pose-confidence",
-      "#studio-post-pose-distance","#studio-post-occluded-turn","#studio-post-touch-gap",
+    touches:["#studio-post-touch-threshold","#studio-post-occluded-turn","#studio-post-touch-gap",
       "#studio-post-reach","#studio-post-smooth","#studio-post-interval",
       "#studio-post-ball-score","#studio-post-ball-gap",
       "#studio-post-idle","#studio-post-stationary","#studio-post-rally-min",
       "#studio-post-coverage","#studio-post-samples","#studio-post-min-touches",
       "#studio-post-no-touch","#studio-post-context"],
-    touch_types:["#studio-post-tcn-experimental"],
+    touch_types:["#studio-post-pose-confidence","#studio-post-pose-distance"],
     identity:["#studio-post-auto-assign-threshold"]
   };
   const graphDescriptions={
@@ -639,8 +634,8 @@
     pose:"RTMPose-M Body7 получает рамки игроков и исходные пиксели видео.",
     fusion:"Сохранение общей версии GPU-наблюдений и повторное использование кэша.",
     tracking:"ByteTrack сопровождает Track ID на CPU. Это алгоритм трекинга, а не нейросеть.",
-    touches:"Физические касания и определение их типов выполняются в одном CPU-проходе.",
-    touch_types:"По умолчанию используется алгоритм PoseMotion. Экспериментальная нейросеть Volley3D TCN используется только при включённой опции и наличии модели; отдельного GPU-прохода здесь нет.",
+    touches:"Touch Detector определяет моменты касаний исключительно по траектории мяча. Контакт с телом и классификация дополняют найденное событие, не изменяя его время.",
+    touch_types:"RTMPose и геометрия тела уточняют тип уже найденного касания. Без достаточных признаков остаётся unknown_touch. Привязка Track ID к конкретному игроку выполняется отдельно, позднее.",
     identity:"Автоматическая привязка Track ID к игрокам из библиотеки.",
     cache:"Готовый GPU-анализ переиспользуется при совместимых настройках."
   };

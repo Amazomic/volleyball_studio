@@ -578,30 +578,14 @@ impl TryFrom<StartRequestWire> for StartRequest {
     type Error = String;
 
     fn try_from(wire: StartRequestWire) -> Result<Self, Self::Error> {
-        // Historical CPU snapshots may still deserialize the old algorithm,
-        // but new Studio requests have one default plus a separate opt-in TCN.
-        if wire
-            .post
-            .pointer("/touches/algorithm")
-            .and_then(Value::as_str)
-            == Some("legacy")
-        {
-            return Err(
-                "Legacy не поддерживается для новых запусков; выберите PoseMotion или TCN".into(),
-            );
-        }
         let (gpu, mut post) = decode_profiles(wire.gpu, wire.post)?;
         gpu.primary_rallies.validate()?;
         post.ball_stabilizer.validate().map_err(str::to_owned)?;
         if !(1..=99).contains(&post.auto_assign_threshold_percent) {
             return Err("Порог сходства для автопривязки должен быть от 1 до 99%".into());
         }
-        // TouchSettings::default() remains legacy for old saved data. An API
-        // request with partial touch parameters uses PoseMotion unless TCN is explicit.
-        if post.touches.algorithm != TouchAlgorithm::TrajectoryTcn {
-            post.touches.algorithm = TouchAlgorithm::PoseMotion;
-        }
-        post.touches.require_pose = true;
+        post.touches.algorithm = TouchAlgorithm::BallTrajectory;
+        post.touches.require_pose = false;
         Ok(Self {
             project_id: wire.project_id,
             video: wire.video,
@@ -1313,6 +1297,7 @@ fn cpu_lineage_valid(
             TouchAlgorithm::TrajectoryTcn => tcn_sha.is_some()
                 && touches["method"] == "vballnet_volley3d_tcn_v1"
                 && touches["tcn_model_sha256"] == serde_json::json!(tcn_sha),
+            TouchAlgorithm::BallTrajectory => touches["method"] == "vballnet_touch_detector_v4",
         })
         && rallies["schema"] == "volley-native-cpu-rally-proposals/1"
         && rallies["state"] == "provisional_rally_segments"
@@ -3611,38 +3596,35 @@ mod tests {
     fn new_post_requests_have_one_touch_algorithm_without_rewriting_saved_legacy() {
         let base = json!({"project_id":"abc123def456","video":"match.mp4"});
         let fresh: StartRequest = serde_json::from_value(base.clone()).unwrap();
-        assert_eq!(fresh.post.touches.algorithm, TouchAlgorithm::PoseMotion);
-        assert!(fresh.post.touches.require_pose);
+        assert_eq!(fresh.post.touches.algorithm, TouchAlgorithm::BallTrajectory);
+        assert!(!fresh.post.touches.require_pose);
 
         let mut partial = base.clone();
         partial["post"] = json!({"touches":{"threshold":0.62}});
         let active: StartRequest = serde_json::from_value(partial).unwrap();
-        assert_eq!(active.post.touches.algorithm, TouchAlgorithm::PoseMotion);
+        assert_eq!(
+            active.post.touches.algorithm,
+            TouchAlgorithm::BallTrajectory
+        );
         assert_eq!(active.post.touches.threshold, 0.62);
-        assert!(active.post.touches.require_pose);
-        let ignored_optional: StartRequest = serde_json::from_value(json!({
-            "project_id":"abc123def456","video":"match.mp4",
-            "post":{"touches":{"require_pose":false}}
-        }))
-        .unwrap();
-        assert!(ignored_optional.post.touches.require_pose);
-        let tcn: StartRequest = serde_json::from_value(json!({
-            "project_id":"abc123def456","video":"match.mp4",
-            "post":{"touches":{"algorithm":"trajectory_tcn"}}
-        }))
-        .unwrap();
-        assert_eq!(tcn.post.touches.algorithm, TouchAlgorithm::TrajectoryTcn);
-        assert!(tcn.post.touches.require_pose);
+        assert!(!active.post.touches.require_pose);
 
-        let mut previous_choice = base;
-        previous_choice["post"] = json!({"touches":{"algorithm":"legacy"}});
-        assert!(serde_json::from_value::<StartRequest>(previous_choice).is_err());
-
+        for algorithm in ["legacy", "pose_motion", "trajectory_tcn"] {
+            let request: StartRequest = serde_json::from_value(json!({
+                "project_id":"abc123def456","video":"match.mp4",
+                "post":{"touches":{"algorithm":algorithm,"require_pose":true}}
+            }))
+            .unwrap();
+            assert_eq!(
+                request.post.touches.algorithm,
+                TouchAlgorithm::BallTrajectory
+            );
+            assert!(!request.post.touches.require_pose);
+        }
         let (_, archived) =
             decode_profiles(json!({}), json!({"touches":{"algorithm":"legacy"}})).unwrap();
         assert_eq!(archived.touches.algorithm, TouchAlgorithm::Legacy);
     }
-
     #[test]
     fn interpolation_profiles_reject_invalid_flags_and_unknown_fields() {
         for fields in [
@@ -3882,7 +3864,10 @@ mod tests {
         }
         assert_eq!(profile.post.tracking.max_gap_frames, 90);
         assert_eq!(profile.post.touches.threshold, 0.48);
-        assert_eq!(profile.post.touches.algorithm, TouchAlgorithm::PoseMotion);
+        assert_eq!(
+            profile.post.touches.algorithm,
+            TouchAlgorithm::BallTrajectory
+        );
         assert_eq!(profile.post.rallies.min_rally_frames, 45);
         assert!(profile.post.tracking.validate().is_ok());
         assert!(profile.post.touches.validate().is_ok());

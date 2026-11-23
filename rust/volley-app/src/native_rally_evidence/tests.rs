@@ -1,5 +1,31 @@
 use super::*;
 
+#[test]
+fn unlinked_ball_trajectory_touch_remains_a_valid_unknown_candidate() {
+    let event: NativeMotion = serde_json::from_value(json!({
+        "frame_index":651,
+        "provisional_track_id":null,
+        "probability":1.0,
+        "ball_x_px":955.0,
+        "ball_y_px":485.0,
+        "motion_frame_index":651,
+        "direction_change_deg":94.0,
+        "speed_before_px_frame":20.0,
+        "speed_after_px_frame":31.0,
+        "velocity_residual_px_frame":31.0,
+        "technique":"unknown_touch",
+        "physical_motion_supported":true,
+        "athlete_identity_verified":false,
+        "ball_occluded_at_contact":true,
+        "inferred_body_reach_supported":false
+    }))
+    .unwrap();
+    assert!(event.valid(700, 1920, 1080));
+    let result = finalize_touch(&event, true, None, &mut BTreeMap::new()).unwrap();
+    assert!(!result.attributed);
+    assert!(result.kind.is_none());
+}
+
 #[cfg(test)]
 #[test]
 fn second_strike_by_same_player_is_not_a_duplicate_when_time_separated() {

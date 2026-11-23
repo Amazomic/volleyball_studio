@@ -657,7 +657,7 @@
     }
     const near=[];
     for(let i=left;i<events.length&&events[i].frame_index<=frame+8;i++)
-      if(events[i].touch_attributed===true||events[i].contact_verified===true)near.push(events[i]);
+      near.push(events[i]);
     return near;
   };
   const drawCpuTouches=(ctx,record,project,run,video,frame,x,y,width,height)=>{
@@ -693,7 +693,7 @@
         player.id===event.provisional_track_id&&player.identity_conflict===true);
       const owner=!conflict&&overlayLabels.loaded&&overlayLabels.key===labelsKey?
         overlayLabels.names.get(String(event.provisional_track_id)):null;
-      const touchLabel=label+" · "+(owner||String(event.provisional_track_id));
+      const touchLabel=label+" · "+(owner||String(event.provisional_track_id??"не определён"));
       const textWidth=ctx.measureText(touchLabel).width;
       const tx=Math.min(x+width-textWidth-9,Math.max(x+5,px+15));
       const ty=Math.max(y+17,Math.min(y+height-5,py-6));
@@ -2444,7 +2444,7 @@
       if(raw)timeline.status.textContent="Сырые GPU-данные · без CPU-разметки";
       else if(!s.run)timeline.status.textContent="Выберите CPU-версию";
       else if(timeline.data)timeline.status.textContent=
-        timeline.data.rallies.length+" розыгрышей · "+timeline.data.touch_annotations.filter(event=>event.touch_attributed===true||event.contact_verified===true).length+" касаний (CPU)";
+        timeline.data.rallies.length+" розыгрышей · "+timeline.data.touch_annotations.length+" касаний (CPU)";
       updateReferenceModeUi();
       placeTrainingTimeline();
       drawTimeline();
@@ -2811,7 +2811,6 @@
       if(!training.active&&overlay.flags.touches&&Array.isArray(data.touch_annotations)){
         for(const classified of [false,true]){
           for(const touch of data.touch_annotations){
-            if(touch.touch_attributed!==true&&touch.contact_verified!==true)continue;
             const kind=cpuTouchKind(touch.kind),style=cpuTouchStyle[kind];
             if((kind!=="unknown_touch")!==classified||!overlay.actionFlags[kind])continue;
             const x=Math.floor(((Number(s.analysisOffset)||0)+Number(touch.frame_index)/fps())/duration*width);
@@ -2869,7 +2868,7 @@
       s.fps=Number(raw.fps)||0;
       if(!s.video)s.video=raw.video;
       ensurePreviewVideo();
-      const actual=raw.touch_annotations.filter(e=>e.touch_attributed===true||e.contact_verified===true);
+      const actual=raw.touch_annotations;
       const attacks=actual.filter(e=>e.kind==="attack").length;
       const blocks=actual.filter(e=>e.kind==="block").length;
       timeline.status.textContent=raw.rallies.length+" розыгрышей · "+
@@ -3656,7 +3655,6 @@
       Array.isArray(data.touch_annotations);
     const touches=validTimeline&&(typeof training==="undefined"||!training.active)&&
       !overlay.raw&&overlay.flags.touches?data.touch_annotations.filter(event=>
-      (event.touch_attributed===true||event.contact_verified===true)&&
       overlay.actionFlags[cpuTouchKind(event.kind)]):[];
     for(const {progress,markers,start,end} of rallyCardProgresses.values()){
       wipe(markers);
@@ -3715,7 +3713,6 @@
       return;
     }
     const touches=data.touch_annotations.filter(event=>
-      (event.touch_attributed===true||event.contact_verified===true)&&
       event.frame_index>=start&&event.frame_index<=end);
     const labels={attack:"Атака",block:"Блок",serve:"Подача",
       overhead_pass:"Передача сверху",dig:"Приём снизу"};

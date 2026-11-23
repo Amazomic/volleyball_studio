@@ -238,7 +238,8 @@ impl NativeMotion {
                 .is_none_or(|part| part.valid(width, height))
             && (!self.ball_occluded_at_contact
                 || self.body_contact_supported
-                || self.inferred_body_reach_supported)
+                || self.inferred_body_reach_supported
+                || self.provisional_track_id.is_none())
             && (!self.inferred_body_reach_supported
                 || self.ball_occluded_at_contact && !self.body_contact_supported)
             && !self.athlete_identity_verified

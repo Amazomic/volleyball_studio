@@ -117,7 +117,7 @@ impl MotionContact {
             || !self.physical_motion_supported
             || self.athlete_identity_verified
             // A new CPU rally may contain no Touch without a real source-frame ID.
-            || self.provisional_track_id.is_none()
+            || (self.body_contact_supported && self.provisional_track_id.is_none())
             || self
                 .contact_landmark
                 .as_ref()
@@ -127,8 +127,9 @@ impl MotionContact {
                     || at >= frames || at.abs_diff(self.frame_index) > 3
             })
             || (self.ball_occluded_at_contact
-                && (!self.body_contact_supported && !self.inferred_body_reach_supported
-                    || self.provisional_track_id.is_none()))
+                && !self.body_contact_supported
+                && !self.inferred_body_reach_supported
+                && self.provisional_track_id.is_some())
             || (self.inferred_body_reach_supported
                 && (!self.ball_occluded_at_contact || self.body_contact_supported))
             || self.technique != "unknown_touch"
@@ -1598,7 +1599,9 @@ mod tests {
         touch.provisional_track_id = Some(0);
         assert!(touch.verify(756, 1280, 720).is_err());
         touch.provisional_track_id = None;
-        assert!(touch.verify(756, 1280, 720).is_err());
+        assert!(touch.verify(756, 1280, 720).is_ok());
+        touch.ball_occluded_at_contact = true;
+        assert!(touch.verify(756, 1280, 720).is_ok());
     }
 
     #[test]

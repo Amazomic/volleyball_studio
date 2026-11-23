@@ -69,21 +69,22 @@ const markers=make("span","rally-card-progress-markers");
 const progress=make("div","rally-card-progress");
 rallyCardProgresses.set(current.current,{progress,markers,start:100,end:149});
 refreshRallyCardTouchTicks();
-assert.equal(markers.children.length,3,
-  "Only attributed/verified CPU touches within the played clip become marks");
-assert.deepEqual(markers.children.map(x=>x.style.left),["0%","50%","98%"]);
+assert.equal(markers.children.length,4,
+  "Every Touch Detector candidate within the played clip becomes a mark, even without a linked player");
+assert.deepEqual(markers.children.map(x=>x.style.left),["0%","50%","60%","98%"]);
 assert.equal(markers.children[0].style.backgroundColor,cpuTouchStyle.attack[0]);
 assert.equal(markers.children[1].style.backgroundColor,cpuTouchStyle.dig[0]);
-assert.equal(markers.children[2].style.backgroundColor,"#c6bf96",
+assert.equal(markers.children[2].style.backgroundColor,cpuTouchStyle.block[0]);
+assert.equal(markers.children[3].style.backgroundColor,"#c6bf96",
   "Untyped touches have the same color as in the video");
-assert.match(progress.attrs["aria-label"],/3 касаний/);
+assert.match(progress.attrs["aria-label"],/4 касаний/);
 assert.match(markers.children[1].title,/12.5 с/);
 overlay.actionFlags.unknown_touch=false;
 refreshRallyCardTouchTicks();
-assert.equal(markers.children.length,2,"Unknown-type checkbox filters card timeline");
+assert.equal(markers.children.length,3,"Unknown-type checkbox filters card timeline");
 overlay.actionFlags.unknown_touch=true;
 refreshRallyCardTouchTicks();
-assert.equal(markers.children.length,3,"Re-enabling unknown restores card markers");
+assert.equal(markers.children.length,4,"Re-enabling unknown restores card markers");
 overlay.flags.touches=false;
 refreshRallyCardTouchTicks();
 assert.equal(markers.children.length,0,"Hiding touches hides all card markers");
@@ -92,7 +93,7 @@ refreshRallyCardTouchTicks();
 assert.equal(markers.children.length,0,"Raw mode never renders CPU touch marks");
 overlay.raw=false;
 refreshRallyCardTouchTicks();
-assert.equal(markers.children.length,3);
+assert.equal(markers.children.length,4);
 
 updateRallyCardProgress();
 assert.equal(progress.style["--rally-progress"],"50%");

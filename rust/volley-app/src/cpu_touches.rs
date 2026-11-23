@@ -34,10 +34,10 @@ use volley_core::{
     fusion::Candidate,
     pose_classification,
     touch_pipeline::{
-        evaluate_pose_block, evaluate_rally_blocks, evaluate_tcn_peaks, exclude_ball_teleports,
+        attach_touch_source_evidence, detect_ball_trajectory_touches, exclude_ball_teleports,
         observed_pose_motion, pose_contact_at_frame, pose_contact_from_nearby_sample,
-        reconstruct_track_gaps, trajectory_features, PhysicalTouchCandidate, PoseFrame, PosePlayer,
-        TouchAlgorithm, TouchBall, TouchFrame, TouchPlayer, TouchSettings,
+        reconstruct_track_gaps, PhysicalTouchCandidate, PoseFrame, PosePlayer, TouchAlgorithm,
+        TouchBall, TouchFrame, TouchPlayer, TouchSettings,
     },
 };
 use volley_inference::trajectory_tcn::{TrajectoryTcn, MODEL_FILENAME};
@@ -1025,6 +1025,7 @@ fn retain_refined_pose_candidates(events: &mut Vec<PhysicalTouchCandidate>, supp
     events.retain(|event| flags.next().unwrap_or(false) || strong_occluded_launch(event));
 }
 
+#[cfg(test)]
 fn retain_pose_confirmed_events(events: &mut Vec<PhysicalTouchCandidate>) {
     events.retain(|event| {
         event.physical_motion_supported
@@ -1356,9 +1357,7 @@ fn refine_pose_events_policy(
         if !event.physical_motion_supported {
             continue;
         }
-        let Some(track_id) = event.provisional_track_id else {
-            continue;
-        };
+        let original_track_id = event.provisional_track_id;
         let Some(frame) = event
             .frame_index
             .checked_sub(first)
@@ -1429,7 +1428,7 @@ fn refine_pose_events_policy(
         event.body_contact_supported = true;
         event.contact_landmark = Some(point);
         event.contact_pose_sample_frame = sample_frame;
-        event.action_prediction = (selected_track == track_id)
+        event.action_prediction = (Some(selected_track) == original_track_id)
             .then_some(event.action_prediction.as_ref())
             .flatten()
             .and_then(|geometry| {
@@ -1562,13 +1561,14 @@ pub(crate) fn detect_stream(
     )
 }
 
+#[cfg(test)]
 fn touch_confidence_passes(probability: f64, threshold: f64) -> bool {
     probability.is_finite() && probability >= threshold
 }
 
 #[expect(clippy::too_many_arguments)]
 fn detect_stream_with_pose(
-    mut tcn: Option<&mut TrajectoryTcn>,
+    _tcn: Option<&mut TrajectoryTcn>,
     source: &Path,
     output: &Path,
     expected_sha: &str,
@@ -1600,22 +1600,12 @@ fn detect_stream_with_pose(
     }) {
         return Err("Invalid preliminary rally intervals".into());
     }
-    if settings.algorithm == TouchAlgorithm::TrajectoryTcn && tcn.is_none() {
-        return Err("Не загружена обученная TCN Volley3D".into());
-    }
     if count == 0 || count > 48 * 3600 * 30 {
         return Err("Touch source frame count exceeds limit".into());
     }
     let full_range = [(0, count - 1)];
     let windows = preliminary_intervals.unwrap_or(&full_range);
     let scoped_frames: u64 = windows.iter().map(|(start, end)| end - start + 1).sum();
-    if settings.require_pose {
-        let (root, fusion, _) =
-            pose_source.ok_or("Для выбранного режима необходим сохранённый анализ позы")?;
-        if !native_preview_pose::enrich(root, fusion, 0, 0, &mut [])? {
-            return Err("Для выбранного режима необходим сохранённый анализ позы".into());
-        }
-    }
     let mut reader = BoundedReader::open(source)?;
     let file = OpenOptions::new()
         .write(true)
@@ -1699,134 +1689,34 @@ fn detect_stream_with_pose(
             if start >= end {
                 continue;
             }
-            let mut events = if settings.algorithm == TouchAlgorithm::TrajectoryTcn {
-                // Only one fixed ONNX CPU session across the streamed replay.
-                let network = tcn.as_deref_mut().ok_or("Missing trained TCN session")?;
-                let scores = network.score(&trajectory_features(evidence_frames))?;
-                let mut events = evaluate_tcn_peaks(
-                    evidence_frames,
-                    &scores,
-                    width,
-                    height,
-                    start,
-                    end,
-                    settings,
-                )?;
-                if let Some((root, fusion, interpolation)) = pose_source {
-                    refine_pose_events_policy(
-                        &mut events,
-                        evidence_frames,
-                        (width, height),
-                        root,
-                        fusion,
-                        settings,
-                        Some(interpolation),
-                    )?;
-                }
-                events
-            } else if settings.algorithm == TouchAlgorithm::PoseMotion {
-                let (root, fusion, interpolation) =
-                    pose_source.ok_or("Для выбранного режима необходим сохранённый анализ позы")?;
-                let poses = pose_frames_policy(root, fusion, evidence_frames, Some(interpolation))?;
-                let mut events = evaluate_rally_blocks(
-                    evidence_frames,
-                    width,
-                    height,
-                    start,
-                    end,
-                    settings,
-                    rally_starts,
-                )?;
+            let mut events = detect_ball_trajectory_touches(
+                evidence_frames,
+                width,
+                height,
+                start,
+                end,
+                settings,
+            )?;
+            attach_touch_source_evidence(
+                &mut events,
+                evidence_frames,
+                width,
+                height,
+                settings.max_reach_ratio,
+            );
+            if let Some((root, fusion, interpolation)) = pose_source {
+                let mut classification_settings = settings;
+                classification_settings.require_pose = false;
                 refine_pose_events_policy(
                     &mut events,
                     evidence_frames,
                     (width, height),
                     root,
                     fusion,
-                    settings,
+                    classification_settings,
                     Some(interpolation),
                 )?;
-                events.extend(evaluate_pose_block(
-                    evidence_frames,
-                    &poses,
-                    width,
-                    height,
-                    start,
-                    end,
-                    settings,
-                )?);
-                events.sort_by_key(|event| event.frame_index);
-                events
-            } else {
-                let mut events = evaluate_rally_blocks(
-                    evidence_frames,
-                    width,
-                    height,
-                    start,
-                    end,
-                    settings,
-                    rally_starts,
-                )?;
-                if let Some((root, fusion, interpolation)) = pose_source {
-                    refine_pose_events_policy(
-                        &mut events,
-                        evidence_frames,
-                        (width, height),
-                        root,
-                        fusion,
-                        settings,
-                        Some(interpolation),
-                    )?;
-                    // The default legacy detector can miss a motion-supported
-                    // wrist contact that RTMPose confirms independently.
-                    // Add those source-backed candidates rather than restricting
-                    // pose evidence to labels of already-found legacy touches.
-                    let poses =
-                        pose_frames_policy(root, fusion, evidence_frames, Some(interpolation))?;
-                    events.extend(evaluate_pose_block(
-                        evidence_frames,
-                        &poses,
-                        width,
-                        height,
-                        start,
-                        end,
-                        settings,
-                    )?);
-                    events.sort_by(|a, b| {
-                        b.body_contact_supported
-                            .cmp(&a.body_contact_supported)
-                            .then_with(|| {
-                                a.contact_landmark
-                                    .as_ref()
-                                    .map(|point| point.priority_distance())
-                                    .unwrap_or(f64::INFINITY)
-                                    .total_cmp(
-                                        &b.contact_landmark
-                                            .as_ref()
-                                            .map(|point| point.priority_distance())
-                                            .unwrap_or(f64::INFINITY),
-                                    )
-                            })
-                            .then_with(|| {
-                                b.velocity_residual_px_frame
-                                    .total_cmp(&a.velocity_residual_px_frame)
-                            })
-                            .then_with(|| b.probability.total_cmp(&a.probability))
-                    });
-                    let mut unique = Vec::new();
-                    let separation = (settings.min_interval_sec * 30.0).round().max(1.0) as u64;
-                    for event in events {
-                        if unique.iter().all(|prior: &PhysicalTouchCandidate| {
-                            prior.frame_index.abs_diff(event.frame_index) > separation
-                        }) {
-                            unique.push(event);
-                        }
-                    }
-                    events = unique;
-                    events.sort_by_key(|event| event.frame_index);
-                }
-                events
-            };
+            }
             apply_training(
                 &mut events,
                 evidence_frames,
@@ -1836,9 +1726,6 @@ fn detect_stream_with_pose(
                 settings,
                 training,
             )?;
-            if settings.require_pose {
-                retain_pose_confirmed_events(&mut events);
-            }
             if let Some(intervals) = preliminary_intervals {
                 events.retain(|event| {
                     intervals.iter().any(|(first, last)| {
@@ -1864,24 +1751,23 @@ fn detect_stream_with_pose(
                     }
                 }
             }
-            events.retain(|event| touch_confidence_passes(event.probability, settings.threshold));
-            for event in events {
-                // Reconstructed gap positions must not acquire authority as
-                // source-frame detections. Check before cross-chunk dedup so
-                // an inferred candidate cannot suppress a genuine contact.
-                let Some(track_id) = event.provisional_track_id else {
-                    continue;
-                };
-                let (first_slice, second_slice) = input.as_slices();
-                if !(source_frame_contains_track(first_slice, event.frame_index, track_id)
-                    || source_frame_contains_track(second_slice, event.frame_index, track_id))
-                    || stabilized.is_some_and(|v| {
-                        v.motion.interpolated.get(event.frame_index as usize) == Some(&true)
-                    })
-                {
-                    continue;
+
+            for mut event in events {
+                if let Some(track_id) = event.provisional_track_id {
+                    let (first_slice, second_slice) = input.as_slices();
+                    if !source_frame_contains_track(first_slice, event.frame_index, track_id)
+                        && !source_frame_contains_track(second_slice, event.frame_index, track_id)
+                    {
+                        event.provisional_track_id = None;
+                        event.body_contact_supported = false;
+                        event.contact_landmark = None;
+                        event.contact_pose_sample_frame = None;
+                        event.action_prediction = None;
+                        event.court = None;
+                    }
                 }
                 motion_candidates += 1;
+
                 if let Some(last) = select_pending_touch(&mut pending, event, separation) {
                     emit_record(&mut writer, &mut output_hash, &last)?;
                     emitted += 1;
@@ -1969,7 +1855,8 @@ fn detect_stream_with_pose(
 
 fn published_touch_settings(requested: Option<TouchSettings>) -> Result<TouchSettings, String> {
     let mut settings = requested.unwrap_or_default().validate()?;
-    settings.require_pose = true;
+    settings.algorithm = TouchAlgorithm::BallTrajectory;
+    settings.require_pose = false;
     Ok(settings)
 }
 
@@ -2371,6 +2258,7 @@ fn process_with_ball_scope_and_rally_settings_report(
                 TouchAlgorithm::PoseMotion => "vballnet_trajectory_body_contact_v12",
                 TouchAlgorithm::Legacy => "vballnet_gravity_player_geometry_pose_contact_v11",
                 TouchAlgorithm::TrajectoryTcn => "vballnet_volley3d_tcn_v1",
+                TouchAlgorithm::BallTrajectory => "vballnet_touch_detector_v4",
             },
             "tcn_model_sha256":tcn_sha,
             "trajectory_detector_version":volley_core::touch_pipeline::TRAJECTORY_DETECTOR_VERSION,
@@ -2582,17 +2470,18 @@ mod tests {
     }
 
     #[test]
-    fn published_settings_ignore_old_optional_pose_override() {
-        assert!(published_touch_settings(None).unwrap().require_pose);
+    fn published_settings_do_not_require_identity_or_pose_for_detection() {
+        let default = published_touch_settings(None).unwrap();
+        assert!(!default.require_pose);
+        assert_eq!(default.algorithm, TouchAlgorithm::BallTrajectory);
         let optional = TouchSettings {
-            require_pose: false,
+            require_pose: true,
+            algorithm: TouchAlgorithm::PoseMotion,
             ..TouchSettings::default()
         };
-        assert!(
-            published_touch_settings(Some(optional))
-                .unwrap()
-                .require_pose
-        );
+        let normalized = published_touch_settings(Some(optional)).unwrap();
+        assert!(!normalized.require_pose);
+        assert_eq!(normalized.algorithm, TouchAlgorithm::BallTrajectory);
     }
 
     #[test]

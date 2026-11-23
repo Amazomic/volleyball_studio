@@ -586,17 +586,6 @@ pub fn processed_window_policy(
     Ok(true)
 }
 
-/// Enrich only selected rally frame samples. Returns false if old GPU run has no poses.
-pub fn enrich(
-    project_root: &Path,
-    fusion_id: &str,
-    start: u64,
-    end: u64,
-    frames: &mut [Value],
-) -> Result<bool, String> {
-    enrich_with_tolerance(project_root, fusion_id, start, end, frames, false)
-}
-
 pub fn enrich_exact(
     project_root: &Path,
     fusion_id: &str,

@@ -81,6 +81,7 @@ pub enum TouchAlgorithm {
     Legacy,
     PoseMotion,
     TrajectoryTcn,
+    BallTrajectory,
 }
 impl Default for TouchSettings {
     fn default() -> Self {
@@ -228,6 +229,175 @@ fn standing_height(
 /// emits only [emit_start,emit_end); 32+ frame overlap keeps local smoothing,
 /// physical motion and time-based dedup decisions away from block boundaries.
 /// Peaks are relative to first frame so this never allocates a full-game curve.
+pub fn detect_ball_trajectory_touches(
+    frames: &[TouchFrame],
+    width: u32,
+    height: u32,
+    emit_start: u64,
+    emit_end: u64,
+    settings: TouchSettings,
+) -> Result<Vec<PhysicalTouchCandidate>, String> {
+    settings.validate()?;
+    if !(64..=16384).contains(&width)
+        || !(64..=16384).contains(&height)
+        || frames.is_empty()
+        || frames.len() > 1200
+    {
+        return Err("Invalid trajectory Touch block dimensions".into());
+    }
+    let first = frames[0].frame_index;
+    let limit = first
+        .checked_add(frames.len() as u64)
+        .ok_or("Touch frame overflow")?;
+    if emit_start < first || emit_start > emit_end || emit_end > limit {
+        return Err("Invalid trajectory Touch emission window".into());
+    }
+    let mut points = Vec::with_capacity(frames.len());
+    for (index, row) in frames.iter().enumerate() {
+        if row.frame_index != first + index as u64 {
+            return Err("Noncontiguous trajectory Touch frames".into());
+        }
+        if let Some(ball) = &row.selected_ball {
+            if (ball.source_model != "vballnet" && ball.source_model != INTERPOLATED_BALL_SOURCE)
+                || !valid_bbox(ball.bbox_xyxy_norm)
+                || !ball.score.is_finite()
+                || !(0.0..=1.0).contains(&ball.score)
+            {
+                return Err("Invalid trajectory Touch ball evidence".into());
+            }
+            let [x, y] = center(ball.bbox_xyxy_norm);
+            points.push(BallObservation {
+                frame: row.frame_index as i64,
+                x: x * width as f64,
+                y: y * height as f64,
+            });
+        }
+    }
+    let mut events = Vec::new();
+    for impact in crate::motion::trajectory_direction_breaks(
+        &points,
+        crate::motion::DirectionBreakConfig::default(),
+    ) {
+        let Ok(frame) = u64::try_from(impact.frame) else {
+            continue;
+        };
+        if frame < emit_start || frame >= emit_end {
+            continue;
+        }
+        let Some(row) = frames.get((frame - first) as usize) else {
+            continue;
+        };
+        if row
+            .selected_ball
+            .as_ref()
+            .is_some_and(|ball| ball.source_model != "vballnet")
+        {
+            continue;
+        }
+        let strength = (impact.motion.angle / 170.0).clamp(0.0, 1.0);
+        let fit_confidence = 1.0 / (1.0 + impact.fit_error / 6.0);
+        let probability = (0.50 + 0.45 * strength * fit_confidence).min(0.95);
+        if probability < settings.threshold {
+            continue;
+        }
+        events.push(PhysicalTouchCandidate {
+            frame_index: frame,
+            provisional_track_id: None,
+            probability,
+            ball_x_px: impact.position[0],
+            ball_y_px: impact.position[1],
+            motion_frame_index: impact.motion.motion_frame as u64,
+            direction_change_deg: impact.motion.angle,
+            speed_before_px_frame: impact.motion.speed_before,
+            speed_after_px_frame: impact.motion.speed_after,
+            velocity_residual_px_frame: impact.motion.residual,
+            technique: "unknown_touch",
+            action_prediction: None,
+            court: None,
+            physical_motion_supported: true,
+            body_contact_supported: false,
+            contact_landmark: None,
+            contact_pose_sample_frame: None,
+            ball_occluded_at_contact: !impact.contact_observed,
+            inferred_body_reach_supported: false,
+            athlete_identity_verified: false,
+        });
+    }
+    Ok(events)
+}
+
+pub fn attach_touch_source_evidence(
+    events: &mut [PhysicalTouchCandidate],
+    frames: &[TouchFrame],
+    width: u32,
+    height: u32,
+    reach_ratio: f64,
+) {
+    let Some(first) = frames.first().map(|frame| frame.frame_index) else {
+        return;
+    };
+    let (w, h) = (width as f64, height as f64);
+    for event in events {
+        if event.ball_occluded_at_contact {
+            continue;
+        }
+        let Some(row) = event
+            .frame_index
+            .checked_sub(first)
+            .and_then(|offset| frames.get(offset as usize))
+        else {
+            continue;
+        };
+        let selected = row
+            .players
+            .iter()
+            .filter_map(|player| {
+                let bbox = pixel_bbox(player.bbox_xyxy_norm, w, h);
+                let distance = (bbox[0] - event.ball_x_px)
+                    .max(event.ball_x_px - bbox[2])
+                    .max(0.0)
+                    .hypot(
+                        (bbox[1] - event.ball_y_px)
+                            .max(event.ball_y_px - bbox[3])
+                            .max(0.0),
+                    );
+                let reach = (bbox[3] - bbox[1]) * reach_ratio;
+                (reach > 0.0 && distance <= reach).then_some((player, bbox, distance / reach))
+            })
+            .min_by(|a, b| a.2.total_cmp(&b.2));
+        let Some((player, bbox, _)) = selected else {
+            continue;
+        };
+        event.provisional_track_id = Some(player.track_id);
+        let radius = row
+            .selected_ball
+            .as_ref()
+            .map(|ball| {
+                ((ball.bbox_xyxy_norm[2] - ball.bbox_xyxy_norm[0]) * w
+                    + (ball.bbox_xyxy_norm[3] - ball.bbox_xyxy_norm[1]) * h)
+                    * 0.25
+            })
+            .unwrap_or(0.0);
+        event.action_prediction = standing_height(
+            frames,
+            (event.frame_index - first) as usize,
+            player.track_id,
+            h,
+        )
+        .and_then(|standing_height_px| {
+            action_prediction::predict(PositionEvidence {
+                ball_y_px: event.ball_y_px,
+                ball_radius_px: radius,
+                player_bbox_px: bbox,
+                standing_height_px,
+                touch_score: event.probability,
+                track_score: player.score,
+                context: CourtContext::Unavailable,
+            })
+        });
+    }
+}
+
 pub fn evaluate_rally_blocks(
     frames: &[TouchFrame],
     width: u32,
@@ -465,6 +635,107 @@ pub fn evaluate_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trajectory_touch_moments_do_not_depend_on_player_identity_or_touch_kind() {
+        let frames = (620..=668_u64)
+            .map(|frame| {
+                let ball = if (648..=653).contains(&frame) {
+                    None
+                } else {
+                    let (x, y) = if frame <= 631 {
+                        let t = frame as f64 - 631.0;
+                        (980.0 - 3.0 * t, 840.0 + 34.0 * t + 0.25 * t * t)
+                    } else if frame <= 642 {
+                        let t = frame as f64 - 631.0;
+                        (980.0 - 3.0 * t, 840.0 - 35.0 * t + t * t)
+                    } else if frame <= 647 {
+                        let t = frame as f64 - 643.0;
+                        (947.0 + t * 0.7, 575.0 + t * 0.2)
+                    } else {
+                        let t = frame as f64 - 654.0;
+                        (955.0 - t * 2.0, 485.0 - 32.0 * t + t * t)
+                    };
+                    Some(TouchBall {
+                        source_model: "vballnet".into(),
+                        score: 0.95,
+                        bbox_xyxy_norm: [
+                            (x - 4.0) / 1920.0,
+                            (y - 4.0) / 1080.0,
+                            (x + 4.0) / 1920.0,
+                            (y + 4.0) / 1080.0,
+                        ],
+                    })
+                };
+                TouchFrame {
+                    frame_index: frame,
+                    players: Vec::new(),
+                    selected_ball: ball,
+                }
+            })
+            .collect::<Vec<_>>();
+        let baseline =
+            detect_ball_trajectory_touches(&frames, 1920, 1080, 620, 669, TouchSettings::default())
+                .unwrap();
+        assert!(baseline
+            .iter()
+            .any(|event| event.frame_index.abs_diff(631) <= 2));
+        assert!(baseline
+            .iter()
+            .any(|event| event.frame_index.abs_diff(651) <= 1));
+        assert!(baseline
+            .iter()
+            .all(|event| event.provisional_track_id.is_none()));
+        assert!(baseline
+            .iter()
+            .all(|event| event.action_prediction.is_none()));
+        let mut attributed_frames = frames.clone();
+        for frame in &mut attributed_frames {
+            frame.players.push(TouchPlayer {
+                track_id: 17,
+                score: 0.99,
+                touch_probability: None,
+                bbox_xyxy_norm: [0.44, 0.25, 0.56, 0.87],
+            });
+        }
+        let mut classified = detect_ball_trajectory_touches(
+            &attributed_frames,
+            1920,
+            1080,
+            620,
+            669,
+            TouchSettings::default(),
+        )
+        .unwrap();
+        let baseline_moments = baseline
+            .iter()
+            .map(|event| event.frame_index)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            classified
+                .iter()
+                .map(|event| event.frame_index)
+                .collect::<Vec<_>>(),
+            baseline_moments,
+        );
+        attach_touch_source_evidence(&mut classified, &attributed_frames, 1920, 1080, 0.75);
+        assert_eq!(
+            classified
+                .iter()
+                .map(|event| event.frame_index)
+                .collect::<Vec<_>>(),
+            baseline_moments,
+        );
+        assert!(classified
+            .iter()
+            .all(|event| !event.athlete_identity_verified));
+        assert!(classified
+            .iter()
+            .any(|event| event.provisional_track_id == Some(17)));
+        assert!(classified
+            .iter()
+            .any(|event| event.provisional_track_id.is_none()));
+    }
 
     fn recorded_motion_event(frame: u64, angle: f64, residual: f64) -> PhysicalTouchCandidate {
         PhysicalTouchCandidate {
