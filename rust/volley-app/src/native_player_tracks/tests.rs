@@ -1,3 +1,76 @@
+#[test]
+fn automatic_links_abstain_on_inconsistent_three_photo_evidence() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    ctx.roster.insert("123456abcdef".into(), "Player B".into());
+    let matches = json!({"7":[
+        {"player_id":"abcdef012345","cosine_similarity":0.81,"samples_used":3,
+         "sample_similarities":[0.99,0.93,0.51]},
+        {"player_id":"123456abcdef","cosine_similarity":0.43,"samples_used":3,
+         "sample_similarities":[0.42,0.43,0.44]}
+    ]});
+    assert!(
+        choose_automatic_photo_links(&ctx, &base_document(&ctx), &matches)
+            .unwrap()
+            .is_empty()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn automatic_links_reject_nearly_equal_athlete_scores() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    ctx.roster.insert("123456abcdef".into(), "Player B".into());
+    let matches = json!({"7":[
+        {"player_id":"abcdef012345","cosine_similarity":0.76,"samples_used":3},
+        {"player_id":"123456abcdef","cosine_similarity":0.75,"samples_used":3}
+    ]});
+    let selected = choose_automatic_photo_links(&ctx, &base_document(&ctx), &matches).unwrap();
+    assert!(selected.is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn gallery_photo_hints_omit_heavy_evidence_and_limit_candidates() {
+    let doc = json!({"automatic_identity_evidence":{"matches":{"7":[
+        {"player_id":"a","cosine_similarity":0.89,"samples_used":3,"sample_similarities":[0.8,0.9,0.97],"reference_track_id":11,"reference_kind":"saved_photo","name":"Player A"},
+        {"player_id":"b","cosine_similarity":0.85,"samples_used":3,"sample_similarities":[0.8,0.87,0.88],"reference_track_id":12,"reference_kind":"saved_photo"},
+        {"player_id":"c","cosine_similarity":0.60,"samples_used":3,"sample_similarities":[0.6,0.6,0.6],"reference_track_id":13,"reference_kind":"saved_photo"}
+    ]}}});
+    let hints = gallery_photo_hints(&doc);
+    let options = hints["7"].as_array().unwrap();
+    assert_eq!(options.len(), 2);
+    assert_eq!(options[0]["cosine_similarity"], 0.89);
+    assert_eq!(options[1]["player_id"], "b");
+    assert!(options[0].get("sample_similarities").is_none());
+    assert!(options[0].get("name").is_none());
+    assert_eq!(
+        doc["automatic_identity_evidence"]["matches"]["7"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn automatic_links_keep_decisive_athlete_scores() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    ctx.roster.insert("123456abcdef".into(), "Player B".into());
+    let matches = json!({"7":[
+        {"player_id":"abcdef012345","cosine_similarity":0.81,"samples_used":3},
+        {"player_id":"123456abcdef","cosine_similarity":0.49,"samples_used":3}
+    ]});
+    let selected = choose_automatic_photo_links(&ctx, &base_document(&ctx), &matches).unwrap();
+    assert_eq!(selected.get(&7).map(String::as_str), Some("abcdef012345"));
+    fs::remove_dir_all(root).unwrap();
+}
+
 use super::*;
 use sha2::{Digest, Sha256};
 #[test]
@@ -1269,7 +1342,7 @@ fn auto_assignment_requires_three_samples_when_sample_count_is_known() {
 }
 
 #[test]
-fn competing_player_photo_is_checked_against_a_second_real_frame() {
+fn competing_player_photo_with_identity_switch_stays_unassigned() {
     let (root, _, sha) = fixture();
     let indexed = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
     let mut ctx = context(&root, sha, indexed);
@@ -1325,7 +1398,7 @@ fn competing_player_photo_is_checked_against_a_second_real_frame() {
 
     let chosen = choose_automatic_photo_links(&ctx, &base_document(&ctx), &verified).unwrap();
     assert_eq!(chosen.get(&12).map(String::as_str), Some("abcdef012345"));
-    assert_eq!(chosen.get(&13).map(String::as_str), Some("123456abcdef"));
+    assert!(!chosen.contains_key(&13));
     fs::remove_dir_all(root).unwrap();
 }
 

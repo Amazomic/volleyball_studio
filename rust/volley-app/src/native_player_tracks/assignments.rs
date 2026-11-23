@@ -262,9 +262,54 @@ pub(super) fn choose_automatic_photo_links_at_threshold(
         };
         let mut ranked = candidates.iter().filter(|v| v.1 == id).collect::<Vec<_>>();
         ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
-        let Some((_, _, owner)) = ranked.first() else {
+        let Some((best_score, _, owner)) = ranked.first() else {
             continue;
         };
+        let best_evidence = matches[id.to_string()].as_array().and_then(|rows| {
+            rows.iter().find(|row| {
+                row["player_id"].as_str() == Some(owner.as_str())
+                    && row["cosine_similarity"].as_f64() == Some(*best_score)
+            })
+        });
+        let Some(best_evidence) = best_evidence else {
+            continue;
+        };
+        if let Some(raw_scores) = best_evidence.get("sample_similarities") {
+            let Some(samples) = raw_scores.as_array().filter(|samples| samples.len() == 3) else {
+                continue;
+            };
+            let scores = samples
+                .iter()
+                .map(Value::as_f64)
+                .collect::<Option<Vec<_>>>();
+            let Some(scores) = scores.filter(|scores| {
+                scores
+                    .iter()
+                    .all(|score| score.is_finite() && (0.0..=1.0).contains(score))
+            }) else {
+                continue;
+            };
+            let low = scores.iter().copied().fold(1.0_f64, f64::min);
+            let high = scores.iter().copied().fold(0.0_f64, f64::max);
+            if high - low >= 0.25 {
+                continue;
+            }
+        }
+        let runner_up = matches[id.to_string()]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|row| {
+                row["player_id"].as_str().is_some_and(|candidate| {
+                    candidate != owner && ctx.roster.contains_key(candidate)
+                }) && row["samples_used"].as_u64() == Some(3)
+            })
+            .filter_map(|row| row["cosine_similarity"].as_f64())
+            .filter(|score| score.is_finite() && (0.0..=1.0).contains(score))
+            .fold(0.0_f64, f64::max);
+        if *best_score - runner_up < 0.08 {
+            continue;
+        }
         let occupied_in_frame = |possible_owner: &str| {
             assigned.iter().any(|(other_id, other_owner)| {
                 other_owner.as_str() == Some(possible_owner)
@@ -664,6 +709,32 @@ pub(super) fn validated(raw: Option<&[u8]>, ctx: &Inputs) -> Result<Value, Strin
     }
     Ok(doc)
 }
+pub(super) fn gallery_photo_hints(doc: &Value) -> Value {
+    let mut hints = serde_json::Map::new();
+    if let Some(matches) = doc["automatic_identity_evidence"]["matches"].as_object() {
+        for (id, rows) in matches {
+            if let Some(rows) = rows.as_array() {
+                let candidates = rows
+                    .iter()
+                    .take(2)
+                    .map(|row| {
+                        json!({
+                            "player_id": row["player_id"],
+                            "cosine_similarity": row["cosine_similarity"],
+                            "reference_track_id": row["reference_track_id"],
+                            "reference_kind": row["reference_kind"]
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if !candidates.is_empty() {
+                    hints.insert(id.clone(), Value::Array(candidates));
+                }
+            }
+        }
+    }
+    Value::Object(hints)
+}
+
 pub(super) fn page(
     ctx: &Inputs,
     doc: &Value,
@@ -845,7 +916,7 @@ pub(super) fn filtered_page(
         "assigned_count":scoped_assigned,"excluded_count":scoped_excluded,
         "identity_conflict_track_ids":actual_conflicts,
         "roster":roster,"tracks":rows,
-        "automatic_identity_matches":doc["automatic_identity_evidence"]["matches"],
+        "automatic_identity_matches":gallery_photo_hints(doc),
         "similarity_status":if doc["automatic_identity_evidence"]["matches"].as_object().is_none() {
             "not_calculated"
         } else if doc["automatic_identity_evidence"]["photo_count"] == 0 {
