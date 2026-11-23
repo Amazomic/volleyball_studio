@@ -2210,3 +2210,9 @@ body[data-ui-theme="light"] .montage-assembly-meta{background:#edf4fb;color:#345
   line-height:1.4;min-height:2.8em;max-height:2.8em;overflow:hidden;
   display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;
 }
+
+#studio-preview-view .studio-debug-manual-point{position:absolute;z-index:5;width:18px;height:18px;box-sizing:border-box;border:2px solid #fff;border-radius:50%;background:#14cfa9aa;box-shadow:0 0 0 4px #091b2baa,0 0 16px #17d3ab;pointer-events:none;transform:translate(-50%,-50%)}
+#studio-preview-view .studio-debug-manual-point[hidden]{display:none}
+#studio-preview-view .studio-debug-action-group #studio-debug-touch-mark[aria-pressed="true"]{background:#19544f;color:#bffff1;border-color:#39c9b0}
+#studio-annotation-context-actions .studio-manual-touch-kind{display:grid;gap:5px;font-size:11px;color:#dceaff;font-weight:650}
+#studio-annotation-context-actions .studio-manual-touch-kind select{width:100%;min-width:0;min-height:34px;padding:6px 8px;color:#effbff;border:1px solid #6a99b5;border-radius:7px;background:#182f49}

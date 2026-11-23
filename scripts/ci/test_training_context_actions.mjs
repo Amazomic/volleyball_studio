@@ -32,6 +32,7 @@ class Node {
   append(...items){this.children.push(...items);}
   replaceChildren(...items){this.children=[...items];}
   addEventListener(name,callback){this.listeners[name]=callback;}
+  setAttribute(name,value){this[name]=value;}
   click(){this.listeners.click?.({stopPropagation:()=>{}});}
 }
 const elements=new Map();
@@ -58,6 +59,8 @@ const context={
     addEventListener:(name,callback)=>{keys=callback;}},
   comparison,comparisonMatches:()=>true,comparisonTime:frame=>(frame/30).toFixed(2)+" с",
   annotation,annotationReady:()=>Boolean(annotation.data),
+  manualTouchKinds:{serve:"Подача",attack:"Атака",block:"Блок",
+    overhead_pass:"Передача сверху",dig:"Приём снизу"},
   training:{active:true,poseAdvanced:{open:false}},reference:{active:false},
   s:{project:"p",video:"v",run:"r"},
   ui:{video:{pause:()=>{paused=true;}}},

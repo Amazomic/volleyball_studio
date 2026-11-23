@@ -65,11 +65,13 @@ const annotation={
   touchId:null,rallyId:null,pendingStart:null,prediction:null,
   lane,touchList:new Node(),rallies:new Node(),metrics:new Node(),saveState:new Node(),pending:new Node(),
   seed:new Node(),calculate:new Node(),classify:new Node(),adopt:new Node(),save:new Node(),
+  markButton:new Node(),saveQuick:new Node(),markMode:false,
   add:new Node(),move:new Node(),remove:new Node(),next:new Node(),
   begin:new Node(),finish:new Node(),review:new Node(),current:new Node()
 };
 const context={
   annotation,training:{active:true},reference:{active:false},ui:{video:{currentTime:2}},
+  trainingNames:{dig:"Приём снизу"},
   s:{seekAt:0,project:"p",run:"cpu",video:"v.mp4"},timeline:{data:{rallies:[]}},
   document:{createElement:name=>new Node(name)},fps:()=>30,timelineDuration:()=>10,
   annotationFrame:()=>60,

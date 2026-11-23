@@ -82,7 +82,8 @@ const timeline={data:{
 const ui={video:{currentTime:3.333,addEventListener(){}}};
 let drawn=0;
 const context={
-  $,s,timeline,ui,trainingNames:{attack:"Атака",dig:"Приём снизу",overhead_pass:"Передача сверху"},comparison:{epoch:0,simulated:true,
+  $,s,timeline,ui,manualTouchKinds:{attack:"Атака",dig:"Приём снизу",overhead_pass:"Передача сверху"},
+  trainingNames:{attack:"Атака",dig:"Приём снизу",overhead_pass:"Передача сверху"},comparison:{epoch:0,simulated:true,
     data:{trajectory_status:"ready",trajectory_rallies:[{start:80,end:180}],
       source_replay_sha256:"a".repeat(64),parameters:{
         min_trajectory_seconds:1.5,stationary_ball_ms:1000,merge_gap_seconds:4}},
@@ -112,6 +113,9 @@ const context={
         source_replay_sha256:"a".repeat(64),
         rally_count:1,rally_source:"calculated_ball_trajectory_rallies",rally_intervals:[{end:180,start:80}],
         proposals:[{frame:100,score:9},{frame:140,score:3}],
+        serve_proposals:[{kind:"serve",identity_verified:false,
+          source:"rally_trajectory_start_v1",rally_start_frame:80,
+          trajectory_start_frame:80,provisional_track_id:null}],
         ground_contacts:[{frame:120,position:[0.4,0.7],landing:"near_half"}],
         court_filter_active:true,
         method:"touch_detector_v4",
@@ -201,7 +205,10 @@ assert.equal(elements.get("studio-annotation-calculate").disabled,true);
 assert.equal(writeActions.length,0,"Adopting candidates is a local edit");
 const touched=annotation.data.touches[0];
 await editAnnotation("move_touch",{id:touched.id,frame:102});
+await editAnnotation("update_touch",{id:touched.id,kind:"dig",position:[0.3,0.6]});
 assert.equal(annotation.data.touches[0].frame,102);
+assert.equal(annotation.data.touches[0].kind,"dig");
+assert.deepEqual(JSON.parse(JSON.stringify(annotation.data.touches[0].position)),[0.3,0.6]);
 assert.equal(writeActions.length,0,"Local touch edits must not contact server");
 assert.equal(elements.get("studio-annotation-save").disabled,false);
 
@@ -209,6 +216,8 @@ await elements.get("studio-annotation-save").click();
 assert.equal(writeActions.length,1);
 assert.equal(writeActions[0].revision,0);
 assert.equal(writeActions[0].touches[0].frame,102);
+assert.equal(writeActions[0].touches[0].kind,"dig");
+assert.deepEqual(JSON.parse(JSON.stringify(writeActions[0].touches[0].position)),[0.3,0.6]);
 assert.equal(annotation.dirty,false);
 assert.equal(annotation.data.revision,1);
 assert.equal(annotation.prediction,null,"Saved labels require a fresh calculation");

@@ -193,6 +193,8 @@
                     <button type="button" class="primary" id="studio-comparison-recalculate">Рассчитать розыгрыши</button>
                     <button type="button" class="primary" id="studio-annotation-calculate" disabled>Рассчитать касания</button>
                     <button type="button" class="primary" id="studio-annotation-classify" disabled>Определить тип касания</button>
+                    <button type="button" class="secondary" id="studio-debug-touch-mark" aria-pressed="false" disabled title="Пауза → нажмите на точку контакта с мячом → выберите тип касания">✎ Разметить касание</button>
+                    <button type="button" class="secondary" id="studio-debug-touch-save" disabled title="Записать ручные касания и типы в эталон">Сохранить эталон</button>
                   </div>
                   <div class="studio-debug-settings-group" role="group" aria-label="Параметры расчёта">
                     <details class="studio-impact-settings" id="studio-impact-settings"><summary>⚙ Параметры касаний</summary><div class="studio-impact-settings-body" role="group" aria-label="Поиск столкновений по траектории"><strong>Столкновения по траектории VBallNet</strong><p>Плавная параболическая дуга полёта игнорируется. Резкий излом направления между двумя участками траектории — кандидат столкновения, а не подтверждённое касание игрока.</p><label>Минимальный угол излома траектории, °<input id="studio-impact-angle" type="number" min="15" max="170" step="5" value="45"></label><label>Допустимый разрыв дуг, пикс.<input id="studio-impact-join" type="number" min="8" max="80" step="1" value="28"></label><label>Допустимая ошибка параболы, пикс.<input id="studio-impact-fit-error" type="number" min="1" max="20" step="0.5" value="4"></label><label>Минимальный интервал между столкновениями, кадры<input id="studio-impact-min-separation" type="number" min="3" max="30" step="1" value="6"></label><small>Параметры действуют только в «Дебаге». Для проверки изменений нажмите «Рассчитать касания».</small></div></details>
@@ -321,6 +323,7 @@
               <div class="video-wrap">
                 <video id="studio-video" tabindex="0" preload="metadata" playsinline aria-label="Просмотр исходного видео. Пробел — воспроизведение или пауза"></video>
                 <canvas id="studio-video-overlay" class="video-overlay" aria-hidden="true"></canvas>
+                <span id="studio-debug-manual-point" class="studio-debug-manual-point" hidden aria-hidden="true"></span>
                 <div class="video-overlay-controls">
                 <div class="video-overlay-toggles" role="group" aria-label="Фильтры и режимы плеера">
                   <div class="video-overlay-filters" role="group" aria-label="Фильтры отображения">

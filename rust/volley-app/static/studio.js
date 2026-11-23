@@ -1151,6 +1151,8 @@
   };
   const trainingNames={attack:"Атака",block:"Блок",serve:"Подача",
     overhead_pass:"Передача сверху",dig:"Приём снизу",low_touch:"Касание"};
+  const manualTouchKinds={serve:"Подача",attack:"Атака",block:"Блок",
+    overhead_pass:"Передача сверху",dig:"Приём снизу"};
   const trainingEditorReset=()=>{
     training.editId=null;
     training.save.textContent="Сохранить пример";
@@ -1306,7 +1308,8 @@
   // Source-scoped human truth. Separate from automatic CPU predictions and
   // from pose examples: training mode never rewrites immutable inference.
   const annotation={
-    data:null,epoch:0,busy:false,dirty:false,prediction:null,typePrediction:null,source:"",priorFlags:null,touchId:null,rallyId:null,pendingStart:null,
+    data:null,epoch:0,busy:false,dirty:false,prediction:null,typePrediction:null,source:"",priorFlags:null,touchId:null,rallyId:null,pendingStart:null,markMode:false,
+    markButton:$("studio-debug-touch-mark"),saveQuick:$("studio-debug-touch-save"),
     touchLayerVisible:true,ballLayerVisible:true,
     status:$("studio-annotation-status"),current:$("studio-annotation-current"),
     lane:$("studio-timeline-track"),touchList:$("studio-annotation-touch-list"),
@@ -1331,6 +1334,8 @@
     reference.analysis.setAttribute("aria-pressed",String(!reference.active));
     reference.toggle.setAttribute("aria-pressed",String(reference.active));
     reference.picker.classList.toggle("hidden",!reference.active);
+    if(reference.active)annotation.markMode=false;
+    drawAnnotation();
     $("studio-preview-view").classList.toggle("reference-workspace",reference.active);
     const titles=document.querySelector("#studio-preview-view .rallies-panel-titles");
     if(titles){
@@ -1386,6 +1391,30 @@
     annotation.status.classList.toggle("is-error",error);
   };
   const annotationReady=()=>annotation.data&&Array.isArray(annotation.data.touches);
+  const updateManualPoint=()=>{
+    if(typeof overlay==="undefined")return;
+    const marker=$("studio-debug-manual-point");
+    if(!marker)return;
+    const touch=training.active&&annotationSourceValid()&&
+      (annotation.data?.touches||[]).find(item=>item.frame===annotationFrame()&&
+        Array.isArray(item.position));
+    const rect=overlay.canvas.getBoundingClientRect(),wrap=overlay.canvas.closest(".video-wrap");
+    const w=ui.video.videoWidth,h=ui.video.videoHeight;
+    if(!touch||!wrap||!w||!h||!rect.width||!rect.height){
+      marker.hidden=true;return;
+    }
+    const scale=Math.min(rect.width/w,rect.height/h);
+    const base=wrap.getBoundingClientRect();
+    marker.style.left=(rect.left-base.left+(rect.width-w*scale)/2+
+      touch.position[0]*w*scale)+"px";
+    marker.style.top=(rect.top-base.top+(rect.height-h*scale)/2+
+      touch.position[1]*h*scale)+"px";
+    marker.title=trainingNames[touch.kind]||"Эталонное касание";
+    marker.hidden=false;
+  };
+  ui.video.addEventListener?.("timeupdate",updateManualPoint);
+  ui.video.addEventListener?.("seeked",updateManualPoint);
+  if(typeof window!=="undefined")window.addEventListener?.("resize",updateManualPoint);
   const annotationSource=()=>[s.project,s.run,s.video].join("\u0000");
   const annotationSourceValid=()=>annotation.source===annotationSource();
   const trainingTouchCountSummary=()=>{
@@ -1443,12 +1472,17 @@
     out:["#ff6b6b","за пределами поля"]
   };
   const drawAnnotation=()=>{
+    updateManualPoint();
     if(!training.active)return;
     const data=annotation.data,ready=annotationReady();
     annotation.calculate.disabled=annotation.busy||annotation.dirty||!s.run||!annotationSourceValid();
     annotation.classify.disabled=annotation.busy||annotation.dirty||!annotation.prediction||!annotationSourceValid();
     annotation.adopt.disabled=annotation.busy||!annotation.prediction||!annotationSourceValid();
     annotation.save.disabled=annotation.busy||!annotation.dirty||!ready||!annotationSourceValid();
+    annotation.markButton.disabled=annotation.busy||!ready||!annotationSourceValid()||reference.active;
+    annotation.markButton.setAttribute("aria-pressed",String(annotation.markMode&&!reference.active));
+    annotation.markButton.textContent=annotation.markMode&&!reference.active?"✓ Выберите точку":"✎ Разметить касание";
+    annotation.saveQuick.disabled=annotation.save.disabled;
     annotation.seed.disabled=true;
     annotation.seed.textContent=ready?"Сбросить метки к автоматическим":"Взять автоматические метки за основу";
     for(const key of ["add","begin","finish","next"])
@@ -1539,6 +1573,7 @@
       tick.hidden=annotation.touchLayerVisible===false;
       tick.dataset.trainingTouchId=item.id;
       tick.title="Касание "+annotationClock(item.frame)+
+        " · "+(trainingNames[item.kind]||"тип не выбран")+
         ". Перетащите или выберите и нажмите «Перенести»";
       tick.setAttribute("aria-label",tick.title);
       let pointer=null;
@@ -1600,7 +1635,8 @@
     for(const item of touches){
       const row=document.createElement("button");row.type="button";
       row.className="studio-annotation-touch"+(item.id===annotation.touchId?" selected":"");
-      row.textContent="● "+annotationClock(item.frame);
+      row.textContent="● "+annotationClock(item.frame)+" · "+
+        (trainingNames[item.kind]||"Тип не выбран");
       row.title="Выбрать касание и перейти к нему";
       row.addEventListener("click",()=>{
         annotation.touchId=item.id;seekTimeline(annotationSourceTime(item.frame));drawAnnotation();
@@ -1704,7 +1740,8 @@
       if(epoch!==annotation.epoch||project!==s.project||run!==s.run)return;
       if(data.schema!=="volley-touch-annotations/1"||data.video!==s.video)
         throw Error("Неверный источник эталонной разметки");
-      annotation.data=data;drawAnnotation();
+      annotation.data={...data,touches:Array.isArray(data.touches)?data.touches:[],
+        rallies:Array.isArray(data.rallies)?data.rallies:[]};drawAnnotation();
       if(reference.active)cards();
 
       annotationNotice(data.reviewed?"Эталон проверен. Метрики рассчитаны по исходным CPU-детекциям.":
@@ -1740,15 +1777,32 @@
     if(fields.frame!==undefined&&(!Number.isSafeInteger(fields.frame)||fields.frame<0||fields.frame>=max)){
       annotationNotice("Кадр вне пределов видео.",true);return;
     }
-    if(action==="add_touch"){
-      if(data.touches.length>=4096||data.touches.some(t=>t.frame===fields.frame)){
-        annotationNotice("Касание уже существует на этом кадре или достигнут лимит.",true);return;
+    if(action==="add_touch"||action==="update_touch"){
+      const kind=fields.kind??null;
+      const position=fields.position??null;
+      if(kind!==null&&!Object.hasOwn(manualTouchKinds,kind)||
+        position!==null&&(!Array.isArray(position)||position.length!==2||
+          !position.every(n=>Number.isFinite(n)&&n>=0&&n<=1))){
+        annotationNotice("Недопустимый тип или точка касания.",true);return;
       }
-      const id=annotationNewId();data.touches.push({id,frame:fields.frame});annotation.touchId=id;
+      if(action==="add_touch"){
+        if(data.touches.length>=4096||data.touches.some(t=>t.frame===fields.frame)){
+          annotationNotice("Касание уже существует на этом кадре или достигнут лимит.",true);return;
+        }
+        const id=annotationNewId();
+        data.touches.push({id,frame:fields.frame,kind,position});
+        annotation.touchId=id;
+      }else{
+        const touch=data.touches.find(t=>t.id===fields.id);
+        if(!touch)return;
+        touch.kind=kind;
+        if(position!==null)touch.position=position;
+        annotation.touchId=touch.id;
+      }
     }else if(action==="move_touch"){
       const touch=data.touches.find(t=>t.id===fields.id);
       if(!touch||data.touches.some(t=>t.id!==fields.id&&t.frame===fields.frame))return;
-      touch.frame=fields.frame;annotation.touchId=touch.id;
+      touch.frame=fields.frame;touch.position=null;annotation.touchId=touch.id;
     }else if(action==="delete_touch"){
       if(!data.touches.some(t=>t.id===fields.id))return;
       data.touches=data.touches.filter(t=>t.id!==fields.id);annotation.touchId=null;
@@ -1771,7 +1825,7 @@
     }else return;
     annotation.dirty=true;data.reviewed=false;data.metrics=null;
     annotation.typePrediction=null;
-    drawAnnotation();drawTimeline();
+    drawAnnotation();drawTimeline();drawOverlay();
     annotationNotice("Черновик изменён. Сохраните данные касаний, затем повторите расчёт по траектории.");
   };
   const impactInputIds=[
@@ -1982,6 +2036,13 @@
     annotation.touchId=null;annotation.rallyId=null;annotation.dirty=true;
     drawAnnotation();drawTimeline();
     annotationNotice("Прогноз взят в черновик. Исправьте метки и сохраните данные касаний.");
+  });
+  annotation.saveQuick.addEventListener("click",()=>annotation.save.click());
+  annotation.markButton.addEventListener("click",()=>{
+    if(annotation.markButton.disabled)return;
+    annotation.markMode=!annotation.markMode;
+    ui.video.pause();hideAnnotationContext();drawAnnotation();
+    if(annotation.markMode)annotationNotice("Пауза: нажмите на точку контакта с мячом, выберите тип и сохраните эталон.");
   });
   annotation.save.addEventListener("click",async()=>{
     if(annotation.busy||!annotation.dirty||!annotationReady()||!annotationSourceValid())return;
@@ -2376,7 +2437,7 @@
     actions:$("studio-annotation-context-actions")
   };
   const hideAnnotationContext=()=>annotationContext.root.classList.add("hidden");
-  const showAnnotationContext=(atFrame,anchor={},touchId=null)=>{
+  const showAnnotationContext=(atFrame,anchor={},touchId=null,position=null)=>{
     if(reference.active||!training.active||!s.run||!s.video)return;
     const maxFrame=(annotation.data?.total_frames||timeline.data?.total_frames||1)-1;
     const frame=Math.max(0,Math.min(maxFrame,Math.round(atFrame)));
@@ -2405,15 +2466,29 @@
       annotationContext.actions.append(button);
     };
     const edit=(name,fields)=>void editAnnotation(name,fields);
+    const typeField=document.createElement("label");
+    typeField.className="studio-manual-touch-kind";
+    typeField.textContent="Тип касания";
+    const typeSelect=document.createElement("select");
+    typeSelect.setAttribute("aria-label","Тип ручного касания");
+    for(const [value,title] of [["","Тип не определён"],...Object.entries(manualTouchKinds)]){
+      const option=document.createElement("option");
+      option.value=value;option.textContent=title;typeSelect.append(option);
+    }
+    typeSelect.value=touch?.kind||"";
+    typeField.append(typeSelect);
+    if(ready)annotationContext.actions.append(typeField);
     if(!ready){
       if(annotation.prediction)action("✓ Взять прогноз касаний для правок",()=>annotation.adopt.click());
       action("Взять CPU-разметку за основу",()=>annotation.seed.click());
     }else{
       if(!touch){
         action(simulated?"✓ Добавить кандидат в эталон":"+ Касание здесь",
-          ()=>edit("add_touch",{frame}));
+          ()=>edit("add_touch",{frame,kind:typeSelect.value||null,position}));
       }else{
         annotation.touchId=touch.id;
+        action("Обновить тип касания",()=>edit("update_touch",{
+          id:touch.id,kind:typeSelect.value||null,position}));
         action("← Сдвинуть на кадр",()=>edit("move_touch",{id:touch.id,
           frame:Math.max(0,touch.frame-1)}));
         action("Сдвинуть на кадр →",()=>edit("move_touch",{id:touch.id,
@@ -2460,7 +2535,7 @@
     const px=Number.isFinite(anchor.clientX)?anchor.clientX-bounds.left:bounds.width/2;
     const py=Number.isFinite(anchor.clientY)?anchor.clientY-bounds.top:bounds.height*0.7;
     annotationContext.root.style.left=Math.max(8,Math.min(bounds.width-276,px))+"px";
-    annotationContext.root.style.top=Math.max(8,Math.min(bounds.height-235,py))+"px";
+    annotationContext.root.style.top=Math.max(8,Math.min(bounds.height-315,py))+"px";
     annotationContext.root.classList.remove("hidden");
   };
   annotationContext.root.addEventListener("pointerdown",event=>event.stopPropagation());
@@ -2468,8 +2543,23 @@
   document.addEventListener("keydown",event=>{
     if(event.key==="Escape")hideAnnotationContext();
   });
-  overlay.canvas.addEventListener("click",()=>{
-    if(training.active&&!training.poseAdvanced.open)hideAnnotationContext();
+  overlay.canvas.addEventListener("click",event=>{
+    if(!training.active||training.poseAdvanced.open)return;
+    if(reference.active||!annotation.markMode||!annotationReady()||
+      !annotationSourceValid()||annotation.busy){hideAnnotationContext();return;}
+    if(!ui.video.paused){ui.video.pause();return;}
+    const rect=overlay.canvas.getBoundingClientRect();
+    const w=ui.video.videoWidth,h=ui.video.videoHeight;
+    if(!rect.width||!rect.height||!w||!h)return;
+    const scale=Math.min(rect.width/w,rect.height/h);
+    const x=(event.clientX-rect.left-(rect.width-w*scale)/2)/(w*scale);
+    const y=(event.clientY-rect.top-(rect.height-h*scale)/2)/(h*scale);
+    if(x<0||x>1||y<0||y>1){
+      annotationNotice("Выберите точку внутри изображения видео.",true);return;
+    }
+    showAnnotationContext(annotationFrame(),event,null,[
+      Number(x.toFixed(4)),Number(y.toFixed(4))
+    ]);
   });
   overlay.canvas.addEventListener("contextmenu",event=>{
     if(reference.active||!training.active||training.poseAdvanced.open||!s.run||!s.video)return;
@@ -2504,6 +2594,8 @@
   };
   overlay.canvas.addEventListener("click",pickTrainingPlayer);
   training.poseAdvanced.addEventListener("toggle",()=>{
+    if(training.poseAdvanced.open)annotation.markMode=false;
+    drawAnnotation();
     overlay.canvas.closest(".video-wrap")?.classList.toggle("training-select",training.active&&training.poseAdvanced.open);
     overlay.canvas.closest(".video-wrap")?.classList.toggle("training-annotation",training.active&&!training.poseAdvanced.open);
     hideAnnotationContext();
@@ -2966,7 +3058,9 @@
         }
         for(const mark of annotation.data.touches){
           const x=((Number(s.analysisOffset)||0)+mark.frame/fps())/duration*width;
-          ctx.fillStyle="#10deb2";ctx.fillRect(x,y,Math.max(2,Math.ceil(dpr)),bandHeight);
+          ctx.fillStyle=({attack:"#ff6b6b",block:"#ac92ff",serve:"#f3a350",
+            overhead_pass:"#66c8ff",dig:"#56dfb9"}[mark.kind]||"#10deb2");
+          ctx.fillRect(x,y,Math.max(2,Math.ceil(dpr)),bandHeight);
         }
       }
       if(!training.active&&overlay.flags.touches&&overlay.actionFlags.serve&&
@@ -4000,9 +4094,11 @@
     const rallies=annotationSorted("rallies"),touches=annotationSorted("touches");
     reference.counts.textContent="Розыгрыши: "+rallies.length+" · касания: "+touches.length;
     const touchButton=touch=>{
-      const button=make("button","studio-reference-touch","● "+label(touch.frame));
+      const button=make("button","studio-reference-touch","● "+label(touch.frame)+" · "+
+        (trainingNames[touch.kind]||"Касание"));
       button.type="button";
-      button.title="Перейти к размеченному касанию";
+      button.title="Перейти к размеченному касанию · "+
+        (trainingNames[touch.kind]||"тип не определён");
       button.addEventListener("click",event=>{
         event.stopPropagation();
         annotation.touchId=touch.id;

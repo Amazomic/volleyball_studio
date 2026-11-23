@@ -26,11 +26,33 @@ const MAX_TOUCHES: usize = 4096;
 const MAX_RALLIES: usize = 1024;
 static LABEL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TouchKind {
+    Attack,
+    Block,
+    Serve,
+    OverheadPass,
+    Dig,
+    UnknownTouch,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Mark {
     id: String,
     frame: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<TouchKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    position: Option<[f64; 2]>,
+}
+fn valid_mark(mark: &Mark, total_frames: u64) -> bool {
+    Uuid::parse_str(&mark.id).is_ok()
+        && mark.frame < total_frames
+        && mark.position.is_none_or(|p| {
+            p.iter()
+                .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        })
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -98,9 +120,7 @@ fn valid(v: &VideoLabels) -> bool {
         && v.trajectory_candidates.iter().all(|c| {
             c.frame < v.total_frames && c.score.is_finite() && (0.0..=10000.0).contains(&c.score)
         })
-        && v.touches
-            .iter()
-            .all(|t| Uuid::parse_str(&t.id).is_ok() && t.frame < v.total_frames)
+        && v.touches.iter().all(|t| valid_mark(t, v.total_frames))
         && v.rallies
             .iter()
             .all(|r| Uuid::parse_str(&r.id).is_ok() && r.start <= r.end && r.end < v.total_frames)
@@ -626,9 +646,7 @@ pub async fn edit(
                         .ok_or_else(|| storage::bad_request("Missing Rally labels"))?;
                     if touches.len() > MAX_TOUCHES
                         || rallies.len() > MAX_RALLIES
-                        || touches
-                            .iter()
-                            .any(|t| t.frame >= run.frames || Uuid::parse_str(&t.id).is_err())
+                        || touches.iter().any(|t| !valid_mark(t, run.frames))
                         || rallies.iter().any(|r| {
                             r.start >= r.end
                                 || r.end >= run.frames
@@ -671,6 +689,8 @@ pub async fn edit(
                         .map(|&frame| Mark {
                             id: Uuid::new_v4().to_string(),
                             frame,
+                            kind: None,
+                            position: None,
                         })
                         .collect();
                     v.rallies = rallies
@@ -694,6 +714,8 @@ pub async fn edit(
                     v.touches.push(Mark {
                         id: Uuid::new_v4().to_string(),
                         frame,
+                        kind: None,
+                        position: None,
                     });
                 }
                 "move_touch" | "delete_touch" => {
@@ -812,6 +834,45 @@ mod tests {
         let roundtrip: VideoLabels =
             serde_json::from_value(serde_json::to_value(&parsed).unwrap()).unwrap();
         assert!(valid(&roundtrip));
+    }
+
+    #[test]
+    fn touch_labels_keep_legacy_frames_and_roundtrip_human_kind_and_position() {
+        let legacy: Mark = serde_json::from_value(json!({
+            "id": Uuid::new_v4().to_string(), "frame": 45
+        }))
+        .unwrap();
+        assert!(valid_mark(&legacy, 100));
+        assert!(legacy.kind.is_none());
+        assert!(legacy.position.is_none());
+
+        let labeled: Mark = serde_json::from_value(json!({
+            "id": Uuid::new_v4().to_string(), "frame": 45,
+            "kind": "overhead_pass", "position": [0.34, 0.62]
+        }))
+        .unwrap();
+        assert!(valid_mark(&labeled, 100));
+        assert_eq!(labeled.kind, Some(TouchKind::OverheadPass));
+        let saved = serde_json::to_value(&labeled).unwrap();
+        assert_eq!(saved["kind"], "overhead_pass");
+        assert_eq!(saved["position"], json!([0.34, 0.62]));
+        let restored: Mark = serde_json::from_value(saved).unwrap();
+        assert!(valid_mark(&restored, 100));
+    }
+
+    #[test]
+    fn touch_labels_reject_unknown_kinds_and_invalid_coordinates() {
+        let id = Uuid::new_v4().to_string();
+        let unknown = json!({"id": id, "frame": 5, "kind": "untrusted_kind"});
+        assert!(serde_json::from_value::<Mark>(unknown).is_err());
+        for point in [json!([-0.01, 0.5]), json!([0.5, 1.01])] {
+            let mark: Mark = serde_json::from_value(json!({
+                "id": Uuid::new_v4().to_string(), "frame": 5,
+                "kind": "serve", "position": point
+            }))
+            .unwrap();
+            assert!(!valid_mark(&mark, 100));
+        }
     }
 
     #[test]

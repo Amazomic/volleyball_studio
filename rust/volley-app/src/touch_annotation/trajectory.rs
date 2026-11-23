@@ -412,6 +412,8 @@ mod tests {
                     .map(|&frame| Mark {
                         id: Uuid::new_v4().to_string(),
                         frame,
+                        kind: None,
+                        position: None,
                     })
                     .collect(),
                 rallies: vec![],

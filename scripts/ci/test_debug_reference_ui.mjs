@@ -46,13 +46,14 @@ const reference={
 const annotation={
   data:{reviewed:true,
     rallies:[{id:"r1",start:30,end:90}],
-    touches:[{id:"t1",frame:45},{id:"t2",frame:130}]},
+    touches:[{id:"t1",frame:45,kind:"dig",position:[0.3,0.6]},
+      {id:"t2",frame:130}]},
   rallyId:null,touchId:null
 };
 const seeks=[];
 const {renderReferenceCards}=runInNewContext(js.slice(start,end)+
   "\n({renderReferenceCards})",{
-    reference,s,annotation,annotationSourceValid:()=>true,
+    reference,s,annotation,trainingNames:{dig:"Приём снизу"},annotationSourceValid:()=>true,
     annotationReady:()=>true,
     annotationSorted:type=>[...annotation.data[type]],
     timeLabel:value=>String(value),
@@ -64,7 +65,7 @@ assert.equal(list.children.length,2,"Rally plus an out-of-rally touch must be vi
 assert.match(reference.counts.textContent,/Розыгрыши: 1 · касания: 2/);
 const card=list.children[0];
 const touch=card.children[2].children[0];
-assert.equal(touch.textContent,"● 11.5");
+assert.equal(touch.textContent,"● 11.5 · Приём снизу");
 touch.handlers.click({stopPropagation(){}});
 assert.equal(seeks[0],11.5,"Reference touch seeks the original video with offset");
 assert.equal(annotation.data.touches[0].frame,45,"Viewing must not mutate a touch");

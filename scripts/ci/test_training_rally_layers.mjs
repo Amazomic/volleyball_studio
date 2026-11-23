@@ -21,8 +21,8 @@ assert.ok(css.includes('.studio-trajectory-proposal)[hidden]{display:none!import
 assert.ok(js.includes('overlay.canvas.addEventListener("contextmenu"'));
 assert.match(js,/overlay\.canvas\.addEventListener\("contextmenu",event=>\{[\s\S]{0,240}showAnnotationContext\(annotationFrame\(\),event\);/,
   "Training context actions are restricted to the right-click handler");
-assert.match(js,/overlay\.canvas\.addEventListener\("click",\(\)=>\{[\s\S]{0,130}hideAnnotationContext\(\);/,
-  "Ordinary clicks close the context menu instead of opening it");
+assert.match(js,/overlay\.canvas\.addEventListener\("click",event=>\{[\s\S]{0,190}if\(reference\.active\|\|!annotation\.markMode/,
+  "Video clicks may open marking only when manual touch mode is enabled");
 
 class Node {
   constructor(){this.style={};this.checked=true;this.hidden=false;this.listeners={};this.textContent="";}
