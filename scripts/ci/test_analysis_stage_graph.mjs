@@ -63,9 +63,9 @@ assert.equal(context.model("rallies")[1],"algorithm");
 const stages=context.stages;
 const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
-assert.equal(stages.length,12);
+assert.equal(stages.length,13);
 assert.ok(ids.includes("publish")&&!ids.includes("material"));
-for(const [row,count] of [[1,6],[2,6]]){
+for(const [row,count] of [[1,6],[2,7]]){
   const nodes=stages.filter(item=>item[3]===row);
   assert.equal(nodes.length,count);
 }
@@ -180,22 +180,27 @@ assert.deepEqual(actualInputs("fusion"),["ball","players"]);
 assert.deepEqual(actualInputs("tracking"),["fusion","pose","rallies"]);
 assert.deepEqual(actualInputs("touches"),["ball_stabilizer","rallies","tracking"]);
 assert.deepEqual(actualInputs("publish"),["rallies","touches","tracking"]);
-assert.deepEqual(actualInputs("identity"),["publish","tracking","video"]);
+assert.deepEqual(actualInputs("identity"),["photos","publish","tracking","video"]);
 assert.equal(dataLinks.state("pose",null),"optional");
 assert.equal(dataLinks.state("pose",{profile:{gpu:{pose_enabled:false}}}),"disabled");
 assert.equal(dataLinks.state("pose",{gpu_reused:true,gpu_jobs:{pose:"saved"}}),"available");
 assert.deepEqual(actualInputs("pose"),["fusion","players","video"]);
 assert.deepEqual(actualInputs("touch_types"),["pose","touches"]);
 assert.equal(dataLinks.state("pose",{profile:{post:{pose_classification:false}},gpu_jobs:{pose:"saved"}}),"available");
-const withClass=(stageId,classes)=>({dataset:{stageId},classList:{contains:name=>classes.includes(name)}});
+const withClass=(stageId,classes)=>({
+  dataset:{stageId},classList:{contains:name=>classes.includes(name)},
+  setAttribute(name,value){this[name]=value;},removeAttribute(name){delete this[name];}
+});
+const fusionNode=withClass("fusion",["is-reused"]);
+const trackingNode=withClass("tracking",["is-active"]);
 const link={
-  dataset:{edgeSource:"fusion",edgeTarget:"tracking",edgeCondition:"",edgeData:"Объединённые наблюдения"},
+  dataset:{edgeSource:"fusion",edgeTarget:"tracking",edgeCondition:""},
   classList:{toggle(name,enabled){this[name]=enabled;}},
   setAttribute(name,value){this[name]=value;}
 };
 const diagram={querySelectorAll(selector){
   return selector===".analysis-flow-node"?
-    [withClass("fusion",["is-reused"]),withClass("tracking",["is-active"])]:[link];
+    [fusionNode,trackingNode]:[link];
 }};
 const edgeContext=vm.createContext({diagram,window:{VolleyballUi:{
   locale:"en",
@@ -203,8 +208,9 @@ const edgeContext=vm.createContext({diagram,window:{VolleyballUi:{
 }}});
 vm.runInContext(definitions+extract("const pipelineEdges=","const graphSettings=")+
   extract("const paintGraphEdges=",'$("analysis-flow-feedback")')+"paintGraphEdges(diagram,{gpu_reused:true});",edgeContext);
-assert.equal(link.textContent,"GPU data · Объединённые наблюдения");
-assert.equal(link["aria-label"],"GPU data → Track IDs: Объединённые наблюдения");
+assert.equal(link.dataset.state,"available");
+assert.equal(link.textContent,undefined);
+assert.equal(trackingNode["aria-description"],"GPU data");
 assert.equal(link.classList["is-active"],true);
 const card=id=>({
   dataset:{stageId:id},
@@ -213,6 +219,7 @@ const card=id=>({
     contains(name){return Boolean(this[name]);}
   },
   style:{setProperty(){}},
+  removeAttribute(){},
   querySelector(){return {classList:{toggle(){}}};}
 });
 const ballCard=card("ball"),poseCard=card("pose");
@@ -229,5 +236,7 @@ assert.equal(poseCard.classList["is-complete"],true);
 const historyProjection=rust.slice(rust.indexOf('rows.push(json!({"id":id'),rust.indexOf("    rows.sort_by"));
 for(const key of ["gpu_jobs","cpu_runs","analysis_id","profile","gpu_rally_count","automatic_identity_available"])
   assert.ok(historyProjection.includes('"'+key+'":'),"Saved graph needs "+key);
-assert.doesNotMatch(js,/graphDraw\(/);
+assert.doesNotMatch(js,/analysis-flow-inputs|analysis-flow-reference/);
+assert.match(js,/"marker-end":"url\(#"\+arrowId/);
+assert.match(css,/analysis-flow-edge\[data-state="disabled"\]\{visibility:hidden\}/);
 console.log("PASS: analysis stages, verified data inputs, optional pose links and history parity");

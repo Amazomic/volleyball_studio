@@ -449,6 +449,7 @@
     ["touches","Касания","cpu",2],
     ["touch_types","Типы касаний","cpu",2],
     ["publish","Публикация розыгрышей","output",2],
+    ["photos","Фотографии игроков","input",2],
     ["identity","Привязка игроков","mixed",2],
   ];
   const pipelineNames=new Map(pipelineStages.map(item=>[item[0],item[1]]));
@@ -480,6 +481,7 @@
     touches:[["path",{d:"M8 22V11a2 2 0 0 1 4 0V5a2 2 0 0 1 4 0v6a2 2 0 0 1 4 0v5a7 7 0 0 1-7 7h-2a8 8 0 0 1-6-3l-3-4a2 2 0 0 1 3-3l3 3"}]],
     touch_types:[["circle",{cx:11,cy:13,r:8}],["path",{d:"m5 8 6 2 4-4m-7 9 3-5 8 3m-8 2-4 6m4-11 1 11M19 1v4m-2-2h4"}]],
     publish:[["path",{d:"M4 12h16m-6-6 6 6-6 6"}]],
+    photos:[["rect",{x:3,y:4,width:18,height:16,rx:3}],["circle",{cx:9,cy:9,r:2}],["path",{d:"m4 17 5-4 3 3 4-5 4 5"}]],
     identity:[["path",{d:"M10 13a5 5 0 0 0 7 .5l3-3a5 5 0 0 0-7-7l-2 2m3 5a5 5 0 0 0-7-.5l-3 3a5 5 0 0 0 7 7l2-2"}]],
   };
   const pipelineIcon=id=>{
@@ -604,30 +606,31 @@
     return null;
   };
   const pipelineEdges=[
-    ["video","ball","Кадры видео"],
-    ["ball","rallies","Детекции мяча"],
-    ["video","players","Кадры видео"],
-    ["rallies","players","Игровые интервалы"],
-    ["players","pose","Рамки игроков"],
-    ["video","pose","Кадры видео"],
-    ["fusion","pose","Версия для сохранения поз"],
-    ["ball","fusion","Детекции мяча"],
-    ["players","fusion","Рамки игроков"],
-    ["fusion","tracking","Данные GPU"],
-    ["pose","tracking","Позы игроков","pose"],
-    ["rallies","tracking","Игровые интервалы"],
-    ["tracking","ball_stabilizer","Мяч из CPU replay"],
-    ["ball_stabilizer","touches","Стабилизированная траектория"],
-    ["tracking","touches","Наблюдения из CPU replay"],
-    ["rallies","touches","Игровые интервалы"],
-    ["pose","touch_types","Сохранённые позы","pose"],
-    ["touches","touch_types","События внутри детектора","pose"],
-    ["rallies","publish","Границы розыгрышей"],
-    ["tracking","publish","Версия CPU replay"],
-    ["touches","publish","Результат Touch Detector"],
-    ["video","identity","Кадры для сравнения"],
-    ["tracking","identity","Track ID"],
-    ["publish","identity","Розыгрыши с участниками"],
+    ["video","ball"],
+    ["ball","rallies"],
+    ["video","players"],
+    ["rallies","players"],
+    ["players","pose","pose"],
+    ["video","pose","pose"],
+    ["fusion","pose","pose"],
+    ["ball","fusion"],
+    ["players","fusion"],
+    ["fusion","tracking"],
+    ["pose","tracking","pose"],
+    ["rallies","tracking"],
+    ["tracking","ball_stabilizer"],
+    ["ball_stabilizer","touches"],
+    ["tracking","touches"],
+    ["rallies","touches"],
+    ["pose","touch_types","pose"],
+    ["touches","touch_types","pose"],
+    ["rallies","publish"],
+    ["tracking","publish"],
+    ["touches","publish"],
+    ["video","identity"],
+    ["tracking","identity"],
+    ["publish","identity"],
+    ["photos","identity"],
   ];
   const graphLinkState=(condition,run)=>{
     if(condition!=="pose")return "available";
@@ -793,6 +796,66 @@
     element.dataset.graphText=label;
     element.textContent=window.VolleyballUi.translate(label);
   };
+  const graphRoutes=(boxes,links,width)=>{
+    const rows=new Map(),ports=new Map();
+    for(const box of boxes.values()){
+      if(!rows.has(box.t))rows.set(box.t,[]);
+      rows.get(box.t).push(box);
+    }
+    for(const row of rows.values())row.sort((a,b)=>a.l-b.l);
+    const routes=links.map(([from,to])=>{
+      const a=boxes.get(from),b=boxes.get(to),row=rows.get(a.t);
+      const neighbors=a.t===b.t&&Math.abs(row.indexOf(a)-row.indexOf(b))===1;
+      if(!neighbors){
+        for(const id of [from,to])ports.set(id,(ports.get(id)||0)+1);
+      }
+      return {from,to,a,b,neighbors};
+    });
+    const rowLanes=new Map(),usedPorts=new Map();
+    const port=(id,box)=>{
+      const index=(usedPorts.get(id)||0)+1;
+      usedPorts.set(id,index);
+      return box.l+(box.r-box.l)*index/(ports.get(id)+1);
+    };
+    const lane=top=>{
+      const index=rowLanes.get(top)||0;
+      rowLanes.set(top,index+1);
+      return top-7-index*1.75;
+    };
+    return routes.map(({from,to,a,b,neighbors},index)=>{
+      if(neighbors){
+        const forward=a.l<b.l,y=Math.min(a.b,b.b,a.t+28);
+        return [[forward?a.r:a.l,y],[forward?b.l:b.r,y]];
+      }
+      const ax=port(from,a),bx=port(to,b),ay=lane(a.t);
+      if(a.t===b.t)return [[ax,a.t],[ax,ay],[bx,ay],[bx,b.t]];
+      const by=lane(b.t),left=ax+bx<width,offset=5+21*(index+1)/(links.length+1);
+      const x=left?offset:width-offset;
+      return [[ax,a.t],[ax,ay],[x,ay],[x,by],[bx,by],[bx,b.t]];
+    });
+  };
+  const drawGraphEdges=target=>{
+    const svg=target.querySelector(".analysis-flow-arrows");
+    if(!svg||!target.clientWidth)return;
+    const origin=target.getBoundingClientRect();
+    const boxes=new Map([...target.querySelectorAll(".analysis-flow-node")].map(node=>{
+      const rect=node.getBoundingClientRect();
+      return [node.dataset.stageId,{l:rect.left-origin.left,r:rect.right-origin.left,
+        t:rect.top-origin.top,b:rect.bottom-origin.top}];
+    }));
+    const edges=[...svg.querySelectorAll(".analysis-flow-edge")];
+    const links=edges.map(({dataset})=>[dataset.edgeSource,dataset.edgeTarget]);
+    svg.setAttribute("viewBox","0 0 "+target.clientWidth+" "+target.clientHeight);
+    graphRoutes(boxes,links,target.clientWidth).forEach((points,index)=>{
+      edges[index].setAttribute("d","M"+points.map(point=>point.join(",")).join(" L"));
+    });
+  };
+  const graphSvg=(tag,attributes)=>{
+    const element=document.createElementNS("http://www.w3.org/2000/svg",tag);
+    for(const [name,value] of Object.entries(attributes))element.setAttribute(name,value);
+    return element;
+  };
+  let graphId=0;
   const createPipelineGraph=(target,run)=>{
     clear(target);
     const grid=make("div","analysis-flow-grid");
@@ -812,8 +875,9 @@
     }
     for(const [id,name,kind,row] of pipelineStages){
       const cell=make("div","analysis-flow-cell");
-      const node=make("button","analysis-flow-node");
-      node.type="button";node.dataset.stageId=id;node.dataset.kind=kind;
+      const node=make(id==="photos"?"div":"button","analysis-flow-node");
+      if(id!=="photos")node.type="button";
+      node.dataset.stageId=id;node.dataset.kind=kind;
       const heading=make("span","analysis-flow-node-title",window.VolleyballUi.translate(name));
       const technical=make("span","analysis-flow-node-model");
       technical.textContent=graphLabel(id,run);
@@ -821,41 +885,27 @@
       const headingRow=make("span","analysis-flow-node-heading-row");
       headingRow.append(pipelineIcon(id),heading);
       node.append(headingRow,technical);
-      node.title=graphDescriptions[id];
-      node.addEventListener("click",()=>{
-        openGraphSettings(id);
-      });
+      if(graphDescriptions[id])node.title=graphDescriptions[id];
+      if(id!=="photos")node.addEventListener("click",()=>openGraphSettings(id));
       const stats=make("small","analysis-flow-node-stats","—");
-      cell.append(node,stats);
+      if(id==="photos")cell.append(node);
+      else cell.append(node,stats);
       if(id==="players"||id==="tracking")cell.append(make("small","analysis-flow-node-stage-metrics hidden"));
-      const incoming=pipelineEdges.filter(([,to])=>to===id);
-      if(incoming.length||id==="identity"){
-        const inputs=make("ul","analysis-flow-inputs");
-        for(const [from,to,data,condition] of incoming){
-          const item=make("li","");
-          const link=make("button","analysis-flow-edge");
-          link.type="button";
-          link.dataset.edgeSource=from;
-          link.dataset.edgeTarget=to;
-          link.dataset.edgeCondition=condition||"";
-          link.dataset.edgeData=data;
-          link.addEventListener("click",()=>{
-            const source=target.querySelector('[data-stage-id="'+from+'"]');
-            source?.focus();
-          });
-          item.append(link);
-          inputs.append(item);
-        }
-        if(id==="identity"){
-          const reference=make("li","analysis-flow-reference");
-          graphText(reference,"Фотографии игроков");
-          inputs.append(reference);
-        }
-        cell.append(inputs);
-      }
       phases.get(row).append(cell);
     }
-    target.append(grid);
+    const svg=graphSvg("svg",{class:"analysis-flow-arrows","aria-hidden":"true"});
+    const arrowId="analysis-flow-arrow-"+(++graphId);
+    const defs=graphSvg("defs",{});
+    const marker=graphSvg("marker",{id:arrowId,viewBox:"0 0 8 8",refX:8,refY:4,
+      markerWidth:7,markerHeight:7,orient:"auto",markerUnits:"userSpaceOnUse"});
+    marker.append(graphSvg("path",{d:"M0 0 L8 4 L0 8 Z",class:"analysis-flow-arrowhead"}));
+    defs.append(marker);
+    svg.append(defs);
+    for(const [from,to,condition] of pipelineEdges){
+      svg.append(graphSvg("path",{class:"analysis-flow-edge","data-edge-source":from,
+        "data-edge-target":to,"data-edge-condition":condition||"","marker-end":"url(#"+arrowId+")"}));
+    }
+    target.append(grid,svg);
   };
   const updatePipelineGraph=(target,run)=>{
     target._graphRun=run;
@@ -878,6 +928,7 @@
     };
     for(const node of target.querySelectorAll(".analysis-flow-node")){
       const id=node.dataset.stageId;
+      if(id==="photos")continue;
       const entry=id==="touch_types"?(run?.gpu_jobs?.pose?seen.get("touches"):null):seen.get(id);
       const combinedPose=id==="pose"&&currentId==="players"&&
         /RTMPose/.test(String(run?.stage||""));
@@ -933,9 +984,9 @@
   };
   const paintGraphEdges=(target,run)=>{
     const nodes=new Map([...target.querySelectorAll(".analysis-flow-node")].map(node=>[node.dataset.stageId,node]));
-    const t=value=>window.VolleyballUi.translate(value);
+    const inputs=new Map();
     for(const edge of target.querySelectorAll(".analysis-flow-edge")){
-      const {edgeSource,edgeTarget,edgeCondition,edgeData}=edge.dataset;
+      const {edgeSource,edgeTarget,edgeCondition}=edge.dataset;
       const source=nodes.get(edgeSource),destination=nodes.get(edgeTarget);
       const state=graphLinkState(edgeCondition,run);
       const ready=state==="available"&&
@@ -945,18 +996,46 @@
       edge.dataset.state=state;
       edge.classList.toggle("is-complete",!!ready);
       edge.classList.toggle("is-active",!!running);
-      const label=t(edgeData);
-      const status=state==="disabled"?" · "+t("Отключено"):state==="optional"?" · "+t("При наличии"):"";
-      const sourceName=t(pipelineNames.get(edgeSource));
-      edge.textContent=sourceName+(sourceName===label?"":" · "+label)+status;
-      edge.title=sourceName+" → "+t(pipelineNames.get(edgeTarget))+": "+label+status;
-      edge.setAttribute("aria-label",edge.title);
+      if(state!=="disabled"){
+        if(!inputs.has(edgeTarget))inputs.set(edgeTarget,[]);
+        inputs.get(edgeTarget).push(window.VolleyballUi.translate(pipelineNames.get(edgeSource)));
+      }
+    }
+    for(const [id,node] of nodes){
+      const names=inputs.get(id);
+      if(names?.length)node.setAttribute("aria-description",names.join(", "));
+      else node.removeAttribute("aria-description");
     }
   };
   $("analysis-flow-feedback").append(ui.note,ui.profileDelta);
   const mainGraph=$("analysis-flow-diagram");
   if(mainGraph&&typeof mainGraph.querySelector==="function"){
     updatePipelineGraph(mainGraph,null);
+    let drawFrame=0;
+    const scheduleDraw=()=>{
+      if(drawFrame)return;
+      drawFrame=requestAnimationFrame(()=>{
+        drawFrame=0;
+        drawGraphEdges(mainGraph);
+      });
+    };
+    scheduleDraw();
+    if(typeof ResizeObserver!=="undefined"){
+      const observer=new ResizeObserver(scheduleDraw);
+      observer.observe(mainGraph);
+      for(const cell of mainGraph.querySelectorAll(".analysis-flow-cell"))observer.observe(cell);
+    }
+    const highlight=event=>{
+      const hovered=event.type==="pointerover"||event.type==="focusin"?event.target:event.relatedTarget;
+      const id=hovered?.closest?.(".analysis-flow-node")?.dataset.stageId;
+      mainGraph.classList.toggle("has-edge-focus",!!id);
+      for(const edge of mainGraph.querySelectorAll(".analysis-flow-edge")){
+        const {edgeSource,edgeTarget}=edge.dataset;
+        edge.classList.toggle("is-highlighted",id===edgeSource||id===edgeTarget);
+      }
+    };
+    for(const event of ["pointerover","pointerout","focusin","focusout"])
+      mainGraph.addEventListener(event,highlight);
     window.addEventListener("volley:ui-language",()=>{
       for(const element of mainGraph.querySelectorAll("[data-graph-text]"))
         graphText(element,element.dataset.graphText);
@@ -965,6 +1044,7 @@
         heading.textContent=window.VolleyballUi.translate(pipelineNames.get(node.dataset.stageId));
       }
       updatePipelineGraph(mainGraph,mainGraph._graphRun);
+      scheduleDraw();
     });
   }
   for(const [id,button] of [["analysis-flow-gpu-start",ui.gpuOnly],

@@ -1976,16 +1976,17 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 .analysis-flow-toolbar>strong{font-size:14px}
 .analysis-flow-actions{display:flex;gap:7px;flex-wrap:wrap}
 .analysis-flow-actions button{padding:8px 12px}
-.analysis-flow-diagram{max-width:none;width:100%;container-type:inline-size}
+.analysis-flow-diagram{max-width:none;width:100%;container-type:inline-size;position:relative}
 .analysis-flow-grid{display:grid;gap:16px}
-.analysis-flow-phase{min-width:0;padding:14px;border:1px solid #314862;border-radius:12px;background:#142238}
-.analysis-flow-phase-label{margin:0 0 12px;color:#c2d6ed;font-size:13px;font-weight:750;line-height:1.35}
-.analysis-flow-cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
-.analysis-flow-cell{min-width:0;display:grid;grid-template-rows:subgrid;grid-row:span 4;gap:6px}
+.analysis-flow-phase{min-width:0;padding:14px 30px;border:1px solid #314862;border-radius:12px;background:#142238}
+.analysis-flow-phase-label{margin:0 0 54px;color:#c2d6ed;font-size:13px;font-weight:750;line-height:1.35}
+.analysis-flow-cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:54px 19px}
+.analysis-flow-phase[data-phase="cpu"] .analysis-flow-cards{grid-template-columns:repeat(7,minmax(0,1fr))}
+.analysis-flow-cell{min-width:0;display:grid;grid-template-rows:subgrid;grid-row:span 3;gap:6px}
 .analysis-flow-node-stats{min-width:0;min-height:1.3em;line-height:1.35;text-align:center;font-size:12px;color:#a6bad2;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-@container (max-width:1070px){.analysis-flow-cards{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:15px}}
-@container (max-width:570px){.analysis-flow-cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@container (max-width:330px){.analysis-flow-cards{grid-template-columns:minmax(0,1fr)}}
+@container (max-width:1070px){.analysis-flow-phase[data-phase] .analysis-flow-cards{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@container (max-width:570px){.analysis-flow-phase[data-phase] .analysis-flow-cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@container (max-width:330px){.analysis-flow-phase[data-phase] .analysis-flow-cards{grid-template-columns:minmax(0,1fr)}}
 body[data-ui-theme="light"] .analysis-flow-phase{background:#ebf1f9;border-color:#b7c9dd}
 body[data-ui-theme="light"] .analysis-flow-phase-label,body[data-ui-theme="light"] .analysis-flow-node-stats,body[data-ui-theme="light"] .analysis-flow-node-stage-metrics{color:#355071}
 .analysis-flow-node-stage-metrics{grid-row:3;display:block;text-align:center;white-space:pre-line;line-height:14px;font-size:clamp(10px,.7vw,11px);font-weight:550;color:#b0bac9;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
@@ -2014,19 +2015,21 @@ body[data-ui-theme="light"] .analysis-flow-phase-label,body[data-ui-theme="light
 .analysis-flow-node.is-active.is-progress-unknown::before,.analysis-flow-node.is-active.is-progress-unknown::after{width:33%;background:linear-gradient(90deg,transparent,#efba4b 48%,transparent);animation:analysis-stage-indeterminate 2.8s ease-in-out infinite}
 @keyframes analysis-stage-pulse{0%,100%{opacity:.72}50%{opacity:1}}
 @keyframes analysis-stage-indeterminate{0%{transform:translateX(0);opacity:.55}50%{opacity:1}100%{transform:translateX(200%);opacity:.55}}
-.analysis-flow-inputs{grid-row:4;list-style:none;margin:0;padding:6px 0 0;border-top:1px solid #7896b047;display:grid;align-content:start;gap:4px}
-.analysis-flow-inputs li{min-width:0}
-.analysis-flow-edge,.analysis-flow-reference{display:flex;align-items:center;gap:7px;width:100%;padding:4px 5px;text-align:left;font-weight:500;font-family:inherit;font-size:11px;line-height:1.35;overflow-wrap:anywhere;color:#c0d3e9;background:#102036;border:1px solid #385474;border-radius:6px}
-.analysis-flow-edge::before,.analysis-flow-reference::before{content:"↳";color:#8fbce6;flex:none}
-.analysis-flow-edge[data-state="optional"]{border-style:dashed}
-.analysis-flow-edge[data-state="disabled"]{color:#9aacc1;border-style:dotted}
-.analysis-flow-edge.is-complete::before{color:#78e2c2}
-.analysis-flow-edge.is-active{border-style:dashed;border-color:#71d8dc;animation:analysis-flow-move 1.5s ease-in-out infinite alternate}
-.analysis-flow-edge:is(:hover,:focus-visible){outline:2px solid #71abde;outline-offset:1px}
-@keyframes analysis-flow-move{to{background:#194353}}
-body[data-ui-theme="light"] :is(.analysis-flow-edge,.analysis-flow-reference){color:#284666;background:#f6f9fd;border-color:#a3b9d0}
-body[data-ui-theme="light"] :is(.analysis-flow-edge,.analysis-flow-reference)::before{color:#346698}
-body[data-ui-theme="light"] .analysis-flow-edge.is-active{animation:none;border-color:#207677}
+.analysis-flow-node[data-stage-id="photos"]{cursor:default}
+.analysis-flow-arrows{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+.analysis-flow-arrowhead{fill:#8caecb}
+.analysis-flow-edge{fill:none;stroke:#7f9fba;stroke-width:1.45;stroke-linecap:round;stroke-linejoin:round;opacity:.68}
+.analysis-flow-edge[data-edge-condition]:not([data-edge-condition=""]){stroke-dasharray:4 4}
+.analysis-flow-edge[data-state="disabled"]{visibility:hidden}
+.analysis-flow-edge.is-complete{stroke:#85b9b6;opacity:.86}
+.analysis-flow-edge.is-active{stroke:#86f6ed;stroke-width:2.2;stroke-dasharray:6 5;opacity:1;animation:analysis-flow-move .8s linear infinite}
+.analysis-flow-diagram.has-edge-focus .analysis-flow-edge:not(.is-highlighted){opacity:.18}
+.analysis-flow-edge.is-highlighted{stroke:#9fe3ff;stroke-width:2.4;opacity:1}
+@keyframes analysis-flow-move{to{stroke-dashoffset:-22}}
+body[data-ui-theme="light"] .analysis-flow-edge{stroke:#466482}
+body[data-ui-theme="light"] .analysis-flow-arrowhead{fill:#466482}
+body[data-ui-theme="light"] .analysis-flow-edge.is-complete{stroke:#376d68}
+body[data-ui-theme="light"] .analysis-flow-edge:is(.is-active,.is-highlighted){stroke:#006c78}
 .analysis-flow-result{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px 15px;padding:9px 4px 3px;font-size:12px}
 .analysis-flow-result-title{font-weight:700;color:#cdeaff}
 .analysis-flow-result-status,.analysis-flow-result-muted{color:#93aeca;font-variant-numeric:tabular-nums}
