@@ -2685,6 +2685,22 @@ fn excluded_tracks_never_appear_as_assignable_unassigned_ids() {
 }
 
 #[test]
+fn legacy_null_automatic_links_preserve_manual_assignments() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let ctx = context(&root, sha, tracks);
+    let mut doc = base_document(&ctx);
+    doc["assignments"]["7"] = json!("abcdef012345");
+    doc["automatic_assignments"] = Value::Null;
+    let loaded = validated(Some(&serde_json::to_vec(&doc).unwrap()), &ctx).unwrap();
+    assert_eq!(loaded["automatic_assignments"], json!({}));
+    assert_eq!(loaded["assignments"], doc["assignments"]);
+    doc["automatic_assignments"] = json!([7]);
+    assert!(validated(Some(&serde_json::to_vec(&doc).unwrap()), &ctx).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn native_manual_assignments_are_replay_scoped_and_roster_checked() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();

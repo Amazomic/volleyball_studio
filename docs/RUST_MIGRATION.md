@@ -3874,3 +3874,9 @@ Studio показывает кнопку перехода между debug и re
 - Исправление: поиск `openvino_c.dll` в управляемой директории зависимостей и в 64-битной установке Python; явный путь имеет приоритет, неверная настройка и отсутствие DLL обнаруживаются при запуске/Doctor. Добавлен воспроизводимый локальный установщик OpenVINO 2025.4.0 без изменения глобального Python. На HOME-PC runtime установлен в `%LOCALAPPDATA%\VolleyballStudio\native-deps\openvino`.
 - RED: тест обнаружения DLL до реализации не находил `scripts/find-openvino-runtime.ps1`. GREEN: Windows discovery (приоритет explicit/env, управляемый runtime, 64-битный Python, отвергание отсутствующего файла и 32-битного Python), реальный `cargo test -p volley-inference actual_openvino_model_vector_if_native_library_configured --offline --locked` с DLL — PASS (1/1). `scripts/check-all.ps1`: PASS (WASM, fmt, Clippy, Rust workspace, Node gates). Перепроверка на пользовательских матчах/фактический процент автопривязки — NOT TESTED; проекты и эталоны не изменены.
 - Применение: стандартная очередь `scripts/deploy-volley-queue.ps1` после публикации SHA и сверка HTTP.
+
+### 2026-11-24 — Normalize empty automatic player links
+
+- Base: `f32cc268f3de4a6b19fc9acb6d125002ed4b099c`; owner: `rust/volley-app/src/native_player_tracks/assignments.rs`; regression: `tests.rs`.
+- Legacy null or absent automatic assignments are normalized to an empty object; new documents use the same canonical shape. Manual links, exclusions, replay identity and rejection of malformed non-null values are preserved.
+- RED: `legacy_null_automatic_links_preserve_manual_assignments` reproduced `Invalid automatic links`. GREEN: `cargo test -p volley-app --offline --locked native_player_tracks` 105/105; `scripts/check-all.ps1` PASS (WASM, fmt, Clippy, workspace tests, 108 Node gates). GPU/real-match quality NOT TESTED. Live deployment verified separately after publication.

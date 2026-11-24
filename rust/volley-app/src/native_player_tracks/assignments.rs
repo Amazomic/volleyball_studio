@@ -647,7 +647,7 @@ pub(super) fn base_document(ctx: &Inputs) -> Value {
         "project_id":ctx.project_id,"video":ctx.video,
         "replay_id":ctx.replay_id,
         "source_replay_sha256":ctx.source_sha,
-        "assignments":{},"excluded_ids":[],
+        "assignments":{},"excluded_ids":[],"automatic_assignments":{},
         "athlete_identity_claims_manually_reviewed":true,
         "automatic_reid_binding":false,
     })
@@ -656,7 +656,7 @@ pub(super) fn validated(raw: Option<&[u8]>, ctx: &Inputs) -> Result<Value, Strin
     let Some(bytes) = raw else {
         return Ok(base_document(ctx));
     };
-    let doc: Value = serde_json::from_slice(bytes)
+    let mut doc: Value = serde_json::from_slice(bytes)
         .map_err(|e| format!("Invalid track assignments JSON: {e}"))?;
     if doc["schema"] != "volley-native-player-track-links/1"
         || doc["project_id"] != ctx.project_id
@@ -667,6 +667,9 @@ pub(super) fn validated(raw: Option<&[u8]>, ctx: &Inputs) -> Result<Value, Strin
         || doc["automatic_reid_binding"] != false
     {
         return Err("Manual Track ID links refer to a different replay or schema".into());
+    }
+    if doc["automatic_assignments"].is_null() {
+        doc["automatic_assignments"] = json!({});
     }
     let assignments = doc["assignments"]
         .as_object()
