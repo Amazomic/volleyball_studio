@@ -1,5 +1,15 @@
 use super::super::RawDetection;
 use serde::{Deserialize, Serialize};
+use volley_core::ball_interpolation::{
+    stabilize_ball_motion, BallStabilizerSettings, ScoredBallSample, StabilizedBallMotion,
+    BALL_STABILIZER_ALGORITHM_VERSION,
+};
+
+#[derive(Debug, Serialize)]
+struct RallyBallStabilizer {
+    algorithm: &'static str,
+    settings: BallStabilizerSettings,
+}
 
 const CONTEXT_FRAMES: u64 = 30;
 const MIN_DETECTIONS: usize = 45;
@@ -56,6 +66,7 @@ pub(super) struct RallyMask {
     movement_filter_version: &'static str,
     context_seconds: f64,
     observed_ball_frames: usize,
+    ball_stabilizer: RallyBallStabilizer,
     pub detected: Vec<(u64, u64)>,
     pub merged: Vec<(u64, u64)>,
     pub selected: Vec<(u64, u64)>,
@@ -64,11 +75,22 @@ pub(super) struct RallyMask {
 }
 
 impl RallyMask {
+    #[cfg(test)]
     pub fn from_ball_samples(
         samples: &[RawDetection],
         frames: u64,
         settings: PrimaryRallySettings,
     ) -> Result<Self, String> {
+        Self::with_ball_stabilizer(samples, frames, settings, BallStabilizerSettings::default())
+            .map(|(mask, _)| mask)
+    }
+
+    pub fn with_ball_stabilizer(
+        samples: &[RawDetection],
+        frames: u64,
+        settings: PrimaryRallySettings,
+        stabilizer_settings: BallStabilizerSettings,
+    ) -> Result<(Self, StabilizedBallMotion), String> {
         settings.validate()?;
         let len = usize::try_from(frames).map_err(|_| "Rally mask frame count overflow")?;
         if len == 0 || len > 48 * 3600 * 30 {
@@ -98,7 +120,21 @@ impl RallyMask {
             ]);
             scores[frame] = sample.score;
         }
-        let observed_ball_frames = points.iter().filter(|point| point.is_some()).count();
+        let samples = points
+            .into_iter()
+            .zip(scores)
+            .enumerate()
+            .filter_map(|(frame, (point, confidence))| {
+                Some(ScoredBallSample {
+                    frame,
+                    point: point?,
+                    confidence,
+                })
+            })
+            .collect::<Vec<_>>();
+        let trajectory = stabilize_ball_motion(&samples, len, stabilizer_settings)?;
+        let observed_ball_frames = trajectory.observed_frames;
+        let mut points = trajectory.points.clone();
         let motion = crate::cpu_retrack::ball_track::analyze_moving_ball(
             &points,
             settings.min_trajectory_seconds,
@@ -172,24 +208,31 @@ impl RallyMask {
         if fallback_reason.is_some() {
             selected.clear();
         }
-        Ok(Self {
-            schema: "volley-primary-rally-mask/1",
-            source_frame_count: frames,
-            min_trajectory_seconds: settings.min_trajectory_seconds,
-            merge_gap_seconds: settings.merge_gap_seconds,
-            min_rally_seconds: crate::cpu_retrack::ball_track::MIN_RALLY_FRAMES as f64 / 30.0,
-            stationary_ball_ms: settings.stationary_ball_ms,
-            stationary_intervals: motion.stationary,
-            unobserved_intervals: motion.unobserved,
-            movement_filter_version: "stationary_ball_min_rally_5s_v3",
-            context_seconds: CONTEXT_FRAMES as f64 / 30.0,
-            observed_ball_frames,
-            detected,
-            merged,
-            selected,
-            uncertain,
-            fallback_reason,
-        })
+        Ok((
+            Self {
+                schema: "volley-primary-rally-mask/1",
+                source_frame_count: frames,
+                min_trajectory_seconds: settings.min_trajectory_seconds,
+                merge_gap_seconds: settings.merge_gap_seconds,
+                min_rally_seconds: crate::cpu_retrack::ball_track::MIN_RALLY_FRAMES as f64 / 30.0,
+                stationary_ball_ms: settings.stationary_ball_ms,
+                stationary_intervals: motion.stationary,
+                unobserved_intervals: motion.unobserved,
+                movement_filter_version: "stationary_ball_min_rally_5s_v3",
+                context_seconds: CONTEXT_FRAMES as f64 / 30.0,
+                observed_ball_frames,
+                ball_stabilizer: RallyBallStabilizer {
+                    algorithm: BALL_STABILIZER_ALGORITHM_VERSION,
+                    settings: stabilizer_settings,
+                },
+                detected,
+                merged,
+                selected,
+                uncertain,
+                fallback_reason,
+            },
+            trajectory,
+        ))
     }
 
     pub fn includes(&self, frame: u64) -> bool {
@@ -257,6 +300,21 @@ mod tests {
         assert!(mask.includes(start.saturating_sub(20)));
         assert!(!mask.includes(899));
         assert!(!mask.includes(start.saturating_sub(70)));
+    }
+
+    #[test]
+    fn primary_rally_mask_records_the_stabilizer_used_to_select_player_frames() {
+        let mask = RallyMask::from_ball_samples(
+            &moving_samples(80, 270),
+            900,
+            PrimaryRallySettings::default(),
+        )
+        .unwrap();
+        let saved = serde_json::to_value(mask).unwrap();
+        assert_eq!(
+            saved["ball_stabilizer"]["algorithm"],
+            volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION
+        );
     }
 
     #[test]

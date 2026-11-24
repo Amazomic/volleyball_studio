@@ -440,12 +440,12 @@
   const pipelineStages=[
     ["video","Подготовка видео","input",1],
     ["ball","Детекция мяча","gpu",1],
+    ["ball_stabilizer","ball_stabilizer","cpu",1],
     ["rallies","Розыгрыши","cpu",1],
     ["players","Поиск игроков","gpu",1],
     ["fusion","Данные GPU","output",1],
     ["pose","Позы игроков","gpu",1],
     ["tracking","Трекинг ID","cpu",2],
-    ["ball_stabilizer","Интерполяция траектории мяча","cpu",2],
     ["touches","Касания","cpu",2],
     ["touch_types","Типы касаний","cpu",2],
     ["publish","Публикация розыгрышей","output",2],
@@ -458,7 +458,7 @@
   const pipelineModelMeta=(id,run)=>{
     const known={
       ball:["VballNetV4c","model"],
-      ball_stabilizer:["Ball Stabilizer","algorithm"],
+      ball_stabilizer:["ball_stabilizer","algorithm"],
       players:[(run?run.profile?.gpu?.person_detector:$("studio-gpu-person-detector")?.value)==="rfdetr-large"?"RF-DETR Large":"RF-DETR Medium","model"],
       pose:["RTMPose-M Body7","model"],
       tracking:["ByteTrack","algorithm"],
@@ -505,7 +505,7 @@
     if(entry?.id&&pipelineNames.has(entry.id))return entry.id;
     const name=String(typeof entry==="string"?entry:entry?.name||"");
     if(/Проверка исходного видео|Подготовка исходного видео/.test(name))return "video";
-    if(/Ball Stabilizer|Интерполяция траектории мяча/.test(name))return "ball_stabilizer";
+    if(/ball_stabilizer|Ball Stabilizer|Интерполяция траектории мяча/.test(name))return "ball_stabilizer";
     if(/Поиск розыгрышей/.test(name))return "rallies";
     if(/GPU.*V[Bb]allNet/.test(name))return "ball";
     if(/RTMPose/.test(name)&&!/RF-DETR/.test(name))return "pose";
@@ -607,7 +607,7 @@
   };
   const pipelineEdges=[
     ["video","ball"],
-    ["ball","rallies"],
+    ["ball","ball_stabilizer"],
     ["video","players"],
     ["rallies","players"],
     ["players","pose","pose"],
@@ -618,7 +618,7 @@
     ["fusion","tracking"],
     ["pose","tracking","pose"],
     ["rallies","tracking"],
-    ["tracking","ball_stabilizer"],
+    ["ball_stabilizer","rallies"],
     ["ball_stabilizer","touches"],
     ["tracking","touches"],
     ["rallies","touches"],
@@ -658,8 +658,8 @@
   };
   const graphDescriptions={
     video:"Выбор видео, интервалов анализа и разметки площадки.",
-    ball:"VBallNetV4c работает с фиксированным окном из 9 кадров. Память CUDA и потоки CPU — общие настройки нейросетей 1-й фазы. Интерполяция и пространственная фильтрация ложных точек настраиваются отдельно во 2-й фазе (Ball Stabilizer).",
-    ball_stabilizer:"Ball Stabilizer использует все детекции VBallNet: отдалённые ложные точки отбрасываются по соседним положениям и непрерывности траектории. Короткие пропуски интерполируются до поиска касаний; розыгрыши 1-й фазы не меняются.",
+    ball:"VBallNetV4c работает с фиксированным окном из 9 кадров. Детекции мяча поступают в ball_stabilizer.",
+    ball_stabilizer:"Отбрасывает ложные точки и интерполирует короткие пропуски. Одна сохранённая траектория используется для поиска розыгрышей, касаний и предпросмотра.",
     rallies:"Рабочие настройки первичного анализа: длительность траектории, остановка мяча в миллисекундах и объединение без перекрытия удержаний или пропусков детекции от 3 секунд. Эксперименты в «Дебаге» имеют собственные значения и не меняют этот GPU-профиль.",
     players:"RF-DETR ищет игроков только внутри найденных игровых интервалов.",
     pose:"RTMPose-M Body7 получает рамки игроков и кадры в общем GPU-проходе с RF-DETR. Позы сохраняются после проверки объединённой версии GPU.",

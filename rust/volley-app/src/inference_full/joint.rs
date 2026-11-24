@@ -290,6 +290,7 @@ pub(crate) fn run_joint_pair(
     gpu_memory_limit_mb: u64,
     cpu_threads: usize,
     rally_settings: PrimaryRallySettings,
+    stabilizer_settings: volley_core::ball_interpolation::BallStabilizerSettings,
     cancelled: &AtomicBool,
     mut report: impl FnMut(f64, u64, u64, Option<(&Value, u64)>) -> Result<(), String>,
 ) -> Result<JointPair, String> {
@@ -465,10 +466,11 @@ pub(crate) fn run_joint_pair(
             total_frames,
             None,
         )?;
-        let mask = RallyMask::from_ball_samples(
+        let (mask, trajectory) = RallyMask::with_ball_stabilizer(
             ball_writer.ball_samples.as_deref().unwrap_or(&[]),
             ball_scan.decode.decoded_frames,
             rally_settings,
+            stabilizer_settings,
         )?;
         if let Some(reason) = mask.fallback_reason {
             return Err(format!(
@@ -480,6 +482,11 @@ pub(crate) fn run_joint_pair(
         let mut mask_value = serde_json::to_value(&mask)
             .map_err(|error| format!("Serialize primary rally mask: {error}"))?;
         mask_value["selected_frames"] = json!(selected_frames);
+        let trajectory_sha =
+            crate::cpu_touches::write_ball_trajectory(&ball.folder, &trajectory, cancelled)?;
+        mask_value["ball_stabilizer"]["trajectory_sha256"] = json!(trajectory_sha);
+        mask_value["ball_stabilizer"]["confidence_frames"] = json!(trajectory.confidence_frames);
+        mask_value["ball_stabilizer"]["observed_frames"] = json!(trajectory.observed_frames);
         storage::write_json_atomic(
             &ball.folder.join("rally_mask.json"),
             &json!({

@@ -776,7 +776,7 @@ fn pipeline_stage_id(name: &str) -> &'static str {
     if name.contains("Проверка исходного видео") || name.contains("Подготовка исходного видео")
     {
         "video"
-    } else if name.contains("Ball Stabilizer") {
+    } else if name.contains("Ball Stabilizer") || name == "ball_stabilizer" {
         "ball_stabilizer"
     } else if name.contains("Поиск розыгрышей") {
         "rallies"
@@ -1087,6 +1087,17 @@ fn gpu_lineage_valid(
     {
         return false;
     }
+    if request.mode.allows_gpu_execution()
+        && (saved["gpu_rally_mask"]["ball_stabilizer"]["algorithm"]
+            != volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION
+            || saved["gpu_rally_mask"]["ball_stabilizer"]["settings"]
+                != json!(request.post.ball_stabilizer)
+            || !saved["gpu_rally_mask"]["ball_stabilizer"]["trajectory_sha256"]
+                .as_str()
+                .is_some_and(volley_core::contracts::sha256))
+    {
+        return false;
+    }
     let Some(players_id) = saved["gpu_jobs"]["players"]
         .as_str()
         .filter(|id| valid_id(id))
@@ -1298,7 +1309,12 @@ fn cpu_lineage_valid(
         && touches["source_replay_id"] == replay
         && touches["ball_stabilizer"]["schema"] == "volley-ball-stabilizer/1"
         && touches["ball_stabilizer"]["version"] == volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION
-        && touches["ball_stabilizer"]["settings"] == json!(request.post.ball_stabilizer)
+        && touches["ball_stabilizer"]["settings"]
+            == if saved["gpu_rally_mask"]["ball_stabilizer"]["trajectory_sha256"].is_string() {
+                saved["gpu_rally_mask"]["ball_stabilizer"]["settings"].clone()
+            } else {
+                json!(request.post.ball_stabilizer)
+            }
         && touches["ball_stabilizer"]["source_replay_sha256"] == touches["source_replay_sha256"]
         && saved["ball_stabilizer"] == touches["ball_stabilizer"]
         && touches["project_id"] == request.project_id
@@ -2025,12 +2041,15 @@ async fn pipeline(
                         request.gpu.gpu_memory_limit_mb,
                         request.gpu.cpu_threads,
                         request.gpu.primary_rallies,
+                        request.post.ball_stabilizer,
                         cancel,
                         |fraction, processed, total, rally_mask| {
                             if let Some((mask, decoded_frames)) = rally_mask {
                                 publish_primary_rally_mask(path, status, mask, decoded_frames)?;
                             }
-                            let label = if fraction < 0.4 {
+                            let label = if fraction == 0.399999 && rally_mask.is_none() {
+                                "ball_stabilizer"
+                            } else if fraction < 0.4 {
                                 "GPU · VBallNet: траектория мяча и розыгрыши"
                             } else if full_resolution_pose {
                                 "GPU · RF-DETR + RTMPose: игровые интервалы"
@@ -2245,7 +2264,9 @@ async fn pipeline(
         return Err("cancelled".into());
     }
 
-    progress(path, status, "Постобработка · Ball Stabilizer", 90.0)?;
+    if status["gpu_rally_mask"]["ball_stabilizer"]["trajectory_sha256"].is_null() {
+        progress(path, status, "ball_stabilizer", 90.0)?;
+    }
     let stabilized = tokio::task::block_in_place(|| {
         cpu_touches::stabilize_primary_replay(
             app,
@@ -2258,7 +2279,7 @@ async fn pipeline(
                 progress_with_frames(
                     path,
                     status,
-                    "Постобработка · Ball Stabilizer",
+                    "ball_stabilizer",
                     90.0 + done as f64 / total.max(1) as f64,
                     Some((done, total)),
                 )
@@ -2269,7 +2290,7 @@ async fn pipeline(
     save(path, status)?;
     log_event(
         path,
-        "Ball Stabilizer",
+        "ball_stabilizer",
         "success",
         &format!(
             "Принято={} · отклонено={} · интерполировано={}",
@@ -4236,7 +4257,12 @@ mod branching_tests {
                 "merge_gap_seconds":request.gpu.primary_rallies.merge_gap_seconds,
                 "stationary_ball_ms":request.gpu.primary_rallies.stationary_ball_ms,
                 "movement_filter_version":"stationary_ball_min_rally_5s_v3",
-                "min_rally_seconds":5.0
+                "min_rally_seconds":5.0,
+                "ball_stabilizer":{
+                    "algorithm":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
+                    "trajectory_sha256":sha,
+                    "settings":volley_core::ball_interpolation::BallStabilizerSettings::default()
+                }
             },
             "gpu_rally_mask_sha256":sha,
             "ball_stabilizer":{
@@ -4335,10 +4361,10 @@ mod branching_tests {
             "changed Ball Stabilizer must invalidate CPU results"
         );
         assert!(
-            changed.gpu.is_some(),
-            "changed Ball Stabilizer must reuse VBallNet GPU"
+            changed.gpu.is_none(),
+            "changing the primary trajectory invalidates dependent player detections"
         );
-        assert!(!cpu_lineage_valid(&project_dir, &request, &saved, None));
+        assert!(cpu_lineage_valid(&project_dir, &request, &saved, None));
         request.post.ball_stabilizer = Default::default();
         storage::write_json_atomic(&directory.join("status.json"), &saved).unwrap();
         let mut legacy = saved.clone();

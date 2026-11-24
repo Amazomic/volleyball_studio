@@ -53,7 +53,7 @@ const context=vm.createContext({});
 context.$=()=>({checked:false});
 vm.runInContext(definitions+"this.stages=pipelineStages;this.id=pipelineId;this.model=pipelineModelMeta;",context);
 assert.equal(context.model("ball")[0],"VballNetV4c");
-assert.equal(context.model("ball_stabilizer")[0],"Ball Stabilizer");
+assert.equal(context.model("ball_stabilizer")[0],"ball_stabilizer");
 assert.equal(context.model("players")[0],"RF-DETR Medium");
 assert.equal(context.model("pose")[0],"RTMPose-M Body7");
 assert.equal(context.model("tracking")[1],"algorithm");
@@ -65,7 +65,7 @@ const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
 assert.equal(stages.length,13);
 assert.ok(ids.includes("publish")&&!ids.includes("material"));
-for(const [row,count] of [[1,6],[2,7]]){
+for(const [row,count] of [[1,7],[2,6]]){
   const nodes=stages.filter(item=>item[3]===row);
   assert.equal(nodes.length,count);
 }
@@ -176,6 +176,8 @@ assert.match(js,/stationary_ball_ms:inputValue\("studio-gpu-rally-stationary-ms"
 const dataLinks=vm.runInNewContext(extract("const pipelineEdges=","const graphSettings=")
   +"({links:pipelineEdges,state:graphLinkState});");
 const actualInputs=target=>Array.from(dataLinks.links.filter(link=>link[1]===target),link=>link[0]).sort();
+assert.deepEqual(actualInputs("ball_stabilizer"),["ball"]);
+assert.deepEqual(actualInputs("rallies"),["ball_stabilizer"]);
 assert.deepEqual(actualInputs("fusion"),["ball","players"]);
 assert.deepEqual(actualInputs("tracking"),["fusion","pose","rallies"]);
 assert.deepEqual(actualInputs("touches"),["ball_stabilizer","rallies","tracking"]);

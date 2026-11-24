@@ -422,6 +422,53 @@ fn read_canonical_ball_motion(
     Ok(motion)
 }
 
+pub(crate) fn write_ball_trajectory(
+    folder: &Path,
+    motion: &volley_core::ball_interpolation::StabilizedBallMotion,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
+    let part = folder.join("trajectory.jsonl.partial");
+    let output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&part)
+        .map_err(|e| format!("Create canonical ball trajectory: {e}"))?;
+    let mut writer = BufWriter::new(output);
+    let mut digest = Sha256::new();
+    let rejected: std::collections::HashSet<usize> =
+        motion.rejected_frames.iter().copied().collect();
+    for (index, point) in motion.points.iter().enumerate() {
+        if cancel.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        let row = CanonicalBallFrame {
+            frame: index as u64,
+            ball: *point,
+            interpolated: motion.interpolated[index],
+            rejected: rejected.contains(&index),
+        };
+        row.validate(index as u64)?;
+        let mut line = serde_json::to_vec(&row).map_err(|e| e.to_string())?;
+        line.push(b'\n');
+        writer
+            .write_all(&line)
+            .map_err(|e| format!("Write canonical ball frame: {e}"))?;
+        digest.update(&line);
+    }
+    writer
+        .flush()
+        .map_err(|e| format!("Flush canonical ball trajectory: {e}"))?;
+    writer
+        .get_ref()
+        .sync_all()
+        .map_err(|e| format!("Sync canonical ball trajectory: {e}"))?;
+    drop(writer);
+    let checksum = format!("{:x}", digest.finalize());
+    fs::rename(&part, folder.join(BALL_TRAJECTORY_FILE))
+        .map_err(|e| format!("Publish canonical ball trajectory: {e}"))?;
+    Ok(checksum)
+}
+
 fn persist_stabilized_replay(
     project: &Path,
     source: (&str, &str, &str),
@@ -438,45 +485,7 @@ fn persist_stabilized_replay(
     let folder = root.join(&artifact_id);
     fs::create_dir(&folder).map_err(|e| format!("Create Ball Stabilizer artifact: {e}"))?;
     let result = (|| -> Result<String, String> {
-        let part = folder.join("trajectory.jsonl.partial");
-        let output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&part)
-            .map_err(|e| format!("Create canonical ball trajectory: {e}"))?;
-        let mut writer = BufWriter::new(output);
-        let mut digest = Sha256::new();
-        let rejected: std::collections::HashSet<usize> =
-            motion.rejected_frames.iter().copied().collect();
-        for (index, point) in motion.points.iter().enumerate() {
-            if cancel.load(Ordering::Acquire) {
-                return Err("cancelled".into());
-            }
-            let row = CanonicalBallFrame {
-                frame: index as u64,
-                ball: *point,
-                interpolated: motion.interpolated[index],
-                rejected: rejected.contains(&index),
-            };
-            row.validate(index as u64)?;
-            let mut line = serde_json::to_vec(&row).map_err(|e| e.to_string())?;
-            line.push(b'\n');
-            writer
-                .write_all(&line)
-                .map_err(|e| format!("Write canonical ball frame: {e}"))?;
-            digest.update(&line);
-        }
-        writer
-            .flush()
-            .map_err(|e| format!("Flush canonical ball trajectory: {e}"))?;
-        writer
-            .get_ref()
-            .sync_all()
-            .map_err(|e| format!("Sync canonical ball trajectory: {e}"))?;
-        drop(writer);
-        let checksum = format!("{:x}", digest.finalize());
-        fs::rename(&part, folder.join(BALL_TRAJECTORY_FILE))
-            .map_err(|e| format!("Publish canonical ball trajectory: {e}"))?;
+        let checksum = write_ball_trajectory(&folder, motion, cancel)?;
         let manifest = json!({
             "schema":BALL_TRAJECTORY_SCHEMA,
             "algorithm_version":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
@@ -501,6 +510,83 @@ fn persist_stabilized_replay(
             Err(error)
         }
     }
+}
+
+fn load_primary_ball_trajectory(
+    project: &Path,
+    replay: &Value,
+    frames: u64,
+) -> Result<
+    Option<(
+        volley_core::ball_interpolation::StabilizedBallMotion,
+        volley_core::ball_interpolation::BallStabilizerSettings,
+    )>,
+    String,
+> {
+    let Some(job) = replay["player_frame_scope_ball_job_id"].as_str() else {
+        return Ok(None);
+    };
+    if !opaque_id(job) {
+        return Err("Invalid primary Ball Stabilizer source ID".into());
+    }
+    let folder = project.join("native_gpu_runs").join(job);
+    let mask = safe_file(&folder, "rally_mask.json", MAX_MANIFEST_BYTES)?;
+    let bytes = fs::read(mask).map_err(|e| e.to_string())?;
+    if replay["player_frame_scope_sha256"] != format!("{:x}", Sha256::digest(&bytes)) {
+        return Err("Primary rally mask changed before Ball Stabilizer reuse".into());
+    }
+    let evidence: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let source = &evidence["mask"]["ball_stabilizer"];
+    if source.is_null() {
+        return Ok(None);
+    }
+    if source["algorithm"] != volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION
+        || evidence["ball_job_id"] != job
+    {
+        return Err("Incompatible primary Ball Stabilizer artifact".into());
+    }
+    let file_sha = source["trajectory_sha256"]
+        .as_str()
+        .filter(|sha| volley_core::contracts::sha256(sha))
+        .ok_or("Missing primary Ball Stabilizer trajectory checksum")?;
+    let source_frames = evidence["mask"]["source_frame_count"]
+        .as_u64()
+        .filter(|count| (frames..=frames + 8).contains(count))
+        .ok_or("Primary Ball Stabilizer frame count mismatch")?;
+    let count = |key: &str| {
+        source[key]
+            .as_u64()
+            .filter(|value| *value <= source_frames)
+            .map(|value| value as usize)
+            .ok_or("Invalid primary Ball Stabilizer frame statistics")
+    };
+    let settings =
+        serde_json::from_value::<volley_core::ball_interpolation::BallStabilizerSettings>(
+            source["settings"].clone(),
+        )
+        .map_err(|e| e.to_string())?;
+    settings.validate()?;
+    let trajectory = safe_file(&folder, BALL_TRAJECTORY_FILE, MAX_INPUT_BYTES)?;
+    let mut motion = read_canonical_ball_motion(
+        &trajectory,
+        file_sha,
+        source_frames,
+        count("confidence_frames")?,
+        count("observed_frames")?,
+    )?;
+    motion.points.truncate(frames as usize);
+    motion.interpolated.truncate(frames as usize);
+    motion
+        .rejected_frames
+        .retain(|&frame| frame < frames as usize);
+    motion.observed_frames = motion
+        .points
+        .iter()
+        .zip(&motion.interpolated)
+        .filter(|(point, interpolated)| point.is_some() && !**interpolated)
+        .count();
+    motion.confidence_frames = motion.observed_frames + motion.rejected_frames.len();
+    Ok(Some((motion, settings)))
 }
 
 pub(crate) fn stabilize_primary_replay(
@@ -555,7 +641,13 @@ pub(crate) fn stabilize_primary_replay(
         return Err("Incompatible CPU replay for Ball Stabilizer".into());
     }
     let path = safe_file(&replay, "tracked_frames.jsonl", MAX_INPUT_BYTES)?;
-    let computed = stabilize_replay_rows(&path, &sha, frames, settings, cancel, &mut progress)?;
+    let (computed, settings) = match load_primary_ball_trajectory(&project, &manifest, frames)? {
+        Some((motion, primary_settings)) => (motion, primary_settings),
+        None => (
+            stabilize_replay_rows(&path, &sha, frames, settings, cancel, &mut progress)?,
+            settings,
+        ),
+    };
     let (artifact_id, trajectory_sha256) = persist_stabilized_replay(
         &project,
         (project_id, video, replay_id),
@@ -678,6 +770,55 @@ fn use_stabilized_ball(
 #[cfg(test)]
 mod ball_stabilizer_postprocessing_tests {
     use super::*;
+
+    #[test]
+    fn primary_trajectory_reuse_checks_both_hashes_and_aligns_the_replay_tail() {
+        let project = std::env::temp_dir().join(format!("volley-primary-ball-{}", Uuid::new_v4()));
+        let job = Uuid::new_v4().simple().to_string();
+        let folder = project.join("native_gpu_runs").join(&job);
+        fs::create_dir_all(&folder).unwrap();
+        let motion = volley_core::ball_interpolation::StabilizedBallMotion {
+            points: vec![Some([0.2, 0.5]), Some([0.3, 0.5]), Some([0.4, 0.5])],
+            interpolated: vec![false, true, false],
+            rejected_frames: vec![],
+            confidence_frames: 2,
+            observed_frames: 2,
+        };
+        let checksum = write_ball_trajectory(&folder, &motion, &AtomicBool::new(false)).unwrap();
+        let evidence = serde_json::to_vec(&json!({
+            "ball_job_id": job,
+            "mask": {
+                "source_frame_count": 3,
+                "ball_stabilizer": {
+                    "algorithm": volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
+                    "settings": volley_core::ball_interpolation::BallStabilizerSettings::default(),
+                    "trajectory_sha256": checksum,
+                    "confidence_frames": 2,
+                    "observed_frames": 2,
+                }
+            },
+        }))
+        .unwrap();
+        fs::write(folder.join("rally_mask.json"), &evidence).unwrap();
+        let mut replay = json!({
+            "player_frame_scope_ball_job_id": job,
+            "player_frame_scope_sha256": format!("{:x}", Sha256::digest(&evidence)),
+        });
+        let (reused, _) = load_primary_ball_trajectory(&project, &replay, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reused.points, motion.points[..2]);
+        assert_eq!(reused.interpolated, [false, true]);
+        assert_eq!(reused.observed_frames, 1);
+        fs::write(folder.join(BALL_TRAJECTORY_FILE), b"invalid").unwrap();
+        assert!(load_primary_ball_trajectory(&project, &replay, 2).is_err());
+        replay["player_frame_scope_sha256"] = json!("invalid");
+        assert_eq!(
+            load_primary_ball_trajectory(&project, &replay, 2).unwrap_err(),
+            "Primary rally mask changed before Ball Stabilizer reuse"
+        );
+        fs::remove_dir_all(project).unwrap();
+    }
 
     #[test]
     fn stabilized_cpu_replay_filters_false_ball_interpolates_gap_and_preserves_sha() {

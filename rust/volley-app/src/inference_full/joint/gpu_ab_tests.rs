@@ -337,6 +337,7 @@ fn real_uu_match_gpu_ab_legacy_vs_shared() -> Result<(), String> {
         memory,
         threads,
         super::PrimaryRallySettings::default(),
+        Default::default(),
         &abort,
         |_, _, _, _| Ok(()),
     )?;
@@ -641,6 +642,7 @@ fn original_pose_single_decode_benchmark() -> Result<(), String> {
             0,
             4,
             super::PrimaryRallySettings::default(),
+            Default::default(),
             &abort,
             |_, _, _, _| Ok(()),
         )?;
@@ -968,6 +970,7 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
         0,
         4,
         super::PrimaryRallySettings::default(),
+        Default::default(),
         &abort,
         |_, _, _, _| Ok(()),
     )?;
