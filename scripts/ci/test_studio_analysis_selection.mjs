@@ -212,3 +212,37 @@ chainHandler({detail:{project_id:"abc",video:""}});
 assert.equal(updates,1,"Removing all analyses must update postprocess availability");
 
 console.log("PASS: primary analysis selection, completion, deletion and empty-state guards.");
+
+const freshCalls=[];
+context.previewCache.load=async(path,ttl,persist,fresh)=>{
+  freshCalls.push({path,fresh});
+  if(path.includes("/runs"))return {runs:[]};
+  throw Error("Temporary overview failure");
+};
+let saves=0,builds=0;
+context.chainSnapshot.save=()=>{saves++;};
+context.window.VolleyStudioChain.build=()=>{builds++;return chain([primaryA],{});};
+await assert.rejects(context.loadChain("","",false),/индекс|стадии|каталог/i);
+assert.equal(builds,0,"Incomplete source catalog must not fabricate an orphan analysis");
+assert.equal(saves,0,"Incomplete source catalog must not be cached");
+assert.ok(freshCalls.every(call=>call.fresh===true),"Catalog revalidation must bypass stale metadata cache");
+
+let release;
+context.window.VolleyballUi.ready=new Promise(resolve=>{release=resolve;});
+s.project="abc";s.analysis=primaryA;s.run=runA;
+analysis.value=primaryA;cpu.value=runA;
+let reads=0;
+context.chainSnapshot.read=()=>{reads++;return null;};
+context.previewCache.load=async path=>path.includes("/runs")?{runs:[]}:overview;
+context.window.VolleyStudioChain.build=()=>chain([], {});
+const stale=context.loadChain(primaryA,runA,false,true);
+assert.equal(s.analysis,"","Old analysis must be cleared before WASM readiness");
+assert.equal(s.run,"","Old CPU run must be cleared before WASM readiness");
+s.project="other";
+s.projectVideos=[];
+const current=context.loadChain("","",false,true);
+release();
+await Promise.all([stale,current]);
+assert.equal(reads,0,"Explicit project switching must not restore a persisted snapshot");
+assert.equal(s.project,"other");
+assert.equal(s.analysis,"");

@@ -58,7 +58,7 @@
   // selectors synchronously on refresh while metadata is checked in background.
   // Never cache video bytes or claim this snapshot verifies source evidence.
   const chainSnapshot=(()=>{
-    const key="volley:studio-chain:v1";
+    const key="volley:studio-chain:v2";
     const read=(project,videos)=>{
       try{
         const raw=localStorage.getItem(key);
@@ -74,6 +74,7 @@
              entry[1].project_id!==project||entry[1].video!==entry[0])return null;
           overviews.set(entry[0],entry[1]);
         }
+        if(overviews.size!==videos.length)return null;
         return window.VolleyStudioChain?.build(videos,overviews,row.runs)||null;
       }catch{return null;}
     };
@@ -162,13 +163,13 @@
         for(const key of keys)store.removeItem(key);
       }catch{}
     };
-    const load=(path,ttl,persist=false)=>{
-      const value=read(path);
+    const load=(path,ttl,persist=false,fresh=false)=>{
+      const value=fresh?null:read(path);
       if(value!==null)return Promise.resolve(value);
-      if(inflight.has(path))return inflight.get(path);
+      if(!fresh&&inflight.has(path))return inflight.get(path);
       const started=epoch;
       const task=request(path).then(value=>{
-        if(epoch===started)save(path,value,ttl,persist);
+        if(epoch===started&&inflight.get(path)===task)save(path,value,ttl,persist);
         return value;
       }).finally(()=>{if(inflight.get(path)===task)inflight.delete(path);});
       inflight.set(path,task);
@@ -3708,23 +3709,25 @@
     // to the remaining available versions using the normal reset flow.
     await setAnalysis(preferredRun);
   };
-  const loadChain=async(preferredAnalysis="",preferredRun="",retainCurrent=false)=>{
-    await window.VolleyballUi?.ready;
+  const loadChain=async(preferredAnalysis="",preferredRun="",retainCurrent=false,freshOnly=false)=>{
     const token=++s.chainEpoch,project=s.project;
     if(!retainCurrent){
       reset();
-      s.chain=null;
+      s.analysis="";s.chain=null;
       options(ui.analysis,[],"value",x=>x,"Загрузка анализов…");
       options(ui.run,[],"rally_run_id",x=>x,"Сначала выберите анализ");
       ui.analysis.disabled=true;ui.run.disabled=true;
+      refreshPicker(ui.analysis);refreshPicker(ui.run);
     }
+    await window.VolleyballUi?.ready;
+    if(token!==s.chainEpoch||s.project!==project)return;
     if(!project){
       options(ui.analysis,[],"value",x=>x,"Сначала выберите проект");
       message("Выберите проект для просмотра цепочки обработок.");
       return;
     }
     const videos=s.projectVideos.slice(0,40);
-    const cached=chainSnapshot.read(project,videos);
+    const cached=freshOnly?null:chainSnapshot.read(project,videos);
     if(cached){
       await renderChain(cached,retainCurrent?s.analysis:preferredAnalysis,
         retainCurrent?s.run:preferredRun,retainCurrent);
@@ -3734,7 +3737,7 @@
     }
     try{
       const runs=await previewCache.load(
-        url("/api/cpu/native/rallies/runs",{project_id:project}),300000,true);
+        url("/api/cpu/native/rallies/runs",{project_id:project}),300000,true,true);
       if(token!==s.chainEpoch||s.project!==project)return;
       const overviews=new Map();
       let unavailable=0;
@@ -3744,7 +3747,7 @@
           try{
             const value=await previewCache.load(url("/api/studio/analysis-overview",{
               project_id:project,video
-            }),300000,true);
+            }),300000,true,true);
             if(value.schema!=="volley-native-analysis-overview/1"||
                value.project_id!==project||value.video!==video||value.metadata_only!==true)
               throw Error("Несовместимая версия индекса анализа");
@@ -3759,10 +3762,12 @@
       if(token!==s.chainEpoch||s.project!==project)return;
       const builder=window.VolleyStudioChain;
       if(!builder?.build)throw Error("Не удалось загрузить связанную цепочку данных");
+      if(unavailable){
+        const error=Error("Не удалось загрузить полный индекс стадий анализа");
+        if(cached){message(error.message,"error");return;}
+        throw error;
+      }
       const fresh=builder.build(videos,overviews,runs.runs);
-      // A transient partial API failure should not erase the last usable
-      // index. A later manual refresh retries the authoritative metadata.
-      if(unavailable&&cached)return;
       chainSnapshot.save(project,videos,overviews,runs.runs);
       if(!s.chain||chainSignature(s.chain)!==chainSignature(fresh)){
         // Preserve edits to the current selection made while revalidating.
@@ -3771,9 +3776,8 @@
           retainCurrent?s.run:cached?(s.run||preferredRun):preferredRun,
           retainCurrent);
       }
-      if(unavailable)message("Не удалось прочитать стадии "+unavailable+
-        " видео. Для части CPU-версий происхождение GPU не подтверждено.","error");
     }catch(error){
+      if(token!==s.chainEpoch||s.project!==project)return;
       if(!cached)throw error;
       console.warn("Обновление индекса обработок отложено:",error);
     }
@@ -3797,11 +3801,13 @@
     const current=rows.find(row=>row.id===s.project);
     s.projectVideos=Array.isArray(current?.videos)?
       current.videos.filter(video=>typeof video==="string"):[];
-    window.dispatchEvent(new Event("volley:project-ready"));
-    await loadChain(s.project===prev?selectedAnalysis:
+    const loading=loadChain(s.project===prev?selectedAnalysis:
       s.project===stored.project?stored.analysis:"",
       s.project===prev?selectedRun:
-      s.project===stored.project?stored.run:"");
+      s.project===stored.project?stored.run:"",false,!!prev&&s.project!==prev);
+    window.dispatchEvent(new Event("volley:project-ready"));
+    await loading;
+    if(epoch!==s.catalogEpoch)return;
     if(reference.active)void refreshReferenceCatalog();
   };
   const loadMarks=async(token)=>{
@@ -4706,11 +4712,13 @@
     const entry=s.projectCatalog.find(row=>row.id===s.project);
     s.projectVideos=Array.isArray(entry?.videos)?
       entry.videos.filter(video=>typeof video==="string"):[];
+    const project=s.project;
+    const loading=loadChain("","",false,true);
     window.dispatchEvent(new Event("volley:project-ready"));
     try{
-      await loadChain();
-      if(reference.active)void refreshReferenceCatalog();
-    }catch(e){failed(e);}
+      await loading;
+      if(project===s.project&&reference.active)void refreshReferenceCatalog();
+    }catch(e){if(project===s.project)failed(e);}
   });
   ui.analysis.addEventListener("change",()=>setAnalysis().catch(failed));
   ui.run.addEventListener("change",async()=>{

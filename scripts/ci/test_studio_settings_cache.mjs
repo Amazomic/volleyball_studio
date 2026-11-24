@@ -60,7 +60,7 @@ assert.equal(touch.value,"0.75","Unchanged defaults must restore user overrides"
 assert.equal(refreshed.analysisFormCache.read("b".repeat(12)),null,
   "Settings are isolated by project");
 assert.match(studio,/VolleyballStudioProjectCatalog=\(\)=>request\("\/api\/projects"\)/);
-assert.match(studio,/rallies\/runs",\{project_id:project\}\),300000,true\)/);
+assert.match(studio,/rallies\/runs",\{project_id:project\}\),300000,true,true\)/,"Source catalog refresh must bypass expired or stale metadata");
 assert.match(tabs,/await window\.VolleyballStudioProjectCatalog\(\)/);
 assert.match(tabs,/window\.VolleyballEditor\?\.load\(project,ui\.video\.value,true\)/);
 console.log("PASS: Studio refresh restores source chain and per-project settings using bounded metadata caches");
