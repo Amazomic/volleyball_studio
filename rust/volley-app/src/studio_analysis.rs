@@ -227,15 +227,12 @@ fn overview(state: &AppState, project_id: &str, video: &str) -> Result<Value, Ap
     let project_root = projects::project_root(state).join(project_id);
     safe_folder(&project_root).map_err(storage::bad_request)?;
     let _guard = if state.writes_enabled {
-        Some(crate::analysis_management::catalog_guard(
+        Some(crate::analysis_management::catalog_read_guard(
             state, project_id,
         )?)
     } else {
         None
     };
-    if state.writes_enabled {
-        crate::analysis_management::recover(&project_root)?;
-    }
     let mut stages = Vec::new();
     for (stage, folder, _, _) in STAGES {
         stages.push(stage_summary(

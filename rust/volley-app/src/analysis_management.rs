@@ -27,6 +27,24 @@ mod tests {
     }
 
     #[test]
+    fn catalog_reads_share_lock_without_allowing_concurrent_mutation() {
+        let root = std::env::temp_dir().join(format!("volley-catalog-lock-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("123456abcdef")).unwrap();
+        let first = read_catalog_guard(&root, "123456abcdef").unwrap();
+        let second = read_catalog_guard(&root, "123456abcdef").unwrap();
+        assert!(catalog_lock(&root, "123456abcdef", false).is_err());
+        assert!(catalog_lock(&root, "abcdef123456", false).is_ok());
+        drop(first);
+        assert!(catalog_lock(&root, "123456abcdef", false).is_err());
+        drop(second);
+        let writer = catalog_lock(&root, "123456abcdef", false).unwrap();
+        assert!(read_catalog_guard(&root, "123456abcdef").is_err());
+        drop(writer);
+        assert!(read_catalog_guard(&root, "123456abcdef").is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn rename_and_delete_primary_preserve_unrelated_analysis() {
         let root = std::env::temp_dir().join(format!("volley-analysis-edit-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
@@ -437,9 +455,32 @@ use std::collections::HashSet;
 use std::{fs, fs::File, path::Path, sync::Arc};
 
 pub(crate) fn catalog_guard(state: &AppState, project_id: &str) -> Result<File, ApiError> {
+    catalog_lock(&projects::project_root(state), project_id, false)
+}
+
+pub(crate) fn catalog_read_guard(state: &AppState, project_id: &str) -> Result<File, ApiError> {
+    read_catalog_guard(&projects::project_root(state), project_id)
+}
+
+fn read_catalog_guard(root: &Path, project_id: &str) -> Result<File, ApiError> {
+    let lock = catalog_lock(root, project_id, true)?;
+    let project = root.join(project_id);
+    if !project.join("native_analysis_deletion").exists()
+        && !project
+            .join("native_analysis_deletion_committed.json")
+            .exists()
+    {
+        return Ok(lock);
+    }
+    drop(lock);
+    let lock = catalog_lock(root, project_id, false)?;
+    recover(&project)?;
+    Ok(lock)
+}
+
+fn catalog_lock(root: &Path, project_id: &str, shared: bool) -> Result<File, ApiError> {
     storage::project_id(project_id)?;
-    let root = projects::project_root(state);
-    safe_folder(&root).map_err(storage::bad_request)?;
+    safe_folder(root).map_err(storage::bad_request)?;
     let locks = root.join(".analysis-locks");
     match fs::create_dir(&locks) {
         Ok(()) => {}
@@ -458,8 +499,12 @@ pub(crate) fn catalog_guard(state: &AppState, project_id: &str) -> Result<File, 
         .truncate(false)
         .open(path)
         .map_err(|e| storage::internal(format!("Analysis lock: {e}")))?;
-    lock.try_lock_exclusive()
-        .map_err(|_| storage::conflict("Данные проекта заняты другой операцией"))?;
+    if shared {
+        FileExt::try_lock_shared(&lock)
+    } else {
+        FileExt::try_lock_exclusive(&lock)
+    }
+    .map_err(|_| storage::conflict("Данные проекта заняты другой операцией"))?;
     Ok(lock)
 }
 

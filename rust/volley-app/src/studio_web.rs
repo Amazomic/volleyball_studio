@@ -328,15 +328,12 @@ fn list_runs(state: &AppState, project_id: &str) -> Result<Value, crate::storage
     let project_root = projects::project_root(state).join(project_id);
     safe_folder(&project_root).map_err(storage::bad_request)?;
     let _guard = if state.writes_enabled {
-        Some(crate::analysis_management::catalog_guard(
+        Some(crate::analysis_management::catalog_read_guard(
             state, project_id,
         )?)
     } else {
         None
     };
-    if state.writes_enabled {
-        crate::analysis_management::recover(&project_root)?;
-    }
     let root = project_root.join("native_cpu_rallies");
     if !root.exists() {
         return Ok(json!({"project_id":project_id,"runs":[],"total_seen":0,
