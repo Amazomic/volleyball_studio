@@ -3880,3 +3880,10 @@ Studio показывает кнопку перехода между debug и re
 - Base: `f32cc268f3de4a6b19fc9acb6d125002ed4b099c`; owner: `rust/volley-app/src/native_player_tracks/assignments.rs`; regression: `tests.rs`.
 - Legacy null or absent automatic assignments are normalized to an empty object; new documents use the same canonical shape. Manual links, exclusions, replay identity and rejection of malformed non-null values are preserved.
 - RED: `legacy_null_automatic_links_preserve_manual_assignments` reproduced `Invalid automatic links`. GREEN: `cargo test -p volley-app --offline --locked native_player_tracks` 105/105; `scripts/check-all.ps1` PASS (WASM, fmt, Clippy, workspace tests, 108 Node gates). GPU/real-match quality NOT TESTED. Live deployment verified separately after publication.
+
+## 2026-11-24 — ByteTrack как единственный трекер
+
+- По прямому решению пользователя удалены неиспользуемые ProvisionalTracker и тестовые legacy-модули identity_handoff, identity_turnover, track_merge; общие типы, подавление дублей и штатная постобработка ByteTrack сохранены. База a5cae60787a7ee63d570239d3187a3ed32c366ed, владелец tracking: rust/volley-app/src/cpu_retrack.rs и rust/volley-core/src/tracker/bytetrack.rs.
+- Экспериментальные бенчмарки используют ByteTrack; подпись детекторного бенчмарка больше не приписывает ему RTMPose. Исторические результаты сохранены, ограничения текущих примеров отражены в README.
+- Проверки: cargo test -p volley-core tracker:: --offline --locked PASS (28); cargo test -p volley-app --example bench_person_tracks --offline --locked PASS (1); cargo check -p volley-app --example bench_detector_swap --offline --locked PASS; powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-all.ps1 PASS (Rust, Clippy, WASM, 108 Node gates; штатные ignored тесты исключены).
+- Независимое сравнение качества трекеров на размеченных матчах, GPU-бенчмарки примеров и проверка реального видео NOT TESTED. Применение к Studio проверяется после публикации финального SHA.

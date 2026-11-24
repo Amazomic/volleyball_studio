@@ -38,13 +38,7 @@ const OUTPUT_FILE: &str = "tracked_frames.jsonl";
 pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rtmpose_primary_pose_association_v7";
 pub(crate) mod ball_track;
 mod gap_interpolation;
-#[cfg(test)]
-mod identity_handoff;
-#[cfg(test)]
-mod identity_turnover;
 mod pose_source;
-#[cfg(test)]
-mod track_merge;
 mod track_stitch;
 
 pub(crate) use volley_core::contracts::job_id as opaque_id;

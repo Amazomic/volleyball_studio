@@ -12,12 +12,24 @@ use std::{
 };
 use volley_core::{
     fusion::Candidate,
-    tracker::{ProvisionalTracker, TrackingOptions},
+    tracker::{bytetrack::ByteTracker, TrackingOptions},
 };
 use volley_inference::{
     person::{DetectorVariant, PersonEngine},
     Device,
 };
+
+fn benchmark_model() -> &'static str {
+    "RF-DETR-Medium-Native+ByteTrack"
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn report_identifies_detector_only_and_bytetrack() {
+        assert_eq!(super::benchmark_model(), "RF-DETR-Medium-Native+ByteTrack");
+    }
+}
 
 fn fingerprint(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let mut reader = BufReader::new(File::open(path)?);
@@ -40,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = args.next().ok_or("need .jsonl output")?;
     let detector_variant = DetectorVariant::from_env()?;
     let mut engine = PersonEngine::load(Path::new(&repo), Device::Cuda, 8, 0)?;
-    let mut tracker = ProvisionalTracker::new(TrackingOptions::default())?;
+    let mut tracker = ByteTracker::new(TrackingOptions::default())?;
     let mut ffmpeg = Command::new("ffmpeg")
         .args([
             "-hide_banner",
@@ -95,7 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     touch_probability: None,
                 })
                 .collect::<Vec<_>>();
-            let tracked = tracker.process_frame(next_frame, &candidates)?;
+            let tracked = tracker.process_frame_with_poses(next_frame, &candidates, &[])?;
             total_boxes += tracked.tracks.len() as u64;
             let tracks = tracked
                 .tracks
@@ -137,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     touch_probability: None,
                 })
                 .collect::<Vec<_>>();
-            let tracked = tracker.process_frame(next_frame, &candidates)?;
+            let tracked = tracker.process_frame_with_poses(next_frame, &candidates, &[])?;
             total_boxes += tracked.tracks.len() as u64;
             let tracks = tracked
                 .tracks
@@ -173,7 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let duration = started.elapsed().as_secs_f64();
     let report = serde_json::json!({
         "model": match detector_variant {
-            DetectorVariant::RfDetrMedium => "RF-DETR-Medium-Native+RTMPose+ProvisionalTracker",
+            DetectorVariant::RfDetrMedium => benchmark_model(),
         },
         "frames": next_frame,
         "total_observed_boxes": total_boxes,

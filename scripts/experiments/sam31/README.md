@@ -1,5 +1,7 @@
 # Experimental SAM 3.1 vs RTMDet/RTMPose tracking
 
+Historical measurements below used ProvisionalTracker. Current examples use ByteTrack; results are not directly comparable. The native baseline runs RF-DETR without RTMPose; the detector-swap example runs RTMPose on resized frames. Neither reproduces the full Studio pipeline.
+
 State: isolated experimental branch, NOT wired into the Rust Studio runtime. Production GPU inference, UI and caches are unchanged.
 
 Meta SAM 3.1 source: https://github.com/facebookresearch/sam3
@@ -67,7 +69,7 @@ Results to date: scripts/experiments/sam31/RESULTS.md
 
 ## RF-DETR Small and Medium (NO gated weights)
 
-Both use Roboflow's Apache-2.0 weights, automatically downloaded on first run. Unlike SAM 3.1 they provide person detections, not stable IDs. Run these proposals through native RTMPose and Rust ProvisionalTracker to measure continuity and unique IDs.
+Both use Roboflow's Apache-2.0 weights, automatically downloaded on first run. Unlike SAM 3.1 they provide person detections, not stable IDs. Run these proposals through native RTMPose and ByteTrack to measure diagnostic continuity and unique IDs.
 
 All paths below are in WSL:
 

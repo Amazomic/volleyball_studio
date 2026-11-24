@@ -13,7 +13,7 @@ use std::{
 };
 use volley_core::{
     fusion::Candidate,
-    tracker::{ProvisionalTracker, TrackingOptions},
+    tracker::{bytetrack::ByteTracker, TrackingOptions},
 };
 use volley_inference::{person::skeleton_box, pose::PoseEngine, Device};
 
@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .to_owned();
     }
     let mut pose = PoseEngine::load(Path::new(&repo), Device::Cuda, 8, 0)?;
-    let mut tracker = ProvisionalTracker::new(TrackingOptions::default())?;
+    let mut tracker = ByteTracker::new(TrackingOptions::default())?;
     let mut proposals_frames = BufReader::new(File::open(&proposals_path)?).lines();
     let mut ffmpeg = Command::new("ffmpeg")
         .args([
@@ -154,7 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 touch_probability: None,
             });
         }
-        let tracked = tracker.process_frame(count, &candidates)?;
+        let tracked = tracker.process_frame_with_poses(count, &candidates, &[])?;
         let tracks = tracked
             .tracks
             .iter()
@@ -182,7 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pose_seconds = started.elapsed().as_secs_f64();
     let total_seconds = upstream_seconds.map(|secs| secs + pose_seconds);
     let report = serde_json::json!({
-        "model": format!("{upstream_model}+RTMPose+ProvisionalTracker"),
+        "model": format!("{upstream_model}+RTMPose+ByteTrack"),
         "frames": count, "video_sha256": checksum, "video": video,
         "source_proposals_jsonl": proposals_path,
         "detector_proposals": proposals,
