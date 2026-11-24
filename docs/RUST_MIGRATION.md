@@ -3887,3 +3887,9 @@ Studio показывает кнопку перехода между debug и re
 - Экспериментальные бенчмарки используют ByteTrack; подпись детекторного бенчмарка больше не приписывает ему RTMPose. Исторические результаты сохранены, ограничения текущих примеров отражены в README.
 - Проверки: cargo test -p volley-core tracker:: --offline --locked PASS (28); cargo test -p volley-app --example bench_person_tracks --offline --locked PASS (1); cargo check -p volley-app --example bench_detector_swap --offline --locked PASS; powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-all.ps1 PASS (Rust, Clippy, WASM, 108 Node gates; штатные ignored тесты исключены).
 - Независимое сравнение качества трекеров на размеченных матчах, GPU-бенчмарки примеров и проверка реального видео NOT TESTED. Применение к Studio проверяется после публикации финального SHA.
+
+## 2026-11-24 — Освобождение очереди после запуска Studio
+
+- База 104f32fb7f8bed704f9c34fbacce49ba5fb848f3, владелец deployment_runtime: scripts/deploy-volley-queue.ps1. После запуска Studio фоновый процесс удерживал выходной канал launcher, поэтому сбор вывода ожидал завершения сервера и mutex очереди оставался занят.
+- Очередь ожидает процесс launcher напрямую и изолирует выход /daemon; ошибки по коду возврата сохраняются. Режим LauncherProbe проверяет поведение на изолированном launcher без Studio.
+- Проверка: до исправления тест задержался на 8530 мс при фоне 8 секунд; после исправления node scripts/ci/test_studio_deployment_queue.mjs PASS, включая код ошибки 17. powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-all.ps1 PASS (Rust, Clippy, WASM, 108 Node gates; штатные ignored исключены). Live deployment окончательного SHA проверяется после публикации.

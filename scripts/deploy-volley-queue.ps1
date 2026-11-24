@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Deploy","Probe")]
+    [ValidateSet("Deploy","Probe","LauncherProbe")]
     [string]$Action="Deploy",
     [string]$DeploymentRoot=$env:VOLLEY_STUDIO_DEPLOY_ROOT,
     [ValidateRange(1,3600)]
@@ -89,8 +89,17 @@ function Invoke-Launcher([string]$Command){
     $previous=$ErrorActionPreference
     try{
         $ErrorActionPreference="Continue"
-        $output=@(& (Join-Path $root "start-volley-ui.cmd") $Command 2>&1)
-        $exitCode=$LASTEXITCODE
+        if($Command -eq "/daemon"){
+            $launcher=Join-Path $root "start-volley-ui.cmd"
+            $arguments='/d /s /c ""'+$launcher+'" /daemon >NUL 2>&1"'
+            $process=Start-Process -FilePath $env:ComSpec -ArgumentList $arguments -WindowStyle Hidden -PassThru
+            $process.WaitForExit()
+            $exitCode=$process.ExitCode
+            $output=@("Check Studio runtime logs for daemon startup details")
+        }else{
+            $output=@(& (Join-Path $root "start-volley-ui.cmd") $Command 2>&1)
+            $exitCode=$LASTEXITCODE
+        }
     }finally{
         $ErrorActionPreference=$previous
     }
@@ -182,7 +191,9 @@ try{
     }
     if(-not $ownsLock){throw "Deployment queue wait timed out ($LockTimeoutSeconds seconds)"}
 
-    if($Action -eq "Probe"){
+    if($Action -eq "LauncherProbe"){
+        Invoke-Launcher "/daemon"
+    }elseif($Action -eq "Probe"){
         if(-not $ProbeTrace -or -not $ProbeState -or $ProbeVersion -notmatch '^[a-zA-Z0-9._-]{1,40}$'){
             throw "Probe requires trace, state and safe version"
         }

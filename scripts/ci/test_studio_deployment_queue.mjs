@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {readFileSync,mkdtempSync,rmSync,existsSync,readFileSync as read} from "node:fs";
+import {readFileSync,mkdtempSync,rmSync,existsSync,readFileSync as read,writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join,resolve} from "node:path";
 import {spawn} from "node:child_process";
@@ -53,6 +53,33 @@ if(process.platform==="win32"){
     assert.equal(lines.filter(x=>x==="build:v2").length,1);
     assert.equal(lines.filter(x=>x==="skip:v2").length,1);
     assert.equal(read(state,"utf8").trim(),"v2");
+  }finally{rmSync(temp,{recursive:true,force:true});}
+}
+if(process.platform==="win32"){
+  const temp=mkdtempSync(join(tmpdir(),"volley-daemon-inherit-"));
+  try{
+    writeFileSync(join(temp,"start-volley-ui.cmd"),'@echo off\r\nstart "" /b powershell.exe -NoProfile -Command Start-Sleep -Seconds 8\r\necho launched\r\n');
+    const start=Date.now();
+    const elapsed=await new Promise((done,reject)=>{
+      const child=spawn("powershell.exe",["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",ps,"-Action","LauncherProbe","-DeploymentRoot",temp],{windowsHide:true});
+      let output="";
+      child.stdout.on("data",chunk=>output+=chunk);
+      child.stderr.on("data",chunk=>output+=chunk);
+      child.on("error",reject);
+      child.on("exit",code=>code===0?done(Date.now()-start):reject(new Error(`exit ${code}: ${output}`)));
+    });
+    assert.ok(elapsed<5000,`Launcher waited for detached child: ${elapsed}ms`);
+    writeFileSync(join(temp,"start-volley-ui.cmd"),'@echo off\r\nexit /b 17\r\n');
+    const failed=await new Promise((done,reject)=>{
+      const child=spawn("powershell.exe",["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",ps,"-Action","LauncherProbe","-DeploymentRoot",temp],{windowsHide:true});
+      let output="";
+      child.stdout.on("data",chunk=>output+=chunk);
+      child.stderr.on("data",chunk=>output+=chunk);
+      child.on("error",reject);
+      child.on("close",code=>done({code,output}));
+    });
+    assert.notEqual(failed.code,0);
+    assert.match(failed.output,/exit 17/);
   }finally{rmSync(temp,{recursive:true,force:true});}
 }
 console.log("PASS: deployment queue serializes builds and coalesces duplicate requests");
