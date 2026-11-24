@@ -1148,7 +1148,9 @@ fn gpu_lineage_valid(
             return false;
         }
     }
-    if request.gpu.pose_enabled {
+    if request.gpu.pose_enabled
+        && saved["pose_pipeline_policy"] != cpu_retrack::POSE_REFINEMENT_POLICY
+    {
         let Some(pose_id) = saved["gpu_jobs"]["pose"].as_str().filter(|id| valid_id(id)) else {
             return false;
         };
@@ -1377,6 +1379,7 @@ fn compatible_version(saved: &Value, request: &StartRequest, identity: &Value) -
     saved["schema"] == SCHEMA
         && saved["analysis_range"] == json!(request.analysis_range)
         && saved["gpu_model_stack"] == requested_gpu_model_stack(request.gpu.person_detector)
+        && (!request.gpu.pose_enabled || request.mode == PipelineMode::Post || saved["gpu_jobs"]["pose"].is_null())
         && saved["project_id"] == request.project_id
         && saved["video"] == request.video
         && decode_profiles(saved["profile"]["gpu"].clone(), empty_profile())
@@ -2013,15 +2016,6 @@ async fn pipeline(
                     .acquire()
                     .await
                     .map_err(|e| format!("Shared GPU inference limit: {e}"))?;
-                let full_resolution_pose = if request.gpu.pose_enabled {
-                    let native_info = volley_media::probe(&plan.source)?;
-                    shared_native_pose_supported(true, native_info.width, native_info.height)
-                } else {
-                    false
-                };
-                if request.gpu.pose_enabled && !full_resolution_pose {
-                    return Err("RTMPose не может использовать исходные кадры этого разрешения в общем конвейере; отдельный полный проход запрещён".into());
-                }
                 let total = status["gpu_total_frames"].as_u64().unwrap_or(0);
                 progress_with_frames(
                     path,
@@ -2041,7 +2035,7 @@ async fn pipeline(
                             .map_or(plan.duration_sec, |range| range.end_sec - range.start_sec),
                         request.analysis_range,
                         request.gpu.pose_stride,
-                        full_resolution_pose,
+                        false,
                         request.gpu.person_detector,
                         request.gpu.gpu_memory_limit_mb,
                         request.gpu.cpu_threads,
@@ -2058,8 +2052,6 @@ async fn pipeline(
                                 "Touch Detector"
                             } else if fraction < 0.4 {
                                 "GPU · VBallNet: траектория мяча и розыгрыши"
-                            } else if full_resolution_pose {
-                                "GPU · RF-DETR + RTMPose: игровые интервалы"
                             } else {
                                 "GPU · RF-DETR: игровые интервалы"
                             };
@@ -2164,15 +2156,6 @@ async fn pipeline(
         }
     }
 
-    if request.mode.allows_gpu_execution()
-        && request.gpu.pose_enabled
-        && status["gpu_jobs"]["pose"].as_str().is_none()
-    {
-        return Err(
-            "Не получены позы из общего GPU-конвейера; отдельный повторный проход RTMPose запрещён"
-                .into(),
-        );
-    }
     if request.mode == PipelineMode::Gpu {
         progress(path, status, "Первичный GPU-анализ завершён", 99.9)?;
         return Ok(());
@@ -2191,28 +2174,52 @@ async fn pipeline(
         "cpu_retrack::process",
         json!({"project_id":request.project_id,"video":request.video,"fusion_id":fusion_id,"settings":request.post.tracking}),
     )?;
-    let refine_pose = (request.mode.allows_gpu_execution() && request.gpu.pose_enabled).then_some(
+    let refine_pose = (request.mode == PipelineMode::Full && request.gpu.pose_enabled).then_some(
         cpu_retrack::PoseRefinement {
             threads: request.gpu.cpu_threads,
             memory_mb: request.gpu.gpu_memory_limit_mb,
+            stride: request
+                .gpu
+                .pose_mode
+                .effective_stride(request.gpu.pose_stride),
         },
     );
-    let replay = cpu_cancel(
-        app.clone(),
-        cpu_retrack::ReplayRequest {
-            project_id: request.project_id.clone(),
-            video: request.video.clone(),
-            fusion_id,
-            settings: Some(request.post.tracking),
-            interpolate_pose: request.post.interpolate_pose,
-            interpolate_players: request.post.interpolate_players,
-        },
-        cancel.clone(),
-        move |app, request, cancel| {
-            cpu_retrack::process_with_cancel(app, request, cancel, refine_pose)
-        },
-    )
-    .await?;
+    let pose_permit = if refine_pose.is_some() {
+        let plan =
+            preparation::plan_for(app, &request.project_id, &request.video).map_err(reason)?;
+        let native = volley_media::probe(&plan.source)?;
+        if !shared_native_pose_supported(true, native.width, native.height) {
+            return Err("RTMPose: исходное разрешение превышает предел декодера".into());
+        }
+        Some(
+            app.inference_limit
+                .acquire()
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+    let replay_request = cpu_retrack::ReplayRequest {
+        project_id: request.project_id.clone(),
+        video: request.video.clone(),
+        fusion_id,
+        settings: Some(request.post.tracking),
+        interpolate_pose: request.post.interpolate_pose,
+        interpolate_players: request.post.interpolate_players,
+    };
+    let replay = tokio::task::block_in_place(|| {
+        cpu_retrack::process_with_cancel(app, &replay_request, cancel, refine_pose, || {
+            progress(
+                path,
+                status,
+                "GPU · RTMPose по стабилизированным рамкам",
+                88.0,
+            )
+        })
+    })
+    .map_err(reason)?;
+    drop(pose_permit);
     let replay_id = require_id(&replay, "replay_id")?;
     if replay["player_frame_scope_version"] != "primary_gpu_selected_intervals_v1"
         || replay["player_frame_scope_sha256"] != status["gpu_rally_mask_sha256"]
@@ -2843,6 +2850,7 @@ pub async fn start(
         "client_request_id":request.client_request_id,
         "analysis_range":request.analysis_range,
         "gpu_model_stack":requested_gpu_model_stack(request.gpu.person_detector),
+        "pose_pipeline_policy":cpu_retrack::POSE_REFINEMENT_POLICY,
         "zero_copy_request":zero_copy_requested(),"zero_copy_active":false,
         "gpu_jobs":{},"cpu_runs":{},"analysis_id":null,
         "gpu_rally_mask":null,"gpu_rally_mask_sha256":null,

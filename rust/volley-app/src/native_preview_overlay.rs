@@ -980,7 +980,7 @@ pub async fn get(
         if reviewed.source_sha != preview_run.replay_sha {
             return Err("Confirmed player links belong to another CPU replay".into());
         }
-        let poses_available = if let Some(fusion) = fusion_for_pose {
+        let legacy_poses_available = if let Some(fusion) = fusion_for_pose {
             native_preview_pose::enrich_exact(
                 &pose_root,
                 &fusion,
@@ -1007,6 +1007,14 @@ pub async fn get(
             &reviewed.owners,
             interpolate_players,
         );
+        let poses_available = legacy_poses_available
+            || frames.iter().any(|row| {
+                row["players"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|player| player["pose"].is_array())
+            });
         if poses_available {
             continuity::append_poses(&mut frames);
         }

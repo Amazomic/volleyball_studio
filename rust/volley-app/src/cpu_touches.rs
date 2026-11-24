@@ -93,7 +93,8 @@ fn pose_frames_policy(
         last.frame_index + 1,
         &mut values,
         interpolation,
-    )? {
+    )? && refined.is_empty()
+    {
         return Err("Для выбранного режима необходим сохранённый анализ позы".into());
     }
     Ok(values
@@ -1676,7 +1677,7 @@ fn refine_pose_events_policy(
     if events.is_empty() || frames.is_empty() {
         return Ok(());
     }
-    if native_preview_pose::source_info(project_root, fusion_id)?.is_none() {
+    if refined.is_empty() && native_preview_pose::source_info(project_root, fusion_id)?.is_none() {
         if settings.require_pose {
             return Err("Для выбранного режима необходим сохранённый анализ позы".into());
         }
@@ -2143,12 +2144,18 @@ fn detect_stream_with_pose(
             .tracked_players
             .iter()
             .filter_map(|player| {
-                (player.pose_source.as_deref() == Some(crate::cpu_retrack::POSE_REFINEMENT_POLICY))
-                    .then_some(PosePlayer {
-                        track_id: player.track_id,
-                        keypoints: player.pose?,
-                        interpolated: false,
-                    })
+                matches!(
+                    player.pose_source.as_deref(),
+                    Some(
+                        crate::cpu_retrack::POSE_REFINEMENT_POLICY
+                            | crate::cpu_retrack::LEGACY_POSE_REFINEMENT_POLICY
+                    )
+                )
+                .then_some(PosePlayer {
+                    track_id: player.track_id,
+                    keypoints: player.pose?,
+                    interpolated: false,
+                })
             })
             .collect::<Vec<_>>();
         if !measured.is_empty() {

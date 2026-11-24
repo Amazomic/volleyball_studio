@@ -149,9 +149,15 @@ pub(super) fn append_poses(frames: &mut [Value]) {
             .as_array()
             .map(Vec::as_slice)
             .unwrap_or_default();
-        let refined = players
-            .iter()
-            .any(|p| p["pose_source"] == crate::cpu_retrack::POSE_REFINEMENT_POLICY);
+        let refined = players.iter().any(|p| {
+            matches!(
+                p["pose_source"].as_str(),
+                Some(
+                    crate::cpu_retrack::POSE_REFINEMENT_POLICY
+                        | crate::cpu_retrack::LEGACY_POSE_REFINEMENT_POLICY
+                )
+            )
+        });
         let mut poses = if refined {
             Vec::new()
         } else {

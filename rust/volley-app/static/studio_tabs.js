@@ -445,8 +445,8 @@
     ["rallies","Розыгрыши","cpu",1],
     ["players","Поиск игроков","gpu",1],
     ["fusion","Данные GPU","output",1],
-    ["pose","Позы игроков","gpu",1],
-    ["tracking","Трекинг ID","cpu",2],
+    ["tracking","Стабилизация рамок","cpu",2],
+    ["pose","Позы по стабилизированным рамкам","gpu",2],
     ["touches","Уточнение касаний","cpu",2],
     ["touch_types","Типы касаний","cpu",2],
     ["publish","Публикация розыгрышей","output",2],
@@ -570,7 +570,7 @@
           " поз · "+stageTime(duration)+" (общ.)";
       return "С RF-DETR · "+stageTime(duration);
     }
-    if(id==="touch_types"&&entry&&run?.gpu_jobs?.pose){
+    if(id==="touch_types"&&entry&&(run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0)){
       const duration=running&&Number.isFinite(entry.started_ms)&&entry.finished_ms==null?
         Math.max(0,now-entry.started_ms):entry.duration_ms;
       return "В составе касаний · "+stageTime(duration);
@@ -612,13 +612,11 @@
     ["ball","ball_stabilizer"],
     ["video","players"],
     ["rallies","players"],
-    ["players","pose","pose"],
     ["video","pose","pose"],
-    ["fusion","pose","pose"],
     ["ball","fusion"],
     ["players","fusion"],
     ["fusion","tracking"],
-    ["pose","tracking","pose"],
+    ["tracking","pose","pose"],
     ["rallies","tracking"],
     ["ball_stabilizer","rallies"],
     ["ball_stabilizer","touch_detector"],
@@ -638,7 +636,7 @@
   ];
   const graphLinkState=(condition,run)=>{
     if(condition!=="pose")return "available";
-    if(run?.gpu_jobs?.pose)return "available";
+    if(run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0)return "available";
     return run?.profile?.gpu?.pose_enabled===false?"disabled":"optional";
   };
   const graphSettings={
@@ -947,20 +945,21 @@
     const complete=run?.status==="complete";
     const savedGpu={
       ball:run?.gpu_jobs?.ball,rallies:run?.gpu_rally_mask||Number.isSafeInteger(run?.gpu_rally_count),players:run?.gpu_jobs?.players,
-      fusion:run?.analysis_id,pose:run?.gpu_jobs?.pose
+      fusion:run?.analysis_id,pose:run?.gpu_jobs?.pose||(Number(run?.player_tracking_stats?.refined_poses)>0?run?.cpu_runs?.tracking:null)
     };
     const savedCpu={
       tracking:run?.cpu_runs?.tracking,ball_stabilizer:run?.ball_stabilizer,
-      touches:run?.cpu_runs?.touches,touch_types:run?.cpu_runs?.touches&&run?.gpu_jobs?.pose,
+      touches:run?.cpu_runs?.touches,touch_types:run?.cpu_runs?.touches&&(run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0),
       publish:run?.cpu_runs?.rallies,identity:run?.automatic_identity||run?.automatic_identity_available
     };
     for(const node of target.querySelectorAll(".analysis-flow-node")){
       const id=node.dataset.stageId;
       if(id==="photos")continue;
-      const entry=id==="touch_types"?(run?.gpu_jobs?.pose?seen.get("touches"):null):seen.get(id);
+      const hasPose=!!run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0;
+      const entry=id==="touch_types"?(hasPose?seen.get("touches"):null):seen.get(id);
       const combinedPose=id==="pose"&&currentId==="players"&&
         /RTMPose/.test(String(run?.stage||""));
-      const concurrentTypes=id==="touch_types"&&currentId==="touches"&&!!run?.gpu_jobs?.pose;
+      const concurrentTypes=id==="touch_types"&&currentId==="touches"&&hasPose;
       const running=active&&(id===currentId||combinedPose||concurrentTypes||
         id!=="touch_types"&&!!entry&&entry.finished_ms==null&&entry===stages.at(-1));
       const done=!!entry&&(entry.finished_ms!=null||complete&&!running)||

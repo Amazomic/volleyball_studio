@@ -2,6 +2,7 @@ use super::{BoundedReader, MAX_ROW_BYTES};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     fs::{self, OpenOptions},
     io::{BufWriter, Write},
     path::Path,
@@ -11,7 +12,8 @@ use volley_core::{bbox_iou, fusion::Candidate, tracker::PoseEvidence};
 use volley_inference::{pose::PoseEngine, Device};
 use volley_media::raw_decoder::{decode_original_frames_in_range, AnalysisRange};
 
-pub(crate) const POLICY: &str = "original_rgb_stabilized_track_crops_v1";
+pub(crate) const POLICY: &str = "original_rgb_stabilized_track_crops_v2";
+pub(crate) const LEGACY_POLICY: &str = "original_rgb_stabilized_track_crops_v1";
 
 pub(super) fn stabilize_crops(tracked: &mut [Value], raw: &[Candidate]) -> u64 {
     let anchors = tracked
@@ -74,6 +76,7 @@ pub(super) fn stabilize_crops(tracked: &mut [Value], raw: &[Candidate]) -> u64 {
 pub(crate) struct Refinement {
     pub threads: usize,
     pub memory_mb: u64,
+    pub stride: usize,
 }
 
 pub(super) struct Source<'a> {
@@ -95,13 +98,26 @@ fn proposals(players: &[Value]) -> Vec<(usize, [f64; 4], &'static str)> {
             } else if player["pose_crop_origin"] == "combined_track_box" {
                 "combined_track_box"
             } else {
-                return None;
+                "stabilized_track_box"
             };
             let bbox =
                 serde_json::from_value(player["detection"]["bbox_xyxy_norm"].clone()).ok()?;
             Some((index, bbox, origin))
         })
         .collect()
+}
+
+fn stabilize_pose_crop(current: [f64; 4], previous: Option<[f64; 4]>) -> [f64; 4] {
+    let Some(previous) = previous.filter(|previous| bbox_iou(*previous, current) >= 0.80) else {
+        return current;
+    };
+    let midpoint = std::array::from_fn::<_, 4, _>(|i| (current[i] + previous[i]) * 0.5);
+    [
+        current[0].min(midpoint[0]),
+        current[1].min(midpoint[1]),
+        current[2].max(midpoint[2]),
+        current[3].max(midpoint[3]),
+    ]
 }
 
 pub(super) fn refine(
@@ -121,6 +137,7 @@ pub(super) fn refine(
     let mut hash = Sha256::new();
     let mut engine = None;
     let mut accepted = 0;
+    let mut previous_crops = BTreeMap::<u64, [f64; 4]>::new();
     decode_original_frames_in_range(
         source.original,
         source.decoded_frames,
@@ -140,7 +157,22 @@ pub(super) fn refine(
             let players = row["tracked_players"]
                 .as_array_mut()
                 .ok_or("Missing tracked players")?;
-            let crops = proposals(players);
+            let mut next_crops = BTreeMap::new();
+            let mut crops = Vec::new();
+            for (player, bbox, origin) in proposals(players) {
+                let id = players[player]["track_id"]
+                    .as_u64()
+                    .ok_or("Missing Track ID for pose crop")?;
+                if (index as usize).is_multiple_of(settings.stride) {
+                    crops.push((
+                        player,
+                        stabilize_pose_crop(bbox, previous_crops.get(&id).copied()),
+                        origin,
+                    ));
+                }
+                next_crops.insert(id, bbox);
+            }
+            previous_crops = next_crops;
             if !crops.is_empty() && engine.is_none() {
                 engine = Some(PoseEngine::load(
                     repository,
@@ -165,6 +197,7 @@ pub(super) fn refine(
                             players[*player]["pose"] = json!(joints);
                             players[*player]["pose_interpolated"] = json!(false);
                             players[*player]["pose_crop_origin"] = json!(origin);
+                            players[*player]["pose_crop_bbox_xyxy_norm"] = json!(bbox);
                             players[*player]["pose_source"] = json!(POLICY);
                             accepted += 1;
                         }
@@ -196,6 +229,32 @@ pub(super) fn refine(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn crop_alignment_preserves_current_bounds_and_rejects_a_large_jump() {
+        let current = [0.21, 0.26, 0.30, 0.66];
+        let previous = [0.205, 0.26, 0.295, 0.67];
+        let aligned = stabilize_pose_crop(current, Some(previous));
+        assert!(aligned[0] < current[0] && aligned[3] > current[3]);
+        assert_eq!(aligned[1..3], current[1..3]);
+        assert_eq!(
+            stabilize_pose_crop(current, Some([0.6, 0.5, 0.8, 0.9])),
+            current
+        );
+    }
+
+    #[test]
+    fn single_pose_pass_accepts_unchanged_stable_track_crop() {
+        let rows = [json!({
+            "track_id": 7,
+            "detection": {"bbox_xyxy_norm": [0.21, 0.26, 0.29, 0.66]}
+        })];
+        let crops = proposals(&rows);
+        assert_eq!(
+            crops,
+            [(0, [0.21, 0.26, 0.29, 0.66], "stabilized_track_box")]
+        );
+    }
 
     #[test]
     fn measured_head_and_body_expand_one_crop_without_stealing_neighbor() {

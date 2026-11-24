@@ -41,7 +41,10 @@ mod gap_interpolation;
 mod pose_refinement;
 mod pose_source;
 mod track_stitch;
-pub(crate) use pose_refinement::{Refinement as PoseRefinement, POLICY as POSE_REFINEMENT_POLICY};
+pub(crate) use pose_refinement::{
+    Refinement as PoseRefinement, LEGACY_POLICY as LEGACY_POSE_REFINEMENT_POLICY,
+    POLICY as POSE_REFINEMENT_POLICY,
+};
 
 pub(crate) use volley_core::contracts::job_id as opaque_id;
 
@@ -694,7 +697,7 @@ fn confirmation_threshold(requested: u64, sample_period: Option<u64>) -> u64 {
 }
 
 pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, ApiError> {
-    process_inner(state, req, None, None)
+    process_inner(state, req, None, None, || Ok(()))
 }
 
 pub(crate) fn process_with_cancel(
@@ -702,8 +705,9 @@ pub(crate) fn process_with_cancel(
     req: &ReplayRequest,
     cancel: &AtomicBool,
     refinement: Option<PoseRefinement>,
+    on_pose: impl FnOnce() -> Result<(), String>,
 ) -> Result<Value, ApiError> {
-    process_inner(state, req, Some(cancel), refinement)
+    process_inner(state, req, Some(cancel), refinement, on_pose)
 }
 
 fn process_inner(
@@ -711,6 +715,7 @@ fn process_inner(
     req: &ReplayRequest,
     cancel: Option<&AtomicBool>,
     refinement: Option<PoseRefinement>,
+    on_pose: impl FnOnce() -> Result<(), String>,
 ) -> Result<Value, ApiError> {
     if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
         return Err(storage::conflict("cancelled"));
@@ -813,8 +818,11 @@ fn process_inner(
         load_player_frame_scope(&project_root, &manifest, frames).map_err(storage::bad_request)?;
     // Pose evidence was measured on actual GPU RGB frames and bound to the
     // selected fusion SHA. Legacy fusions without RTMPose remain readable.
-    let pose_source =
-        pose_source::locate(&project_root, &req.fusion_id).map_err(storage::bad_request)?;
+    let pose_source = if refinement.is_none() {
+        pose_source::locate(&project_root, &req.fusion_id).map_err(storage::bad_request)?
+    } else {
+        None
+    };
     let root = project_root.join("native_cpu_replays");
     match fs::symlink_metadata(&root) {
         Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
@@ -843,10 +851,11 @@ fn process_inner(
                 cancel,
             },
         )?;
-        let refine_pose = refinement.is_some() && pose_source.is_some() && player_scope.is_some();
+        let refine_pose = refinement.is_some() && player_scope.is_some();
         let mut refined_poses = 0;
         let mut refine_input_sha = None;
-        if refine_pose && totals.combined_pose_crops + totals.interpolated_player_boxes > 0 {
+        if refine_pose {
+            on_pose()?;
             let decoded_frames = manifest["decoded_frames"]
                 .as_u64()
                 .filter(|n| (frames..=frames + 8).contains(n))
