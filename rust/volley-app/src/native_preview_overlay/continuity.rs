@@ -145,10 +145,21 @@ pub(super) fn append_poses(frames: &mut [Value]) {
         if row["in_rally"] != true {
             continue;
         }
-        let mut poses = row["pose_points"].as_array().cloned().unwrap_or_default();
+        let players = row["players"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let refined = players
+            .iter()
+            .any(|p| p["pose_source"] == crate::cpu_retrack::POSE_REFINEMENT_POLICY);
+        let mut poses = if refined {
+            Vec::new()
+        } else {
+            row["pose_points"].as_array().cloned().unwrap_or_default()
+        };
         let observed = !poses.is_empty() && row["pose_points_interpolated"] != true;
         let mut measured = observed;
-        for p in row["players"].as_array().into_iter().flatten() {
+        for p in players {
             if !p["pose"].is_array()
                 || poses
                     .iter()
@@ -158,8 +169,15 @@ pub(super) fn append_poses(frames: &mut [Value]) {
             }
             let interpolated = p["pose_interpolated"] == true;
             measured |= !interpolated;
-            poses.push(json!({"box":p["box"],"keypoints":p["pose"],"track_id":p["id"],
-                "interpolated":interpolated,"source":if interpolated {"cpu_rally_linear_v1"} else {"rtmpose_rgb"}}));
+            let source = p["pose_source"].as_str().unwrap_or(if interpolated {
+                "cpu_rally_linear_v1"
+            } else {
+                "rtmpose_rgb"
+            });
+            poses.push(
+                json!({"box":p["box"],"keypoints":p["pose"],"track_id":p["id"],
+                "interpolated":interpolated,"source":source}),
+            );
         }
         if !poses.is_empty() {
             row["pose_points"] = json!(poses);
@@ -385,6 +403,21 @@ pub(super) fn fill(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refined_pose_replaces_old_unassigned_skeleton_in_processed_preview() {
+        let mut frames = [json!({
+            "in_rally":true,
+            "pose_points":[{"keypoints":vec![[0.2,0.3,0.95];17]}],
+            "players":[{"id":7,"pose":vec![[0.4,0.5,0.95];17],
+                "pose_source":crate::cpu_retrack::POSE_REFINEMENT_POLICY}]
+        })];
+        append_poses(&mut frames);
+        let poses = frames[0]["pose_points"].as_array().unwrap();
+        assert_eq!(poses.len(), 1);
+        assert_eq!(poses[0]["track_id"], 7);
+        assert_eq!(poses[0]["keypoints"][0], json!([0.4, 0.5, 0.95]));
+    }
 
     #[test]
     fn torso_points_fill_two_seconds_and_resume_after_longer_break() {

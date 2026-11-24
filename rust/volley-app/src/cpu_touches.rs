@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     fs::{self, OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
@@ -52,7 +52,7 @@ const BALL_TRAJECTORY_SCHEMA: &str = "volley-native-stabilized-ball-trajectory/1
 
 #[cfg(test)]
 fn pose_frames(root: &Path, fusion: &str, frames: &[TouchFrame]) -> Result<Vec<PoseFrame>, String> {
-    pose_frames_policy(root, fusion, frames, None)
+    pose_frames_policy(root, fusion, frames, None, &BTreeMap::new())
 }
 
 fn pose_frames_policy(
@@ -60,6 +60,7 @@ fn pose_frames_policy(
     fusion: &str,
     frames: &[TouchFrame],
     interpolation: Option<bool>,
+    refined: &BTreeMap<u64, Vec<PosePlayer>>,
 ) -> Result<Vec<PoseFrame>, String> {
     let Some(first) = frames.first() else {
         return Ok(Vec::new());
@@ -67,10 +68,24 @@ fn pose_frames_policy(
     let Some(last) = frames.last() else {
         return Ok(Vec::new());
     };
-    let mut values: Vec<Value> = frames.iter().map(|frame| json!({
-        "frame":frame.frame_index,
-        "players":frame.players.iter().map(|player| json!({"id":player.track_id,"box":player.bbox_xyxy_norm})).collect::<Vec<_>>()
-    })).collect();
+    let mut values: Vec<Value> = frames
+        .iter()
+        .map(|frame| {
+            json!({
+                "frame":frame.frame_index,
+                "players":frame.players.iter().map(|player| {
+                    let mut row = json!({"id":player.track_id,"box":player.bbox_xyxy_norm});
+                    if let Some(pose) = refined.get(&frame.frame_index).and_then(|poses| {
+                        poses.iter().find(|pose| pose.track_id == player.track_id)
+                    }) {
+                        row["pose"] = json!(pose.keypoints);
+                        row["pose_source"] = json!(crate::cpu_retrack::POSE_REFINEMENT_POLICY);
+                    }
+                    row
+                }).collect::<Vec<_>>()
+            })
+        })
+        .collect();
     if !native_preview_pose::enrich_continuous_policy(
         root,
         fusion,
@@ -158,6 +173,8 @@ struct TrackedCandidate {
     track_id: u64,
     detection: Candidate,
     is_verified_athlete: bool,
+    pose: Option<[[f64; 3]; 17]>,
+    pose_source: Option<String>,
 }
 #[derive(Deserialize)]
 struct SelectedBall {
@@ -1386,9 +1403,11 @@ fn refine_pose_events(
         fusion_id,
         settings,
         None,
+        &BTreeMap::new(),
     )
 }
 
+#[expect(clippy::too_many_arguments)]
 fn refine_pose_events_policy(
     events: &mut Vec<PhysicalTouchCandidate>,
     frames: &[TouchFrame],
@@ -1397,6 +1416,7 @@ fn refine_pose_events_policy(
     fusion_id: &str,
     settings: TouchSettings,
     interpolation: Option<bool>,
+    refined: &BTreeMap<u64, Vec<PosePlayer>>,
 ) -> Result<(), String> {
     let (video_width, video_height) = dimensions;
     if events.is_empty() || frames.is_empty() {
@@ -1408,7 +1428,7 @@ fn refine_pose_events_policy(
         }
         return Ok(());
     }
-    let poses = pose_frames_policy(project_root, fusion_id, frames, interpolation)?;
+    let poses = pose_frames_policy(project_root, fusion_id, frames, interpolation, refined)?;
     let first = frames[0].frame_index;
     let mut supported = vec![false; events.len()];
     for (index, event) in events.iter_mut().enumerate() {
@@ -1503,6 +1523,7 @@ fn refine_pose_events_policy(
 
 /// Match manually named motions only after independent same-Track-ID ball/body
 /// evidence. Training cannot create touches or invent athlete identities.
+#[expect(clippy::too_many_arguments)]
 fn apply_training(
     events: &mut [PhysicalTouchCandidate],
     frames: &[TouchFrame],
@@ -1511,6 +1532,7 @@ fn apply_training(
     height: u32,
     settings: TouchSettings,
     training: &[training_samples::Example],
+    refined: &BTreeMap<u64, Vec<PosePlayer>>,
 ) -> Result<(), String> {
     if events.is_empty() || training.is_empty() {
         return Ok(());
@@ -1518,7 +1540,7 @@ fn apply_training(
     let Some((root, fusion, interpolation)) = pose_source else {
         return Ok(());
     };
-    let poses = pose_frames_policy(root, fusion, frames, Some(interpolation))?;
+    let poses = pose_frames_policy(root, fusion, frames, Some(interpolation), refined)?;
     let Some(first) = frames.first().map(|f| f.frame_index) else {
         return Ok(());
     };
@@ -1673,6 +1695,7 @@ fn detect_stream_with_pose(
     let mut writer = BufWriter::new(file);
     let mut output_hash = Sha256::new();
     let mut buffer: VecDeque<TouchFrame> = VecDeque::new();
+    let mut refined = BTreeMap::<u64, Vec<PosePlayer>>::new();
     let mut next_emit = windows.first().map(|(start, _)| *start).unwrap_or(count);
     let mut window_index = 0;
     let mut completed_frames = 0;
@@ -1684,6 +1707,7 @@ fn detect_stream_with_pose(
     let mut process_block = |start: u64,
                              end: u64,
                              input: &VecDeque<TouchFrame>,
+                             refined: &BTreeMap<u64, Vec<PosePlayer>>,
                              window: (u64, u64)|
      -> Result<(), String> {
         let region_start = start.saturating_sub(HALO as u64).max(window.0);
@@ -1778,6 +1802,7 @@ fn detect_stream_with_pose(
                     fusion,
                     classification_settings,
                     Some(interpolation),
+                    refined,
                 )?;
             }
             apply_training(
@@ -1788,6 +1813,7 @@ fn detect_stream_with_pose(
                 height,
                 settings,
                 training,
+                refined,
             )?;
             if let Some(intervals) = preliminary_intervals {
                 events.retain(|event| {
@@ -1852,10 +1878,31 @@ fn detect_stream_with_pose(
         }
         let raw: TrackedFrame = serde_json::from_slice(&bytes)
             .map_err(|e| format!("Invalid CPU tracked frame: {e}"))?;
+        let measured = raw
+            .tracked_players
+            .iter()
+            .filter_map(|player| {
+                (player.pose_source.as_deref() == Some(crate::cpu_retrack::POSE_REFINEMENT_POLICY))
+                    .then_some(PosePlayer {
+                        track_id: player.track_id,
+                        keypoints: player.pose?,
+                        interpolated: false,
+                    })
+            })
+            .collect::<Vec<_>>();
+        if !measured.is_empty() {
+            refined.insert(index, measured);
+        }
         buffer.push_back(transform_frame(raw, index)?);
         while next_emit + (CHUNK + HALO) as u64 <= index + 1 {
             let end = next_emit + CHUNK as u64;
-            process_block(next_emit, end, &buffer, (window_start, window_end))?;
+            process_block(
+                next_emit,
+                end,
+                &buffer,
+                &refined,
+                (window_start, window_end),
+            )?;
             completed_frames += end - next_emit;
             next_emit = end;
             if let Some(report) = on_progress.as_deref_mut() {
@@ -1867,11 +1914,18 @@ fn detect_stream_with_pose(
             {
                 buffer.pop_front();
             }
+            refined.retain(|frame, _| *frame >= next_emit.saturating_sub(HALO as u64));
         }
         if index == window_end {
             while next_emit <= window_end {
                 let end = (next_emit + CHUNK as u64).min(window_end + 1);
-                process_block(next_emit, end, &buffer, (window_start, window_end))?;
+                process_block(
+                    next_emit,
+                    end,
+                    &buffer,
+                    &refined,
+                    (window_start, window_end),
+                )?;
                 completed_frames += end - next_emit;
                 next_emit = end;
                 if let Some(report) = on_progress.as_deref_mut() {
@@ -1885,6 +1939,7 @@ fn detect_stream_with_pose(
                 }
             }
             buffer.clear();
+            refined.clear();
             window_index += 1;
             next_emit = windows
                 .get(window_index)

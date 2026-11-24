@@ -313,8 +313,27 @@ pub(super) fn stitch(
                 match canonical.get_mut(&id) {
                     Some(previous) => {
                         removed += 1;
+                        let bounds = serde_json::from_value::<[f64; 4]>(
+                            previous["detection"]["bbox_xyxy_norm"].clone(),
+                        )
+                        .ok()
+                        .zip(
+                            serde_json::from_value::<[f64; 4]>(
+                                player["detection"]["bbox_xyxy_norm"].clone(),
+                            )
+                            .ok(),
+                        );
                         if quality(&player) > quality(previous) {
                             *previous = player;
+                        }
+                        if let Some((a, b)) = bounds {
+                            previous["detection"]["bbox_xyxy_norm"] = json!([
+                                a[0].min(b[0]),
+                                a[1].min(b[1]),
+                                a[2].max(b[2]),
+                                a[3].max(b[3]),
+                            ]);
+                            previous["pose_crop_origin"] = json!("combined_track_box");
                         }
                     }
                     None => {

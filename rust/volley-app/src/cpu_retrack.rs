@@ -35,11 +35,13 @@ use volley_core::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_torso_association_v9";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_stabilized_body_v10";
 pub(crate) mod ball_track;
 mod gap_interpolation;
+mod pose_refinement;
 mod pose_source;
 mod track_stitch;
+pub(crate) use pose_refinement::{Refinement as PoseRefinement, POLICY as POSE_REFINEMENT_POLICY};
 
 pub(crate) use volley_core::contracts::job_id as opaque_id;
 
@@ -177,6 +179,8 @@ struct ReplayTotals {
     identity_turnover_splits: u64,
     identity_handoff_splits: u64,
     pose_detections: u64,
+    combined_pose_crops: u64,
+    interpolated_player_boxes: u64,
     processed_player_frames: u64,
     bytetrack_low_confidence_matches: u64,
     bytetrack_lost_low_confidence_matches: u64,
@@ -514,7 +518,7 @@ fn replay_frames_verified(
         )
         .map_err(|e| format!("Serialize tracked pose observations: {e}"))?;
         if let Some(rows) = tracked_players.as_array_mut() {
-            for row in rows {
+            for row in rows.iter_mut() {
                 let index = row["detection"]["query_index"].as_u64().unwrap_or(u64::MAX) as usize;
                 let measured = joints.get(index).is_some_and(Option::is_some);
                 row["measurement_source"] = json!(if measured {
@@ -526,6 +530,10 @@ fn replay_frames_verified(
                     row["pose"] = json!(pose.joints);
                     row["pose_interpolated"] = json!(false);
                 }
+            }
+            if scope.is_some() {
+                totals.combined_pose_crops +=
+                    pose_refinement::stabilize_crops(rows, &frame.player_candidates);
             }
         }
         totals.frames += 1;
@@ -661,11 +669,13 @@ fn replay_frames_verified(
         .ok_or("More duplicate detections removed than confirmed")?;
     totals.identity_turnover_splits = 0;
     totals.identity_handoff_splits = 0;
-    let (continuous_sha, _inferred_positions) = if interpolate_players {
+    let (continuous_sha, inferred_positions) = if interpolate_players {
         fill_confirmed_track_gaps(output, &stitched_sha, count, scope, cancel)?
     } else {
         (stitched_sha, 0)
     };
+    totals.interpolated_player_boxes = inferred_positions;
+    totals.combined_pose_crops += removed_duplicate_boxes;
     let track_count = summary
         .confirmed_tracks
         .checked_sub(merged)
@@ -684,21 +694,23 @@ fn confirmation_threshold(requested: u64, sample_period: Option<u64>) -> u64 {
 }
 
 pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, ApiError> {
-    process_inner(state, req, None)
+    process_inner(state, req, None, None)
 }
 
 pub(crate) fn process_with_cancel(
     state: &AppState,
     req: &ReplayRequest,
     cancel: &AtomicBool,
+    refinement: Option<PoseRefinement>,
 ) -> Result<Value, ApiError> {
-    process_inner(state, req, Some(cancel))
+    process_inner(state, req, Some(cancel), refinement)
 }
 
 fn process_inner(
     state: &AppState,
     req: &ReplayRequest,
     cancel: Option<&AtomicBool>,
+    refinement: Option<PoseRefinement>,
 ) -> Result<Value, ApiError> {
     if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
         return Err(storage::conflict("cancelled"));
@@ -818,7 +830,7 @@ fn process_inner(
     fs::create_dir(&directory).map_err(|e| storage::internal(format!("Create CPU replay: {e}")))?;
     let result = (|| -> Result<Value, String> {
         let part = directory.join("tracked_frames.jsonl.partial");
-        let (digest, totals, track_count) = replay_frames_with_pose_options(
+        let (mut digest, totals, track_count) = replay_frames_with_pose_options(
             &source,
             &part,
             frames,
@@ -831,6 +843,35 @@ fn process_inner(
                 cancel,
             },
         )?;
+        let refine_pose = refinement.is_some() && pose_source.is_some() && player_scope.is_some();
+        let mut refined_poses = 0;
+        let mut refine_input_sha = None;
+        if refine_pose && totals.combined_pose_crops + totals.interpolated_player_boxes > 0 {
+            let decoded_frames = manifest["decoded_frames"]
+                .as_u64()
+                .filter(|n| (frames..=frames + 8).contains(n))
+                .ok_or("RTMPose refinement requires the original decoded frame count")?;
+            let range = serde_json::from_value(manifest["analysis_range"].clone())
+                .map_err(|e| format!("Invalid RTMPose refinement range: {e}"))?;
+            refine_input_sha = Some(digest.clone());
+            (digest, refined_poses) = pose_refinement::refine(
+                &state.repository_root,
+                pose_refinement::Source {
+                    original: &plan.source,
+                    replay: &part,
+                    replay_sha: &digest,
+                    frames,
+                    decoded_frames,
+                    range,
+                },
+                refinement.ok_or("RTMPose refinement settings unavailable")?,
+                cancel.ok_or("RTMPose refinement cancellation unavailable")?,
+            )?;
+            volley_media::preparation::verify_source_provenance(
+                &plan.source,
+                &manifest["original_source"],
+            )?;
+        }
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared video changed during CPU replay".into());
         }
@@ -882,6 +923,9 @@ fn process_inner(
             "touches_confirmed":false,
             "cpu_processing_complete":false,
         });
+        record["pose_refinement_policy"] = json!(refine_pose.then_some(POSE_REFINEMENT_POLICY));
+        record["refined_pose_count"] = json!(refined_poses);
+        record["pose_refinement_input_sha256"] = json!(refine_input_sha);
         record["player_frame_scope_version"] = json!(if player_scope.is_some() {
             "primary_gpu_selected_intervals_v1"
         } else {

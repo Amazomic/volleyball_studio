@@ -474,6 +474,9 @@ fn overlay_players(frame: &Value) -> Vec<Value> {
             {
                 player["pose"] = p["pose"].clone();
                 player["pose_interpolated"] = json!(p["pose_interpolated"] == true);
+                if p["pose_source"].is_string() {
+                    player["pose_source"] = p["pose_source"].clone();
+                }
                 if !inferred.contains(&id) && p["pose_interpolated"] != true {
                     if let Some(point) = serde_json::from_value(p["pose"].clone())
                         .ok()

@@ -1271,6 +1271,8 @@ fn cpu_lineage_valid(
         // A saved replay from the disabled legacy tracker must never be
         // silently reused when ByteTrack is now the default.
         && track["track_association_version"] == cpu_retrack::TRACK_ASSOCIATION_VERSION
+        && (!request.gpu.pose_enabled
+            || track["pose_refinement_policy"] == cpu_retrack::POSE_REFINEMENT_POLICY)
         && track["replay_id"] == replay
         && track["interpolate_pose"].as_bool().unwrap_or(true) == request.post.interpolate_pose
         && track["source_fusion_id"] == fusion
@@ -1725,7 +1727,7 @@ async fn cpu_cancel<T: Send + 'static>(
     app: Arc<AppState>,
     request: T,
     cancel: Arc<AtomicBool>,
-    handler: fn(&AppState, &T, &AtomicBool) -> Result<Value, ApiError>,
+    handler: impl FnOnce(&AppState, &T, &AtomicBool) -> Result<Value, ApiError> + Send + 'static,
 ) -> Result<Value, String> {
     tokio::task::spawn_blocking(move || handler(&app, &request, &cancel))
         .await
@@ -2163,6 +2165,12 @@ async fn pipeline(
         "cpu_retrack::process",
         json!({"project_id":request.project_id,"video":request.video,"fusion_id":fusion_id,"settings":request.post.tracking}),
     )?;
+    let refine_pose = (request.mode.allows_gpu_execution() && request.gpu.pose_enabled).then_some(
+        cpu_retrack::PoseRefinement {
+            threads: request.gpu.cpu_threads,
+            memory_mb: request.gpu.gpu_memory_limit_mb,
+        },
+    );
     let replay = cpu_cancel(
         app.clone(),
         cpu_retrack::ReplayRequest {
@@ -2174,7 +2182,9 @@ async fn pipeline(
             interpolate_players: request.post.interpolate_players,
         },
         cancel.clone(),
-        cpu_retrack::process_with_cancel,
+        move |app, request, cancel| {
+            cpu_retrack::process_with_cancel(app, request, cancel, refine_pose)
+        },
     )
     .await?;
     let replay_id = require_id(&replay, "replay_id")?;
@@ -2185,11 +2195,23 @@ async fn pipeline(
         return Err("Трекинг CPU вышел за границы проверенной GPU-маски розыгрышей".into());
     }
     status["cpu_runs"]["tracking"] = json!(replay_id);
+    if replay["pose_refinement_policy"] == cpu_retrack::POSE_REFINEMENT_POLICY {
+        log_event(
+            path,
+            "RTMPose",
+            "success",
+            &format!(
+                "Позы уточнены по RGB оригинала и стабилизированным рамкам: {}",
+                replay["refined_pose_count"].as_u64().unwrap_or_default()
+            ),
+        )?;
+    }
     status["player_tracking_stats"] = json!({
         "raw_detections": replay["raw_player_detections"],
         "total_track_ids": replay["tentative_track_count"],
         "short_track_ids": replay["discarded_short_track_ids"],
         "track_ids": replay["provisional_track_count"],
+        "refined_poses": replay["refined_pose_count"],
     });
     status["cpu_player_frame_coverage"] = json!({
         "processed_frames":replay["player_frames_processed"],
