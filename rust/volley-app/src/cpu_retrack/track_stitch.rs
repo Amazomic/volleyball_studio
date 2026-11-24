@@ -219,7 +219,11 @@ fn find_handoffs(
                                 .similarity(&new_pose, new_at - old_at)
                                 .is_some_and(|score| score >= 0.72)
                         {
-                            gap_candidates.push((distance, old_id, new_id));
+                            gap_candidates.push((
+                                distance + 0.0006 * (start - old.end) as f64,
+                                old_id,
+                                new_id,
+                            ));
                         }
                     }
                     continue;
@@ -239,13 +243,19 @@ fn find_handoffs(
             }
             let displacement = (old_head[0] - new_head[0]).hypot(old_head[1] - new_head[1]);
             if displacement <= 0.012 + (start - old.end) as f64 * 0.0006 {
-                gap_candidates.push((displacement, old_id, new_id));
+                gap_candidates.push((
+                    displacement + 0.0006 * (start - old.end) as f64,
+                    old_id,
+                    new_id,
+                ));
             }
         }
     }
     gap_candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut successors = BTreeMap::new();
+    let mut predecessors = BTreeSet::new();
     for &(distance, old_id, new_id) in &gap_candidates {
-        if used.contains(&old_id) || used.contains(&new_id) {
+        if successors.contains_key(&old_id) || predecessors.contains(&new_id) {
             continue;
         }
         if gap_candidates
@@ -258,9 +268,15 @@ fn find_handoffs(
         {
             continue;
         }
-        used.insert(old_id);
-        used.insert(new_id);
-        aliases.insert(new_id, old_id);
+        successors.insert(old_id, new_id);
+        predecessors.insert(new_id);
+    }
+    for &root in successors.keys().filter(|id| !predecessors.contains(id)) {
+        let mut current = root;
+        while let Some(&next) = successors.get(&current) {
+            aliases.insert(next, root);
+            current = next;
+        }
     }
     Ok(aliases)
 }
@@ -663,6 +679,49 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(stitch(&path, &sha, 48, Some(&rally)).unwrap(), (sha, 0, 0));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn torso_handoffs_chain_to_first_id_inside_one_rally() {
+        let path = std::env::temp_dir().join(format!("volley-chain-{}.jsonl", Uuid::new_v4()));
+        let mut raw = Vec::new();
+        for frame in 0..80_u64 {
+            let mut players = Vec::new();
+            for (id, start, end, x) in [
+                (3, 0, 17, 0.54),
+                (7, 21, 38, 0.54),
+                (12, 42, 59, 0.54),
+                (19, 62, 79, 0.54),
+                (25, 0, 79, 0.65),
+            ] {
+                if (start..=end).contains(&frame) {
+                    let joints = [[x, 0.47, 0.9]; 17];
+                    players.push(json!({
+                        "track_id":id,"pose":joints,
+                        "detection":candidate(frame,[x-0.04,0.35,x+0.04,0.67],None)
+                    }));
+                }
+            }
+            serde_json::to_writer(
+                &mut raw,
+                &json!({"frame_index":frame,"tracked_players":players}),
+            )
+            .unwrap();
+            raw.push(b'\n');
+        }
+        fs::write(&path, &raw).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&raw));
+        let rally = rally_scope(vec![(0, 79)]);
+        let (updated, merged, removed) = stitch(&path, &sha, 80, Some(&rally)).unwrap();
+        assert_eq!((merged, removed), (3, 0));
+        assert_ne!(updated, sha);
+        for line in fs::read_to_string(&path).unwrap().lines() {
+            let row: Value = serde_json::from_str(line).unwrap();
+            for player in row["tracked_players"].as_array().unwrap() {
+                assert!(matches!(player["track_id"].as_u64(), Some(3 | 25)));
+            }
+        }
         fs::remove_file(path).unwrap();
     }
 
