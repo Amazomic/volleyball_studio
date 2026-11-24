@@ -52,7 +52,7 @@ const logPanel=new Node("details");
 host.append(progress,logPanel);
 const ui={historyList:new Node("div"),progress,logPanel};
 const state={
-  latestPipeline:null,historyRows:[],historyFilter:"all",historyOffset:0
+  latestPipeline:null,historyRows:[],historyFilter:"all",historyOffset:0,historyProject:"aaaabbbbcccc"
 };
 let project="aaaabbbbcccc";
 const getId=id=>id==="studio-analysis-live-host"?host:null;
@@ -63,7 +63,7 @@ const sessionStorage={
   removeItem:key=>storedRuns.delete(key)
 };
 const helpers={
-  state,ui,projectId:()=>project,
+  state,ui,projectId:()=>project,mainGraph:null,
   $:getId,make:(tag,klass,text)=>new Node(tag,klass,text),
   clear:node=>node.textContent="",
   historyDuration:()=> "—",
@@ -140,7 +140,7 @@ const restoredState={
     {id,mode:"post",video:"match.mp4",status:"complete",duration_ms:90000,stages:[]},
     {id:"b".repeat(32),mode:"gpu",video:"older.mp4",status:"complete",stages:[]}
   ],
-  historyFilter:"all",historyOffset:0
+  historyFilter:"all",historyOffset:0,historyProject:"aaaabbbbcccc"
 };
 const restored=runInNewContext(registry+source.slice(from,to)+
   "\n({renderHistory,recordHistoryRun})",{

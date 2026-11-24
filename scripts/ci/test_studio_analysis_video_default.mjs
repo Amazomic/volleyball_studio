@@ -24,7 +24,7 @@ const context={
     beginLoad:()=>++currentToken,
     currentLoad:(_key,token)=>token===currentToken
   },
-  loadHistory(){},resetLog(){},updateProfile(){},
+  loadHistory(){},resetLog(){},updateProfile(){},renderGraphSummary(){},
   clear:node=>{node.options=[];node.value="";},
   make:(_tag,_class,label)=>({value:"",textContent:label}),
   window:{

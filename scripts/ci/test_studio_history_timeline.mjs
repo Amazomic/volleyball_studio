@@ -44,7 +44,8 @@ class Node{
 }
 const host=new Node("div"),progress=new Node("progress"),logPanel=new Node("details");
 host.append(progress,logPanel);
-const ui={historyList:new Node("div"),progress,logPanel};
+const historyMore={classList:{add(){},remove(){}}};
+const ui={historyList:new Node("div"),progress,logPanel,historyMore,video:{value:"game.mp4"}};
 const id="a".repeat(32),now=Date.now();
 const stages=[
   {name:"GPU · VballNet",started_ms:now-90000,finished_ms:now-40000,duration_ms:50000},
@@ -56,7 +57,9 @@ const current={
   mode:"gpu",video:"game.mp4",stage:"GPU · RF-DETR Medium + RTMPose: running",
   status:"running",progress_percent:67.5,elapsed_ms:91000,remaining_ms:110000,stages
 };
-const state={latestPipeline:current,historyRows:[],historyFilter:"all",historyStatusAt:now,historyOffset:0};
+let project=current.project_id,graphSource;
+const state={latestPipeline:current,historyRows:[],historyFilter:"all",historyStatusAt:now,
+  historyOffset:0,historyEpoch:0,historyProject:project,formProject:project,trackCovers:new Map()};
 const storage=new Map();
 const sessionStorage={
   getItem:key=>storage.get(key)||null,
@@ -65,11 +68,12 @@ const sessionStorage={
 };
 const {renderHistory,updateLiveHistory,recordHistoryRun}=runInNewContext(registry+source.slice(from,to)+
   "\n({renderHistory,updateLiveHistory,recordHistoryRun})",{
-    state,ui,projectId:()=>"aaaabbbbcccc", $:key=>key==="studio-analysis-live-host"?host:null,
+    state,ui,projectId:()=>project, $:key=>key==="studio-analysis-live-host"?host:null,
     make:(tag,klass,text)=>new Node(tag,klass,text),
     clear:node=>node.textContent="",historyDuration:ms=>ms===null?"—":Math.floor(ms/1000)+" с",
     historyLog:async()=>true,
-    window:{VolleyballUi:{translate:x=>x},sessionStorage},showGraphResult:()=>{},updatePipelineGraph:()=>{},
+    window:{VolleyballUi:{translate:x=>x},sessionStorage},mainGraph:host,
+    showGraphResult:source=>{graphSource=source;},updatePipelineGraph:()=>{},
     requestAnimationFrame:()=>{}
   });
 renderHistory();
@@ -95,6 +99,38 @@ assert.match(run.querySelector(".analysis-history-runtime").textContent,/Зав�
 assert.doesNotMatch(run.querySelector(".analysis-history-stages").textContent,/В процессе/);
 assert.match(run.querySelector(".analysis-history-stages").textContent,/40 с/);
 assert.strictEqual(progress.parent,logPanel.parent);
+const other={...finished,id:"b".repeat(32),video:"other.mp4"};
+state.historyRows=[finished,other];
+ui.video.value=other.video;
+renderHistory();
+assert.equal(graphSource?.id,other.id);
+updateLiveHistory(finished);
+assert.equal(graphSource?.id,other.id);
+project="ddddeeeeffff";
+renderHistory();
+assert.equal(graphSource,null);
+assert.equal(ui.historyList.children.length,0);
+const projectReadyStart=source.indexOf('  window.addEventListener("volley:project-ready",()=>{');
+const projectReadyEnd=source.indexOf("  for(const nav",projectReadyStart);
+let projectReady,resolveHistory;
+const loadHistory=runInNewContext(source.slice(to,source.indexOf("  ui.historyRefresh.addEventListener",to))+
+  source.slice(projectReadyStart,projectReadyEnd)+"\nloadHistory",{
+    state,ui,projectId:()=>project,renderHistory,liveHistory:()=>null,resetLog:()=>{},
+    get:()=>new Promise(resolve=>{resolveHistory=resolve;}),
+    window:{addEventListener:(event,callback)=>{projectReady=callback;}}
+  });
+project=current.project_id;
+const pending=loadHistory();
+project="ddddeeeeffff";
+projectReady();
+assert.equal(graphSource,null);
+project=current.project_id;
+projectReady();
+resolveHistory({schema:"volley-studio-pipeline-history/1",project_id:project,
+  runs:[other],next_offset:1});
+await pending;
+assert.equal(state.historyRows.length,0);
+assert.equal(graphSource,null);
 const resultPanel=new Node("div");
 const showGraphResult=runInNewContext(source.slice(
   source.indexOf("  const showGraphResult=source=>{"),

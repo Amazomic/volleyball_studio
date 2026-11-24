@@ -200,13 +200,13 @@ assert.equal(completeState.analysis,primaryB);
 // Deleting the last GPU chain must trigger the analysis button state update.
 const tabSource=readFileSync(new URL("../../rust/volley-app/static/studio_tabs.js",import.meta.url),"utf8");
 const start=tabSource.indexOf('  window.addEventListener("volley:chain-change"');
-const end=tabSource.indexOf('  ui.project.addEventListener("change"',start);
+const end=tabSource.indexOf('  window.addEventListener("volley:track-photo-covers"',start);
 assert.ok(start>=0&&end>start);
 let updates=0,chainHandler;
 runInNewContext(tabSource.slice(start,end),{
   window:{addEventListener:(_,handler)=>{chainHandler=handler;}},
   state:{tab:"analysis"},projectId:()=>"abc",
-  ui:{video:{options:[],value:""}},updateProfile:()=>{updates++;}
+  ui:{video:{options:[],value:""}},updateProfile:()=>{updates++;},renderGraphSummary:()=>{}
 });
 chainHandler({detail:{project_id:"abc",video:""}});
 assert.equal(updates,1,"Removing all analyses must update postprocess availability");

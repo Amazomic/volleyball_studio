@@ -27,7 +27,7 @@
     pipelineId:"",pipelineProject:"",pipelineTimer:null,
     starting:false,stopRequested:false,polling:false,pollErrors:0,completedId:"",
     logKey:"",logOffset:0,logBusy:false,logLastCall:"",logPending:null,
-    historyRows:[],historyFilter:"all",historyEpoch:0,historyOffset:0,latestPipeline:null,
+    historyRows:[],historyFilter:"all",historyEpoch:0,historyOffset:0,historyProject:"",latestPipeline:null,
     revision:"absent",players:[],mutating:false,playersLoaded:false,
     projectMemberIds:new Set(),trackCoverScope:"",trackCovers:new Map(),playerTrackCounts:null
   };
@@ -1035,6 +1035,17 @@
     const status=state.latestPipeline;
     return status&&status.project_id===projectId()&&status.id&&status.status!=="idle"?status:null;
   };
+  const projectHistoryRows=()=>state.historyProject===projectId()?state.historyRows:[];
+  const renderGraphSummary=()=>{
+    if(!mainGraph||typeof mainGraph.querySelector!=="function")return;
+    const video=state.formProject===projectId()?ui.video.value:"";
+    const latest=liveHistory();
+    const source=video?(latest?.video===video?latest:
+      projectHistoryRows().find(row=>row.video===video)||null):null;
+    updatePipelineGraph(mainGraph,source);
+    showGraphResult(source);
+    requestAnimationFrame(()=>graphDraw(mainGraph));
+  };
   const historyVisibleByProject=new Map();
   const visibleHistoryRuns=project=>{
     if(!historyVisibleByProject.has(project)){
@@ -1123,16 +1134,10 @@
     $("studio-analysis-live-host").append(ui.progress,ui.logPanel);
     clear(ui.historyList);
     const latest=liveHistory();
-    if(typeof updatePipelineGraph==="function"&&typeof mainGraph!=="undefined"&&
-      mainGraph&&typeof mainGraph.querySelector==="function"){
-      const source=latest||state.historyRows[0]||null;
-      updatePipelineGraph(mainGraph,source);
-      showGraphResult(source);
-      requestAnimationFrame(()=>graphDraw(mainGraph));
-    }
+    renderGraphSummary();
     const active=latest&&["queued","running","cancelling"].includes(latest.status);
     const visibleIds=visibleHistoryRuns(projectId());
-    const rows=state.historyRows.filter(row=>visibleIds.has(row.id)&&
+    const rows=projectHistoryRows().filter(row=>visibleIds.has(row.id)&&
       (state.historyFilter==="all"||row.mode===state.historyFilter||
         !row.mode||row.mode==="full"||(active&&row.id===latest.id)));
     // The status endpoint can observe a new job before the history endpoint lists it.
@@ -1194,12 +1199,7 @@
   const updateLiveHistory=status=>{
     if(status.project_id!==projectId()||!status.id||status.status==="idle")return;
     state.latestPipeline=status;
-    if(typeof updatePipelineGraph==="function"&&typeof mainGraph!=="undefined"&&
-      mainGraph&&typeof mainGraph.querySelector==="function"){
-      updatePipelineGraph(mainGraph,status);
-      showGraphResult(status);
-      requestAnimationFrame(()=>graphDraw(mainGraph));
-    }
+    renderGraphSummary();
     if(!visibleHistoryRuns(status.project_id).has(status.id))return;
     let item=[...ui.historyList.children].find(node=>node.dataset?.runId===status.id);
     if(!item){renderHistory();item=[...ui.historyList.children].find(node=>node.dataset?.runId===status.id);}
@@ -1235,7 +1235,8 @@
       if(data.schema!=="volley-studio-pipeline-history/1"||data.project_id!==project||!Array.isArray(data.runs)||
         !Number.isSafeInteger(data.next_offset)||data.next_offset<offset)
         throw Error("Некорректный ответ истории");
-      state.historyRows=append?state.historyRows.concat(data.runs):data.runs;
+      state.historyRows=append?projectHistoryRows().concat(data.runs):data.runs;
+      state.historyProject=project;
       state.historyOffset=data.next_offset;
       ui.historyMore.classList.add("hidden");
       renderHistory();
@@ -1277,12 +1278,6 @@
     if(!status||status.schema!=="volley-studio-pipeline/1")return;
     const percent=Number(status.progress_percent);
     ui.progress.value=Number.isFinite(percent)?Math.max(0,Math.min(percent,100)):0;
-    if(typeof updatePipelineGraph==="function"&&typeof mainGraph!=="undefined"&&
-      mainGraph&&typeof mainGraph.querySelector==="function"){
-      updatePipelineGraph(mainGraph,status);
-      showGraphResult(status);
-      requestAnimationFrame(()=>graphDraw(mainGraph));
-    }
     const active=["queued","running","cancelling"].includes(status.status);
     if(status.status==="cancelling")state.stopRequested=true;
     const stage=String(status.stage||"Обработка");
@@ -1392,6 +1387,7 @@
       clear(ui.video);ui.video.append(make("option","","Сначала выберите проект"));
       window.VolleyballEditor?.load("","");
       updateProfile();
+      renderGraphSummary();
       return;
     }
     const catalog=window.VolleyballStudioProjectCatalog?
@@ -1428,6 +1424,7 @@
     state.formProject=project;
     window.VolleyballEditor?.load(project,ui.video.value,true);
     updateProfile();
+    renderGraphSummary();
     await restorePipeline();
   };
   const launchPipeline=async(mode="full")=>{
@@ -1662,7 +1659,7 @@
   ui.playerRefresh.addEventListener("click",()=>loadPlayers().catch(failure));
   for(const field of allProfileFields())field.addEventListener(field.tagName==="SELECT"||field.type==="checkbox"?"change":"input",()=>{
     updateProfile();saveAnalysisSettings();
-    if(mainGraph?.isConnected)updatePipelineGraph(mainGraph,state.latestPipeline||null);
+    renderGraphSummary();
   });
   ui.reset.addEventListener("click",event=>{event.preventDefault();resetProfile();});
   ui.start.addEventListener("click",()=>state.pipelineId?cancelPipeline():launchPipeline());
@@ -1672,6 +1669,7 @@
     saveAnalysisSettings();
     window.VolleyballEditor?.load(projectId(),ui.video.value);
     updateProfile();
+    renderGraphSummary();
   });
   updateProfile();
   window.addEventListener("volley:chain-change",event=>{
@@ -1682,17 +1680,9 @@
         ui.video.value!==detail.video){
       ui.video.value=detail.video;
       window.VolleyballEditor?.load(projectId(),ui.video.value);
+      renderGraphSummary();
     }
     updateProfile();
-  });
-  ui.project.addEventListener("change",()=>{
-    $("studio-analysis-live-host").append(ui.progress,ui.logPanel);
-    state.latestPipeline=null;
-    if(mainGraph&&typeof mainGraph.querySelector==="function")updatePipelineGraph(mainGraph,null);
-    resetLog();
-    state.historyEpoch++;state.historyRows=[];state.historyOffset=0;ui.historyMore.classList.add("hidden");ui.historyList.textContent="Выберите проект.";
-    state.analysisGeneration++;
-    // project-ready is the canonical data refresh event (no double fetch).
   });
   window.addEventListener("volley:track-photo-covers",event=>{
     const detail=event.detail||{};
@@ -1727,6 +1717,16 @@
     if(state.tab==="players")loadPlayers().catch(failure);
   });
   window.addEventListener("volley:project-ready",()=>{
+    const project=projectId();
+    if(state.historyProject!==project){
+      state.historyEpoch++;
+      state.historyProject=project;
+      state.historyRows=[];
+      state.historyOffset=0;
+      ui.historyMore.classList.add("hidden");
+    }
+    if(state.latestPipeline?.project_id!==project)state.latestPipeline=null;
+    renderHistory();
     state.playersLoaded=false;
     state.projectMemberIds=new Set();
     state.trackCovers.clear();state.trackCoverScope="";state.playerTrackCounts=null;

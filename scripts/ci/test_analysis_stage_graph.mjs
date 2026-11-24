@@ -169,7 +169,7 @@ assert.match(js,/recordHistoryRun\(project,status\.id\)/);
 assert.match(js,/sessionStorage\?\.setItem\("volley:analysis-session-runs:v1:"/);
 assert.match(js,/visibleIds\.has\(row\.id\)/);
 assert.match(timeline,/make\("span","analysis-history-stage-name",pipelineLabel\(entry\)\)/);
-assert.match(js,/updatePipelineGraph\(mainGraph,status\)/);
+assert.match(js,/updatePipelineGraph\(mainGraph,source\)/);
 assert.match(rust,/rows\.push\(json!\(\{"name":stage_name,"id":stage_id/);
 assert.match(rust,/status\["stage_id"\] = json!\(stage_id\)/);
 assert.match(rust,/status\["shared_pose"\] = shared_pose_metrics\(status, &pose\)/);
