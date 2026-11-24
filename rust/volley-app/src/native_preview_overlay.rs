@@ -474,6 +474,16 @@ fn overlay_players(frame: &Value) -> Vec<Value> {
             {
                 player["pose"] = p["pose"].clone();
                 player["pose_interpolated"] = json!(p["pose_interpolated"] == true);
+                if !inferred.contains(&id) && p["pose_interpolated"] != true {
+                    if let Some(point) = serde_json::from_value(p["pose"].clone())
+                        .ok()
+                        .map(|joints| volley_core::tracker::PoseEvidence { joints })
+                        .filter(volley_core::tracker::PoseEvidence::valid)
+                        .and_then(|pose| pose.torso())
+                    {
+                        player["torso_point"] = json!(point);
+                    }
+                }
             }
             Some(player)
         })

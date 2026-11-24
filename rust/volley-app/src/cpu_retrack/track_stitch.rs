@@ -8,7 +8,7 @@ use std::{
     io::{BufWriter, Write},
     path::Path,
 };
-use volley_core::{bbox_iou, fusion::Candidate};
+use volley_core::{bbox_iou, fusion::Candidate, tracker::PoseEvidence};
 
 #[derive(Deserialize)]
 struct Frame {
@@ -20,6 +20,7 @@ struct Frame {
 struct Observation {
     track_id: u64,
     detection: Candidate,
+    pose: Option<[[f64; 3]; 17]>,
 }
 
 #[derive(Default)]
@@ -29,6 +30,8 @@ struct Track {
     observed: u64,
     first_head: Option<(u64, [f64; 2])>,
     last_head: Option<(u64, [f64; 2])>,
+    first_pose: Option<(u64, PoseEvidence)>,
+    last_pose: Option<(u64, PoseEvidence)>,
     first_box: Option<[f64; 4]>,
     last_box: Option<[f64; 4]>,
 }
@@ -95,6 +98,14 @@ fn find_handoffs(
                 .first_box
                 .get_or_insert(observation.detection.bbox_xyxy_norm);
             track.last_box = Some(observation.detection.bbox_xyxy_norm);
+            if let Some(pose) = observation
+                .pose
+                .map(|joints| PoseEvidence { joints })
+                .filter(PoseEvidence::valid)
+            {
+                track.first_pose.get_or_insert((frame, pose));
+                track.last_pose = Some((frame, pose));
+            }
             if let Some(head) = observation.detection.head_point_norm {
                 if head.iter().all(|value| value.is_finite()) {
                     track.first_head.get_or_insert((frame, head));
@@ -184,29 +195,46 @@ fn find_handoffs(
         if used.contains(&old_id) || old.observed < 12 {
             continue;
         }
-        let (Some((old_at, old_head)), Some(old_box)) = (old.last_head, old.last_box) else {
-            continue;
-        };
-        if old.end.saturating_sub(old_at) > 3 {
-            continue;
-        }
         for (&new_id, new) in &tracks {
             if old_id == new_id || used.contains(&new_id) || new.observed < 12 {
                 continue;
             }
-            let (Some(start), Some((new_at, new_head)), Some(new_box)) =
-                (new.start, new.first_head, new.first_box)
-            else {
+            let Some(start) = new.start else {
                 continue;
             };
             if start <= old.end
-                || start - old.end > 13
-                || new_at.saturating_sub(start) > 3
+                || start - old.end > 45
                 || !scope.is_some_and(|mask| mask.same_interval(old.end, start))
             {
                 continue;
             }
-            if bbox_iou(old_box, new_box) < 0.25 {
+            if let (Some((old_at, old_pose)), Some((new_at, new_pose))) =
+                (old.last_pose, new.first_pose)
+            {
+                if old.end - old_at <= 3 && new_at - start <= 3 {
+                    if let Some((a, b)) = old_pose.torso().zip(new_pose.torso()) {
+                        let distance = (a[0] - b[0]).hypot(a[1] - b[1]);
+                        if distance <= (0.012 + (start - old.end) as f64 * 0.0006).min(0.035)
+                            && old_pose
+                                .similarity(&new_pose, new_at - old_at)
+                                .is_some_and(|score| score >= 0.72)
+                        {
+                            gap_candidates.push((distance, old_id, new_id));
+                        }
+                    }
+                    continue;
+                }
+            }
+            let (Some((old_at, old_head)), Some((new_at, new_head)), Some(old_box), Some(new_box)) =
+                (old.last_head, new.first_head, old.last_box, new.first_box)
+            else {
+                continue;
+            };
+            if start - old.end > 13
+                || old.end - old_at > 3
+                || new_at - start > 3
+                || bbox_iou(old_box, new_box) < 0.25
+            {
                 continue;
             }
             let displacement = (old_head[0] - new_head[0]).hypot(old_head[1] - new_head[1]);
@@ -536,6 +564,45 @@ mod tests {
                 assert_eq!(player["track_id"], 3);
             }
         }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn measured_torso_stitches_different_crops_only_within_one_rally() {
+        let path =
+            std::env::temp_dir().join(format!("volley-torso-stitch-{}.jsonl", Uuid::new_v4()));
+        let mut raw = Vec::new();
+        let joints = [[0.54, 0.47, 0.9]; 17];
+        for frame in 0..65 {
+            let players = if frame <= 17 {
+                vec![json!({"track_id":3,"pose":joints,
+                    "detection":candidate(frame,[0.50,0.35,0.58,0.67],None)})]
+            } else if frame >= 41 {
+                vec![json!({"track_id":7,"pose":joints,
+                    "detection":candidate(frame,[0.52,0.43,0.56,0.51],None)})]
+            } else {
+                vec![]
+            };
+            serde_json::to_writer(
+                &mut raw,
+                &json!({
+                    "frame_index":frame,"tracked_players":players,
+                }),
+            )
+            .unwrap();
+            raw.push(b'\n');
+        }
+        fs::write(&path, &raw).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&raw));
+        let separate = rally_scope(vec![(0, 17), (41, 64)]);
+        assert!(find_handoffs(&path, &sha, 65, Some(&separate))
+            .unwrap()
+            .is_empty());
+        let rally = rally_scope(vec![(0, 64)]);
+        assert_eq!(
+            find_handoffs(&path, &sha, 65, Some(&rally)).unwrap(),
+            BTreeMap::from([(7, 3)])
+        );
         fs::remove_file(path).unwrap();
     }
 

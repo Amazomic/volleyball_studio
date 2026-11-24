@@ -159,6 +159,7 @@ MP4, MOV, MKV, AVI, WEBM, M4V, MTS · до 30 файлов · до 32 ГиБ к�
 ● Касания	● Touches
 ⌁ Траектория	⌁ Trajectory
 ▢ Игроки	▢ Players
+● Точки корпуса	● Torso points
 Выберите розыгрыш справа	Choose a rally on the right
 ▶ Воспроизвести	▶ Play
 ♫ Звук	♫ Sound
@@ -253,6 +254,7 @@ CPU-параметры создают отдельную постобработ�
 Показывать или скрывать касания	Show or hide touches
 Показывать или скрывать траекторию мяча	Show or hide the ball trajectory
 Показывать или скрывать рамки игроков	Show or hide player boxes
+Показывать измеренные точки корпуса с Track ID	Show measured torso points with Track ID
 Управление видео	Video controls
 Воспроизвести	Play
 Отключить звук	Mute

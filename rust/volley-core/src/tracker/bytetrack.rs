@@ -387,12 +387,14 @@ impl ByteTracker {
                 let duplicate = bbox_iou(other.box_.bbox_xyxy_norm, item.box_.bbox_xyxy_norm)
                     >= self.config.nms_iou
                     || same_head_body_duplicate(&other.box_, &item.box_);
-                let separate_poses = other
+                let torso_distance = other
                     .pose
                     .and_then(|pose| pose.torso())
                     .zip(item.pose.and_then(|pose| pose.torso()))
-                    .is_some_and(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1]) > 0.020);
-                !duplicate
+                    .map(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1]));
+                let same_torso = torso_distance.is_some_and(|distance| distance <= 0.008);
+                let separate_poses = torso_distance.is_some_and(|distance| distance > 0.020);
+                !(duplicate || same_torso)
                     || separate_poses
                     || self.independently_tracked_bodies(frame, &other.box_, &item.box_)
             }) {
@@ -601,8 +603,7 @@ impl ByteTracker {
                         {
                             let similarity =
                                 previous.similarity(&measured, frame.saturating_sub(pose_frame))?;
-                            (similarity >= 0.50 && travel <= (travel_limit + 0.10).min(0.30))
-                                .then_some(0.80 * similarity + 0.20 * overlap)
+                            (similarity >= 0.50).then_some(0.90 * similarity + 0.10 * overlap)
                         }
                         _ => (overlap >= threshold && travel <= travel_limit).then_some(overlap),
                     }
@@ -700,6 +701,24 @@ mod tests {
             ];
         }
         PoseEvidence { joints }
+    }
+
+    #[test]
+    fn torso_keeps_id_when_a_body_detection_is_replaced_by_a_partial_crop() {
+        let mut tracker = tracker();
+        let pose = Some(measured_pose(0.35));
+        let mut body = person(0, 0, 0.30, 0.95);
+        body.bbox_xyxy_norm = [0.30, 0.20, 0.40, 0.90];
+        let initial = tracker
+            .process_frame_with_poses(0, &[body], &[pose])
+            .unwrap();
+        let mut partial = person(1, 0, 0.33, 0.95);
+        partial.bbox_xyxy_norm = [0.33, 0.28, 0.39, 0.42];
+        let next = tracker
+            .process_frame_with_poses(1, &[partial], &[pose])
+            .unwrap();
+        assert_eq!(next.tracks.len(), 1);
+        assert_eq!(next.tracks[0].track_id, initial.tracks[0].track_id);
     }
 
     #[test]

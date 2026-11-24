@@ -15,12 +15,12 @@ const actionMarkup=html.match(/<fieldset id="studio-overlay-actions"[\s\S]*?<\/f
 assert.equal((actionMarkup.match(/data-overlay-action=/g)||[]).length,6);
 assert.match(css,/\.video-overlay-actions\{[^}]*justify-content:flex-start;[^}]*align-self:flex-start/);
 
-const buttons=Object.fromEntries(["rallies","touches","trajectory","players","pose","court"]
+const buttons=Object.fromEntries(["rallies","touches","trajectory","players","torso","pose","court"]
   .map(key=>[key,{setAttribute(){}}]));
 let filterHidden=false;
 const overlay={
   ...buttons,raw:false,
-  flags:{rallies:true,touches:true,trajectory:true,players:true,pose:true,court:true},
+  flags:{rallies:true,touches:true,trajectory:true,players:true,torso:false,pose:true,court:true},
   actionControls:{classList:{toggle(_name,hidden){filterHidden=hidden;}}}
 };
 const toggleCtx={overlay};
