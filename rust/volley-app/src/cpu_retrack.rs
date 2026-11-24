@@ -35,7 +35,7 @@ use volley_core::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_stabilized_body_v11";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_occlusion_continuity_v12";
 pub(crate) mod ball_track;
 mod gap_interpolation;
 mod pose_refinement;
@@ -84,6 +84,7 @@ struct FusedFrame {
 #[derive(Clone, Debug)]
 struct PlayerFrameScope {
     selected: Vec<(u64, u64)>,
+    rallies: Vec<(u64, u64)>,
     ball_job_id: String,
     mask_sha256: String,
 }
@@ -104,6 +105,11 @@ impl PlayerFrameScope {
     fn same_interval(&self, first: u64, last: u64) -> bool {
         self.interval(first)
             .is_some_and(|(start, end)| first >= start && last <= end)
+    }
+
+    fn same_confirmed_rally(&self, first: u64, last: u64) -> bool {
+        let index = self.rallies.partition_point(|&(start, _)| start <= first);
+        index > 0 && last <= self.rallies[index - 1].1
     }
 
     fn frame_count(&self) -> u64 {
@@ -160,8 +166,17 @@ fn load_player_frame_scope(
     }
     let selected =
         crate::cpu_touches::align_primary_intervals(&selected, source_frames, replay_frames)?;
+    let rallies = match mask.get("merged") {
+        Some(value) => {
+            let intervals = serde_json::from_value::<Vec<(u64, u64)>>(value.clone())
+                .map_err(|_| "Invalid confirmed rally intervals for player tracking")?;
+            crate::cpu_touches::align_primary_intervals(&intervals, source_frames, replay_frames)?
+        }
+        None => Vec::new(),
+    };
     Ok(Some(PlayerFrameScope {
         selected,
+        rallies,
         ball_job_id: ball_job_id.to_owned(),
         mask_sha256: format!("{:x}", Sha256::digest(&bytes)),
     }))
@@ -664,7 +679,7 @@ fn replay_frames_verified(
     drop(writer);
     let observed_sha = format!("{:x}", sha.finalize());
     let (stitched_sha, merged, removed_duplicate_boxes) =
-        track_stitch::stitch(output, &observed_sha, count, scope)?;
+        track_stitch::stitch(output, &observed_sha, count, scope, interpolate_players)?;
     totals.duplicate_track_ids_merged = merged;
     totals.detections = totals
         .detections
@@ -1039,6 +1054,7 @@ mod tests {
         let source = root.join("fusion.jsonl");
         let output = root.join("tracked.jsonl");
         let scope = PlayerFrameScope {
+            rallies: Vec::new(),
             selected: vec![(0, 20), (50, 70)],
             ball_job_id: "0123456789abcdef0123456789abcdef".into(),
             mask_sha256: "a".repeat(64),
