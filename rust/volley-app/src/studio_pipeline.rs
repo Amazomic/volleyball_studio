@@ -380,6 +380,18 @@ fn history_rows(state: &AppState, project_id: &str, offset: usize) -> Result<Val
             "status":status["status"],"stage":status["stage"],"error":status["error"],
             "started_ms":started,"duration_ms":started.zip(finished).and_then(|(a,b)| b.checked_sub(a)),
             "gpu_reused":status["gpu_reused"],"result_reused":status["result_reused"],
+            "stage_id":status["stage_id"],"analysis_id":status["analysis_id"],
+            "gpu_jobs":status["gpu_jobs"],"cpu_runs":status["cpu_runs"],
+            "gpu_rally_count":status["gpu_rally_mask"]["merged"].as_array().map(Vec::len),
+            "shared_pose":status["shared_pose"],
+            "player_tracking_stats":status["player_tracking_stats"],
+            "ball_stabilizer":status["ball_stabilizer"],
+            "completion_quality":status["completion_quality"],
+            "automatic_identity_available":status["automatic_identity"].is_object(),
+            "profile":{"gpu":{
+                "person_detector":status["profile"]["gpu"]["person_detector"],
+                "pose_enabled":status["profile"]["gpu"]["pose_enabled"]
+            }},
             "stages":stages}));
     }
     rows.sort_by(|a, b| {
@@ -1868,6 +1880,7 @@ async fn pipeline(
         status["gpu_reused"] = json!(true);
         status["result_reused"] = json!(true);
         status["reused_from_id"] = existing["id"].clone();
+        status["ball_stabilizer"] = existing["ball_stabilizer"].clone();
         status["automatic_identity"] = existing["automatic_identity"].clone();
         status["automatic_identity_complete"] = existing["automatic_identity_complete"].clone();
         status["automatic_identity_error"] = existing["automatic_identity_error"].clone();
@@ -4517,6 +4530,14 @@ mod branching_tests {
         let history = history_rows(&handler_state, "abc123def456", 0).unwrap();
         assert_eq!(history["runs"][0]["id"], run_id);
         assert_eq!(history["runs"][0]["duration_ms"], 3500);
+        assert_eq!(history["runs"][0]["analysis_id"], analysis);
+        assert_eq!(history["runs"][0]["gpu_jobs"], saved["gpu_jobs"]);
+        assert_eq!(history["runs"][0]["cpu_runs"], saved["cpu_runs"]);
+        assert_eq!(
+            history["runs"][0]["profile"]["gpu"]["pose_enabled"],
+            saved["profile"]["gpu"]["pose_enabled"]
+        );
+        assert_eq!(history["runs"][0]["automatic_identity_available"], false);
         assert_eq!(history["runs"][0]["stages"][0]["duration_ms"], 2000);
         assert_eq!(history["runs"][0]["stages"][1]["duration_ms"], 1500);
         // CPU can use a standalone GPU fusion with no Studio pipeline record.

@@ -9,9 +9,8 @@ const js=readFileSync(join(root,"rust/volley-app/static/studio_tabs.js"),"utf8")
 const rust=readFileSync(join(root,"rust/volley-app/src/studio_pipeline.rs"),"utf8");
 const html=readFileSync(join(root,"rust/volley-app/static/studio.html"),"utf8");
 const css=readFileSync(join(root,"rust/volley-app/static/studio.css"),"utf8");
-assert.match(css,/\.analysis-flow-diagram\{[^}]*max-width:none;width:100%/);
-assert.match(css,/\.analysis-flow-grid\{[^}]*grid-template-columns:repeat\(6,minmax\(0,1fr\)\)/);
-assert.match(css,/\.analysis-flow-node\{[^}]*width:100%;height:58px/);
+assert.match(css,/\.analysis-flow-diagram\{[^}]*container-type:inline-size/);
+assert.match(css,/\.analysis-flow-node\{[^}]*min-height:76px/);
 assert.match(css,/\.analysis-flow-node-stats\{[^}]*font-size:/);
 assert.match(js,/cell\.append\(node,stats\)/);
 assert.match(js,/!!entry&&entry\.finished_ms==null&&entry===stages\.at\(-1\)/);
@@ -39,11 +38,9 @@ assert.equal(format("pose",null,{gpu_jobs:{pose:"pose-run"},stages:[{id:"players
   "С RF-DETR · 00:00:36");
 assert.equal(format("pose",null,{gpu_jobs:{pose:"pose-run"},stages:[]},0,true,false),
   "Позы сохранены · время не измерено");
-for(const kind of ["input","gpu","cpu"]){
+for(const kind of ["input","gpu","cpu","mixed","output"]){
   assert.match(css,new RegExp('\\.analysis-flow-node\\[data-kind="'+kind+'"\\]\\{background:linear-gradient\\('));
 }
-assert.match(css,/\.analysis-flow-progress-dot\.is-visible\{opacity:1\}/);
-assert.match(js,/dot\.append\(element\("animateMotion"/);
 assert.match(js,/edge\.classList\.toggle\("is-active",!!running\)/);
 
 const extract=(begin,end)=>{
@@ -61,32 +58,24 @@ assert.equal(context.model("players")[0],"RF-DETR Medium");
 assert.equal(context.model("pose")[0],"RTMPose-M Body7");
 assert.equal(context.model("tracking")[1],"algorithm");
 assert.equal(context.model("touches")[0],"Touch Detector");
-assert.equal(context.model("touch_types")[0],"RTMPose + геометрия");
-assert.equal(context.model("touch_types",{profile:{post:{touches:{algorithm:"trajectory_tcn"}}}})[0],"RTMPose + геометрия");
-assert.equal(context.model("rallies"),null);
+assert.equal(context.model("touch_types")[1],"algorithm");
+assert.equal(context.model("rallies")[1],"algorithm");
 const stages=context.stages;
 const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
-assert.equal(stages.length,11);
-assert.ok(!ids.includes("publish")&&!ids.includes("material"));
-assert.deepEqual([...new Set(stages.filter(row=>row[2]==="gpu"||row[2]==="input").map(row=>row[3]))].sort(),[1]);
-assert.deepEqual([...new Set(stages.filter(row=>row[2]==="cpu"||row[2]==="output").map(row=>row[3]))].sort(),[2]);
-for(const [row,count] of [[1,6],[2,5]]){
+assert.equal(stages.length,12);
+assert.ok(ids.includes("publish")&&!ids.includes("material"));
+for(const [row,count] of [[1,6],[2,6]]){
   const nodes=stages.filter(item=>item[3]===row);
   assert.equal(nodes.length,count);
-  assert.deepEqual(Array.from(nodes,item=>item[4]),Array.from({length:count},(_,i)=>i+1));
 }
 assert.match(css,/\.analysis-flow-node::after\{[^}]*linear-gradient\(to right,/);
-assert.match(css,/\.analysis-flow-node\[data-flow="rtl"\]::after\{[^}]*linear-gradient\(to left,/);
 assert.doesNotMatch(css,/\.analysis-flow-node::after\{[^}]*conic-gradient/);
-assert.match(js,/cell\.style\.gridColumn=row===2\?7-col:col/);
-assert.match(js,/node\.dataset\.flow=row===2\?"rtl":"ltr"/);
 assert.match(js,/node\.style\.setProperty\("--stage-progress"/);
 assert.match(css,/\.analysis-flow-node\.is-complete\{[^}]*border-color:#efba4b/);
 assert.match(css,/\.analysis-flow-node::before,\.analysis-flow-node::after\{[^}]*width:var\(--stage-progress,0%\)/);
 assert.match(css,/\.analysis-flow-node::before\{top:0/);
 assert.match(css,/\.analysis-flow-node::after\{bottom:0/);
-assert.match(css,/\.analysis-flow-node\[data-flow="rtl"\]::before,\.analysis-flow-node\[data-flow="rtl"\]::after\{[^}]*right:0/);
 assert.doesNotMatch(css,/\.analysis-flow-node\.is-active\{[^}]*22px/);
 assert.match(css,/@media\(prefers-reduced-motion:reduce\)[^\n]*\.analysis-flow-node\.is-active::before/);
 assert.equal((css.match(/@property --stage-progress/g)||[]).length,1);
@@ -127,10 +116,6 @@ assert.equal(pctContext.percent(null,false,true),100);
 assert.equal(pctContext.percent(null,true,false),null);
 assert.equal(pctContext.percent({frames_processed:50,frames_total:100},false,false),0);
 assert.match(js,/analysis-flow-phase/);
-assert.match(css,/\.analysis-flow-phase\[data-phase="gpu"\]/);
-assert.match(css,/\.analysis-flow-phase\[data-phase="cpu"\]/);
-for(const item of stages)
-  assert.ok(item[0]==="ball_stabilizer"||item[1].split(/\s+/u).length<=2,item[1]);
 const examples=[
   ["Проверка исходного видео","video"],
   ["GPU · VBallNet: траектория мяча и розыгрыши","ball"],
@@ -146,14 +131,9 @@ const examples=[
   ["Монтажная временная разметка","material"]
 ];
 for(const [name,id] of examples)assert.equal(context.id(name),id,name);
-const edges=vm.runInNewContext(extract("const pipelineEdges=","const graphSettings=")
-  .replace("const pipelineEdges=","").replace(/;\s*$/u,""));
-assert.deepEqual(Array.from(edges.find(row=>row[2]==="no-pose")).slice(0,2),["fusion","tracking"]);
-assert.ok(edges.some(([from,to])=>from==="touch_types"&&to==="identity"));
-assert.ok(edges.some(([from,to,branch])=>from==="touches"&&to==="identity"&&branch==="no-types"));
+const edges=vm.runInNewContext(extract("const pipelineEdges=","const graphSettings=")+"pipelineEdges;");
 for(const [from,to] of edges){
   assert.ok(ids.includes(from)&&ids.includes(to),from+" -> "+to);
-  assert.ok(ids.indexOf(from)<ids.indexOf(to),from+" -> "+to);
 }
 const timeline=extract("const renderStageTimeline=","const renderHistory=");
 assert.doesNotMatch(timeline,/updatePipelineGraph|analysis-flow-grid|analysis-flow-diagram/);
@@ -193,4 +173,61 @@ assert.match(js,/primary_rallies:\{\s*min_trajectory_seconds:/);
 assert.match(js,/merge_gap_seconds:inputValue\("studio-gpu-rally-merge-seconds"\)/);
 assert.match(js,/stationary_ball_ms:inputValue\("studio-gpu-rally-stationary-ms"\)/);
 
-console.log("PASS: 11 visible processing stages, direct identity edges, history parity and conditional branches");
+const dataLinks=vm.runInNewContext(extract("const pipelineEdges=","const graphSettings=")
+  +"({links:pipelineEdges,state:graphLinkState});");
+const actualInputs=target=>Array.from(dataLinks.links.filter(link=>link[1]===target),link=>link[0]).sort();
+assert.deepEqual(actualInputs("fusion"),["ball","players"]);
+assert.deepEqual(actualInputs("tracking"),["fusion","pose","rallies"]);
+assert.deepEqual(actualInputs("touches"),["ball_stabilizer","rallies","tracking"]);
+assert.deepEqual(actualInputs("publish"),["rallies","touches","tracking"]);
+assert.deepEqual(actualInputs("identity"),["publish","tracking","video"]);
+assert.equal(dataLinks.state("pose",null),"optional");
+assert.equal(dataLinks.state("pose",{profile:{gpu:{pose_enabled:false}}}),"disabled");
+assert.equal(dataLinks.state("pose",{gpu_reused:true,gpu_jobs:{pose:"saved"}}),"available");
+assert.deepEqual(actualInputs("pose"),["fusion","players","video"]);
+assert.deepEqual(actualInputs("touch_types"),["pose","touches"]);
+assert.equal(dataLinks.state("pose",{profile:{post:{pose_classification:false}},gpu_jobs:{pose:"saved"}}),"available");
+const withClass=(stageId,classes)=>({dataset:{stageId},classList:{contains:name=>classes.includes(name)}});
+const link={
+  dataset:{edgeSource:"fusion",edgeTarget:"tracking",edgeCondition:"",edgeData:"Объединённые наблюдения"},
+  classList:{toggle(name,enabled){this[name]=enabled;}},
+  setAttribute(name,value){this[name]=value;}
+};
+const diagram={querySelectorAll(selector){
+  return selector===".analysis-flow-node"?
+    [withClass("fusion",["is-reused"]),withClass("tracking",["is-active"])]:[link];
+}};
+const edgeContext=vm.createContext({diagram,window:{VolleyballUi:{
+  locale:"en",
+  translate(value){return this.locale==="en"?{"Данные GPU":"GPU data","Трекинг ID":"Track IDs"}[value]||value:value;}
+}}});
+vm.runInContext(definitions+extract("const pipelineEdges=","const graphSettings=")+
+  extract("const paintGraphEdges=",'$("analysis-flow-feedback")')+"paintGraphEdges(diagram,{gpu_reused:true});",edgeContext);
+assert.equal(link.textContent,"GPU data · Объединённые наблюдения");
+assert.equal(link["aria-label"],"GPU data → Track IDs: Объединённые наблюдения");
+assert.equal(link.classList["is-active"],true);
+const card=id=>({
+  dataset:{stageId:id},
+  classList:{
+    toggle(name,enabled){this[name]=enabled;},
+    contains(name){return Boolean(this[name]);}
+  },
+  style:{setProperty(){}},
+  querySelector(){return {classList:{toggle(){}}};}
+});
+const ballCard=card("ball"),poseCard=card("pose");
+const graph={
+  querySelector:()=>true,
+  querySelectorAll:selector=>selector===".analysis-flow-node"?[ballCard,poseCard]:[]
+};
+const stageContext=vm.createContext({graph,window:edgeContext.window,document:{},$:context.$});
+vm.runInContext(definitions+extract("const pipelineEdges=","const graphSettings=")+
+  extract("const graphLabel=",'$("analysis-flow-feedback")')+
+  'updatePipelineGraph(graph,{status:"complete",gpu_jobs:{pose:"saved"},stages:[{id:"ball",finished_ms:2000}]});',stageContext);
+assert.equal(ballCard.classList["is-complete"],true);
+assert.equal(poseCard.classList["is-complete"],true);
+const historyProjection=rust.slice(rust.indexOf('rows.push(json!({"id":id'),rust.indexOf("    rows.sort_by"));
+for(const key of ["gpu_jobs","cpu_runs","analysis_id","profile","gpu_rally_count","automatic_identity_available"])
+  assert.ok(historyProjection.includes('"'+key+'":'),"Saved graph needs "+key);
+assert.doesNotMatch(js,/graphDraw\(/);
+console.log("PASS: analysis stages, verified data inputs, optional pose links and history parity");

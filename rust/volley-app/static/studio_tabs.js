@@ -438,21 +438,21 @@
   };
 
   const pipelineStages=[
-    ["video","Подготовка видео","input",1,1],
-    ["ball","Детекция мяча","gpu",1,2],
-    ["rallies","Розыгрыши","gpu",1,3],
-    ["players","Поиск игроков","gpu",1,4],
-    ["fusion","Данные GPU","gpu",1,5],
-    ["pose","Позы игроков","gpu",1,6],
-    ["tracking","Трекинг ID","cpu",2,1],
-    ["ball_stabilizer","Интерполяция траектории мяча","cpu",2,2],
-    ["touches","Касания","cpu",2,3],
-    ["touch_types","Типы касаний","cpu",2,4],
-    ["identity","Привязка игроков","cpu",2,5],
+    ["video","Подготовка видео","input",1],
+    ["ball","Детекция мяча","gpu",1],
+    ["rallies","Розыгрыши","cpu",1],
+    ["players","Поиск игроков","gpu",1],
+    ["fusion","Данные GPU","output",1],
+    ["pose","Позы игроков","gpu",1],
+    ["tracking","Трекинг ID","cpu",2],
+    ["ball_stabilizer","Интерполяция траектории мяча","cpu",2],
+    ["touches","Касания","cpu",2],
+    ["touch_types","Типы касаний","cpu",2],
+    ["publish","Публикация розыгрышей","output",2],
+    ["identity","Привязка игроков","mixed",2],
   ];
   const pipelineNames=new Map(pipelineStages.map(item=>[item[0],item[1]]));
   pipelineNames.set("cache","Кэш GPU");
-  pipelineNames.set("publish","Публикация");
   pipelineNames.set("material","Результат");
   const pipelineModelMeta=(id,run)=>{
     const known={
@@ -462,7 +462,9 @@
       pose:["RTMPose-M Body7","model"],
       tracking:["ByteTrack","algorithm"],
       touches:["Touch Detector","algorithm"],
-      touch_types:["RTMPose + геометрия","classifier"]
+      rallies:["Маска игровых интервалов","algorithm"],
+      touch_types:["Геометрия поз · внутри Touch Detector","algorithm"],
+    identity:["ReID · сопоставление на CPU","mixed"]
     };
     return known[id]||null;
   };
@@ -477,6 +479,7 @@
     tracking:[["rect",{x:2,y:3,width:20,height:18,rx:3}],["circle",{cx:8,cy:9,r:2}],["path",{d:"M4 17c1-3 7-3 8 0m4-9h4m-4 5h4m-4 5h3"}]],
     touches:[["path",{d:"M8 22V11a2 2 0 0 1 4 0V5a2 2 0 0 1 4 0v6a2 2 0 0 1 4 0v5a7 7 0 0 1-7 7h-2a8 8 0 0 1-6-3l-3-4a2 2 0 0 1 3-3l3 3"}]],
     touch_types:[["circle",{cx:11,cy:13,r:8}],["path",{d:"m5 8 6 2 4-4m-7 9 3-5 8 3m-8 2-4 6m4-11 1 11M19 1v4m-2-2h4"}]],
+    publish:[["path",{d:"M4 12h16m-6-6 6 6-6 6"}]],
     identity:[["path",{d:"M10 13a5 5 0 0 0 7 .5l3-3a5 5 0 0 0-7-7l-2 2m3 5a5 5 0 0 0-7-.5l-3 3a5 5 0 0 0 7 7l2-2"}]],
   };
   const pipelineIcon=id=>{
@@ -563,7 +566,7 @@
           " поз · "+stageTime(duration)+" (общ.)";
       return "С RF-DETR · "+stageTime(duration);
     }
-    if(id==="touch_types"&&entry&&run?.profile?.post?.pose_classification!==false){
+    if(id==="touch_types"&&entry&&run?.gpu_jobs?.pose){
       const duration=running&&Number.isFinite(entry.started_ms)&&entry.finished_ms==null?
         Math.max(0,now-entry.started_ms):entry.duration_ms;
       return "В составе касаний · "+stageTime(duration);
@@ -572,8 +575,8 @@
     if(id==="ball_stabilizer"&&entry&&run?.ball_stabilizer){
       const stats=run.ball_stabilizer;
       result="−"+stats.rejected_frames+" / +"+stats.interpolated_frames+" точек";
-    }else if(id==="rallies"&&entry&&Array.isArray(run?.gpu_rally_mask?.merged)){
-      const count=run.gpu_rally_mask.merged.length;
+    }else if(id==="rallies"&&entry&&Number.isSafeInteger(run?.gpu_rally_count??run?.gpu_rally_mask?.merged?.length)){
+      const count=run.gpu_rally_count??run.gpu_rally_mask.merged.length;
       const noun=count%10===1&&count%100!==11?"розыгрыш":
         count%10>=2&&count%10<=4&&(count%100<12||count%100>14)?"розыгрыша":"розыгрышей";
       result=count.toLocaleString("ru-RU")+" "+noun;
@@ -601,11 +604,36 @@
     return null;
   };
   const pipelineEdges=[
-    ["video","ball"],["ball","rallies"],["rallies","players"],["players","fusion"],
-    ["fusion","pose"],["pose","tracking"],["tracking","ball_stabilizer"],["ball_stabilizer","touches"],
-    ["touches","touch_types"],["touch_types","identity"],
-    ["video","fusion","cache"],["fusion","tracking","no-pose"],["touches","identity","no-types"]
+    ["video","ball","Кадры видео"],
+    ["ball","rallies","Детекции мяча"],
+    ["video","players","Кадры видео"],
+    ["rallies","players","Игровые интервалы"],
+    ["players","pose","Рамки игроков"],
+    ["video","pose","Кадры видео"],
+    ["fusion","pose","Версия для сохранения поз"],
+    ["ball","fusion","Детекции мяча"],
+    ["players","fusion","Рамки игроков"],
+    ["fusion","tracking","Данные GPU"],
+    ["pose","tracking","Позы игроков","pose"],
+    ["rallies","tracking","Игровые интервалы"],
+    ["tracking","ball_stabilizer","Мяч из CPU replay"],
+    ["ball_stabilizer","touches","Стабилизированная траектория"],
+    ["tracking","touches","Наблюдения из CPU replay"],
+    ["rallies","touches","Игровые интервалы"],
+    ["pose","touch_types","Сохранённые позы","pose"],
+    ["touches","touch_types","События внутри детектора","pose"],
+    ["rallies","publish","Границы розыгрышей"],
+    ["tracking","publish","Версия CPU replay"],
+    ["touches","publish","Результат Touch Detector"],
+    ["video","identity","Кадры для сравнения"],
+    ["tracking","identity","Track ID"],
+    ["publish","identity","Розыгрыши с участниками"],
   ];
+  const graphLinkState=(condition,run)=>{
+    if(condition!=="pose")return "available";
+    if(run?.gpu_jobs?.pose)return "available";
+    return run?.profile?.gpu?.pose_enabled===false?"disabled":"optional";
+  };
   const graphSettings={
     video:[".analysis-profile-source","#studio-analysis-editor"],
     ball:["#studio-gpu-stride","#studio-gpu-memory","#studio-gpu-threads"],
@@ -631,12 +659,13 @@
     ball_stabilizer:"Ball Stabilizer использует все детекции VBallNet: отдалённые ложные точки отбрасываются по соседним положениям и непрерывности траектории. Короткие пропуски интерполируются до поиска касаний; розыгрыши 1-й фазы не меняются.",
     rallies:"Рабочие настройки первичного анализа: длительность траектории, остановка мяча в миллисекундах и объединение без перекрытия удержаний или пропусков детекции от 3 секунд. Эксперименты в «Дебаге» имеют собственные значения и не меняют этот GPU-профиль.",
     players:"RF-DETR ищет игроков только внутри найденных игровых интервалов.",
-    pose:"RTMPose-M Body7 получает рамки игроков и исходные пиксели видео.",
+    pose:"RTMPose-M Body7 получает рамки игроков и кадры в общем GPU-проходе с RF-DETR. Позы сохраняются после проверки объединённой версии GPU.",
     fusion:"Сохранение общей версии GPU-наблюдений и повторное использование кэша.",
     tracking:"ByteTrack сопровождает Track ID на CPU. Это алгоритм трекинга, а не нейросеть.",
     touches:"Touch Detector определяет моменты касаний исключительно по траектории мяча. Контакт с телом и классификация дополняют найденное событие, не изменяя его время.",
     touch_types:"RTMPose и геометрия тела уточняют тип уже найденного касания. Без достаточных признаков остаётся unknown_touch. Привязка Track ID к конкретному игроку выполняется отдельно, позднее.",
-    identity:"Автоматическая привязка Track ID к игрокам из библиотеки.",
+    publish:"Публикует границы первичных розыгрышей с результатом Touch Detector для выбранной версии CPU replay.",
+    identity:"Автоматическая привязка Track ID к игрокам из библиотеки по фотографиям и наблюдениям внутри опубликованных розыгрышей.",
     cache:"Готовый GPU-анализ переиспользуется при совместимых настройках."
   };
   let graphMoved=[],graphFocus=null,graphHintTarget=null;
@@ -753,103 +782,45 @@
     if(event.key==="Escape"&&!$("analysis-flow-dialog").classList.contains("hidden"))
       closeGraphSettings();
   });
-  let graphSequence=0;
-  const graphBounds=(node,root)=>{
-    const a=node.getBoundingClientRect(),b=root.getBoundingClientRect();
-    return {l:a.left-b.left,r:a.right-b.left,t:a.top-b.top,b:a.bottom-b.top,
-      cx:(a.left+a.right)/2-b.left,cy:(a.top+a.bottom)/2-b.top};
+  const graphLabel=(id,run)=>{
+    const meta=pipelineModelMeta(id,run);
+    if(!meta)return "";
+    const kind={model:"Нейросеть · GPU",algorithm:"Алгоритм · CPU"}[meta[1]];
+    return kind?window.VolleyballUi.translate(kind)+" · "+window.VolleyballUi.translate(meta[0]):
+      window.VolleyballUi.translate(meta[0]);
   };
-  const graphDraw=target=>{
-    const svg=target.querySelector(".analysis-flow-lines");
-    if(!svg||!target.isConnected||!target.offsetWidth)return;
-    const byId=new Map([...target.querySelectorAll(".analysis-flow-node")].map(n=>
-      [n.dataset.stageId,graphBounds(n,target)]));
-    svg.replaceChildren();
-    svg.setAttribute("viewBox","0 0 "+target.clientWidth+" "+target.clientHeight);
-    if(!target.dataset.graphArrow)target.dataset.graphArrow="flow-arrow-"+(++graphSequence);
-    const markerId=target.dataset.graphArrow;
-    const element=(tag,attrs)=>{
-      const el=document.createElementNS("http://www.w3.org/2000/svg",tag);
-      for(const [key,value] of Object.entries(attrs))el.setAttribute(key,value);
-      return el;
-    };
-    const defs=element("defs",{}),marker=element("marker",{
-      id:markerId,markerWidth:"7",markerHeight:"7",refX:"6",refY:"3.5",
-      orient:"auto",markerUnits:"strokeWidth"});
-    marker.append(element("path",{d:"M 0 0 L 7 3.5 L 0 7 Z",fill:"#7ba0c9"}));
-    defs.append(marker);svg.append(defs);
-    for(const [from,to,kind] of pipelineEdges){
-      const a=byId.get(from),b=byId.get(to);if(!a||!b)continue;
-      let d="",label=null;
-      if(kind==="no-types"||kind==="cache"){
-        const y=Math.min(a.t,b.t)-14;
-        d="M "+a.cx+" "+a.t+" L "+a.cx+" "+y+" L "+b.cx+" "+y+" L "+b.cx+" "+b.t;
-        label=[kind==="cache"?"Кэш GPU":"Без типов",(a.cx+b.cx)/2,y-3];
-      }else if(kind==="no-pose"){
-        const y=(a.b+b.t)/2;
-        d="M "+(a.r-12)+" "+a.b+" L "+(a.r-12)+" "+y+" L "+b.cx+" "+y+" L "+b.cx+" "+b.t;
-        label=["Без поз",(a.cx+b.cx)/2,y-3];
-      }else if(Math.abs(a.cy-b.cy)<8){
-        d=a.cx<b.cx?"M "+a.r+" "+a.cy+" L "+b.l+" "+b.cy:
-          "M "+a.l+" "+a.cy+" L "+b.r+" "+b.cy;
-      }else if(Math.abs(a.cx-b.cx)<8){
-        d="M "+a.cx+" "+a.b+" L "+b.cx+" "+b.t;
-      }else{
-        const y=(a.b+b.t)/2;
-        d="M "+a.cx+" "+a.b+" L "+a.cx+" "+y+" L "+b.cx+" "+y+" L "+b.cx+" "+b.t;
-      }
-      const path=element("path",{d,"class":"analysis-flow-edge"+(kind?" is-branch":""),
-        "data-edge":from+"-"+to,"marker-end":"url(#"+markerId+")"});
-      svg.append(path);
-      const dot=element("circle",{r:"3.5","class":"analysis-flow-progress-dot",
-        "data-edge":from+"-"+to,"aria-hidden":"true"});
-      dot.append(element("animateMotion",{
-        path:d,dur:"1.4s",repeatCount:"indefinite",calcMode:"linear"
-      }));
-      svg.append(dot);
-      if(label){
-        const t=element("text",{x:String(label[1]),y:String(label[2]),
-          "class":"analysis-flow-edge-label"});
-        t.textContent=label[0];svg.append(t);
-      }
-    }
-    paintGraphEdges(target,target._graphRun);
+  const graphText=(element,label)=>{
+    element.dataset.graphText=label;
+    element.textContent=window.VolleyballUi.translate(label);
   };
   const createPipelineGraph=(target,run)=>{
     clear(target);
-    const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
-    svg.setAttribute("class","analysis-flow-lines");svg.setAttribute("aria-hidden","true");
     const grid=make("div","analysis-flow-grid");
-    for(const [phase,label,rows] of [
-      ["gpu","1 фаза · GPU · подготовка и детекция","1"],
-      ["cpu","2 фаза · CPU · обработка результатов","2"]
+    const phases=new Map();
+    for(const [phase,label,row] of [
+      ["gpu","1 фаза · Первичный анализ",1],
+      ["cpu","2 фаза · Постобработка",2]
     ]){
-      const panel=make("div","analysis-flow-phase");
+      const panel=make("section","analysis-flow-phase");
       panel.dataset.phase=phase;
-      panel.style.gridRow=rows;
-      panel.style.gridColumn="1 / -1";
-      panel.setAttribute("aria-hidden","true");
-      panel.append(make("span","analysis-flow-phase-label",label));
+      const title=make("h3","analysis-flow-phase-label");
+      graphText(title,label);
+      const cards=make("div","analysis-flow-cards");
+      panel.append(title,cards);
+      phases.set(row,cards);
       grid.append(panel);
     }
-    for(const [id,name,kind,row,col] of pipelineStages){
+    for(const [id,name,kind,row] of pipelineStages){
       const cell=make("div","analysis-flow-cell");
-      cell.style.gridRow=row;cell.style.gridColumn=row===2?7-col:col;
       const node=make("button","analysis-flow-node");
       node.type="button";node.dataset.stageId=id;node.dataset.kind=kind;
-      node.dataset.flow=row===2?"rtl":"ltr";
       const heading=make("span","analysis-flow-node-title",window.VolleyballUi.translate(name));
       const technical=make("span","analysis-flow-node-model");
-      const meta=pipelineModelMeta(id,run);
-      if(meta){
-        technical.textContent=meta[0];
-        technical.dataset.modelKind=meta[1];
-      }else technical.classList.add("hidden");
+      technical.textContent=graphLabel(id,run);
+      technical.classList.toggle("hidden",!technical.textContent);
       const headingRow=make("span","analysis-flow-node-heading-row");
       headingRow.append(pipelineIcon(id),heading);
       node.append(headingRow,technical);
-      node.setAttribute("aria-label",window.VolleyballUi.translate(name)+
-        (meta?" — "+(meta[1]==="model"?"нейросеть ":"алгоритм ")+meta[0]:""));
       node.title=graphDescriptions[id];
       node.addEventListener("click",()=>{
         openGraphSettings(id);
@@ -857,10 +828,34 @@
       const stats=make("small","analysis-flow-node-stats","—");
       cell.append(node,stats);
       if(id==="players"||id==="tracking")cell.append(make("small","analysis-flow-node-stage-metrics hidden"));
-      grid.append(cell);
+      const incoming=pipelineEdges.filter(([,to])=>to===id);
+      if(incoming.length||id==="identity"){
+        const inputs=make("ul","analysis-flow-inputs");
+        for(const [from,to,data,condition] of incoming){
+          const item=make("li","");
+          const link=make("button","analysis-flow-edge");
+          link.type="button";
+          link.dataset.edgeSource=from;
+          link.dataset.edgeTarget=to;
+          link.dataset.edgeCondition=condition||"";
+          link.dataset.edgeData=data;
+          link.addEventListener("click",()=>{
+            const source=target.querySelector('[data-stage-id="'+from+'"]');
+            source?.focus();
+          });
+          item.append(link);
+          inputs.append(item);
+        }
+        if(id==="identity"){
+          const reference=make("li","analysis-flow-reference");
+          graphText(reference,"Фотографии игроков");
+          inputs.append(reference);
+        }
+        cell.append(inputs);
+      }
+      phases.get(row).append(cell);
     }
-    target.append(svg,grid);
-    requestAnimationFrame(()=>graphDraw(target));
+    target.append(grid);
   };
   const updatePipelineGraph=(target,run)=>{
     target._graphRun=run;
@@ -872,42 +867,47 @@
     const currentId=pipelineNames.has(run?.stage_id)?run.stage_id:pipelineId(run?.stage);
     const cached=run?.gpu_reused===true;
     const complete=run?.status==="complete";
+    const savedGpu={
+      ball:run?.gpu_jobs?.ball,rallies:run?.gpu_rally_mask||Number.isSafeInteger(run?.gpu_rally_count),players:run?.gpu_jobs?.players,
+      fusion:run?.analysis_id,pose:run?.gpu_jobs?.pose
+    };
+    const savedCpu={
+      tracking:run?.cpu_runs?.tracking,ball_stabilizer:run?.ball_stabilizer,
+      touches:run?.cpu_runs?.touches,touch_types:run?.cpu_runs?.touches&&run?.gpu_jobs?.pose,
+      publish:run?.cpu_runs?.rallies,identity:run?.automatic_identity||run?.automatic_identity_available
+    };
     for(const node of target.querySelectorAll(".analysis-flow-node")){
-      const id=node.dataset.stageId,entry=seen.get(id==="touch_types"?"touches":id);
-      const classification=run?.profile?.post?.pose_classification!==false;
+      const id=node.dataset.stageId;
+      const entry=id==="touch_types"?(run?.gpu_jobs?.pose?seen.get("touches"):null):seen.get(id);
       const combinedPose=id==="pose"&&currentId==="players"&&
         /RTMPose/.test(String(run?.stage||""));
-      const concurrentTypes=id==="touch_types"&&currentId==="touches"&&classification;
+      const concurrentTypes=id==="touch_types"&&currentId==="touches"&&!!run?.gpu_jobs?.pose;
       const running=active&&(id===currentId||combinedPose||concurrentTypes||
-        !!entry&&entry.finished_ms==null&&entry===stages.at(-1));
-      const done=!!entry&&(entry.finished_ms!=null||complete&&!running)&&
-        (id!=="touch_types"||classification)||
+        id!=="touch_types"&&!!entry&&entry.finished_ms==null&&entry===stages.at(-1));
+      const done=!!entry&&(entry.finished_ms!=null||complete&&!running)||
         (id==="pose"&&!!run?.gpu_jobs?.pose&&!running);
-      const reused=cached&&id==="fusion"&&!done;
+      const reused=!entry&&((cached&&!!savedGpu[id])||(run?.result_reused===true&&!!savedCpu[id]));
       node.classList.toggle("is-active",!!running);
       node.classList.toggle("is-complete",done);
       node.classList.toggle("is-reused",reused);
       node.classList.toggle("is-skipped",
-        cached&&["ball","rallies","players","pose"].includes(id)&&!entry&&
-          !(id==="pose"&&run?.gpu_jobs?.pose)||
-        id==="pose"&&run?.profile?.gpu?.pose_enabled===false||
-        id==="touch_types"&&!classification);
+        id==="pose"&&graphLinkState("pose",run)==="disabled"||
+        id==="touch_types"&&graphLinkState("pose",run)==="disabled");
       node.classList.toggle("is-failed",
         run?.status==="failed"&&id===currentId||
         id==="identity"&&run?.completion_quality==="identity_failed");
       const pct=stageProgressPercent(entry,!!running,done);
       node.style.setProperty("--stage-progress",(pct??0)+"%");
       node.classList.toggle("is-progress-unknown",!!running&&pct===null);
-      const meta=pipelineModelMeta(id,run);
       const technical=node.querySelector(".analysis-flow-node-model");
-      if(technical){
-        technical.textContent=meta?.[0]||"";
-        technical.classList.toggle("hidden",!meta);
-        if(meta)technical.dataset.modelKind=meta[1];
-      }
+      const label=graphLabel(id,run);
+      technical.textContent=label;
+      technical.classList.toggle("hidden",!label);
       const stats=node.nextElementSibling;
       if(stats?.classList.contains("analysis-flow-node-stats")){
-        const statusText=stageResultText(id,entry,run,Date.now(),done,running);
+        const statusText=reused&&id!=="pose"?window.VolleyballUi.translate("Из кэша"):
+          node.classList.contains("is-skipped")?window.VolleyballUi.translate("Пропущено"):
+          stageResultText(id,entry,run,Date.now(),done,running);
         stats.textContent=running&&pct!==null?Math.round(pct)+"% · "+statusText:statusText;
         const sharedPose=id==="pose"&&!entry&&
           (run?.shared_pose?.source_stage_id==="players"||
@@ -925,55 +925,47 @@
         }
       }
       const name=pipelineNames.get(id)||id;
-      node.title=name+(meta?" · "+(meta[1]==="model"?"Нейросеть":"Алгоритм")+": "+meta[0]:"")+
+      node.title=name+(label?" · "+label:"")+
         (entry?.frames_total?" · "+(entry.frames_processed||0)+"/"+entry.frames_total+" кадров":"")+
         (running?" · выполняется":done?" · завершено":reused?" · из кэша":"");
     }
     paintGraphEdges(target,run);
   };
   const paintGraphEdges=(target,run)=>{
-    const active=run&&["queued","running","cancelling"].includes(run.status);
-    const currentId=pipelineNames.has(run?.stage_id)?run.stage_id:pipelineId(run?.stage);
-    const cached=run?.gpu_reused===true,complete=run?.status==="complete";
+    const nodes=new Map([...target.querySelectorAll(".analysis-flow-node")].map(node=>[node.dataset.stageId,node]));
+    const t=value=>window.VolleyballUi.translate(value);
     for(const edge of target.querySelectorAll(".analysis-flow-edge")){
-      const [from,to]=edge.dataset.edge.split("-");
-      const a=target.querySelector('[data-stage-id="'+from+'"]');
-      const b=target.querySelector('[data-stage-id="'+to+'"]');
-      const branchCache=from==="video"&&to==="fusion";
-      const branchSkip=from==="fusion"&&to==="tracking";
-      const branchTypes=from==="touches"&&to==="identity";
-      const classification=run?.profile?.post?.pose_classification!==false;
-      const selected=branchCache?cached:branchSkip?run?.profile?.gpu?.pose_enabled===false:
-        branchTypes?!classification:!cached;
-      const done=branchCache?cached&&complete:selected&&a?.classList.contains("is-complete")&&b?.classList.contains("is-complete");
-      const running=selected&&active&&(branchCache?
-        currentId==="cache"||(currentId==="tracking"&&cached):
-        b?.classList.contains("is-active")&&
-        (a?.classList.contains("is-complete")||a?.classList.contains("is-active")));
-      edge.classList.toggle("is-complete",!!done);
+      const {edgeSource,edgeTarget,edgeCondition,edgeData}=edge.dataset;
+      const source=nodes.get(edgeSource),destination=nodes.get(edgeTarget);
+      const state=graphLinkState(edgeCondition,run);
+      const ready=state==="available"&&
+        (source.classList.contains("is-complete")||source.classList.contains("is-reused"));
+      const running=ready&&destination.classList.contains("is-active")&&
+        !(run?.gpu_reused===true&&edgeTarget==="fusion");
+      edge.dataset.state=state;
+      edge.classList.toggle("is-complete",!!ready);
       edge.classList.toggle("is-active",!!running);
-      edge.style.opacity=selected?"1":".35";
-      const dot=target.querySelector('.analysis-flow-progress-dot[data-edge="'+from+"-"+to+'"]');
-      dot?.classList.toggle("is-visible",!!running);
+      const label=t(edgeData);
+      const status=state==="disabled"?" · "+t("Отключено"):state==="optional"?" · "+t("При наличии"):"";
+      const sourceName=t(pipelineNames.get(edgeSource));
+      edge.textContent=sourceName+(sourceName===label?"":" · "+label)+status;
+      edge.title=sourceName+" → "+t(pipelineNames.get(edgeTarget))+": "+label+status;
+      edge.setAttribute("aria-label",edge.title);
     }
   };
   $("analysis-flow-feedback").append(ui.note,ui.profileDelta);
   const mainGraph=$("analysis-flow-diagram");
   if(mainGraph&&typeof mainGraph.querySelector==="function"){
     updatePipelineGraph(mainGraph,null);
-    window.addEventListener("resize",()=>requestAnimationFrame(()=>graphDraw(mainGraph)));
-  }
-  window.addEventListener("volley:ui-language",()=>{
-    for(const node of ui.analysis.querySelectorAll(".analysis-flow-node")){
-      const name=pipelineNames.get(node.dataset.stageId);
-      const heading=node.querySelector(".analysis-flow-node-title");
-      if(name&&heading)heading.textContent=window.VolleyballUi.translate(name);
-    }
-    requestAnimationFrame(()=>graphDraw(mainGraph));
-  });
-  if(typeof ResizeObserver!=="undefined"){
-    const observer=new ResizeObserver(()=>requestAnimationFrame(()=>graphDraw(mainGraph)));
-    observer.observe(mainGraph);
+    window.addEventListener("volley:ui-language",()=>{
+      for(const element of mainGraph.querySelectorAll("[data-graph-text]"))
+        graphText(element,element.dataset.graphText);
+      for(const node of mainGraph.querySelectorAll(".analysis-flow-node")){
+        const heading=node.querySelector(".analysis-flow-node-title");
+        heading.textContent=window.VolleyballUi.translate(pipelineNames.get(node.dataset.stageId));
+      }
+      updatePipelineGraph(mainGraph,mainGraph._graphRun);
+    });
   }
   for(const [id,button] of [["analysis-flow-gpu-start",ui.gpuOnly],
     ["analysis-flow-cpu-start",ui.postOnly],["analysis-flow-full-start",ui.start]]){
@@ -1044,7 +1036,6 @@
       projectHistoryRows().find(row=>row.video===video)||null):null;
     updatePipelineGraph(mainGraph,source);
     showGraphResult(source);
-    requestAnimationFrame(()=>graphDraw(mainGraph));
   };
   const historyVisibleByProject=new Map();
   const visibleHistoryRuns=project=>{

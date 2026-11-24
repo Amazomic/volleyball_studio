@@ -9,26 +9,14 @@ const rule=selector=>{
   assert.ok(match,"Missing CSS rule "+selector);
   return match[1];
 };
-const px=(style,key)=>{
-  const match=style.match(new RegExp("(?:^|;)\\s*"+key+"\\s*:\\s*(-?\\d+)px(?:;|$)"));
-  assert.ok(match,"Expected px value for "+key);
-  return Number(match[1]);
-};
-const phase=rule(".analysis-flow-phase");
-const cell=rule(".analysis-flow-cell");
-const label=rule(".analysis-flow-phase-label");
-const grid=rule(".analysis-flow-grid");
-const margins=phase.match(/margin:\s*(-?\d+)px\s+(-?\d+)px\s+(-?\d+)px/);
-assert.ok(margins,"Phase must have explicit symmetric inset and vertical clearance");
-const [top,right,bottom]=margins.slice(1).map(Number);
-assert.ok(top<0&&right<0&&bottom<0);
-const labelTop=px(label,"top");
-const labelHeight=px(label,"line-height");
-const cardTop=px(cell,"padding-top");
-assert.ok(labelTop>=10,"Phase heading needs room above it");
-assert.ok(cardTop-(top+labelTop+labelHeight)>=10,"Phase heading must not touch stage buttons");
-assert.ok(px(grid,"row-gap")-(-top-bottom)>=20,"Phase panels need a visible separation");
-assert.match(flow,/panel\.style\.gridColumn="1 \/ -1"/);
-assert.match(flow,/\["gpu",.*?"1"\]/);
-assert.match(flow,/\["cpu",.*?"2"\]/);
-console.log("PASS: GPU and CPU phase frames have balanced borders and isolated headings");
+assert.match(rule(".analysis-flow-diagram"),/container-type:inline-size/);
+assert.match(rule(".analysis-flow-node"),/min-height:76px/);
+for(const selector of [".analysis-flow-node-model",".analysis-flow-node-stats"]){
+  const style=rule(selector);
+  assert.doesNotMatch(style,/white-space:nowrap|text-overflow:ellipsis|overflow:hidden/);
+  assert.match(style,/overflow-wrap:anywhere/);
+}
+assert.match(css,/@container \(max-width:330px\)\{\.analysis-flow-cards\{grid-template-columns:minmax\(0,1fr\)/);
+assert.doesNotMatch(css,/\.analysis-flow-diagram\{[^}]*min-width:950px/);
+assert.match(flow,/phases\.get\(row\)\.append\(cell\)/);
+console.log("PASS: the analysis graph wraps its cards and metrics within the panel");

@@ -679,3 +679,31 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 
 ≈ Подачи	≈ Serves
 ≈ Подачи взяты из начала траектории каждого розыгрыша в предпросмотре. Это кандидаты, а не подтверждённые касания; без привязанного Track ID подача учитывается только в общем числе.	≈ Serves come from the beginning of each rally's ball trajectory in Preview. These are candidates, not confirmed touches; without an assigned Track ID, a serve appears only in the total.
+1 фаза · Первичный анализ	Phase 1 · Primary analysis
+2 фаза · Постобработка	Phase 2 · Post-processing
+Нейросеть · GPU	Neural network · GPU
+Алгоритм · CPU	Algorithm · CPU
+Маска игровых интервалов	Rally interval mask
+Геометрия поз · внутри Touch Detector	Pose geometry · within Touch Detector
+ReID · сопоставление на CPU	ReID · matching on CPU
+Кадры видео	Video frames
+Детекции мяча	Ball detections
+Игровые интервалы	Rally intervals
+Рамки игроков	Player boxes
+Мяч из CPU replay	Ball observations from CPU replay
+Стабилизированная траектория	Stabilized trajectory
+Наблюдения из CPU replay	Observations from CPU replay
+Сохранённые позы	Saved poses
+События внутри детектора	Events within the detector
+Границы розыгрышей	Rally boundaries
+Версия CPU replay	CPU replay version
+Результат Touch Detector	Touch Detector output
+Розыгрыши с участниками	Rallies with participants
+Фотографии игроков	Player photos
+Отключено	Disabled
+При наличии	When available
+Из кэша	From cache
+Пропущено	Skipped
+Публикация розыгрышей	Publish rallies
+Версия для сохранения поз	Version for publishing poses
+Кадры для сравнения	Frames for comparison
