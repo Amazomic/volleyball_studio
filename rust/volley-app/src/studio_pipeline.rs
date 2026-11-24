@@ -1877,7 +1877,7 @@ async fn pipeline(
         )?;
     } else if let Some(existing) = reusable.full.filter(|v| {
         request.mode == PipelineMode::Full
-            && v["automatic_identity"].is_object()
+            && v["automatic_identity"]["decision_policy"] == "track_photo_consensus_v1"
             && v["cpu_runs"]["tracking"]
                 .as_str()
                 .and_then(|replay| {
@@ -2447,6 +2447,7 @@ async fn pipeline(
         }
     };
     status["automatic_identity"] = identities.clone();
+    status["automatic_identity"]["decision_policy"] = json!("track_photo_consensus_v1");
     let remaining = identities["unassigned_track_ids"]
         .as_array()
         .ok_or("Некорректный результат привязки")?;

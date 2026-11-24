@@ -42,14 +42,42 @@ fn five_independent_photos_are_compared_per_track_id() {
 }
 
 #[test]
-fn automatic_links_abstain_on_inconsistent_three_photo_evidence() {
+fn automatic_links_use_four_agreeing_frames_when_one_crop_drops_the_mean() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    ctx.roster.insert("123456abcdef".into(), "Player B".into());
+    let matches = json!({"7":[
+        {"player_id":"abcdef012345","cosine_similarity":0.719,"samples_used":5,
+         "sample_similarities":[0.808,0.699,0.904,0.866,0.316]},
+        {"player_id":"123456abcdef","cosine_similarity":0.552,"samples_used":5,
+         "sample_similarities":[0.606,0.571,0.577,0.675,0.332]}
+    ]});
+    let doc = base_document(&ctx);
+    assert_eq!(
+        choose_automatic_photo_links(&ctx, &doc, &matches)
+            .unwrap()
+            .get(&7)
+            .map(String::as_str),
+        Some("abcdef012345")
+    );
+    let mut switched = matches;
+    switched["7"][1]["sample_similarities"][4] = json!(0.91);
+    assert!(choose_automatic_photo_links(&ctx, &doc, &switched)
+        .unwrap()
+        .is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn automatic_links_abstain_on_two_inconsistent_frames() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
     let mut ctx = context(&root, sha, tracks);
     ctx.roster.insert("123456abcdef".into(), "Player B".into());
     let matches = json!({"7":[
         {"player_id":"abcdef012345","cosine_similarity":0.81,"samples_used":5,
-         "sample_similarities":[0.99,0.93,0.86,0.78,0.51]},
+         "sample_similarities":[0.99,0.96,0.94,0.65,0.51]},
         {"player_id":"123456abcdef","cosine_similarity":0.43,"samples_used":5,
          "sample_similarities":[0.42,0.43,0.44,0.43,0.43]}
     ]});
