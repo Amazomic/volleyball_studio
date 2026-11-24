@@ -237,7 +237,10 @@ pub(super) fn edit_references(
             storage::bad_request("Read photo album and provide its expected_revision")
         })?;
     let _project_lock = if req.action == "enroll" {
-        Some(project_guard::write_guard(state, &req.project_id)?)
+        Some(project_guard::write_guard_for_postprocessing(
+            state,
+            &req.project_id,
+        )?)
     } else {
         None
     };
@@ -409,7 +412,6 @@ pub async fn references(
         let snapshot = state.clone();
         let source_req = req.clone();
         tokio::task::spawn_blocking(move || {
-            let _lock = project_guard::write_guard(&snapshot, &source_req.project_id)?;
             reference_player(&snapshot, &source_req.project_id, &source_req.player_id)?;
             verified_reference_source(&snapshot, &source_req)
         })

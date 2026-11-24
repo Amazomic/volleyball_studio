@@ -1647,11 +1647,7 @@ fn persist_photo_comparison(
             "Automatic links require isolated writable storage",
         ));
     }
-    let _guard = if return_automatic_result {
-        project_guard::write_guard_for_postprocessing(state, &req.project_id)?
-    } else {
-        project_guard::write_guard(state, &req.project_id)?
-    };
+    let _guard = project_guard::write_guard_for_postprocessing(state, &req.project_id)?;
     let snapshot = super::photo_comparison::snapshot(state, req)?;
     if comparison["identity_revision"] != json!(snapshot.identity_revision)
         || comparison["album_revisions"] != json!(snapshot.albums)
@@ -1801,7 +1797,7 @@ pub async fn edit(
 ) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
     let result = tokio::task::spawn_blocking(move || {
-        let _lock = project_guard::write_guard(&state, &req.project_id)?;
+        let _lock = project_guard::write_guard_for_postprocessing(&state, &req.project_id)?;
         change(&state, &req)
     })
     .await

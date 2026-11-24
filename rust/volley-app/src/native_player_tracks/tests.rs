@@ -2050,7 +2050,24 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
         offset: 0,
         limit: 10,
     };
-    let saved = change(&state, &assign).unwrap();
+    let state = Arc::new(state);
+    let held = project_guard::write_guard(&state, id).unwrap();
+    let saved = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let request = tokio::spawn(edit(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(assign.clone()),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let finished_while_locked = request.is_finished();
+        drop(held);
+        let Json(saved) = request.await.unwrap().unwrap();
+        assert!(
+            !finished_while_locked,
+            "A competing writer must queue rather than fail"
+        );
+        saved
+    });
     assert_eq!(saved["assigned_count"], 1);
     assert_eq!(saved["tracks"][0]["assigned_player_name"], "Ильнур");
     let saved = change(
@@ -2164,7 +2181,7 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
         .enable_all()
         .build()
         .unwrap();
-    let shared = Arc::new(state);
+    let shared = state.clone();
     runtime.block_on(async {
         let jpeg = photo(
             State(shared.clone()),
