@@ -1974,22 +1974,24 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 .analysis-flow{min-width:0;border:1px solid #293e5a;border-radius:11px;background:#101b2e;padding:12px 14px;margin:8px 0 15px}
 .analysis-flow-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}
 .analysis-flow-toolbar>strong{font-size:14px}
+.analysis-flow-focus{display:flex;align-items:center;gap:8px;margin-left:auto;color:#afc1d8;font-size:12px}
+.analysis-flow-focus select{width:auto;max-width:190px;padding:6px 9px;font-size:12px}
 .analysis-flow-actions{display:flex;gap:7px;flex-wrap:wrap}
 .analysis-flow-actions button{padding:8px 12px}
 .analysis-flow-diagram{max-width:none;width:100%;container-type:inline-size;position:relative}
-.analysis-flow-grid{display:grid;gap:16px}
-.analysis-flow-phase{min-width:0;padding:14px 30px;border:1px solid #314862;border-radius:12px;background:#142238}
-.analysis-flow-phase-label{margin:0 0 54px;color:#c2d6ed;font-size:13px;font-weight:750;line-height:1.35}
-.analysis-flow-cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:54px 19px}
+.analysis-flow-grid{display:grid;gap:12px}
+.analysis-flow-phase{min-width:0;padding:11px 20px;border:1px solid #314862;border-radius:12px;background:#142238}
+.analysis-flow-phase-label{margin:0 0 32px;color:#c2d6ed;font-size:13px;font-weight:750;line-height:1.35}
+.analysis-flow-cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:32px 19px}
 .analysis-flow-phase[data-phase="cpu"] .analysis-flow-cards{grid-template-columns:repeat(7,minmax(0,1fr))}
-.analysis-flow-cell{min-width:0;display:grid;grid-template-rows:subgrid;grid-row:span 3;gap:6px}
+.analysis-flow-cell{min-width:0;display:flex;flex-direction:column;gap:4px}
 .analysis-flow-node-stats{min-width:0;min-height:1.3em;line-height:1.35;text-align:center;font-size:12px;color:#a6bad2;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 @container (max-width:1070px){.analysis-flow-phase[data-phase] .analysis-flow-cards{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @container (max-width:570px){.analysis-flow-phase[data-phase] .analysis-flow-cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @container (max-width:330px){.analysis-flow-phase[data-phase] .analysis-flow-cards{grid-template-columns:minmax(0,1fr)}}
 body[data-ui-theme="light"] .analysis-flow-phase{background:#ebf1f9;border-color:#b7c9dd}
 body[data-ui-theme="light"] .analysis-flow-phase-label,body[data-ui-theme="light"] .analysis-flow-node-stats,body[data-ui-theme="light"] .analysis-flow-node-stage-metrics{color:#355071}
-.analysis-flow-node-stage-metrics{grid-row:3;display:block;text-align:center;white-space:pre-line;line-height:14px;font-size:clamp(10px,.7vw,11px);font-weight:550;color:#b0bac9;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.analysis-flow-node-stage-metrics{display:block;text-align:center;white-space:pre-line;line-height:14px;font-size:clamp(10px,.7vw,11px);font-weight:550;color:#b0bac9;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 .analysis-flow-node{position:relative;isolation:isolate;min-width:0;width:100%;min-height:76px;padding:7px 12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;overflow:hidden;text-align:center;color:#eaf5ff;border:1px solid #365779;border-radius:10px;cursor:pointer;font-family:inherit;font-size:clamp(10px,.9vw,13px);font-weight:700;line-height:1.2;transition:background .18s,border-color .18s,box-shadow .18s}
 .analysis-flow-node-heading-row{display:flex;align-items:center;justify-content:center;gap:6px;max-width:100%}
 .analysis-flow-node-icon{width:17px;height:17px;flex:0 0 17px;color:#cdefff}
@@ -2003,7 +2005,8 @@ body[data-ui-theme="light"] .analysis-flow-phase-label,body[data-ui-theme="light
 .analysis-flow-node[data-kind="output"]{background:linear-gradient(145deg,#53347c,#342853);border-color:#aa7be8}
 .analysis-flow-node:hover,.analysis-flow-node:focus-visible{filter:brightness(1.19);border-color:#c1e7ff;outline:2px solid #458bd2;outline-offset:2px}
 .analysis-flow-node.is-active{border-color:#7aafbe;box-shadow:0 0 0 1px #8fe8f533}
-.analysis-flow-node.is-complete{border-color:#efba4b;box-shadow:0 0 0 1px #e7bd5c55,0 0 7px #efba4b22}
+.analysis-flow-node.is-complete:not(.is-active)::before,.analysis-flow-node.is-complete:not(.is-active)::after{opacity:0}
+.analysis-flow-node.is-linked-focus{outline:2px solid #8bd4ee;outline-offset:2px}
 .analysis-flow-node.is-reused{border-color:#8cc1ef;border-style:dashed}
 .analysis-flow-node.is-skipped{border-style:dotted}
 .analysis-flow-node.is-failed{border-color:#fa7a7a;box-shadow:0 0 14px #dd494966}
@@ -2023,13 +2026,14 @@ body[data-ui-theme="light"] .analysis-flow-phase-label,body[data-ui-theme="light
 .analysis-flow-edge[data-state="disabled"]{visibility:hidden}
 .analysis-flow-edge.is-complete{stroke:#85b9b6;opacity:.86}
 .analysis-flow-edge.is-active{stroke:#86f6ed;stroke-width:2.2;stroke-dasharray:6 5;opacity:1;animation:analysis-flow-move .8s linear infinite}
-.analysis-flow-diagram.has-edge-focus .analysis-flow-edge:not(.is-highlighted){opacity:.18}
-.analysis-flow-edge.is-highlighted{stroke:#9fe3ff;stroke-width:2.4;opacity:1}
+.analysis-flow-edge.is-highlighted{stroke:#9fe3ff;stroke-width:2;opacity:1}
+.analysis-flow-edge.is-outgoing{stroke:#c5b8ff}
 @keyframes analysis-flow-move{to{stroke-dashoffset:-22}}
 body[data-ui-theme="light"] .analysis-flow-edge{stroke:#466482}
 body[data-ui-theme="light"] .analysis-flow-arrowhead{fill:#466482}
 body[data-ui-theme="light"] .analysis-flow-edge.is-complete{stroke:#376d68}
 body[data-ui-theme="light"] .analysis-flow-edge:is(.is-active,.is-highlighted){stroke:#006c78}
+body[data-ui-theme="light"] .analysis-flow-edge.is-outgoing{stroke:#674799}
 .analysis-flow-result{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px 15px;padding:9px 4px 3px;font-size:12px}
 .analysis-flow-result-title{font-weight:700;color:#cdeaff}
 .analysis-flow-result-status,.analysis-flow-result-muted{color:#93aeca;font-variant-numeric:tabular-nums}

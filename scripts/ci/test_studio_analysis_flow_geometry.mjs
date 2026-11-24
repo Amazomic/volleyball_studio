@@ -62,3 +62,9 @@ for(const columns of [7,3,2,1]){
 }
 
 console.log("PASS: arrows stay outside cards at wide, tablet and narrow layouts");
+const visible=vm.runInNewContext(definition("const graphEdgeVisible=","const drawGraphEdges=")+"graphEdgeVisible;");
+assert.equal(visible({local:true,state:"available"}),true);
+assert.equal(visible({local:false,state:"available"}),false);
+assert.equal(visible({local:false,state:"optional",focus:"pose",focused:true}),true);
+assert.equal(visible({local:true,state:"available",focus:"ball",focused:false,active:true}),false);
+assert.equal(visible({local:true,state:"disabled",focused:true,active:true}),false);

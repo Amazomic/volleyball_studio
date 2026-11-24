@@ -72,7 +72,7 @@ for(const [row,count] of [[1,6],[2,7]]){
 assert.match(css,/\.analysis-flow-node::after\{[^}]*linear-gradient\(to right,/);
 assert.doesNotMatch(css,/\.analysis-flow-node::after\{[^}]*conic-gradient/);
 assert.match(js,/node\.style\.setProperty\("--stage-progress"/);
-assert.match(css,/\.analysis-flow-node\.is-complete\{[^}]*border-color:#efba4b/);
+assert.match(css,/\.analysis-flow-node\.is-complete:not\(\.is-active\)::after\{opacity:0\}/);
 assert.match(css,/\.analysis-flow-node::before,\.analysis-flow-node::after\{[^}]*width:var\(--stage-progress,0%\)/);
 assert.match(css,/\.analysis-flow-node::before\{top:0/);
 assert.match(css,/\.analysis-flow-node::after\{bottom:0/);

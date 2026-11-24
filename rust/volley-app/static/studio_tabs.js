@@ -464,7 +464,7 @@
       tracking:["ByteTrack","algorithm"],
       touches:["Touch Detector","algorithm"],
       rallies:["Маска игровых интервалов","algorithm"],
-      touch_types:["Геометрия поз · внутри Touch Detector","algorithm"],
+      touch_types:["Геометрия поз","algorithm"],
     identity:["ReID · сопоставление на CPU","mixed"]
     };
     return known[id]||null;
@@ -788,7 +788,7 @@
   const graphLabel=(id,run)=>{
     const meta=pipelineModelMeta(id,run);
     if(!meta)return "";
-    const kind={model:"Нейросеть · GPU",algorithm:"Алгоритм · CPU"}[meta[1]];
+    const kind={model:"GPU",algorithm:"Алгоритм"}[meta[1]];
     return kind?window.VolleyballUi.translate(kind)+" · "+window.VolleyballUi.translate(meta[0]):
       window.VolleyballUi.translate(meta[0]);
   };
@@ -803,11 +803,14 @@
       rows.get(box.t).push(box);
     }
     for(const row of rows.values())row.sort((a,b)=>a.l-b.l);
+    const rowTops=[...rows.keys()].sort((a,b)=>a-b);
+    const laneCounts=new Map();
     const routes=links.map(([from,to])=>{
       const a=boxes.get(from),b=boxes.get(to),row=rows.get(a.t);
       const neighbors=a.t===b.t&&Math.abs(row.indexOf(a)-row.indexOf(b))===1;
       if(!neighbors){
         for(const id of [from,to])ports.set(id,(ports.get(id)||0)+1);
+        for(const top of new Set([a.t,b.t]))laneCounts.set(top,(laneCounts.get(top)||0)+1);
       }
       return {from,to,a,b,neighbors};
     });
@@ -820,7 +823,7 @@
     const lane=top=>{
       const index=rowLanes.get(top)||0;
       rowLanes.set(top,index+1);
-      return top-7-index*1.75;
+      return top-7-index*Math.min(3.5,21/Math.max(1,laneCounts.get(top)-1));
     };
     return routes.map(({from,to,a,b,neighbors},index)=>{
       if(neighbors){
@@ -829,11 +832,14 @@
       }
       const ax=port(from,a),bx=port(to,b),ay=lane(a.t);
       if(a.t===b.t)return [[ax,a.t],[ax,ay],[bx,ay],[bx,b.t]];
-      const by=lane(b.t),left=ax+bx<width,offset=5+21*(index+1)/(links.length+1);
-      const x=left?offset:width-offset;
+      const by=lane(b.t),left=ax+bx<width,offset=5+12*(index+1)/(links.length+1);
+      const adjacentRows=rowTops.indexOf(b.t)-rowTops.indexOf(a.t)===1;
+      const x=adjacentRows?a.r+4+5*(index+1)/(links.length+1):left?offset:width-offset;
       return [[ax,a.t],[ax,ay],[x,ay],[x,by],[bx,by],[bx,b.t]];
     });
   };
+  const graphEdgeVisible=({local,state,focus,focused,active=false})=>
+    state!=="disabled"&&(focus?focused:local||active);
   const drawGraphEdges=target=>{
     const svg=target.querySelector(".analysis-flow-arrows");
     if(!svg||!target.clientWidth)return;
@@ -843,7 +849,25 @@
       return [node.dataset.stageId,{l:rect.left-origin.left,r:rect.right-origin.left,
         t:rect.top-origin.top,b:rect.bottom-origin.top}];
     }));
-    const edges=[...svg.querySelectorAll(".analysis-flow-edge")];
+    const ordered=[...boxes.values()];
+    const rowTops=[...new Set(ordered.map(box=>box.t))];
+    const focus=target.dataset.focusStage;
+    const edges=[...svg.querySelectorAll(".analysis-flow-edge")].filter(edge=>{
+      const {edgeSource,edgeTarget,state}=edge.dataset;
+      const a=boxes.get(edgeSource),b=boxes.get(edgeTarget);
+      const consecutive=Math.abs(ordered.indexOf(a)-ordered.indexOf(b))===1;
+      const handoff=edgeSource==="fusion"&&edgeTarget==="tracking"&&
+        rowTops.indexOf(b.t)-rowTops.indexOf(a.t)===1;
+      const publication=a.t===b.t&&(edgeSource==="touches"&&edgeTarget==="publish"||
+        edgeSource==="publish"&&edgeTarget==="identity");
+      const focused=focus===edgeSource||focus===edgeTarget;
+      const visible=graphEdgeVisible({local:consecutive||handoff||publication,state,focus,focused,
+        active:edge.classList.contains("is-active")});
+      edge.classList.toggle("is-highlighted",focused);
+      edge.classList.toggle("is-outgoing",focus===edgeSource);
+      if(!visible)edge.removeAttribute("d");
+      return visible;
+    });
     const links=edges.map(({dataset})=>[dataset.edgeSource,dataset.edgeTarget]);
     svg.setAttribute("viewBox","0 0 "+target.clientWidth+" "+target.clientHeight);
     graphRoutes(boxes,links,target.clientWidth).forEach((points,index)=>{
@@ -981,6 +1005,7 @@
         (running?" · выполняется":done?" · завершено":reused?" · из кэша":"");
     }
     paintGraphEdges(target,run);
+    target._scheduleGraphDraw?.();
   };
   const paintGraphEdges=(target,run)=>{
     const nodes=new Map([...target.querySelectorAll(".analysis-flow-node")].map(node=>[node.dataset.stageId,node]));
@@ -1019,23 +1044,40 @@
         drawGraphEdges(mainGraph);
       });
     };
+    mainGraph._scheduleGraphDraw=scheduleDraw;
     scheduleDraw();
+    const focusSelect=$("analysis-flow-focus");
+    for(const [id,name] of pipelineStages){
+      const option=make("option","",window.VolleyballUi.translate(name));
+      option.value=id;
+      focusSelect.append(option);
+    }
     if(typeof ResizeObserver!=="undefined"){
       const observer=new ResizeObserver(scheduleDraw);
       observer.observe(mainGraph);
       for(const cell of mainGraph.querySelectorAll(".analysis-flow-cell"))observer.observe(cell);
     }
-    const highlight=event=>{
-      const hovered=event.type==="pointerover"||event.type==="focusin"?event.target:event.relatedTarget;
-      const id=hovered?.closest?.(".analysis-flow-node")?.dataset.stageId;
-      mainGraph.classList.toggle("has-edge-focus",!!id);
-      for(const edge of mainGraph.querySelectorAll(".analysis-flow-edge")){
-        const {edgeSource,edgeTarget}=edge.dataset;
-        edge.classList.toggle("is-highlighted",id===edgeSource||id===edgeTarget);
-      }
+    let hoveredStage="",keyboardStage="";
+    const stageAt=element=>element?.closest?.(".analysis-flow-node")?.dataset.stageId||"";
+    const highlight=()=>{
+      const id=hoveredStage||keyboardStage||focusSelect.value;
+      mainGraph.dataset.focusStage=id;
+      for(const node of mainGraph.querySelectorAll(".analysis-flow-node"))
+        node.classList.toggle("is-linked-focus",id===node.dataset.stageId);
+      scheduleDraw();
     };
-    for(const event of ["pointerover","pointerout","focusin","focusout"])
-      mainGraph.addEventListener(event,highlight);
+    focusSelect.addEventListener("change",highlight);
+    for(const type of ["pointerover","pointerout","focusin","focusout"]){
+      mainGraph.addEventListener(type,event=>{
+        if(type==="pointerover"||type==="pointerout"){
+          if(event.pointerType!=="touch")hoveredStage=stageAt(type==="pointerover"?event.target:event.relatedTarget);
+        }else{
+          const focused=type==="focusin"?event.target:event.relatedTarget;
+          keyboardStage=focused?.matches?.(":focus-visible")?stageAt(focused):"";
+        }
+        highlight();
+      });
+    }
     window.addEventListener("volley:ui-language",()=>{
       for(const element of mainGraph.querySelectorAll("[data-graph-text]"))
         graphText(element,element.dataset.graphText);
@@ -1043,8 +1085,10 @@
         const heading=node.querySelector(".analysis-flow-node-title");
         heading.textContent=window.VolleyballUi.translate(pipelineNames.get(node.dataset.stageId));
       }
+      for(const option of focusSelect.options){
+        if(option.value)option.textContent=window.VolleyballUi.translate(pipelineNames.get(option.value));
+      }
       updatePipelineGraph(mainGraph,mainGraph._graphRun);
-      scheduleDraw();
     });
   }
   for(const [id,button] of [["analysis-flow-gpu-start",ui.gpuOnly],
