@@ -16,7 +16,7 @@ const makeNode=(tag,klass="",text="")=>({
 const state={
   grouping:false,groupLoaded:true,groupShown:24,busy:false,writable:true,groupRevision:"revision",
   groupNavigation:new Map(),photoIndices:new Map(),groups:[{ids:[101,102,103],source:"auto",averageSimilarity:.83}],
-  unassignedIds:new Set([101,102,103]),project:"project",video:"video",replay:"replay",rallyRun:"rally",
+  unassignedIds:new Set([101,102,103]),assignmentPending:new Set(),project:"project",video:"video",replay:"replay",rallyRun:"rally",
   selected:new Set()
 };
 const items=makeNode("div"),more=makeNode("button"),splits=[];
@@ -26,6 +26,8 @@ const context={
   node:makeNode,
   path:(url,args)=>url+"?"+new URLSearchParams(args),
   attachSuggestions(){},
+  visibleUnassigned:id=>state.unassignedIds.has(id)&&!state.assignmentPending.has(id),
+  sortBySimilarity:groups=>groups,
   reviewEdit:async(action,ids)=>{splits.push([action,...ids]);}
 };
 runInNewContext(source.slice(from,to)+"\nthis.renderGroupCards=renderGroupCards;",context);
@@ -52,6 +54,10 @@ assert.deepEqual(splits, [["split",102]],"detach splits only the visible ID");
 context.renderGroupCards();
 const preserved=items.children[0].children[0].children.find(x=>x.klass==="track-group-main-photo");
 assert.ok(preserved.src.includes("track_id=102"),"card rendering preserves selected ID");
+state.assignmentPending=new Set([101,102,103]);
+context.renderGroupCards();
+assert.match(items.children[0].text,/Нет групп с непривязанными/,
+  "Pending group assignment removes its card without waiting for a response");
 
 const helperStart=source.indexOf("  const refreshPhotoMatches=async(");
 const helperEnd=source.indexOf("  const repeatPhotoAnalysis",helperStart);

@@ -2499,6 +2499,45 @@ fn photo_crop_is_bounded_and_rejects_corrupted_geometry() {
 }
 
 #[test]
+fn unassigned_gallery_orders_saved_similarity_before_pagination() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    let sample = ctx.tracks[&7].clone();
+    ctx.tracks.clear();
+    for id in [7, 8, 9, 10] {
+        ctx.tracks.insert(id, sample.clone());
+    }
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8, 9, 10]).unwrap();
+    let mut doc = base_document(&ctx);
+    doc["automatic_identity_evidence"] = json!({
+        "photo_sample_policy":PHOTO_SAMPLE_POLICY,
+        "matches":{
+            "7":[{"player_id":"abcdef012345","cosine_similarity":0.61}],
+            "8":[{"player_id":"abcdef012345","cosine_similarity":0.93}],
+            "9":[{"player_id":"abcdef012345","cosine_similarity":0.82}],
+            "10":[{"player_id":"not-on-roster","cosine_similarity":0.99}]
+        }
+    });
+    let first = filtered_page(&ctx, &doc, "revision", 0, 2, Some("unassigned"), None).unwrap();
+    let second = filtered_page(&ctx, &doc, "revision", 2, 2, Some("unassigned"), None).unwrap();
+    let ids = |page: &Value| {
+        page["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["track_id"].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&first), vec![8, 9]);
+    assert_eq!(ids(&second), vec![7, 10]);
+    doc["assignments"]["8"] = json!("abcdef012345");
+    let remaining = filtered_page(&ctx, &doc, "revision", 0, 2, Some("unassigned"), None).unwrap();
+    assert_eq!(ids(&remaining), vec![9, 7]);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn track_gallery_filters_owners_before_pagination() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
