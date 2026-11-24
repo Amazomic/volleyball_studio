@@ -212,6 +212,10 @@ fn consistent_photo_samples(row: &Value, threshold: f64) -> bool {
         })
 }
 
+fn threshold_only(doc: &Value) -> bool {
+    doc["automatic_identity_evidence"]["assignment_policy"] == "threshold_only_v1"
+}
+
 pub(super) fn choose_automatic_photo_links_at_threshold(
     ctx: &Inputs,
     doc: &Value,
@@ -249,9 +253,10 @@ pub(super) fn choose_automatic_photo_links_at_threshold(
             continue;
         }
         for row in rows.as_array().ok_or("Invalid candidate list")? {
-            if row["samples_used"]
-                .as_u64()
-                .is_some_and(|count| count != REID_PHOTOS_PER_TRACK as u64)
+            if !threshold_only(doc)
+                && row["samples_used"]
+                    .as_u64()
+                    .is_some_and(|count| count != REID_PHOTOS_PER_TRACK as u64)
             {
                 continue;
             }
@@ -314,7 +319,7 @@ pub(super) fn choose_automatic_photo_links_at_threshold(
         let Some(best_evidence) = best_evidence else {
             continue;
         };
-        if !consistent_photo_samples(best_evidence, threshold) {
+        if !threshold_only(doc) && !consistent_photo_samples(best_evidence, threshold) {
             continue;
         }
         let runner_up = matches[id.to_string()]
@@ -329,7 +334,7 @@ pub(super) fn choose_automatic_photo_links_at_threshold(
             .filter_map(|row| row["cosine_similarity"].as_f64())
             .filter(|score| score.is_finite() && (0.0..=1.0).contains(score))
             .fold(0.0_f64, f64::max);
-        if *best_score - runner_up < 0.08 {
+        if !threshold_only(doc) && *best_score - runner_up < 0.08 {
             continue;
         }
         let occupied_in_frame = |possible_owner: &str| {
@@ -356,6 +361,9 @@ pub(super) fn choose_automatic_photo_links_with_groups(
     threshold: f64,
 ) -> Result<BTreeMap<u64, String>, String> {
     let mut chosen = choose_automatic_photo_links_at_threshold(ctx, doc, matches, threshold)?;
+    if threshold_only(doc) {
+        return Ok(chosen);
+    }
     let Some(groups) = groups.as_array() else {
         return Ok(chosen);
     };
@@ -904,7 +912,8 @@ pub(super) fn filtered_page(
                 .filter_map(|row| {
                     let player = row["player_id"].as_str()?;
                     let score = row["cosine_similarity"].as_f64()?;
-                    (row["samples_used"].as_u64() == Some(REID_PHOTOS_PER_TRACK as u64)
+                    ((threshold_only(doc)
+                        || row["samples_used"].as_u64() == Some(REID_PHOTOS_PER_TRACK as u64))
                         && score >= saved_automatic_photo_threshold(doc))
                     .then_some((score, player))
                 })
@@ -1414,6 +1423,13 @@ pub(super) fn refresh_automatic_photo_links(
 pub(super) fn reenable_user_requested_auto_assignments(doc: &mut Value, action: &str) {
     if action == "auto_assign" {
         doc["automatic_suppressed_ids"] = json!([]);
+        if !doc["automatic_identity_evidence"].is_object() {
+            doc["automatic_identity_evidence"] = json!({});
+        }
+        doc["automatic_identity_evidence"]["assignment_policy"] = json!("threshold_only_v1");
+    } else if action == "postprocess_auto_assign" && doc["automatic_identity_evidence"].is_object()
+    {
+        doc["automatic_identity_evidence"]["assignment_policy"] = Value::Null;
     }
 }
 
@@ -1464,6 +1480,17 @@ pub(super) fn automatic_unassigned_reason(
     else {
         return "no_photo_match";
     };
+    if threshold_only(doc) {
+        return if rows.iter().any(|row| {
+            row["cosine_similarity"]
+                .as_f64()
+                .is_some_and(|score| score.is_finite() && score >= threshold && score <= 1.0)
+        }) {
+            "identity_conflict_or_ambiguity"
+        } else {
+            "below_similarity_threshold"
+        };
+    }
     let above_threshold = rows.iter().filter(|row| {
         row["samples_used"].as_u64() == Some(REID_PHOTOS_PER_TRACK as u64)
             && row["cosine_similarity"]
@@ -1695,7 +1722,9 @@ fn persist_photo_comparison(
         })
         .copied()
         .collect::<Vec<_>>();
+    let assignment_policy = doc["automatic_identity_evidence"]["assignment_policy"].clone();
     doc["automatic_identity_evidence"] = json!({
+        "assignment_policy":assignment_policy,
         "threshold":threshold, "matches":matches,
         "eligible_track_ids":comparison_eligible_ids,
         "identity_groups":comparison["identity_groups"],

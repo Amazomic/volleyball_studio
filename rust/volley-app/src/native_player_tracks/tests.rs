@@ -3049,3 +3049,34 @@ fn explicit_auto_assignment_recovers_links_suppressed_by_a_previous_reset() {
     assert_eq!(doc["automatic_suppressed_ids"], json!([]));
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn explicit_similarity_threshold_ignores_sample_vetoes_and_survives_reload() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    ctx.roster.insert("123456abcdef".into(), "Player B".into());
+    let mut doc = base_document(&ctx);
+    reenable_user_requested_auto_assignments(&mut doc, "auto_assign");
+    for (samples, scores) in [
+        (5, json!([0.98, 0.97, 0.94, 0.62, 0.49])),
+        (1, json!([0.80])),
+    ] {
+        let matches = json!({"7":[
+            {"player_id":"abcdef012345","cosine_similarity":0.80,"samples_used":samples,"sample_similarities":scores},
+            {"player_id":"123456abcdef","cosine_similarity":0.78,"samples_used":5}
+        ]});
+        let (mut updated, chosen) =
+            refresh_automatic_photo_links(&ctx, &doc, &matches, 0.73).unwrap();
+        assert_eq!(chosen.get(&7).map(String::as_str), Some("abcdef012345"));
+        updated["automatic_identity_evidence"]["matches"] = matches;
+        updated["automatic_identity_evidence"]["photo_sample_policy"] =
+            json!("five_observations_v2");
+        updated["automatic_identity_evidence"]["threshold"] = json!(0.73);
+        reconcile_automatic_photo_links(&ctx, &mut updated).unwrap();
+        let view = filtered_page(&ctx, &updated, "rev", 0, 20, Some("unassigned"), None).unwrap();
+        assert_eq!(view["unassigned_track_ids"], json!([]));
+        assert_eq!(view["assigned_count"], 1);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
