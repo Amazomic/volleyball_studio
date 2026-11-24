@@ -641,7 +641,8 @@
     const descriptions={
       manually_suppressed:"автопривязка отменена вручную",
       below_similarity_threshold:"ниже порога "+state.appliedAutoThreshold+"%",
-      insufficient_observations:"недостаточно кадров (нужно 3)",
+      insufficient_observations:"недостаточно наблюдений (нужно 5)",
+      inconsistent_photo_samples:"признаки на пяти кадрах нестабильны",
       identity_conflict_or_ambiguity:"конфликт ID или неоднозначное сходство",
       no_photo_match:"нет совпадения с эталонами"
     };
@@ -1554,6 +1555,7 @@
         (remaining?" · нет совпадений: "+count("no_photo_match")+
           " · мало наблюдений: "+count("insufficient_observations")+
           " · ниже порога: "+count("below_similarity_threshold")+
+          " · нестабильные признаки: "+count("inconsistent_photo_samples")+
           " · конфликт: "+count("identity_conflict_or_ambiguity")+
           " · вручную отключено: "+count("manually_suppressed"):"");
       reviewNote("Автопривязка выполнена: "+result.automatic_count+

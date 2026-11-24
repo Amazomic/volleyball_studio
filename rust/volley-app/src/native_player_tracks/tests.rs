@@ -1385,6 +1385,41 @@ fn auto_assignment_requires_five_samples_when_sample_count_is_known() {
 }
 
 #[test]
+fn automatic_photo_assignment_survives_one_outlier_among_five_photos() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let ctx = context(&root, sha, tracks);
+    let matches = json!({"7":[{"player_id":"abcdef012345",
+        "cosine_similarity":0.8698449155663521,"samples_used":5,
+        "sample_similarities":[0.9944988646698238,0.7353747583795271,
+            0.9042089076403408,0.8777005440789862,0.8374415030630823]}]});
+    let (_, chosen) =
+        refresh_automatic_photo_links(&ctx, &base_document(&ctx), &matches, 0.65).unwrap();
+    assert_eq!(chosen.get(&7).map(String::as_str), Some("abcdef012345"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn automatic_photo_assignment_rejects_two_outliers_and_weak_four_photo_consensus() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let ctx = context(&root, sha, tracks);
+    for scores in [
+        [0.95, 0.93, 0.90, 0.42, 0.40],
+        [0.97, 0.61, 0.59, 0.59, 0.59],
+    ] {
+        let score = scores.iter().sum::<f64>() / 5.0;
+        let matches = json!({"7":[{"player_id":"abcdef012345",
+            "cosine_similarity":score,"samples_used":5,
+            "sample_similarities":scores}]});
+        let (_, chosen) =
+            refresh_automatic_photo_links(&ctx, &base_document(&ctx), &matches, 0.65).unwrap();
+        assert!(!chosen.contains_key(&7));
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn competing_player_photo_with_identity_switch_stays_unassigned() {
     let (root, _, sha) = fixture();
     let indexed = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();

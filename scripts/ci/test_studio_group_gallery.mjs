@@ -123,7 +123,7 @@ candidateContext.attachSuggestions(cardWithReasons,[101,102,103]);
 const panel=cardWithReasons.children[0];
 const warning=panel.children.find(item=>item.klass.includes("track-auto-warning"));
 assert.match(warning.text,/ID 101: конфликт/);
-assert.match(warning.text,/ID 102: недостаточно кадров/);
+assert.match(warning.text,/ID 102: недостаточно наблюдений \(нужно 5\)/);
 assert.match(warning.text,/ID 103: нет совпадения/);
 const controls=panel.children.find(item=>item.klass==="track-card-link-actions");
 const select=controls.children[0];
