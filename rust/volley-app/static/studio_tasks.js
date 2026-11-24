@@ -9,11 +9,10 @@
   const setPersonDetector=variant=>{
     personDetector.variant=variant;
     personDetector.label=variant==="rfdetr-medium"?"RF-DETR Medium + RTMPose":
+      variant==="rfdetr-large"?"RF-DETR Large + RTMPose":
       variant==="rtmdet-nano"?"RTMDet-Nano + RTMPose":"Детектор игроков + RTMPose";
-    for(const id of ["studio-primary-person-model","studio-raw-person-model"]){
-      const el=$(id);
-      if(el)el.textContent=personDetector.label;
-    }
+    const el=$("studio-raw-person-model");
+    if(el)el.textContent=personDetector.label;
   };
   const refreshPersonDetector=async()=>{
     try{

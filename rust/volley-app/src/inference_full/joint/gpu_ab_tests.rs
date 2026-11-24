@@ -282,6 +282,7 @@ fn real_uu_match_gpu_ab_legacy_vs_shared() -> Result<(), String> {
         duration,
         None,
         config(ModelKind::Ball),
+        volley_inference::person::DetectorVariant::RfDetrMedium,
         1,
     )?;
     let people = super::new_context(
@@ -293,6 +294,7 @@ fn real_uu_match_gpu_ab_legacy_vs_shared() -> Result<(), String> {
         duration,
         None,
         config(ModelKind::Players),
+        volley_inference::person::DetectorVariant::RfDetrMedium,
         stride,
     )?;
     let start = Instant::now();
@@ -331,6 +333,7 @@ fn real_uu_match_gpu_ab_legacy_vs_shared() -> Result<(), String> {
         None,
         stride,
         true,
+        volley_inference::person::DetectorVariant::RfDetrMedium,
         memory,
         threads,
         super::PrimaryRallySettings::default(),
@@ -634,6 +637,7 @@ fn original_pose_single_decode_benchmark() -> Result<(), String> {
             None,
             1,
             shared_pose,
+            volley_inference::person::DetectorVariant::RfDetrMedium,
             0,
             4,
             super::PrimaryRallySettings::default(),
@@ -949,6 +953,7 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(10);
+    let detector = volley_inference::person::DetectorVariant::from_env()?;
     let started = Instant::now();
     let pair = super::run_joint_pair(
         &app,
@@ -959,12 +964,20 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
         analysis_range,
         person_stride,
         true,
+        detector,
         0,
         4,
         super::PrimaryRallySettings::default(),
         &abort,
         |_, _, _, _| Ok(()),
     )?;
+    let evidence = manifest(&app.data_root, "native_gpu_runs", &pair.player_job_id)?;
+    if !evidence["person_pipeline"]
+        .as_str()
+        .is_some_and(|pipeline| pipeline.starts_with(&detector.id().replace('-', "_")))
+    {
+        return Err("Player manifest does not match selected RF-DETR variant".into());
+    }
     if std::env::var("VOLLEY_ZERO_COPY_PRIMARY").as_deref() == Ok("1") {
         if !pair.zero_copy || pair.backend != DecodeBackend::Nvdec {
             return Err(format!(

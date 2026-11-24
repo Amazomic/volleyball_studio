@@ -94,12 +94,12 @@ extern "C" __global__ void rgb_640(
         dst[(y*640+x)*3+c]=(uchar)(fminf(fmaxf(floorf(val+0.5f),0.f),255.f));
     }
 }
-extern "C" __global__ void rfdetr_image(const uchar* rgb,float* dst) {
+extern "C" __global__ void rfdetr_image(const uchar* rgb,float* dst,int side) {
     int x=(int)(blockIdx.x*blockDim.x+threadIdx.x);
     int y=(int)(blockIdx.y*blockDim.y+threadIdx.y);
-    if(x>=576||y>=576) return;
-    float xx=fminf(fmaxf(((float)x+0.5f)*640.f/576.f-0.5f,0.f),639.f);
-    float yy=fminf(fmaxf(((float)y+0.5f)*360.f/576.f-0.5f,0.f),359.f);
+    if(x>=side||y>=side) return;
+    float xx=fminf(fmaxf(((float)x+0.5f)*640.f/(float)side-0.5f,0.f),639.f);
+    float yy=fminf(fmaxf(((float)y+0.5f)*360.f/(float)side-0.5f,0.f),359.f);
     int x0=(int)floorf(xx),y0=(int)floorf(yy);
     int x1=bound(x0+1,640),y1=bound(y0+1,360);
     float u=xx-x0,v=yy-y0;
@@ -109,7 +109,7 @@ extern "C" __global__ void rfdetr_image(const uchar* rgb,float* dst) {
         float a=rgb[(y0*640+x0)*3+c],b=rgb[(y0*640+x1)*3+c];
         float d=rgb[(y1*640+x0)*3+c],e=rgb[(y1*640+x1)*3+c];
         float z=(a+(b-a)*u)*(1.f-v)+(d+(e-d)*u)*v;
-        dst[c*576*576+y*576+x]=(floorf(fminf(fmaxf(z,0.f),255.f)+0.5f)/255.f-mean[c])/stds[c];
+        dst[c*side*side+y*side+x]=(floorf(fminf(fmaxf(z,0.f),255.f)+0.5f)/255.f-mean[c])/stds[c];
     }
 }
 extern "C" __global__ void pose_crop(

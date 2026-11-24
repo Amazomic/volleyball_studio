@@ -391,6 +391,8 @@ RTMPose-M · плавные точки (между измерениями — и
 Для персонального рилса используются только короткие фрагменты вокруг проверенных касаний.	Player reels use short clips around verified contacts.
 VBallNet определяет мяч.	VBallNet detects the ball.
 Детектор игроков + RTMPose	Player detector + RTMPose
+Детектор игроков	Player detector
+VBallNet определяет мяч. Выбранный RF-DETR и RTMPose определяют игроков и скелеты. Результат сохраняется для повторной постобработки.	VBallNet detects the ball. The selected RF-DETR and RTMPose detect players and body landmarks. The result is saved for post-processing.
 определяет игроков и скелеты. Результат сохраняется для повторной постобработки.	detects players and skeletons. Results are saved for repeated postprocessing.
 Исходное видео	Source video
 Шаг анализа мяча	Ball analysis stride

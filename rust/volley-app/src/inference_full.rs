@@ -96,6 +96,8 @@ pub struct StartRequest {
     project_id: String,
     video: String,
     model: ModelKind,
+    #[serde(default)]
+    person_detector: Option<volley_inference::person::DetectorVariant>,
     #[serde(default = "default_stride")]
     stride: usize,
     /// One shared detector/RTMPose sampling period over the prepared 30 FPS timeline.
@@ -287,6 +289,7 @@ struct JobContext {
     duration_sec: f64,
     analysis_range: Option<AnalysisRange>,
     config: Config,
+    person_detector: volley_inference::person::DetectorVariant,
     stride: usize,
     person_stride: usize,
     folder: PathBuf,
@@ -397,8 +400,12 @@ fn finalize_model_output(
         "video":context.video,
         "model":context.config.model,
         "person_pipeline":if context.config.model == ModelKind::Players {
-            let _ = volley_inference::person::DetectorVariant::from_env()?;
-            Some("rfdetr_medium_18250b5a_detector_boxes_pose_deferred_sampled_bytetrack_lowconf_v4")
+            Some(match context.person_detector {
+                volley_inference::person::DetectorVariant::RfDetrMedium =>
+                    "rfdetr_medium_18250b5a_detector_boxes_pose_deferred_sampled_bytetrack_lowconf_v4",
+                volley_inference::person::DetectorVariant::RfDetrLarge =>
+                    "rfdetr_large_da7f1bc1_detector_boxes_pose_deferred_sampled_bytetrack_lowconf_v4",
+            })
         } else { None },
         "person_sampling_period_frames":if context.config.model == ModelKind::Players {
             context.person_stride
@@ -446,11 +453,12 @@ fn run_model(context: &JobContext) -> Result<DecodeSummary, String> {
         None
     };
     let mut person_engine = if context.config.model == ModelKind::Players {
-        Some(PersonEngine::load_for_gpu_evidence(
+        Some(PersonEngine::load_for_gpu_evidence_with_detector(
             &context.repo,
             context.config.device,
             context.config.cpu_threads,
             context.config.gpu_memory_limit_mb,
+            context.person_detector,
         )?)
     } else {
         None
@@ -608,6 +616,12 @@ async fn start_internal(
             "Шаг обнаружения игроков и поз должен быть от 1 до 30 кадров",
         ));
     }
+    let person_detector = match request.person_detector {
+        Some(variant) => variant,
+        None => {
+            volley_inference::person::DetectorVariant::from_env().map_err(storage::bad_request)?
+        }
+    };
     let config = Config {
         model: request.model,
         device: request.device,
@@ -679,6 +693,7 @@ async fn start_internal(
             .map_or(plan.duration_sec, |r| r.end_sec - r.start_sec),
         analysis_range: request.analysis_range,
         config,
+        person_detector,
         stride: request.stride,
         person_stride: request.person_stride,
         folder,
@@ -969,6 +984,7 @@ mod tests {
             full_inference: FullInferenceManager::new(),
         });
         let request = StartRequest {
+            person_detector: None,
             analysis_range: None,
             project_id: project_id.into(),
             video: video.into(),
@@ -1102,6 +1118,7 @@ mod tests {
         };
         for model in [ModelKind::Ball, ModelKind::Players] {
             let request = StartRequest {
+                person_detector: None,
                 analysis_range: None,
                 project_id: id.into(),
                 video: video.into(),

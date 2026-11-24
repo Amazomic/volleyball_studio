@@ -606,7 +606,7 @@
               <div class="analysis-profile-heading">
                 <span class="analysis-profile-number">01</span>
                 <div class="analysis-primary-title"><h2 id="studio-primary-heading">1 фаза</h2>
-                  <button class="analysis-help" type="button" aria-label="О 1 фазе" aria-describedby="studio-primary-help">i<span id="studio-primary-help" class="analysis-tooltip" role="tooltip">VBallNet определяет мяч. <span id="studio-primary-person-model">Детектор игроков + RTMPose</span> определяет игроков и скелеты. Результат сохраняется для повторной постобработки.</span></button></div>
+                  <button class="analysis-help" type="button" aria-label="О 1 фазе" aria-describedby="studio-primary-help">i<span id="studio-primary-help" class="analysis-tooltip" role="tooltip">VBallNet определяет мяч. Выбранный RF-DETR и RTMPose определяют игроков и скелеты. Результат сохраняется для повторной постобработки.</span></button></div>
                 <button id="studio-analysis-gpu-only" class="primary analysis-stage-launch" type="button" title="Запустить отдельно 1 фазу (GPU) и сохранить её результат">▶ Начать анализ</button>
               </div>
               <div class="analysis-profile-fields analysis-profile-core">
@@ -614,6 +614,13 @@
                                   <label class="field-label analysis-setting-help" for="studio-analysis-video" tabindex="0" data-analysis-hint="Выбирает исходный ролик проекта. Первичный анализ создаёт новые GPU-данные именно для этого видео." aria-description="Выбирает исходный ролик проекта. Первичный анализ создаёт новые GPU-данные именно для этого видео." data-analysis-hint-en="Selects which project video is analyzed. GPU evidence is generated from this exact original.">Исходное видео</label>
                                   <select id="studio-analysis-video"><option value="">Выберите проект</option></select>
                                 </div>
+                <div>
+                  <label class="field-label analysis-setting-help" for="studio-gpu-person-detector" tabindex="0" data-analysis-hint="Выбирает модель для рамок игроков в новом анализе. Medium работает быстрее, Large использует большее разрешение." aria-description="Выбирает модель для рамок игроков в новом анализе. Medium работает быстрее, Large использует большее разрешение." data-analysis-hint-en="Selects the player detector for a new analysis. Medium runs faster; Large uses a higher input resolution.">Детектор игроков</label>
+                  <select id="studio-gpu-person-detector" data-default="rfdetr-medium">
+                    <option value="rfdetr-medium">RF-DETR Medium</option>
+                    <option value="rfdetr-large">RF-DETR Large</option>
+                  </select>
+                </div>
                 <div><div class="analysis-field-heading"><label class="field-label analysis-setting-help" for="studio-gpu-stride" tabindex="0" data-analysis-hint="Шаг VBallNet фиксирован: 9 кадров. Это обязательный режим общего GPU-конвейера с фильтрацией розыгрышей." aria-description="Шаг VBallNet фиксирован: 9 кадров. Это обязательный режим общего GPU-конвейера с фильтрацией розыгрышей." data-analysis-hint-en="VBallNet uses a fixed 9-frame step for the shared rally-scoped GPU pipeline.">Шаг анализа мяча</label><button class="analysis-help" type="button" aria-label="О шаге анализа мяча" aria-describedby="studio-ball-step-help">i<span id="studio-ball-step-help" class="analysis-tooltip" role="tooltip">Шаг VBallNet: 9 кадров, фиксирован для общего GPU-конвейера.</span></button></div>
                                   <input id="studio-gpu-stride" type="number" min="9" max="9" step="1" value="9" data-default="9" readonly></div>
                 <div>

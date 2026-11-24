@@ -105,3 +105,4 @@ models/RTMPose-M-Body7.onnx
 
 # RF-DETR Medium ONNX is locally installed, not committed
 models/rf-detr-medium.onnx
+models/rf-detr-large.onnx

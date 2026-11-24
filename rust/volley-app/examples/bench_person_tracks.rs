@@ -186,6 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = serde_json::json!({
         "model": match detector_variant {
             DetectorVariant::RfDetrMedium => benchmark_model(),
+            DetectorVariant::RfDetrLarge => detector_variant.label(),
         },
         "frames": next_frame,
         "total_observed_boxes": total_boxes,

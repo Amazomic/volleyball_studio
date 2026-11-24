@@ -354,9 +354,11 @@ impl GpuPreprocessor {
         matrix: u8,
     ) -> Result<(), String> {
         frame.validate()?;
-        if tensor.dtype().tensor_shape().map(|v| v.as_ref()) != Some(&[1, 3, 576, 576][..]) {
-            return Err("RF-DETR CUDA input shape is invalid".into());
-        }
+        let side = match tensor.dtype().tensor_shape().map(|v| v.as_ref()) {
+            Some([1, 3, 576, 576]) => 576,
+            Some([1, 3, 704, 704]) => 704,
+            _ => return Err("RF-DETR CUDA input shape is invalid".into()),
+        };
         let rgb = &self.rgb_scratch;
         let mut src = frame.ptr;
         let mut pitch = frame.pitch as i32;
@@ -374,11 +376,13 @@ impl GpuPreprocessor {
         ];
         self.launch(self.rgb, 640, 360, 1, &mut args)?;
         let mut dst = tensor.data_ptr() as u64;
-        let mut args: [*mut c_void; 2] = [
+        let mut side_arg = side as i32;
+        let mut args: [*mut c_void; 3] = [
             (&mut rgb_ptr as *mut u64).cast(),
             (&mut dst as *mut u64).cast(),
+            (&mut side_arg as *mut i32).cast(),
         ];
-        self.launch(self.person, 576, 576, 1, &mut args)
+        self.launch(self.person, side, side, 1, &mut args)
     }
 
     pub fn pose_input(
@@ -509,6 +513,48 @@ mod tests {
         );
         assert!(nvrtc_log_capacity(MAX_NVRTC_LOG_BYTES + 1).is_err());
     }
+    #[test]
+    #[ignore = "requires both RF-DETR weights and local CUDA runtime"]
+    fn both_rfdetr_variants_run_host_and_cuda_preprocessing() -> Result<(), String> {
+        use crate::person::{DetectorVariant, PersonEngine};
+        let root = std::env::var_os("VOLLEY_AB_MODEL_ROOT").ok_or("Set VOLLEY_AB_MODEL_ROOT")?;
+        let gpu = GpuPreprocessor::new()?;
+        let driver = ensure()?;
+        let nv12 = [16u8; 16].into_iter().chain([128u8; 8]).collect::<Vec<_>>();
+        let source = GpuBuffer::allocate(nv12.len())?;
+        cuda(
+            unsafe { (driver.cuMemcpyHtoD_v2)(source.ptr, nv12.as_ptr().cast(), nv12.len()) },
+            "Upload synthetic RF-DETR frame",
+        )?;
+        let rgb = vec![0; 640 * 360 * 3];
+        for variant in [DetectorVariant::RfDetrMedium, DetectorVariant::RfDetrLarge] {
+            let mut model = PersonEngine::load_for_gpu_evidence_with_detector(
+                std::path::Path::new(&root),
+                crate::Device::Cuda,
+                2,
+                0,
+                variant,
+            )?;
+            let input = model.allocate_cuda_input()?;
+            gpu.person_input(
+                Nv12View {
+                    ptr: source.ptr,
+                    pitch: 4,
+                    width: 4,
+                    height: 4,
+                },
+                &input,
+                1,
+            )?;
+            gpu.finish()?;
+            let host = model.detect(&rgb)?;
+            let device = model.detect_cuda_input(&input)?;
+            assert!(host.is_empty() && device.is_empty(), "{}", variant.label());
+            println!("{}: host and CUDA inputs accepted", variant.label());
+        }
+        Ok(())
+    }
+
     #[test]
     fn cuda_p016_rotation_preserves_expected_luma_in_device_memory() {
         if mini_cuda::driver::try_init_driver().is_none()

@@ -197,6 +197,7 @@ fn new_context(
     duration: f64,
     range: Option<volley_media::raw_decoder::AnalysisRange>,
     config: Config,
+    person_detector: volley_inference::person::DetectorVariant,
     person_stride: usize,
 ) -> Result<JobContext, String> {
     let id = Uuid::new_v4().simple().to_string();
@@ -226,6 +227,7 @@ fn new_context(
         duration_sec: duration,
         analysis_range: range,
         config,
+        person_detector,
         stride: 9,
         person_stride,
         folder,
@@ -284,6 +286,7 @@ pub(crate) fn run_joint_pair(
     range: Option<volley_media::raw_decoder::AnalysisRange>,
     person_stride: usize,
     pose_enabled: bool,
+    person_detector: volley_inference::person::DetectorVariant,
     gpu_memory_limit_mb: u64,
     cpu_threads: usize,
     rally_settings: PrimaryRallySettings,
@@ -297,9 +300,6 @@ pub(crate) fn run_joint_pair(
     if !state.writes_enabled || !(1..=30).contains(&person_stride) {
         return Err("Invalid shared GPU job or person sampling interval".into());
     }
-    // RF-DETR Medium is the sole supported person detector; keep its
-    // explicit configuration validation but never revive deleted RTMDet.
-    let _detector = volley_inference::person::DetectorVariant::from_env()?;
     let session_count = 2u64 + u64::from(pose_enabled);
     if gpu_memory_limit_mb > 0 && gpu_memory_limit_mb < session_count {
         return Err("GPU memory limit too small for shared sessions".into());
@@ -332,11 +332,12 @@ pub(crate) fn run_joint_pair(
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
-    let mut person_engine = PersonEngine::load_for_gpu_evidence(
+    let mut person_engine = PersonEngine::load_for_gpu_evidence_with_detector(
         &state.repository_root,
         Device::Cuda,
         cpu_threads,
         session_memory,
+        person_detector,
     )?;
 
     let mut pending = PendingFolders::default();
@@ -349,6 +350,7 @@ pub(crate) fn run_joint_pair(
         duration,
         range,
         ball_config,
+        person_detector,
         1,
     )?;
     pending.paths.push(ball.folder.clone());
@@ -361,6 +363,7 @@ pub(crate) fn run_joint_pair(
         duration,
         range,
         person_config,
+        person_detector,
         person_stride,
     )?;
     pending.paths.push(players.folder.clone());

@@ -19,20 +19,25 @@ fn is_observation_frame(frame: u64, period: u64) -> bool {
     frame.is_multiple_of(period)
 }
 
-/// RF-DETR Medium is the sole supported player detector.
 pub const RFDETR_MEDIUM_FILE: &str = "rf-detr-medium.onnx";
 pub const RFDETR_MEDIUM_SHA256: &str =
     "18250b5a3a9552ae117d592f8e8c27fe52438d70c914a77a8913fc45d8f29e69";
-const RFDETR_SIDE: usize = 576;
+const RFDETR_LARGE_FILE: &str = "rf-detr-large.onnx";
+const RFDETR_LARGE_SHA256: &str =
+    "da7f1bc118c6071b48096149b5df01eb1caeb3bb60a262949ac0e41f7c96f705";
 // ByteTrack stage two requires detector boxes that the old 0.28 cutoff discarded.
 // Low-score boxes are NOT eligible to start a new Track ID.
 const RFDETR_MIN_SCORE: f32 = 0.10;
 const RFDETR_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const RFDETR_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum DetectorVariant {
+    #[default]
+    #[serde(rename = "rfdetr-medium")]
     RfDetrMedium,
+    #[serde(rename = "rfdetr-large")]
+    RfDetrLarge,
 }
 
 impl DetectorVariant {
@@ -41,19 +46,60 @@ impl DetectorVariant {
             Err(std::env::VarError::NotPresent) => Ok(Self::RfDetrMedium),
             Err(error) => Err(format!("Invalid VOLLEY_PERSON_DETECTOR: {error}")),
             Ok(value) if value == "rfdetr-medium" => Ok(Self::RfDetrMedium),
+            Ok(value) if value == "rfdetr-large" => Ok(Self::RfDetrLarge),
             Ok(value) => Err(format!(
-                "Unknown VOLLEY_PERSON_DETECTOR={value:?}; expected rfdetr-medium"
+                "Unknown VOLLEY_PERSON_DETECTOR={value:?}; expected rfdetr-medium or rfdetr-large"
             )),
         }
     }
     fn needs_pose_in_gpu_evidence(self) -> bool {
         false
     }
+    pub fn from_pipeline_tag(tag: &str) -> Option<Self> {
+        if tag.starts_with("rfdetr_medium_") {
+            Some(Self::RfDetrMedium)
+        } else if tag.starts_with("rfdetr_large_") {
+            Some(Self::RfDetrLarge)
+        } else {
+            None
+        }
+    }
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::RfDetrMedium => "rfdetr-medium",
+            Self::RfDetrLarge => "rfdetr-large",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RfDetrMedium => "RF-DETR Medium",
+            Self::RfDetrLarge => "RF-DETR Large",
+        }
+    }
+    fn input_shape(self) -> [i64; 4] {
+        let side = match self {
+            Self::RfDetrMedium => 576,
+            Self::RfDetrLarge => 704,
+        };
+        [1, 3, side, side]
+    }
+    fn output_names(self) -> [&'static str; 2] {
+        match self {
+            Self::RfDetrMedium => ["pred_boxes", "pred_logits"],
+            Self::RfDetrLarge => ["dets", "labels"],
+        }
+    }
     fn file(self) -> &'static str {
-        RFDETR_MEDIUM_FILE
+        match self {
+            Self::RfDetrMedium => RFDETR_MEDIUM_FILE,
+            Self::RfDetrLarge => RFDETR_LARGE_FILE,
+        }
     }
     fn sha256(self) -> &'static str {
-        RFDETR_MEDIUM_SHA256
+        match self {
+            Self::RfDetrMedium => RFDETR_MEDIUM_SHA256,
+            Self::RfDetrLarge => RFDETR_LARGE_SHA256,
+        }
     }
 }
 
@@ -119,6 +165,7 @@ fn skeleton_box_with_threshold(
 
 pub struct PersonEngine {
     detector: Session,
+    variant: DetectorVariant,
     pose: Option<PoseEngine>,
 }
 impl PersonEngine {
@@ -143,7 +190,22 @@ impl PersonEngine {
         threads: usize,
         memory_mb: u64,
     ) -> Result<Self, String> {
-        let variant = DetectorVariant::from_env()?;
+        Self::load_for_gpu_evidence_with_detector(
+            repo,
+            device,
+            threads,
+            memory_mb,
+            DetectorVariant::from_env()?,
+        )
+    }
+
+    pub fn load_for_gpu_evidence_with_detector(
+        repo: &Path,
+        device: Device,
+        threads: usize,
+        memory_mb: u64,
+        variant: DetectorVariant,
+    ) -> Result<Self, String> {
         Self::load_with_pose_policy(
             repo,
             device,
@@ -227,7 +289,7 @@ impl PersonEngine {
         let detector = builder
             .commit_from_file(path)
             .map_err(|e| format!("Open person detector: {e}"))?;
-        let required_outputs: &[&str] = &["pred_boxes", "pred_logits"];
+        let required_outputs = variant.output_names();
         if !detector.inputs.iter().any(|i| i.name == "input")
             || required_outputs
                 .iter()
@@ -243,11 +305,15 @@ impl PersonEngine {
         } else {
             None
         };
-        Ok(Self { detector, pose })
+        Ok(Self {
+            detector,
+            variant,
+            pose,
+        })
     }
 
     pub fn allocate_cuda_input(&self) -> Result<crate::cuda_input::CudaInput, String> {
-        crate::cuda_input::allocate(&self.detector, &[1, 3, 576, 576], 0)
+        crate::cuda_input::allocate(&self.detector, &self.variant.input_shape(), 0)
     }
 
     pub fn detect_cuda_input(
@@ -257,21 +323,22 @@ impl PersonEngine {
         if self.pose.is_some() {
             return Err("CUDA detector-only input cannot substitute RTMPose source pixels".into());
         }
+        let [box_name, logit_name] = self.variant.output_names();
         let tensors = crate::cuda_input::run(
             &mut self.detector,
             input,
-            &[1, 3, 576, 576],
+            &self.variant.input_shape(),
             "input",
-            &["pred_boxes", "pred_logits"],
+            &[box_name, logit_name],
             0,
         )?;
         let boxes = tensors
             .iter()
-            .find(|tensor| tensor.name == "pred_boxes")
+            .find(|tensor| tensor.name == box_name)
             .ok_or("CUDA RF-DETR boxes missing")?;
         let logits = tensors
             .iter()
-            .find(|tensor| tensor.name == "pred_logits")
+            .find(|tensor| tensor.name == logit_name)
             .ok_or("CUDA RF-DETR logits missing")?;
         if boxes.dimensions.len() != 3
             || boxes.dimensions[0] != 1
@@ -283,12 +350,12 @@ impl PersonEngine {
         {
             return Err("CUDA RF-DETR output dimensions are incompatible".into());
         }
-        let proposals = decode_rfdetr_medium(&boxes.data, &logits.data)?;
+        let proposals = decode_rfdetr(&boxes.data, &logits.data)?;
         Ok(rfdetr_detector_observations(proposals))
     }
 
     pub fn detect(&mut self, rgb: &[u8]) -> Result<Vec<PersonObservation>, String> {
-        self.detect_rfdetr_medium(rgb)
+        self.detect_rfdetr(rgb)
     }
 
     pub fn detect_frames(
@@ -301,7 +368,7 @@ impl PersonEngine {
             return Err("Person detector expects complete RGB24 frames".into());
         }
         for (index, frame) in frames.chunks_exact(frame_bytes).enumerate() {
-            consume(index, self.detect_rfdetr_medium(frame)?)?;
+            consume(index, self.detect_rfdetr(frame)?)?;
         }
         Ok(())
     }
@@ -334,24 +401,23 @@ impl PersonEngine {
         Ok(())
     }
 
-    fn detect_rfdetr_medium(&mut self, rgb: &[u8]) -> Result<Vec<PersonObservation>, String> {
-        let input = preprocess_rfdetr_medium(rgb)?;
-        let tensor = Tensor::from_array((
-            vec![1_i64, 3, RFDETR_SIDE as i64, RFDETR_SIDE as i64],
-            input,
-        ))
-        .map_err(|e| format!("RF-DETR tensor: {e}"))?;
+    fn detect_rfdetr(&mut self, rgb: &[u8]) -> Result<Vec<PersonObservation>, String> {
+        let shape = self.variant.input_shape();
+        let [box_name, logit_name] = self.variant.output_names();
+        let input = preprocess_rfdetr(rgb, shape[2] as usize)?;
+        let tensor = Tensor::from_array((shape.to_vec(), input))
+            .map_err(|e| format!("RF-DETR tensor: {e}"))?;
         let outputs = self
             .detector
             .run(ort::inputs!["input" => tensor])
             .map_err(|e| format!("RF-DETR inference: {e}"))?;
         let (box_shape, boxes) = outputs
-            .get("pred_boxes")
+            .get(box_name)
             .ok_or("RF-DETR pred_boxes missing")?
             .try_extract_tensor::<f32>()
             .map_err(|e| format!("RF-DETR boxes: {e}"))?;
         let (logit_shape, logits) = outputs
-            .get("pred_logits")
+            .get(logit_name)
             .ok_or("RF-DETR pred_logits missing")?
             .try_extract_tensor::<f32>()
             .map_err(|e| format!("RF-DETR logits: {e}"))?;
@@ -367,7 +433,7 @@ impl PersonEngine {
                 "RF-DETR tensor shape mismatch: {box_shape:?}/{logit_shape:?}"
             ));
         }
-        let proposals = decode_rfdetr_medium(boxes, logits)?;
+        let proposals = decode_rfdetr(boxes, logits)?;
         drop(outputs);
         if self.pose.is_some() {
             self.collect_observations(rgb, proposals)
@@ -481,7 +547,7 @@ fn rfdetr_detector_observations(mut candidates: Vec<(f32, [f64; 4])>) -> Vec<Per
 
 /// Decode the vetted RF-DETR Medium sparse COCO head: 300 cxcywh boxes
 /// and 91 raw category logits, with COCO person in column 1.
-fn decode_rfdetr_medium(boxes: &[f32], logits: &[f32]) -> Result<Vec<(f32, [f64; 4])>, String> {
+fn decode_rfdetr(boxes: &[f32], logits: &[f32]) -> Result<Vec<(f32, [f64; 4])>, String> {
     if boxes.len() != 300 * 4 || logits.len() != 300 * 91 {
         return Err(format!(
             "RF-DETR unexpected output lengths: boxes {}, logits {}",
@@ -522,20 +588,19 @@ fn decode_rfdetr_medium(boxes: &[f32], logits: &[f32]) -> Result<Vec<(f32, [f64;
 
 /// Direct square RGB resize with ImageNet normalization, matching the tested
 /// RF-DETR ONNX export. No letterboxing (the detector was tested this way).
-fn preprocess_rfdetr_medium(rgb: &[u8]) -> Result<Vec<f32>, String> {
+fn preprocess_rfdetr(rgb: &[u8], side: usize) -> Result<Vec<f32>, String> {
     if rgb.len() != W * H * 3 {
         return Err("RF-DETR expects 640x360 RGB24 frames".into());
     }
-    let mut output = vec![0.0f32; 3 * RFDETR_SIDE * RFDETR_SIDE];
-    for y in 0..RFDETR_SIDE {
-        let source_y =
-            ((y as f32 + 0.5) * H as f32 / RFDETR_SIDE as f32 - 0.5).clamp(0.0, (H - 1) as f32);
+    let mut output = vec![0.0f32; 3 * side * side];
+    for y in 0..side {
+        let source_y = ((y as f32 + 0.5) * H as f32 / side as f32 - 0.5).clamp(0.0, (H - 1) as f32);
         let y0 = source_y.floor() as usize;
         let y1 = (y0 + 1).min(H - 1);
         let fy = source_y - y0 as f32;
-        for x in 0..RFDETR_SIDE {
+        for x in 0..side {
             let source_x =
-                ((x as f32 + 0.5) * W as f32 / RFDETR_SIDE as f32 - 0.5).clamp(0.0, (W - 1) as f32);
+                ((x as f32 + 0.5) * W as f32 / side as f32 - 0.5).clamp(0.0, (W - 1) as f32);
             let x0 = source_x.floor() as usize;
             let x1 = (x0 + 1).min(W - 1);
             let fx = source_x - x0 as f32;
@@ -547,7 +612,7 @@ fn preprocess_rfdetr_medium(rgb: &[u8]) -> Result<Vec<f32>, String> {
                 let top = tl + (tr - tl) * fx;
                 let bottom = bl + (br - bl) * fx;
                 let pixel = (top + (bottom - top) * fy).round().clamp(0.0, 255.0);
-                let index = channel * RFDETR_SIDE * RFDETR_SIDE + y * RFDETR_SIDE + x;
+                let index = channel * side * side + y * side + x;
                 output[index] = (pixel / 255.0 - RFDETR_MEAN[channel]) / RFDETR_STD[channel];
             }
         }
@@ -632,12 +697,12 @@ mod tests {
 
     #[test]
     fn rfdetr_rejects_invalid_frame_and_preserves_flat_color() {
-        assert!(preprocess_rfdetr_medium(&[]).is_err());
+        assert!(preprocess_rfdetr(&[], 576).is_err());
         let input = vec![255u8; W * H * 3];
-        let prepared = preprocess_rfdetr_medium(&input).unwrap();
-        assert_eq!(prepared.len(), 3 * RFDETR_SIDE * RFDETR_SIDE);
+        let prepared = preprocess_rfdetr(&input, 576).unwrap();
+        assert_eq!(prepared.len(), 3 * 576 * 576);
         for channel in 0..3 {
-            let pixel = prepared[channel * RFDETR_SIDE * RFDETR_SIDE];
+            let pixel = prepared[channel * 576 * 576];
             let expected = (1.0 - RFDETR_MEAN[channel]) / RFDETR_STD[channel];
             assert!((pixel - expected).abs() < 1e-5);
         }
@@ -653,14 +718,14 @@ mod tests {
         logits[91 + 18] = 10.0; // a dog is not a person.
         boxes[8..12].copy_from_slice(&[f32::NAN, 0.5, 0.4, 0.4]);
         logits[2 * 91 + 1] = 20.0;
-        let results = decode_rfdetr_medium(&boxes, &logits).unwrap();
+        let results = decode_rfdetr(&boxes, &logits).unwrap();
         assert_eq!(results.len(), 1);
         let (score, bbox) = results[0];
         assert!(score > 0.99);
         for (actual, expected) in bbox.into_iter().zip([0.4, 0.2, 0.6, 0.8]) {
             assert!((actual - expected).abs() < 1e-5);
         }
-        assert!(decode_rfdetr_medium(&boxes[..8], &logits).is_err());
+        assert!(decode_rfdetr(&boxes[..8], &logits).is_err());
     }
 
     #[test]
@@ -743,10 +808,10 @@ mod tests {
         let mut points = [sample(0.5, 0.5, 0.9); KPT_COUNT];
         points[5].score = 0.1;
         assert!(skeleton_box(&points).is_none());
-        assert!(preprocess_rfdetr_medium(&vec![0; 3 * W * H - 1]).is_err());
+        assert!(preprocess_rfdetr(&vec![0; 3 * W * H - 1], 576).is_err());
         assert_eq!(
-            preprocess_rfdetr_medium(&vec![0; 3 * W * H]).unwrap().len(),
-            3 * RFDETR_SIDE * RFDETR_SIDE
+            preprocess_rfdetr(&vec![0; 3 * W * H], 576).unwrap().len(),
+            3 * 576 * 576
         );
     }
 }

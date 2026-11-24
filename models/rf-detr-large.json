@@ -1,0 +1,9 @@
+{
+  "release_id": "rf-detr-large",
+  "input_name": "input",
+  "input_shape": [1, 3, 704, 704],
+  "output_names": ["dets", "labels"],
+  "sha256": "da7f1bc118c6071b48096149b5df01eb1caeb3bb60a262949ac0e41f7c96f705",
+  "pose_model": "RTMPose-M-Body7",
+  "download_url": "https://huggingface.co/imbcmdth/rfdetr-onnx/resolve/main/rf-detr-large-2026.onnx?download=true"
+}

@@ -201,6 +201,7 @@
   };
   const gpuProfile=()=>({
       stride:9,
+      person_detector:$("studio-gpu-person-detector").value,
       gpu_memory_limit_mb:inputValue("studio-gpu-memory"),
       cpu_threads:inputValue("studio-gpu-threads"),
       pose_enabled:$("studio-gpu-pose-enabled").value==="1",
@@ -457,7 +458,7 @@
     const known={
       ball:["VballNetV4c","model"],
       ball_stabilizer:["Ball Stabilizer","algorithm"],
-      players:["RF-DETR Medium","model"],
+      players:[(run?run.profile?.gpu?.person_detector:$("studio-gpu-person-detector")?.value)==="rfdetr-large"?"RF-DETR Large":"RF-DETR Medium","model"],
       pose:["RTMPose-M Body7","model"],
       tracking:["ByteTrack","algorithm"],
       touches:["Touch Detector","algorithm"],
@@ -610,7 +611,7 @@
     ball:["#studio-gpu-stride","#studio-gpu-memory","#studio-gpu-threads"],
     ball_stabilizer:["#studio-post-ball-stabilizer-gap","#studio-post-ball-stabilizer-step"],
     rallies:["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds","#studio-gpu-rally-stationary-ms"],
-    players:["#studio-gpu-person-stride"],
+    players:["#studio-gpu-person-detector","#studio-gpu-person-stride"],
     pose:["#studio-gpu-pose-enabled","#studio-gpu-interpolate-pose"],
     fusion:["#studio-gpu-memory","#studio-gpu-threads"],
     tracking:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap",
@@ -629,7 +630,7 @@
     ball:"VBallNetV4c работает с фиксированным окном из 9 кадров. Память CUDA и потоки CPU — общие настройки нейросетей 1-й фазы. Интерполяция и пространственная фильтрация ложных точек настраиваются отдельно во 2-й фазе (Ball Stabilizer).",
     ball_stabilizer:"Ball Stabilizer использует все детекции VBallNet: отдалённые ложные точки отбрасываются по соседним положениям и непрерывности траектории. Короткие пропуски интерполируются до поиска касаний; розыгрыши 1-й фазы не меняются.",
     rallies:"Рабочие настройки первичного анализа: длительность траектории, остановка мяча в миллисекундах и объединение без перекрытия удержаний или пропусков детекции от 3 секунд. Эксперименты в «Дебаге» имеют собственные значения и не меняют этот GPU-профиль.",
-    players:"RF-DETR Medium ищет игроков только внутри найденных игровых интервалов.",
+    players:"RF-DETR ищет игроков только внутри найденных игровых интервалов.",
     pose:"RTMPose-M Body7 получает рамки игроков и исходные пиксели видео.",
     fusion:"Сохранение общей версии GPU-наблюдений и повторное использование кэша.",
     tracking:"ByteTrack сопровождает Track ID на CPU. Это алгоритм трекинга, а не нейросеть.",

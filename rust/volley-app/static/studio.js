@@ -481,10 +481,11 @@
     const variant=fusion?overlay.rawDetectors.get(
       rawDetectorKey(s.project,fusion.id,s.video)):null;
     name.textContent=variant==="rfdetr-medium"?"RF-DETR Medium":
+      variant==="rfdetr-large"?"RF-DETR Large":
       variant==="legacy"?"Архивный анализ":
       "\u0414\u0435\u0442\u0435\u043a\u0442\u043e\u0440 \u0438\u0433\u0440\u043e\u043a\u043e\u0432";
     input.disabled=!fusion;
-    $("studio-raw-player-interpolated-option")?.classList.toggle("hidden",variant!=="rfdetr-medium");
+    $("studio-raw-player-interpolated-option")?.classList.toggle("hidden",!["rfdetr-medium","rfdetr-large"].includes(variant));
   };
   const overlayWindowStart=frame=>Math.max(0,Math.floor(frame/90)*90-60);
   const overlayWindowKey=(project,run,video,start)=>
@@ -554,7 +555,7 @@
          !Number.isSafeInteger(value.height)||value.height<=0||
          value.project_id!==project||
          (isRaw?value.fusion_id!==run:value.rally_run_id!==run)||
-         (isRaw&&!["rfdetr-medium","legacy","unknown"].includes(value.person_detector))||
+         (isRaw&&!["rfdetr-medium","rfdetr-large","legacy","unknown"].includes(value.person_detector))||
          (isRaw?!/^[a-f0-9]{64}$/.test(value.source_fusion_sha256):false)||
          value.video!==video||value.start_frame!==start||
          !Number.isSafeInteger(value.end_frame)||value.end_frame<=start||
@@ -935,7 +936,7 @@
           }
         }
         if(overlay.rawPlayerInterpolated?.checked &&
-          overlay.rawDetectors.get(rawDetectorKey(project,run,video))==="rfdetr-medium"){
+          ["rfdetr-medium","rfdetr-large"].includes(overlay.rawDetectors.get(rawDetectorKey(project,run,video)))){
           ctx.save();
           ctx.strokeStyle="#ffbc69";ctx.fillStyle="#ffe0b0";ctx.lineWidth=1.8;
           ctx.setLineDash([6,4]);

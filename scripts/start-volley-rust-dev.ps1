@@ -104,8 +104,29 @@ function Configure-Environment {
     if($ort){$env:PATH=([System.IO.Path]::GetDirectoryName($ort))+";"+$env:PATH}
     if($openvino){$env:PATH=([System.IO.Path]::GetDirectoryName($openvino))+";"+$env:PATH}
 }
+function Install-RfDetrLarge {
+    $target=Join-Path $repo "models\rf-detr-large.onnx"
+    $model=Get-Content -LiteralPath (Join-Path $repo "models\rf-detr-large.json") -Raw | ConvertFrom-Json
+    if((Test-Path -LiteralPath $target -PathType Leaf) -and
+        (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -eq $model.sha256){
+        return
+    }
+    $temporary="$target.$PID.download"
+    try {
+        Write-Output "Downloading RF-DETR Large"
+        & curl.exe --fail --silent --show-error --location --connect-timeout 15 --max-time 900 --output $temporary $model.download_url
+        if($LASTEXITCODE -ne 0){throw "RF-DETR Large download failed (curl exit $LASTEXITCODE)"}
+        if((Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash -ne $model.sha256){
+            throw "RF-DETR Large model SHA-256 mismatch"
+        }
+        Move-Item -LiteralPath $temporary -Destination $target -Force
+    }finally{
+        if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}
+    }
+}
 function Build-Windows {
     Confirm-Source
+    Install-RfDetrLarge
     Push-Location (Join-Path $repo "rust")
     try {
         & cargo build -p volley-web --target wasm32-unknown-unknown --release --offline --locked
@@ -135,6 +156,7 @@ function Test-NativeDependencies {
     foreach($name in @(
         "models\VballNetV4c_seq9_grayscale_20260908_213829.onnx",
         "models\rf-detr-medium.onnx",
+        "models\rf-detr-large.onnx",
         "models\RTMPose-M-Body7.onnx",
         "models\openvino\person-reidentification-retail-0287.xml"
     )){

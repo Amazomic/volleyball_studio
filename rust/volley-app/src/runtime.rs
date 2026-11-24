@@ -378,7 +378,7 @@ pub(crate) async fn rewrite_status(
         migration_complete: false,
         production_ready: false,
         person_detector: match volley_inference::person::DetectorVariant::from_env() {
-            Ok(volley_inference::person::DetectorVariant::RfDetrMedium) => "rfdetr-medium",
+            Ok(variant) => variant.id(),
             Err(_) => "invalid",
         },
         isolated_writes_enabled: state.writes_enabled,

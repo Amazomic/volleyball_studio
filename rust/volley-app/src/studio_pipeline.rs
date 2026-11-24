@@ -32,6 +32,7 @@ use volley_core::{
     touch_pipeline::{TouchAlgorithm, TouchSettings},
     tracker::TrackingOptions,
 };
+use volley_inference::person::DetectorVariant;
 #[cfg(test)]
 use volley_inference::ModelKind;
 
@@ -423,6 +424,7 @@ pub async fn history(
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GpuProfile {
+    person_detector: DetectorVariant,
     stride: usize,
     gpu_memory_limit_mb: u64,
     cpu_threads: usize,
@@ -443,6 +445,7 @@ const fn default_interpolation_enabled() -> bool {
 impl Default for GpuProfile {
     fn default() -> Self {
         Self {
+            person_detector: DetectorVariant::default(),
             stride: 9,
             gpu_memory_limit_mb: 0,
             cpu_threads: 0,
@@ -1144,7 +1147,7 @@ fn gpu_lineage_valid(
         {
             return false;
         }
-        if saved["gpu_model_stack"] == requested_gpu_model_stack()
+        if saved["gpu_model_stack"] == requested_gpu_model_stack(request.gpu.person_detector)
             && saved["zero_copy_request"].as_bool().unwrap_or(false) == zero_copy_requested()
             && (!matches!(
                 pose["box_source_version"].as_str(),
@@ -1319,15 +1322,6 @@ fn cpu_lineage_valid(
 const RFDETR_GPU_MODEL_STACK: &str =
     "vballnet_rfdetr_medium_18250b5a_original30_native_pose_pixels_bytetrack_lowconf_v7";
 
-/// The GPU-evidence cache must not be shared by different detector weights
-/// or detector-to-pose box policies.
-fn person_detector_label() -> &'static str {
-    match volley_inference::person::DetectorVariant::from_env() {
-        Ok(volley_inference::person::DetectorVariant::RfDetrMedium) => "RF-DETR Medium",
-        Err(_) => "Детектор игроков + RTMPose",
-    }
-}
-
 fn zero_copy_requested() -> bool {
     matches!(
         std::env::var("VOLLEY_ZERO_COPY_PRIMARY").ok().as_deref(),
@@ -1335,17 +1329,19 @@ fn zero_copy_requested() -> bool {
     )
 }
 
-fn requested_gpu_model_stack() -> &'static str {
-    match volley_inference::person::DetectorVariant::from_env() {
-        Ok(volley_inference::person::DetectorVariant::RfDetrMedium) => RFDETR_GPU_MODEL_STACK,
-        Err(_) => "invalid_person_detector_selection_no_gpu_cache_reuse",
+fn requested_gpu_model_stack(detector: DetectorVariant) -> &'static str {
+    match detector {
+        DetectorVariant::RfDetrMedium => RFDETR_GPU_MODEL_STACK,
+        DetectorVariant::RfDetrLarge => {
+            "vballnet_rfdetr_large_da7f1bc1_original30_native_pose_pixels_bytetrack_lowconf_v7"
+        }
     }
 }
 
 fn compatible_version(saved: &Value, request: &StartRequest, identity: &Value) -> bool {
     saved["schema"] == SCHEMA
         && saved["analysis_range"] == json!(request.analysis_range)
-        && saved["gpu_model_stack"] == requested_gpu_model_stack()
+        && saved["gpu_model_stack"] == requested_gpu_model_stack(request.gpu.person_detector)
         && saved["project_id"] == request.project_id
         && saved["video"] == request.video
         && decode_profiles(saved["profile"]["gpu"].clone(), empty_profile())
@@ -1519,6 +1515,7 @@ fn selected_gpu(
     let ball = require_id(&fusion["sources"]["vballnet"], "job_id")?;
     let players = require_id(&fusion["sources"]["person_pose"], "job_id")?;
     let mut stride = None;
+    let mut person_detector = DetectorVariant::default();
     let player_stride = fusion["player_sampling_period_frames"]
         .as_u64()
         .filter(|step| (1..=30).contains(step))
@@ -1547,6 +1544,12 @@ fn selected_gpu(
         {
             return Err("GPU-источник выбранной версии повреждён или не совпадает".into());
         }
+        if model == "players" {
+            person_detector = raw["person_pipeline"]
+                .as_str()
+                .and_then(DetectorVariant::from_pipeline_tag)
+                .unwrap_or_default();
+        }
         stride = Some(current_stride);
     }
     Ok(json!({
@@ -1556,7 +1559,8 @@ fn selected_gpu(
         "id": analysis_id,
         // Standalone GPU manifests preserve the player sampling period.
         "profile": {"gpu": {"stride":stride.unwrap_or(9),
-            "pose_stride":player_stride,"gpu_memory_limit_mb":0,"cpu_threads":8}}
+            "person_detector":person_detector,"pose_stride":player_stride,
+            "gpu_memory_limit_mb":0,"cpu_threads":8}}
     }))
 }
 
@@ -1614,7 +1618,7 @@ async fn gpu(
     let model_name = if model == ModelKind::Ball {
         "VballNet"
     } else {
-        person_detector_label()
+        request.gpu.person_detector.label()
     };
     let total = status["gpu_total_frames"].as_u64().unwrap_or(0);
     progress_with_frames(
@@ -1638,6 +1642,7 @@ async fn gpu(
         "gpu_device_id": 0,
         "stride": request.gpu.stride,
         "person_stride": request.gpu.pose_stride,
+        "person_detector": request.gpu.person_detector,
         "gpu_memory_limit_mb": request.gpu.gpu_memory_limit_mb,
         "cpu_threads": request.gpu.cpu_threads,
         "analysis_range":request.analysis_range
@@ -1819,6 +1824,7 @@ async fn pipeline(
         status["shared_pose"] = source["shared_pose"].clone();
         let (gpu, _) = decode_profiles(source["profile"]["gpu"].clone(), empty_profile())?;
         status["profile"]["gpu"] = json!(gpu);
+        status["gpu_model_stack"] = source["gpu_model_stack"].clone();
         status["gpu_reused"] = json!(true);
         status["reused_from_id"] = source["id"].clone();
         save(path, status)?;
@@ -1913,7 +1919,7 @@ async fn pipeline(
                 "info",
                 &format!(
                     "Совпадающего GPU-профиля нет, VBallNet и {}",
-                    person_detector_label()
+                    request.gpu.person_detector.label()
                 ),
             )?;
             // Primary shared GPU path has passed real-match evidence/CPU
@@ -2000,6 +2006,7 @@ async fn pipeline(
                         request.analysis_range,
                         request.gpu.pose_stride,
                         full_resolution_pose,
+                        request.gpu.person_detector,
                         request.gpu.gpu_memory_limit_mb,
                         request.gpu.cpu_threads,
                         request.gpu.primary_rallies,
@@ -2771,7 +2778,7 @@ pub async fn start(
         "mode":request.mode,"source_analysis_id":request.source_analysis_id,
         "client_request_id":request.client_request_id,
         "analysis_range":request.analysis_range,
-        "gpu_model_stack":requested_gpu_model_stack(),
+        "gpu_model_stack":requested_gpu_model_stack(request.gpu.person_detector),
         "zero_copy_request":zero_copy_requested(),"zero_copy_active":false,
         "gpu_jobs":{},"cpu_runs":{},"analysis_id":null,
         "gpu_rally_mask":null,"gpu_rally_mask_sha256":null,
@@ -2889,7 +2896,7 @@ fn stage_aware_remaining(current: &Value, history: &Value, now: u64) -> Option<u
         Some(8.0)
     } else if name == "GPU · VballNet" {
         Some(44.0)
-    } else if name == "GPU · RF-DETR Medium + RTMPose" || name == "GPU · RF-DETR Medium" {
+    } else if name.starts_with("GPU · RF-DETR ") {
         Some(80.0)
     } else if name == "GPU · RTMPose-M: позы игроков" || name == "GPU · RTMPose-M" {
         Some(84.5)
@@ -3793,6 +3800,21 @@ mod tests {
     }
 
     #[test]
+    fn large_detector_profile_is_distinct_from_medium() {
+        let input = json!({"project_id":"project","video":"video.mp4"});
+        let medium: StartRequest = serde_json::from_value(input.clone()).unwrap();
+        let mut large_input = input;
+        large_input["gpu"] = json!({"person_detector":"rfdetr-large"});
+        let large: StartRequest = serde_json::from_value(large_input).unwrap();
+        let saved = json!({
+            "schema":SCHEMA,"project_id":medium.project_id,"video":medium.video,
+            "gpu_model_stack":RFDETR_GPU_MODEL_STACK,"profile":{"gpu":medium.gpu}
+        });
+        assert!(compatible_version(&saved, &medium, &Value::Null));
+        assert!(!compatible_version(&saved, &large, &Value::Null));
+    }
+
+    #[test]
     fn gpu_defaults_match_person_detector_frame_sampling() {
         let profile = GpuProfile::default();
         assert_eq!(
@@ -3817,7 +3839,7 @@ mod tests {
         assert_eq!(request.gpu.primary_rallies.stationary_ball_ms, 1000);
         let saved = json!({
             "schema":SCHEMA,
-            "gpu_model_stack":requested_gpu_model_stack(),
+            "gpu_model_stack":requested_gpu_model_stack(request.gpu.person_detector),
             "project_id":request.project_id,
             "video":request.video,
             "profile":{"gpu":request.gpu},
@@ -3856,7 +3878,7 @@ mod tests {
         .unwrap();
         let saved = json!({
             "schema":SCHEMA,
-            "gpu_model_stack":requested_gpu_model_stack(),
+            "gpu_model_stack":requested_gpu_model_stack(request.gpu.person_detector),
             "project_id":request.project_id,
             "video":request.video,
             "profile":{"gpu":request.gpu},
@@ -3881,7 +3903,7 @@ mod tests {
         .unwrap();
         let saved = json!({
             "schema":SCHEMA,
-            "gpu_model_stack":requested_gpu_model_stack(),
+            "gpu_model_stack":requested_gpu_model_stack(request.gpu.person_detector),
             "project_id":request.project_id,
             "video":request.video,
             "profile":{"gpu":request.gpu},
@@ -4170,7 +4192,7 @@ mod branching_tests {
         let saved = json!({
             "schema":SCHEMA,"project_id":request.project_id,"video":request.video,
             "status":"complete","pipeline_complete":true,"source_identity":identity,
-            "gpu_model_stack":requested_gpu_model_stack(),
+            "gpu_model_stack":requested_gpu_model_stack(request.gpu.person_detector),
             "profile":{"gpu":request.gpu,"post":request.post},
             "gpu_jobs":{"ball":gpu_ball,"players":gpu_players},
             "gpu_rally_mask":{
@@ -4499,10 +4521,20 @@ mod branching_tests {
         assert_eq!(history["runs"][0]["stages"][1]["duration_ms"], 1500);
         // CPU can use a standalone GPU fusion with no Studio pipeline record.
         fs::remove_file(directory.join("status.json")).unwrap();
+        let player_manifest = project_dir
+            .join("native_gpu_runs")
+            .join(&gpu_players)
+            .join("manifest.json");
+        let mut raw: Value = serde_json::from_slice(&fs::read(&player_manifest).unwrap()).unwrap();
+        raw["person_pipeline"] = json!(
+            "rfdetr_large_da7f1bc1_detector_boxes_pose_deferred_sampled_bytetrack_lowconf_v4"
+        );
+        storage::write_json_atomic(&player_manifest, &raw).unwrap();
         let source = selected_gpu(&handler_state, &request, &identity, &analysis).unwrap();
         assert_eq!(source["gpu_jobs"]["ball"], gpu_ball);
         assert_eq!(source["gpu_jobs"]["players"], gpu_players);
         assert_eq!(source["profile"]["gpu"]["stride"], 9);
+        assert_eq!(source["profile"]["gpu"]["person_detector"], "rfdetr-large");
         assert!(selected_gpu(
             &handler_state,
             &request,

@@ -41,7 +41,7 @@ const profileSelects=[...markup.matchAll(/<select[^>]*id="(studio-(?:gpu|post)[^
   .map(row=>Object.fromEntries([...row[0].matchAll(/([\w-]+)="([^"]*)"/g)]
     .map(attr=>[attr[1],attr[2]])));
 assert.deepEqual(profileSelects.map(attrs=>attrs.id).sort(),
-  ["studio-gpu-pose-enabled"]);
+  ["studio-gpu-person-detector","studio-gpu-pose-enabled"]);
 
 const names=["preview","analysis","players","montage","quick","report"];
 class Node {
@@ -296,7 +296,7 @@ const golden=JSON.parse(pipelineStarts()[0].options.body);
 assert.equal(golden.project_id,"1234abcdef01");
 assert.equal(golden.video,"rally.mp4");
 assert.equal(golden.mode,"full");
-assert.deepEqual(golden.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:0,pose_enabled:true,pose_mode:"photo",pose_stride:1,primary_rallies:{min_trajectory_seconds:1.5,merge_gap_seconds:4,stationary_ball_ms:1000}});
+assert.deepEqual(golden.gpu,{stride:9,person_detector:"rfdetr-medium",gpu_memory_limit_mb:0,cpu_threads:0,pose_enabled:true,pose_mode:"photo",pose_stride:1,primary_rallies:{min_trajectory_seconds:1.5,merge_gap_seconds:4,stationary_ball_ms:1000}});
 assert.equal(golden.post.pose_classification,true);
 assert.equal(golden.post.interpolate_players,true);
 assert.equal(golden.post.interpolate_pose,true);
@@ -318,12 +318,14 @@ a.nodes.get("studio-gpu-memory").value="8192";
 a.nodes.get("studio-gpu-memory").dispatch("input");
 a.nodes.get("studio-gpu-threads").value="12";
 a.nodes.get("studio-gpu-threads").dispatch("input");
-assert.match(a.nodes.get("studio-analysis-profile-delta").textContent,/Изменено параметров: 3/);
+a.nodes.get("studio-gpu-person-detector").value="rfdetr-large";
+a.nodes.get("studio-gpu-person-detector").dispatch("change");
+assert.match(a.nodes.get("studio-analysis-profile-delta").textContent,/Изменено параметров: 4/);
 a.nodes.get("studio-analysis-start").dispatch("click");
 await tick();
 assert.equal(pipelineStarts().length,2,"Second explicit pipeline launch only");
 const override=JSON.parse(pipelineStarts()[1].options.body);
-assert.deepEqual(override.gpu,{stride:9,gpu_memory_limit_mb:8192,cpu_threads:12,pose_enabled:true,pose_mode:"photo",pose_stride:1,primary_rallies:{min_trajectory_seconds:1.5,merge_gap_seconds:4,stationary_ball_ms:1000}});
+assert.deepEqual(override.gpu,{stride:9,person_detector:"rfdetr-large",gpu_memory_limit_mb:8192,cpu_threads:12,pose_enabled:true,pose_mode:"photo",pose_stride:1,primary_rallies:{min_trajectory_seconds:1.5,merge_gap_seconds:4,stationary_ball_ms:1000}});
 assert.equal(override.post.tracking.min_player_score,0.28);
 a.nodes.get("studio-gpu-memory").value="-1";
 a.nodes.get("studio-gpu-memory").dispatch("input");
@@ -348,7 +350,7 @@ assert.equal(pipelineStarts().length,3,"GPU-only button must launch the pipeline
 const gpuOnly=JSON.parse(pipelineStarts()[2].options.body);
 assert.equal(gpuOnly.mode,"gpu");
 assert.equal(gpuOnly.post,undefined,"GPU-only must not include CPU settings");
-assert.deepEqual(gpuOnly.gpu,{stride:9,gpu_memory_limit_mb:0,cpu_threads:0,pose_enabled:true,pose_mode:"photo",pose_stride:1,primary_rallies:{min_trajectory_seconds:1.5,merge_gap_seconds:4,stationary_ball_ms:1000}});
+assert.deepEqual(gpuOnly.gpu,{stride:9,person_detector:"rfdetr-medium",gpu_memory_limit_mb:0,cpu_threads:0,pose_enabled:true,pose_mode:"photo",pose_stride:1,primary_rallies:{min_trajectory_seconds:1.5,merge_gap_seconds:4,stationary_ball_ms:1000}});
 a.nodes.get("studio-inference").value=JSON.stringify([
   "rally.mp4","fusion","b".repeat(32)]);
 a.window.dispatchEvent({type:"volley:chain-change",

@@ -16,6 +16,7 @@ const rate={value:"10"};
 const display={textContent:""};
 const fields={
   "studio-gpu-person-stride":rate,
+  "studio-gpu-person-detector":{value:"rfdetr-medium"},
   "studio-gpu-person-rate":display,
   "studio-gpu-pose-enabled":{value:"1"},
   "studio-gpu-interpolate-players":{checked:true},

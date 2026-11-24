@@ -1255,8 +1255,13 @@ fn gpu_person_detector(project_root: &Path, fusion: &Value) -> &'static str {
     {
         return "unknown";
     }
-    match model["person_pipeline"].as_str() {
-        Some(pipeline) if pipeline.starts_with("rfdetr_medium_") => "rfdetr-medium",
+    let pipeline = model["person_pipeline"].as_str();
+    if let Some(detector) =
+        pipeline.and_then(volley_inference::person::DetectorVariant::from_pipeline_tag)
+    {
+        return detector.id();
+    }
+    match pipeline {
         // Read-only historical evidence remains viewable after retiring
         // its detector; do not label it as a current RF-DETR run.
         Some(pipeline) if pipeline.starts_with("rtmdet_nano_") => "legacy",
