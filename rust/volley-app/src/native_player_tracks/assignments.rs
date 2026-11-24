@@ -826,7 +826,35 @@ pub(super) fn filtered_page(
         Some("player") => owners.get(id).map(String::as_str) == player_id,
         _ => true,
     };
-    let filtered_total = ctx.tracks.keys().filter(|id| matches(id)).count();
+    let photo_hints = gallery_photo_hints(doc);
+    let mut filtered_ids = ctx
+        .tracks
+        .keys()
+        .copied()
+        .filter(|id| matches(id))
+        .collect::<Vec<_>>();
+    if view == Some("unassigned") {
+        let score = |id: u64| {
+            photo_hints[id.to_string()]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|row| {
+                    row["player_id"]
+                        .as_str()
+                        .is_some_and(|player| ctx.roster.contains_key(player))
+                })
+                .filter_map(|row| row["cosine_similarity"].as_f64())
+                .filter(|score| score.is_finite() && *score > 0.0 && *score <= 1.0)
+                .fold(-1.0_f64, f64::max)
+        };
+        filtered_ids.sort_by(|left, right| {
+            score(*right)
+                .total_cmp(&score(*left))
+                .then_with(|| left.cmp(right))
+        });
+    }
+    let filtered_total = filtered_ids.len();
     let unassigned_reasons = ctx
         .tracks
         .keys()
@@ -850,13 +878,8 @@ pub(super) fn filtered_page(
         }
     }
     let mut rows = Vec::new();
-    for (id, info) in ctx
-        .tracks
-        .iter()
-        .filter(|(id, _)| matches(id))
-        .skip(offset)
-        .take(limit)
-    {
+    for id in filtered_ids.iter().skip(offset).take(limit) {
+        let info = &ctx.tracks[id];
         let owner = owners.get(id).map(String::as_str);
         let pending = owner.is_none() && !excluded.contains(id);
         let photo_rows = doc["automatic_identity_evidence"]["matches"][id.to_string()].as_array();
@@ -928,7 +951,7 @@ pub(super) fn filtered_page(
         "assigned_count":scoped_assigned,"excluded_count":scoped_excluded,
         "identity_conflict_track_ids":actual_conflicts,
         "roster":roster,"tracks":rows,
-        "automatic_identity_matches":gallery_photo_hints(doc),
+        "automatic_identity_matches":photo_hints,
         "similarity_status":if doc["automatic_identity_evidence"]["photo_sample_policy"] != PHOTO_SAMPLE_POLICY || doc["automatic_identity_evidence"]["matches"].as_object().is_none() {
             "not_calculated"
         } else if doc["automatic_identity_evidence"]["photo_count"] == 0 {

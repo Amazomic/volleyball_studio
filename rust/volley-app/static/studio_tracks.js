@@ -585,6 +585,14 @@
     })).sort((a,b)=>b.supported-a.supported||
       b.score-a.score||a.name.localeCompare(b.name,"ru"));
   };
+  const visibleUnassigned=id=>state.unassignedIds.has(id)&&!state.assignmentPending.has(id);
+  const visibleUnassignedCount=()=>[...state.unassignedIds].filter(visibleUnassigned).length;
+  const sortBySimilarity=(items,idsOf)=>items.sort((a,b)=>{
+    const aIds=idsOf(a),bIds=idsOf(b);
+    const aScore=playerCandidates(aIds)[0]?.score??-1;
+    const bScore=playerCandidates(bIds)[0]?.score??-1;
+    return bScore-aScore||Number(aIds[0])-Number(bIds[0]);
+  });
   const attachSuggestions=(card,ids)=>{
     const panel=node("div","track-link-suggestions");
     const candidates=playerCandidates(ids);
@@ -659,18 +667,19 @@
     ui.page.textContent=state.filteredTotal?
       (state.offset+1)+"–"+Math.min(state.offset+state.limit,state.filteredTotal)+" из "+state.filteredTotal:
       "Нет Track ID";
-    const singles=state.rows;
+    const singles=state.viewPlayer||state.viewExcluded||state.viewConflicts?
+      state.rows:sortBySimilarity(
+        state.rows.filter(row=>visibleUnassigned(Number(row.track_id))),
+        row=>[Number(row.track_id)]);
     singlesHeader.textContent="Отдельные Track ID · "+
       state.filteredTotal+
       " · на странице "+singles.length;
-    if(!state.rows.length){
-      ui.list.append(node("div","empty-state",state.viewPlayer?
+    if(!singles.length){
+      ui.list.append(node("div","empty-state",state.assignmentPending.size?
+        "Сохраняем выбранные привязки…":state.viewPlayer?
         "У игрока нет привязанных Track ID в выбранной обработке.":state.viewExcluded?
         "Нет исключённых Track ID в выбранной обработке.":
         "Нет непривязанных Track ID в выбранной обработке."));
-    }else if(!singles.length){
-      ui.list.append(node("div","empty-state",
-        "На этой странице ID входят в группы. Перейдите к следующей странице."));
     }
     for(const row of singles){
       const id=Number(row.track_id);
@@ -866,7 +875,7 @@
     if(state.tracksLoaded)state.token++;
     requested.forEach(id=>{state.assignmentPending.add(id);state.selected.delete(id);});
     showBindingStatus(requested,"pending");
-    unlock();
+    animateTrackCards(()=>{renderRows();renderGroupCards();updateUnassignedLabel();unlock();});
     const task=(state.assignmentQueue||Promise.resolve()).then(()=>{
       if(epoch!==state.bindingEpoch||scope.project_id!==state.project||
         scope.video!==state.video||scope.replay_id!==state.replay||
@@ -879,8 +888,8 @@
     finally{
       if(epoch===state.bindingEpoch){
         requested.forEach(id=>state.assignmentPending.delete(id));
-        if(!saved)showBindingStatus(requested,"");
-        unlock();
+        if(!saved)animateTrackCards(()=>{renderRows();renderGroupCards();updateUnassignedLabel();unlock();});
+        else unlock();
         if(!state.assignmentPending.size){
           if(state.bindingNeedsRefresh){
             state.bindingNeedsRefresh=false;
@@ -1261,14 +1270,14 @@
     if(!state.viewPlayer)viewLabel.textContent=state.viewExcluded?
       "Исключённые Track ID · "+state.excludedIds.size:state.viewConflicts?
       "Конфликты одновременной видимости · "+state.identityConflictIds.size:
-      "Непривязанные Track ID · "+state.unassignedIds.size;
+      "Непривязанные Track ID · "+visibleUnassignedCount();
     conflictToggle.hidden=Boolean(state.viewPlayer);
     conflictToggle.textContent=state.viewConflicts?
-      "Показать непривязанные · "+state.unassignedIds.size:
+      "Показать непривязанные · "+visibleUnassignedCount():
       "Конфликты · "+state.identityConflictIds.size;
     excludedToggle.hidden=Boolean(state.viewPlayer);
     excludedToggle.textContent=state.viewExcluded?
-      "Показать непривязанные · "+state.unassignedIds.size:
+      "Показать непривязанные · "+visibleUnassignedCount():
       "Исключённые · "+state.excludedIds.size;
   };
   const viewBack=node("button","secondary","Все непривязанные ID");
@@ -1326,7 +1335,8 @@
       galleryItems.append(node("div","empty-state","Сгруппированных ID пока нет."));
     }
     const visibleGroups=state.groups.map(group=>({...group,originalCount:group.ids.length,
-      ids:group.ids.filter(id=>state.unassignedIds.has(id))})).filter(group=>group.ids.length>=2);
+      ids:group.ids.filter(id=>visibleUnassigned(id))})).filter(group=>group.ids.length>=2);
+    sortBySimilarity(visibleGroups,group=>group.ids);
     if(state.groups.length&&!visibleGroups.length&&state.groupLoaded)
       galleryItems.append(node("div","empty-state","Нет групп с непривязанными Track ID."));
     for(const group of visibleGroups.slice(0,state.groupShown)){
@@ -1524,6 +1534,17 @@
       window.dispatchEvent(new CustomEvent("volley:track-assignments-updated",{detail:{
         project_id:scope.project_id,video:scope.video,replay_id:scope.replay_id
       }}));
+      if(Array.isArray(result.unassigned_track_ids)){
+        state.unassignedIds=new Set(result.unassigned_track_ids.map(Number));
+        if(!state.viewPlayer&&!state.viewExcluded&&!state.viewConflicts){
+          state.rows=state.rows.filter(row=>state.unassignedIds.has(Number(row.track_id)));
+          state.filteredTotal=state.unassignedIds.size;
+          if(state.filteredTotal&&state.offset>=state.filteredTotal)
+            state.offset=Math.floor((state.filteredTotal-1)/state.limit)*state.limit;
+          if(!state.filteredTotal)state.offset=0;
+          animateTrackCards(()=>{renderRows();renderGroupCards();updateUnassignedLabel();unlock();});
+        }
+      }
       await loadPage({preserveCards:true});
       const reasons=result.unassigned_reasons||{};
       const count=key=>Array.isArray(reasons[key])?reasons[key].length:0;

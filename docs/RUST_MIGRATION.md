@@ -3887,3 +3887,10 @@ Studio показывает кнопку перехода между debug и re
 - Экспериментальные бенчмарки используют ByteTrack; подпись детекторного бенчмарка больше не приписывает ему RTMPose. Исторические результаты сохранены, ограничения текущих примеров отражены в README.
 - Проверки: cargo test -p volley-core tracker:: --offline --locked PASS (28); cargo test -p volley-app --example bench_person_tracks --offline --locked PASS (1); cargo check -p volley-app --example bench_detector_swap --offline --locked PASS; powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-all.ps1 PASS (Rust, Clippy, WASM, 108 Node gates; штатные ignored тесты исключены).
 - Независимое сравнение качества трекеров на размеченных матчах, GPU-бенчмарки примеров и проверка реального видео NOT TESTED. Применение к Studio проверяется после публикации финального SHA.
+
+### 2026-11-24 — Сортировка непривязанных ID и мгновенное скрытие карточек
+
+- База: `origin/develop` `104f32fb7f8bed704f9c34fbacce49ba5fb848f3`; владелец данных `rust/volley-app/src/native_player_tracks/assignments.rs`; интерфейс `rust/volley-app/static/studio_tracks.js`; постоянное правило `docs/UI_LAYOUT_POLICY.md`.
+- Непривязанные Track ID упорядочиваются по убыванию лучшего корректного сходства с игроками состава **до серверной пагинации**. Группы непривязанных ID сортируются по лучшему групповому предложению с учётом согласованности признаков. Без оценки — последние; при равенстве — по ID.
+- Ручное назначение скрывает карточки и обновляет счётчик сразу по нажатию; при ошибке сохранения возвращает их. Успешная автоматическая привязка удаляет карточки по подтверждённым серверным ID до перечитывания страницы. Существующие ручные привязки и аналитические данные не переписываются.
+- RED: `scripts/ci/test_studio_player_sorting.mjs` воспроизвёл отсутствие сортировки. GREEN: целевые Node-тесты и полный `scripts/check-all.ps1` PASS (WASM, Rust fmt/Clippy/workspace tests, 109 Node gates). Реальный матч/GPU и ручная визуальная проверка браузера: NOT TESTED. Развёртывание — штатной очередью после публикации SHA.

@@ -19,7 +19,10 @@ const events=[];
 const state={
   project:"p",video:"video.mp4",replay:"r",token:4,
   sourceSha:"a".repeat(64),rallyRun:"run",busy:false,writable:true,total:3,
-  roster:[{id:"playerA"}],photoScoreLoading:false
+  roster:[{id:"playerA"}],photoScoreLoading:false,
+  rows:[{track_id:101},{track_id:102},{track_id:103}],
+  viewPlayer:"",viewExcluded:false,viewConflicts:false,offset:0,limit:24,filteredTotal:3,
+  unassignedIds:new Set([101,102,103])
 };
 const slider={value:"92"};
 const status={textContent:""};
@@ -35,6 +38,7 @@ const context={
     this.type=name;this.detail=options.detail;}},
   CustomEvent:function(name,options){this.type=name;this.detail=options.detail;},
   unlock(){},reidUnlock(){},reviewNote(){},loadPage:async()=>{},
+  animateTrackCards:update=>update(),renderRows(){},renderGroupCards(){},updateUnassignedLabel(){},
   post:async(url,body)=>{
     requests.push({url,body});
     return {automatic_count:1,automatic_assignments:{"101":"playerA"},
@@ -54,6 +58,8 @@ assert.match(status.textContent,/без привязки: 2/);
 assert.match(status.textContent,/мало наблюдений: 1/);
 assert.match(status.textContent,/ниже порога: 1/);
 assert.equal(events.length,1);
+assert.deepEqual(state.rows.map(row=>row.track_id),[102,103],
+  "Confirmed automatic links disappear before the full gallery reload");
 
 slider.value="35";
 await context.run();

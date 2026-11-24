@@ -16,7 +16,9 @@ const savedPhoto=(track_id,photo_index)=>({
   track_id,photo_index,source_replay_sha256:sha
 });
 let photos=[savedPhoto(8,4)],revision=0;
+let rendered=0;
 const context={state,unlock:()=>{},showBindingStatus:()=>{},
+  animateTrackCards:update=>update(),renderRows:()=>{rendered++;},renderGroupCards(){},updateUnassignedLabel(){},
   edit:async(action,ids,player)=>{
     calls.push({action,ids,player});
     // The selected gallery disappears after assignment.
@@ -34,7 +36,9 @@ const context={state,unlock:()=>{},showBindingStatus:()=>{},
   window:{dispatchEvent:event=>events.push(event.type)},
   Event:class{constructor(type){this.type=type;}}};
 runInNewContext(source.slice(start,end)+"\nthis.bindSelected=bindSelected;",context);
-await context.bindSelected([7,8,9],"player");
+const firstAssignment=context.bindSelected([7,8,9],"player");
+assert.equal(rendered,1,"Manual assignment immediately redraws cards before saving");
+await firstAssignment;
 const enrolls=calls.filter(call=>call.body?.action==="enroll");
 assert.equal(calls[0].action,"assign");
 assert.deepEqual(Array.from(calls[0].ids),[7,8,9]);

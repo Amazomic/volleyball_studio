@@ -35,7 +35,8 @@ const modeSwitch=make("div"),modeTabs=make("div"),autoAssignControls=make("div")
 modeTabs.append(make("button","","ID"),make("button","","Группы ID"));autoAssignControls.append(make("label"),make("button"));
 const galleryContext={state:galleryState,node:make,ui:{list:{before:node=>inserted.push(node)},status:{before:node=>inserted.push(node)}},
   window:{addEventListener:(name,fn)=>{handlers[name]=fn;}},groupsMode:make("button"),
-  playerMode:make("button"),modeSwitch,modeTabs,groupingControls:make("div"),autoAssignControls,setMode:mode=>loads.push(mode),loadAlbum:()=>loads.push("album"),loadPage:()=>loads.push(galleryState.viewPlayer)};
+  playerMode:make("button"),modeSwitch,modeTabs,groupingControls:make("div"),autoAssignControls,setMode:mode=>loads.push(mode),loadAlbum:()=>loads.push("album"),loadPage:()=>loads.push(galleryState.viewPlayer),
+  visibleUnassignedCount:()=>[...galleryState.unassignedIds].filter(id=>!galleryState.assignmentPending?.has(id)).length};
 runInNewContext(tracks.slice(viewStart,viewEnd)+"\nthis.updateUnassignedLabel=updateUnassignedLabel;",galleryContext);
 galleryContext.updateUnassignedLabel();
 assert.equal(modeSwitch.children[0].klass,"track-filter-buttons","conflict and excluded filters occupy the upper row");
