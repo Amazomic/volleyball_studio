@@ -246,38 +246,64 @@ pub struct Output {
     pub data: Vec<f32>,
 }
 
-/// Probe the native binary BEFORE ort 2.0 load-dynamic triggers its
-/// global loader. The default loader panics when libonnxruntime.so is absent.
-/// Surface an actionable error instead; never claim CUDA->CPU fallback.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows, test))]
+fn runtime_api_compatible(version: &str) -> bool {
+    let mut parts = version.split('.');
+    parts.next() == Some("1")
+        && parts
+            .next()
+            .and_then(|minor| minor.parse::<u32>().ok())
+            .is_some_and(|minor| minor >= ort::MINOR_VERSION)
+}
+
+#[cfg(any(target_os = "linux", windows))]
 fn runtime_library(device: Device) -> Result<PathBuf, String> {
-    let configured = std::env::var_os("ORT_DYLIB_PATH").ok_or_else(|| {
-        "ONNX Runtime 1.22 (CUDA 12, cuDNN 9) is not installed for the Rust process. Set ORT_DYLIB_PATH to an existing libonnxruntime.so; run scripts/setup_rust_ort_cuda.sh and restart Rust Studio.".to_owned()
-    })?;
+    let configured = std::env::var_os("ORT_DYLIB_PATH")
+        .ok_or("Set ORT_DYLIB_PATH to an absolute path to an ONNX Runtime library with API 22 or newer, then restart Studio")?;
     let path = PathBuf::from(configured);
     if !path.is_absolute() || !path.is_file() {
         return Err(format!(
-            "ORT_DYLIB_PATH does not point to a readable Linux ONNX Runtime shared library: {}. Run scripts/setup_rust_ort_cuda.sh and restart Rust Studio.",
+            "ORT_DYLIB_PATH does not point to an absolute ONNX Runtime library file: {}",
             path.display()
         ));
     }
     let library = unsafe { libloading::Library::new(&path) }
-        .map_err(|error| format!("Cannot load ONNX Runtime 1.22 from {}: {error}. Check LD_LIBRARY_PATH (CUDA 12/cuDNN 9) and restart Rust Studio.", path.display()))?;
+        .map_err(|error| format!("Cannot load ONNX Runtime from {}: {error}", path.display()))?;
     unsafe {
-        library
-            .get::<unsafe extern "C" fn()>(b"OrtGetApiBase\0")
+        let get_base = library
+            .get::<unsafe extern "system" fn() -> *const ort::sys::OrtApiBase>(b"OrtGetApiBase\0")
             .map_err(|error| {
                 format!("ONNX Runtime shared library has no OrtGetApiBase: {error}")
             })?;
+        let base = get_base()
+            .as_ref()
+            .ok_or("ONNX Runtime returned no API base")?;
+        let version = (base.GetVersionString)();
+        if version.is_null() {
+            return Err("ONNX Runtime returned no version string".into());
+        }
+        let version = std::ffi::CStr::from_ptr(version).to_string_lossy();
+        if !runtime_api_compatible(&version) || (base.GetApi)(ort::MINOR_VERSION).is_null() {
+            return Err(format!(
+                "ONNX Runtime {version} at {} does not support required API {}",
+                path.display(),
+                ort::MINOR_VERSION
+            ));
+        }
     }
     if device == Device::Cuda {
+        let provider_name = if cfg!(windows) {
+            "onnxruntime_providers_cuda.dll"
+        } else {
+            "libonnxruntime_providers_cuda.so"
+        };
         let provider = path
             .parent()
             .ok_or("ONNX Runtime library has no parent directory")?
-            .join("libonnxruntime_providers_cuda.so");
+            .join(provider_name);
         if !provider.is_file() {
             return Err(format!(
-                "CUDA provider missing: {}. Install the ONNX Runtime 1.22 GPU build (CUDA 12/cuDNN 9). No CPU fallback.",
+                "CUDA provider missing: {}. Install the matching ONNX Runtime GPU package.",
                 provider.display()
             ));
         }
@@ -303,7 +329,7 @@ impl Engine {
         let (model, path) = spec_for(repo, config.model)?;
         // load-dynamic is configured at compile time; process startup must
         // load a compatible ONNX Runtime native library through ort.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         let _library_path = runtime_library(config.device)?;
         ort::init()
             .commit()
@@ -427,6 +453,13 @@ impl Engine {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_runtime_rejects_the_windows_system_onnxruntime_version() {
+        assert!(!runtime_api_compatible("1.17.1"));
+        assert!(runtime_api_compatible("1.22.0"));
+        assert!(runtime_api_compatible("1.31.1"));
+        assert!(!runtime_api_compatible("2.22.0"));
+    }
     use super::*;
     #[cfg(target_os = "linux")]
     #[test]

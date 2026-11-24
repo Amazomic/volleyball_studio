@@ -258,7 +258,7 @@ impl PersonEngine {
         }
         crate::verify_model_sha(&path, variant.sha256())?;
         // Both GPU sessions explicitly require CUDA; never silently fall back.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         let _ = crate::runtime_library(device)?;
         ort::init()
             .commit()

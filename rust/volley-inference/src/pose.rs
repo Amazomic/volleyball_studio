@@ -59,7 +59,7 @@ impl PoseEngine {
             return Err("RTMPose model size outside validated range".into());
         }
         crate::verify_model_sha(&path, MODEL_SHA256)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         let _ = crate::runtime_library(device)?;
         ort::init()
             .commit()

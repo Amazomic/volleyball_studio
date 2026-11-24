@@ -18,7 +18,7 @@ pub struct TrajectoryTcn {
 impl TrajectoryTcn {
     pub fn load(model: &Path) -> Result<Self, String> {
         let hash = checkpoint_sha256(model)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         let _native = super::runtime_library(super::Device::Cpu)?;
         ort::init()
             .commit()

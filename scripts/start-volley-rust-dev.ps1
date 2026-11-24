@@ -28,7 +28,8 @@ $ownerPath=Join-Path $runtime "windows-owner.json"
 $release=Join-Path $repo "rust\target\release\volley-app.exe"
 $data=if($DataRoot){$DataRoot}elseif($env:VOLLEY_STUDIO_DATA_ROOT){$env:VOLLEY_STUDIO_DATA_ROOT}else{Join-Path $env:LOCALAPPDATA "VolleyballStudio\data"}
 $bindUrl="http://$Bind"
-$ort=if($OrtLibrary){$OrtLibrary}else{$env:ORT_DYLIB_PATH}
+$localOrt=Join-Path $runtime "ort\onnxruntime.dll"
+$ort=if($OrtLibrary){$OrtLibrary}elseif($env:ORT_DYLIB_PATH){$env:ORT_DYLIB_PATH}elseif(Test-Path -LiteralPath $localOrt -PathType Leaf){$localOrt}
 $openvino=& (Join-Path $PSScriptRoot "find-openvino-runtime.ps1") -ExplicitLibrary $OpenvinoLibrary
 
 function Git-Value([string[]]$GitArgs) {

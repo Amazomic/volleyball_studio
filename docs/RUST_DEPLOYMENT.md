@@ -40,9 +40,13 @@ Prerequisites: Windows 11, native Rust `x86_64-pc-windows-msvc` (including
 `wasm32-unknown-unknown` for the web UI), Visual Studio MSVC, Git Bash for
 Linux-script syntax checks, FFmpeg/FFprobe on `PATH`, ONNX Runtime
 `onnxruntime.dll` and `onnxruntime_providers_cuda.dll` with matching NVIDIA
-CUDA/cuDNN DLLs for actual GPU inference. Set `ORT_DYLIB_PATH` to the
-absolute path to the native Windows runtime DLL; a CPU-only library does not
-satisfy GPU readiness. Models must be populated in the clean deployment clone.
+CUDA/cuDNN DLLs for actual GPU inference. The loader requires ONNX Runtime
+API 22 or newer. Provide an absolute path via `-OrtLibrary` or
+`ORT_DYLIB_PATH`, or place the GPU runtime and its dependencies in
+`.studio-runtime/ort/` in the clean deployment clone. The launcher adds
+that library directory to the Studio process's DLL search path. The Windows
+system copy of ONNX Runtime may expose an older API. Models must be populated
+in the clean deployment clone.
 
 The Windows source launcher no longer invokes `wsl.exe` or a Linux ELF.
 Invoke it only from a clean, separate `develop` checkout with HEAD equal to
