@@ -58,7 +58,7 @@ impl DirectionBreakConfig {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TrajectoryBreak {
     pub frame: i64,
     pub position: [f64; 2],

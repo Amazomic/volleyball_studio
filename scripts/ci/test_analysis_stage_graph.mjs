@@ -57,15 +57,15 @@ assert.equal(context.model("ball_stabilizer")[0],"ball_stabilizer");
 assert.equal(context.model("players")[0],"RF-DETR Medium");
 assert.equal(context.model("pose")[0],"RTMPose-M Body7");
 assert.equal(context.model("tracking")[1],"algorithm");
-assert.equal(context.model("touches")[0],"Touch Detector");
+assert.equal(context.model("touch_detector")[0],"Touch Detector");
 assert.equal(context.model("touch_types")[1],"algorithm");
 assert.equal(context.model("rallies")[1],"algorithm");
 const stages=context.stages;
 const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
-assert.equal(stages.length,13);
+assert.equal(stages.length,14);
 assert.ok(ids.includes("publish")&&!ids.includes("material"));
-for(const [row,count] of [[1,7],[2,6]]){
+for(const [row,count] of [[1,8],[2,6]]){
   const nodes=stages.filter(item=>item[3]===row);
   assert.equal(nodes.length,count);
 }
@@ -180,7 +180,8 @@ assert.deepEqual(actualInputs("ball_stabilizer"),["ball"]);
 assert.deepEqual(actualInputs("rallies"),["ball_stabilizer"]);
 assert.deepEqual(actualInputs("fusion"),["ball","players"]);
 assert.deepEqual(actualInputs("tracking"),["fusion","pose","rallies"]);
-assert.deepEqual(actualInputs("touches"),["ball_stabilizer","rallies","tracking"]);
+assert.deepEqual(actualInputs("touch_detector"),["ball_stabilizer"]);
+assert.deepEqual(actualInputs("touches"),["ball_stabilizer","rallies","touch_detector","tracking"]);
 assert.deepEqual(actualInputs("publish"),["rallies","touches","tracking"]);
 assert.deepEqual(actualInputs("identity"),["photos","publish","tracking","video"]);
 assert.equal(dataLinks.state("pose",null),"optional");

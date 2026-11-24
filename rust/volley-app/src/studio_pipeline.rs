@@ -778,6 +778,8 @@ fn pipeline_stage_id(name: &str) -> &'static str {
         "video"
     } else if name.contains("Ball Stabilizer") || name == "ball_stabilizer" {
         "ball_stabilizer"
+    } else if name == "Touch Detector" {
+        "touch_detector"
     } else if name.contains("Поиск розыгрышей") {
         "rallies"
     } else if name.contains("VBallNet") && name.contains("GPU") {
@@ -934,7 +936,7 @@ fn publish_primary_rally_mask(
         path,
         status,
         "Поиск розыгрышей",
-        8.0 + 72.0 * 0.399999,
+        8.0 + 72.0 * 0.3999995,
         Some((decoded_frames, decoded_frames)),
     )?;
     status["gpu_rally_mask"] = mask.clone();
@@ -1092,6 +1094,9 @@ fn gpu_lineage_valid(
             != volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION
             || saved["gpu_rally_mask"]["ball_stabilizer"]["settings"]
                 != json!(request.post.ball_stabilizer)
+            || !saved["gpu_rally_mask"]["touch_detector_sha256"]
+                .as_str()
+                .is_some_and(volley_core::contracts::sha256)
             || !saved["gpu_rally_mask"]["ball_stabilizer"]["trajectory_sha256"]
                 .as_str()
                 .is_some_and(volley_core::contracts::sha256))
@@ -2049,6 +2054,8 @@ async fn pipeline(
                             }
                             let label = if fraction == 0.399999 && rally_mask.is_none() {
                                 "ball_stabilizer"
+                            } else if fraction == 0.3999995 && rally_mask.is_none() {
+                                "Touch Detector"
                             } else if fraction < 0.4 {
                                 "GPU · VBallNet: траектория мяча и розыгрыши"
                             } else if full_resolution_pose {
@@ -4258,6 +4265,7 @@ mod branching_tests {
                 "stationary_ball_ms":request.gpu.primary_rallies.stationary_ball_ms,
                 "movement_filter_version":"stationary_ball_min_rally_5s_v3",
                 "min_rally_seconds":5.0,
+                "touch_detector_sha256":sha,
                 "ball_stabilizer":{
                     "algorithm":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
                     "trajectory_sha256":sha,

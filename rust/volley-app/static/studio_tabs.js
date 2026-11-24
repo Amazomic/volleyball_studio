@@ -441,12 +441,13 @@
     ["video","Подготовка видео","input",1],
     ["ball","Детекция мяча","gpu",1],
     ["ball_stabilizer","ball_stabilizer","cpu",1],
+    ["touch_detector","Touch Detector","cpu",1],
     ["rallies","Розыгрыши","cpu",1],
     ["players","Поиск игроков","gpu",1],
     ["fusion","Данные GPU","output",1],
     ["pose","Позы игроков","gpu",1],
     ["tracking","Трекинг ID","cpu",2],
-    ["touches","Касания","cpu",2],
+    ["touches","Уточнение касаний","cpu",2],
     ["touch_types","Типы касаний","cpu",2],
     ["publish","Публикация розыгрышей","output",2],
     ["photos","Фотографии игроков","input",2],
@@ -462,7 +463,7 @@
       players:[(run?run.profile?.gpu?.person_detector:$("studio-gpu-person-detector")?.value)==="rfdetr-large"?"RF-DETR Large":"RF-DETR Medium","model"],
       pose:["RTMPose-M Body7","model"],
       tracking:["ByteTrack","algorithm"],
-      touches:["Touch Detector","algorithm"],
+      touch_detector:["Touch Detector","algorithm"],
       rallies:["Маска игровых интервалов","algorithm"],
       touch_types:["Геометрия поз","algorithm"],
     identity:["ReID · сопоставление на CPU","mixed"]
@@ -506,6 +507,7 @@
     const name=String(typeof entry==="string"?entry:entry?.name||"");
     if(/Проверка исходного видео|Подготовка исходного видео/.test(name))return "video";
     if(/ball_stabilizer|Ball Stabilizer|Интерполяция траектории мяча/.test(name))return "ball_stabilizer";
+    if(name==="Touch Detector")return "touch_detector";
     if(/Поиск розыгрышей/.test(name))return "rallies";
     if(/GPU.*V[Bb]allNet/.test(name))return "ball";
     if(/RTMPose/.test(name)&&!/RF-DETR/.test(name))return "pose";
@@ -619,6 +621,8 @@
     ["pose","tracking","pose"],
     ["rallies","tracking"],
     ["ball_stabilizer","rallies"],
+    ["ball_stabilizer","touch_detector"],
+    ["touch_detector","touches"],
     ["ball_stabilizer","touches"],
     ["tracking","touches"],
     ["rallies","touches"],

@@ -466,11 +466,27 @@ pub(crate) fn run_joint_pair(
             total_frames,
             None,
         )?;
+        let mut touch_sha = String::new();
         let (mask, trajectory) = RallyMask::with_ball_stabilizer(
             ball_writer.ball_samples.as_deref().unwrap_or(&[]),
             ball_scan.decode.decoded_frames,
             rally_settings,
             stabilizer_settings,
+            |motion| {
+                report(
+                    0.3999995,
+                    ball_scan.decode.decoded_frames,
+                    total_frames,
+                    None,
+                )?;
+                touch_sha = crate::cpu_touches::write_primary_touch_breaks(
+                    &ball.folder,
+                    motion,
+                    &original_provenance["video"],
+                    cancelled,
+                )?;
+                Ok(())
+            },
         )?;
         if let Some(reason) = mask.fallback_reason {
             return Err(format!(
@@ -482,6 +498,7 @@ pub(crate) fn run_joint_pair(
         let mut mask_value = serde_json::to_value(&mask)
             .map_err(|error| format!("Serialize primary rally mask: {error}"))?;
         mask_value["selected_frames"] = json!(selected_frames);
+        mask_value["touch_detector_sha256"] = json!(touch_sha);
         let trajectory_sha =
             crate::cpu_touches::write_ball_trajectory(&ball.folder, &trajectory, cancelled)?;
         mask_value["ball_stabilizer"]["trajectory_sha256"] = json!(trajectory_sha);

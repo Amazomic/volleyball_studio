@@ -42,7 +42,7 @@ pub const TOUCH_MOTION_CONFIG: MotionConfig = MotionConfig {
     gravity: 1.0,
 };
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct MotionEvidence {
     pub motion_frame: i64,
     pub speed_before: f64,

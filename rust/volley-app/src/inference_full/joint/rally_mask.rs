@@ -81,8 +81,14 @@ impl RallyMask {
         frames: u64,
         settings: PrimaryRallySettings,
     ) -> Result<Self, String> {
-        Self::with_ball_stabilizer(samples, frames, settings, BallStabilizerSettings::default())
-            .map(|(mask, _)| mask)
+        Self::with_ball_stabilizer(
+            samples,
+            frames,
+            settings,
+            BallStabilizerSettings::default(),
+            |_| Ok(()),
+        )
+        .map(|(mask, _)| mask)
     }
 
     pub fn with_ball_stabilizer(
@@ -90,6 +96,7 @@ impl RallyMask {
         frames: u64,
         settings: PrimaryRallySettings,
         stabilizer_settings: BallStabilizerSettings,
+        on_stabilized: impl FnOnce(&StabilizedBallMotion) -> Result<(), String>,
     ) -> Result<(Self, StabilizedBallMotion), String> {
         settings.validate()?;
         let len = usize::try_from(frames).map_err(|_| "Rally mask frame count overflow")?;
@@ -133,6 +140,7 @@ impl RallyMask {
             })
             .collect::<Vec<_>>();
         let trajectory = stabilize_ball_motion(&samples, len, stabilizer_settings)?;
+        on_stabilized(&trajectory)?;
         let observed_ball_frames = trajectory.observed_frames;
         let mut points = trajectory.points.clone();
         let motion = crate::cpu_retrack::ball_track::analyze_moving_ball(

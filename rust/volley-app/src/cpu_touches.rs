@@ -422,6 +422,119 @@ fn read_canonical_ball_motion(
     Ok(motion)
 }
 
+const PRIMARY_TOUCH_BREAKS_FILE: &str = "touch_detector.json";
+const PRIMARY_TOUCH_BREAKS_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+pub(crate) fn write_primary_touch_breaks(
+    folder: &Path,
+    motion: &volley_core::ball_interpolation::StabilizedBallMotion,
+    dimensions: &Value,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
+    use volley_core::motion::{trajectory_direction_breaks, BallObservation, DirectionBreakConfig};
+
+    let dimension = |key: &str| {
+        dimensions[key]
+            .as_u64()
+            .filter(|size| (64..=16384).contains(size))
+            .ok_or("Invalid primary Touch Detector video dimensions")
+    };
+    let (width, height) = (dimension("width")?, dimension("height")?);
+    let mut breaks = Vec::new();
+    for start in (0..motion.points.len()).step_by(CHUNK) {
+        if cancel.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        let end = (start + CHUNK).min(motion.points.len());
+        let first = start.saturating_sub(HALO);
+        let last = (end + HALO).min(motion.points.len());
+        let points = motion.points[first..last]
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, point)| {
+                let [x, y] = (*point)?;
+                Some(BallObservation {
+                    frame: (first + offset) as i64,
+                    x: x * width as f64,
+                    y: y * height as f64,
+                })
+            })
+            .collect::<Vec<_>>();
+        breaks.extend(
+            trajectory_direction_breaks(&points, DirectionBreakConfig::default())
+                .into_iter()
+                .filter(|impact| (start as i64..end as i64).contains(&impact.frame)),
+        );
+    }
+    let file = folder.join(PRIMARY_TOUCH_BREAKS_FILE);
+    storage::write_json_atomic(
+        &file,
+        &json!({
+            "width":width,"height":height,"frames":motion.points.len(),"breaks":breaks
+        }),
+    )
+    .map_err(|e| format!("Save Touch Detector output: {e:?}"))?;
+    let bytes = fs::read(&file).map_err(|e| e.to_string())?;
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
+}
+
+fn read_primary_touch_breaks(
+    project: &Path,
+    replay: &Value,
+    width: u32,
+    height: u32,
+    frames: u64,
+) -> Result<Option<Vec<volley_core::motion::TrajectoryBreak>>, String> {
+    let Some(job) = replay["player_frame_scope_ball_job_id"]
+        .as_str()
+        .filter(|id| opaque_id(id))
+    else {
+        return Ok(None);
+    };
+    let folder = project.join("native_gpu_runs").join(job);
+    let mask = fs::read(safe_file(
+        &folder,
+        "rally_mask.json",
+        PRIMARY_TOUCH_BREAKS_MAX_BYTES,
+    )?)
+    .map_err(|e| e.to_string())?;
+    if replay["player_frame_scope_sha256"] != format!("{:x}", Sha256::digest(&mask)) {
+        return Err("Primary rally mask changed before Touch Detector reuse".into());
+    }
+    let evidence: Value = serde_json::from_slice(&mask).map_err(|e| e.to_string())?;
+    let checksum = &evidence["mask"]["touch_detector_sha256"];
+    if checksum.is_null() {
+        return Ok(None);
+    }
+    let bytes = fs::read(safe_file(
+        &folder,
+        PRIMARY_TOUCH_BREAKS_FILE,
+        PRIMARY_TOUCH_BREAKS_MAX_BYTES,
+    )?)
+    .map_err(|e| e.to_string())?;
+    if *checksum != format!("{:x}", Sha256::digest(&bytes)) {
+        return Err("Primary Touch Detector SHA mismatch".into());
+    }
+    let mut artifact: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if artifact["width"] != width
+        || artifact["height"] != height
+        || !artifact["frames"]
+            .as_u64()
+            .is_some_and(|count| (frames..=frames + 8).contains(&count))
+    {
+        return Err("Primary Touch Detector dimensions or frame count mismatch".into());
+    }
+    let impacts: Vec<volley_core::motion::TrajectoryBreak> =
+        serde_json::from_value(artifact["breaks"].take()).map_err(|e| e.to_string())?;
+    if impacts
+        .windows(2)
+        .any(|pair| pair[0].frame >= pair[1].frame)
+    {
+        return Err("Primary Touch Detector frames out of order".into());
+    }
+    Ok(Some(impacts))
+}
+
 pub(crate) fn write_ball_trajectory(
     folder: &Path,
     motion: &volley_core::ball_interpolation::StabilizedBallMotion,
@@ -1775,6 +1888,7 @@ pub(crate) fn detect_stream(
         &[],
         None,
         None,
+        None,
         &[],
         None,
         None,
@@ -1804,6 +1918,7 @@ fn detect_stream_with_pose(
     training: &[training_samples::Example],
     ball_mask: Option<&crate::cpu_retrack::ball_track::BallTrackMask>,
     stabilized: Option<&StabilizedReplay>,
+    primary_breaks: Option<&[volley_core::motion::TrajectoryBreak]>,
     rally_starts: &[u64],
     preliminary_intervals: Option<&[(u64, u64)]>,
     mut on_progress: Option<&mut dyn FnMut(u64, u64) -> Result<(), String>>,
@@ -1924,6 +2039,11 @@ fn detect_stream_with_pose(
                 end,
                 settings,
                 court.map(|court| (court, window.1)),
+                primary_breaks.map(|events| {
+                    let first = events.partition_point(|event| event.frame < start as i64);
+                    let last = events.partition_point(|event| event.frame < end as i64);
+                    &events[first..last]
+                }),
             )?;
             attach_touch_source_evidence(
                 &mut events,
@@ -2455,6 +2575,17 @@ fn process_with_ball_scope_and_rally_settings_report(
         } else {
             None
         };
+        let primary_breaks = if persisted.is_some() {
+            read_primary_touch_breaks(
+                &project_dir,
+                &manifest,
+                dimensions.width,
+                dimensions.height,
+                frames,
+            )?
+        } else {
+            None
+        };
         let (digest, events, raw) = detect_stream_with_pose(
             tcn.as_mut(),
             &source,
@@ -2477,6 +2608,7 @@ fn process_with_ball_scope_and_rally_settings_report(
             &training_examples,
             ball_mask.as_deref(),
             persisted.as_ref(),
+            primary_breaks.as_deref(),
             rally_starts,
             preliminary_scope_applied.then_some(preliminary.as_slice()),
             Some(&mut checked_progress),
@@ -2547,6 +2679,7 @@ fn process_with_ball_scope_and_rally_settings_report(
             } else { "unknown_touch_no_pose" },
             "cpu_processing_complete":false,
         });
+        record["primary_touch_detector_reused"] = json!(primary_breaks.is_some());
         if let Some(stabilized) = stabilized {
             record["ball_stabilizer"] = stabilized.summary();
         }
@@ -2742,6 +2875,7 @@ mod tests {
             None,
             None,
             &[],
+            None,
             None,
             None,
             &[],
@@ -3167,6 +3301,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
             &[],
             None,
             None,
@@ -3193,6 +3328,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                None,
                 None,
                 None,
                 &[240],
@@ -3285,6 +3421,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
             &[],
             Some(&[(10, 90), (285, 365)]),
             Some(&mut |done, total| {
@@ -3321,6 +3458,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
             &[],
             Some(&[(0, 80), (450, 530)]),
             Some(&mut |done, total| {
@@ -3347,6 +3485,7 @@ mod tests {
             None,
             None,
             &[],
+            None,
             None,
             None,
             &[],
@@ -3511,6 +3650,7 @@ mod local_tuning_diagnostic {
             None,
             None,
             &[],
+            None,
             None,
             None,
             &[],

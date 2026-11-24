@@ -229,6 +229,7 @@ fn standing_height(
 /// emits only [emit_start,emit_end); 32+ frame overlap keeps local smoothing,
 /// physical motion and time-based dedup decisions away from block boundaries.
 /// Peaks are relative to first frame so this never allocates a full-game curve.
+#[expect(clippy::too_many_arguments)]
 pub fn detect_ball_trajectory_touches(
     frames: &[TouchFrame],
     width: u32,
@@ -237,6 +238,7 @@ pub fn detect_ball_trajectory_touches(
     emit_end: u64,
     settings: TouchSettings,
     court_scope: Option<(&crate::court_geometry::CourtTransform, u64)>,
+    primary_breaks: Option<&[crate::motion::TrajectoryBreak]>,
 ) -> Result<Vec<PhysicalTouchCandidate>, String> {
     settings.validate()?;
     if !(64..=16384).contains(&width)
@@ -275,14 +277,30 @@ pub fn detect_ball_trajectory_touches(
         }
     }
     let mut events = Vec::new();
-    for impact in crate::motion::trajectory_direction_breaks(
-        &points,
-        crate::motion::DirectionBreakConfig::default(),
-    ) {
+    let computed;
+    let impacts = match primary_breaks {
+        Some(impacts) => impacts,
+        None => {
+            computed = crate::motion::trajectory_direction_breaks(
+                &points,
+                crate::motion::DirectionBreakConfig::default(),
+            );
+            &computed
+        }
+    };
+    for impact in impacts {
         let Ok(frame) = u64::try_from(impact.frame) else {
             continue;
         };
-        if frame < emit_start || frame >= emit_end {
+        if frame < emit_start
+            || frame >= emit_end
+            || (primary_breaks.is_some()
+                && impact
+                    .before_frames
+                    .iter()
+                    .chain(&impact.after_frames)
+                    .any(|&anchor| !(first as i64..limit as i64).contains(&anchor)))
+        {
             continue;
         }
         let Some(row) = frames.get((frame - first) as usize) else {
@@ -298,7 +316,7 @@ pub fn detect_ball_trajectory_touches(
         if court_scope.is_some_and(|(court, rally_end_frame)| {
             crate::motion::classify_ground_contact(
                 &points,
-                &impact,
+                impact,
                 court,
                 width,
                 height,
@@ -651,6 +669,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn supplied_trajectory_breaks_replace_the_late_motion_scan() {
+        let frames = (0..20)
+            .map(|frame_index| TouchFrame {
+                frame_index,
+                players: Vec::new(),
+                selected_ball: None,
+            })
+            .collect::<Vec<_>>();
+        let impact = crate::motion::TrajectoryBreak {
+            frame: 10,
+            position: [100.0, 110.0],
+            motion: crate::motion::MotionEvidence {
+                angle: 70.0,
+                motion_frame: 10,
+                ..Default::default()
+            },
+            fit_error: 1.0,
+            before_frames: vec![],
+            after_frames: vec![],
+            contact_observed: true,
+        };
+        let events = detect_ball_trajectory_touches(
+            &frames,
+            640,
+            480,
+            0,
+            20,
+            TouchSettings::default(),
+            None,
+            Some(&[impact]),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].frame_index, 10);
+        assert!(events[0].provisional_track_id.is_none());
+    }
+
+    #[test]
     fn trajectory_touch_moments_do_not_depend_on_player_identity_or_touch_kind() {
         let frames = (620..=668_u64)
             .map(|frame| {
@@ -696,6 +752,7 @@ mod tests {
             669,
             TouchSettings::default(),
             None,
+            None,
         )
         .unwrap();
         assert!(baseline
@@ -726,6 +783,7 @@ mod tests {
             620,
             669,
             TouchSettings::default(),
+            None,
             None,
         )
         .unwrap();
