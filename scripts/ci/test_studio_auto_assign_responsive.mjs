@@ -19,7 +19,9 @@ let calls=0,refreshes=0,disabledUpdates=0;
 const events=[],tasks=[],notices=[];
 const state={busy:false,writable:true,total:2,roster:[{id:"athlete"}],project:"p",
   video:"v",sourceSha:"a".repeat(64),comparisonIds:new Set([7,8]),replay:"r",token:3,
-  photoScoreLoading:false,photoScoresPromise:null,autoAssignPending:null};
+  photoScoreLoading:false,photoScoresPromise:null,autoAssignPending:null,
+  bindingEpoch:0,unassignedIds:new Set([7,8]),rows:[{track_id:7},{track_id:8}],
+  filteredTotal:2,offset:0,limit:24,selected:new Set()};
 const working=new Set();
 const attrs=new Map();
 const galleryAuto={classList:{add:v=>working.add(v),remove:v=>working.delete(v)},
@@ -34,7 +36,8 @@ const context={
   reidUnlock:()=>{disabledUpdates++},
   unlock:()=>{},
   reviewNote:(msg,error)=>notices.push({msg,error}),
-  loadPage:async()=>{refreshes++},
+  animateTrackCards:fn=>fn(),renderRows:()=>{},renderGroupCards:()=>{},updateUnassignedLabel:()=>{},
+  loadPage:async()=>{refreshes++;assert.equal(state.unassignedIds.has(7),false,"Cards removed before refresh")},
   post:async(_,body)=>{calls++;assert.equal(body.auto_threshold_percent,80);return new Promise((resolve,reject)=>{
     resolveRequest=resolve;rejectRequest=reject;
   })},
@@ -55,9 +58,12 @@ assert.equal(tasks[0].task.progress,null,"Do not fabricate percentage");
 assert.match(galleryStatus.textContent,/Можно продолжать работу/);
 await context.run();
 assert.equal(calls,1,"Double click must not launch duplicate requests");
-resolveRequest({automatic_count:2,threshold_percent:80,automatic_assignments:{"7":"athlete","8":"athlete"}});
+state.token++; // A concurrent gallery read must not discard the committed mutation.
+resolveRequest({automatic_count:2,threshold_percent:80,automatic_assignments:{"7":"athlete","8":"athlete"},unassigned_track_ids:[],identity_revision:"new"});
 await running;
 assert.equal(refreshes,1);
+assert.equal(state.rows.length,0);
+assert.equal(state.filteredTotal,0);
 assert.equal(events.length,1);
 assert.equal(tasks.at(-1).clear,true);
 assert.equal(working.has("is-working"),false);
@@ -84,7 +90,7 @@ const queued=state.autoAssignPending;
 state.autoAssignPending=null;
 const resumed=context.run(queued.threshold);
 assert.equal(calls,3,"Only after existing photo comparison is done, assign");
-resolveRequest({automatic_count:1,threshold_percent:80,automatic_assignments:{"7":"athlete"}});
+resolveRequest({automatic_count:1,threshold_percent:80,automatic_assignments:{"7":"athlete"},unassigned_track_ids:[8],identity_revision:"newer"});
 await resumed;
 assert.equal(refreshes,2);
 assert.equal(tasks.at(-1).clear,true);

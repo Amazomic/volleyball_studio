@@ -1161,7 +1161,7 @@
   const galleryRepeat=node("button","secondary","Повторить анализ");
   galleryRepeat.type="button";galleryRepeat.disabled=true;
   galleryRepeat.addEventListener("click",()=>repeatPhotoAnalysis());
-  const galleryAuto=node("button","primary track-auto-assign","Автопривязать");
+  const galleryAuto=node("button","primary track-auto-assign","Привязать по сходству");
   galleryAuto.type="button";galleryAuto.disabled=true;
   galleryAuto.addEventListener("click",()=>autoAssignSimilar());
   const galleryAutoThreshold=node("input");
@@ -1501,7 +1501,7 @@
   const autoAssignSimilar=async(forcedThreshold)=>{
     if(!reviewReady()||state.busy||autoAssignInFlight||
        !state.writable||!state.total||!state.roster.length)return;
-    const scope=reviewScope(),token=state.token;
+    const scope=reviewScope(),epoch=state.bindingEpoch,scopeKey=autoAssignScope();
     const threshold=forcedThreshold===undefined?Number(galleryAutoThreshold.value):forcedThreshold;
     if(!Number.isInteger(threshold)||threshold<1||threshold>99)return;
     if(state.photoScoreLoading){
@@ -1524,7 +1524,7 @@
       const result=await post("/api/players/native/reid-review",{
         ...scope,action:"auto_assign",auto_threshold_percent:threshold
       });
-      if(token!==state.token||scope.replay_id!==state.replay)return;
+      if(epoch!==state.bindingEpoch||scopeKey!==autoAssignScope())return;
       if(!Number.isSafeInteger(result.automatic_count)||result.automatic_count<0 ||
          result.threshold_percent!==threshold ||
          !result.automatic_assignments||typeof result.automatic_assignments!=="object")
@@ -1532,9 +1532,8 @@
       window.VolleyballTasks?.set("auto-reid",{
         label:"Автопривязка ID",stage:"Сохранено · обновляем список игроков",progress:null
       });
-      window.dispatchEvent(new CustomEvent("volley:track-assignments-updated",{detail:{
-        project_id:scope.project_id,video:scope.video,replay_id:scope.replay_id
-      }}));
+      state.token++;
+      if(typeof result.identity_revision==="string")state.revision=result.identity_revision;
       if(Array.isArray(result.unassigned_track_ids)){
         state.unassignedIds=new Set(result.unassigned_track_ids.map(Number));
         if(!state.viewPlayer&&!state.viewExcluded&&!state.viewConflicts){
@@ -1546,7 +1545,11 @@
           animateTrackCards(()=>{renderRows();renderGroupCards();updateUnassignedLabel();unlock();});
         }
       }
+      window.dispatchEvent(new CustomEvent("volley:track-assignments-updated",{detail:{
+        project_id:scope.project_id,video:scope.video,replay_id:scope.replay_id
+      }}));
       await loadPage({preserveCards:true});
+      if(epoch!==state.bindingEpoch||scopeKey!==autoAssignScope())return;
       const reasons=result.unassigned_reasons||{};
       const count=key=>Array.isArray(reasons[key])?reasons[key].length:0;
       const remaining=Array.isArray(result.unassigned_track_ids)?result.unassigned_track_ids.length:0;
@@ -1562,7 +1565,7 @@
         ". Ручные назначения сохранены; одновременные ID одного игрока не объединяются.");
       autoAssignMessage("Привязано ID: "+result.automatic_count+" · порог "+threshold+"%");
     }catch(error){
-      if(token===state.token){
+      if(epoch===state.bindingEpoch&&scopeKey===autoAssignScope()){
         galleryStatus.textContent="Ошибка автопривязки: "+String(error.message||error);
         autoAssignMessage("Ошибка автопривязки: "+String(error.message||error));
         reviewNote(String(error.message||error),true);
