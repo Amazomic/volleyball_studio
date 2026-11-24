@@ -175,6 +175,43 @@ pub(super) fn choose_automatic_photo_links(
     )
 }
 
+fn consistent_photo_samples(row: &Value, threshold: f64) -> bool {
+    let Some(raw) = row.get("sample_similarities") else {
+        return true;
+    };
+    let Some(samples) = raw
+        .as_array()
+        .filter(|samples| samples.len() == REID_PHOTOS_PER_TRACK)
+    else {
+        return false;
+    };
+    let Some(mut scores) = samples
+        .iter()
+        .map(Value::as_f64)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    if scores
+        .iter()
+        .any(|score| !score.is_finite() || !(0.0..=1.0).contains(score))
+    {
+        return false;
+    }
+    scores.sort_by(f64::total_cmp);
+    if scores[REID_PHOTOS_PER_TRACK - 1] - scores[0] >= 0.25
+        && scores[0] < (threshold - 0.10).max(0.60)
+    {
+        return false;
+    }
+    [&scores[..REID_PHOTOS_PER_TRACK - 1], &scores[1..]]
+        .iter()
+        .any(|stable| {
+            stable[stable.len() - 1] - stable[0] < 0.25
+                && stable.iter().sum::<f64>() / stable.len() as f64 >= threshold
+        })
+}
+
 pub(super) fn choose_automatic_photo_links_at_threshold(
     ctx: &Inputs,
     doc: &Value,
@@ -277,29 +314,8 @@ pub(super) fn choose_automatic_photo_links_at_threshold(
         let Some(best_evidence) = best_evidence else {
             continue;
         };
-        if let Some(raw_scores) = best_evidence.get("sample_similarities") {
-            let Some(samples) = raw_scores
-                .as_array()
-                .filter(|samples| samples.len() == REID_PHOTOS_PER_TRACK)
-            else {
-                continue;
-            };
-            let scores = samples
-                .iter()
-                .map(Value::as_f64)
-                .collect::<Option<Vec<_>>>();
-            let Some(scores) = scores.filter(|scores| {
-                scores
-                    .iter()
-                    .all(|score| score.is_finite() && (0.0..=1.0).contains(score))
-            }) else {
-                continue;
-            };
-            let low = scores.iter().copied().fold(1.0_f64, f64::min);
-            let high = scores.iter().copied().fold(0.0_f64, f64::max);
-            if high - low >= 0.25 {
-                continue;
-            }
+        if !consistent_photo_samples(best_evidence, threshold) {
+            continue;
         }
         let runner_up = matches[id.to_string()]
             .as_array()
@@ -1425,13 +1441,20 @@ pub(super) fn automatic_unassigned_reason(
     else {
         return "no_photo_match";
     };
-    if rows.iter().any(|row| {
+    let above_threshold = rows.iter().filter(|row| {
         row["samples_used"].as_u64() == Some(REID_PHOTOS_PER_TRACK as u64)
             && row["cosine_similarity"]
                 .as_f64()
                 .is_some_and(|score| score >= threshold)
-    }) {
+    });
+    if above_threshold
+        .clone()
+        .any(|row| consistent_photo_samples(row, threshold))
+    {
         return "identity_conflict_or_ambiguity";
+    }
+    if above_threshold.count() > 0 {
+        return "inconsistent_photo_samples";
     }
     if rows
         .iter()
