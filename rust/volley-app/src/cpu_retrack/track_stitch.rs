@@ -203,7 +203,7 @@ fn find_handoffs(
                 continue;
             };
             if start <= old.end
-                || start - old.end > 45
+                || start - old.end > 120
                 || !scope.is_some_and(|mask| mask.same_interval(old.end, start))
             {
                 continue;
@@ -573,11 +573,11 @@ mod tests {
             std::env::temp_dir().join(format!("volley-torso-stitch-{}.jsonl", Uuid::new_v4()));
         let mut raw = Vec::new();
         let joints = [[0.54, 0.47, 0.9]; 17];
-        for frame in 0..65 {
+        for frame in 0..106 {
             let players = if frame <= 17 {
                 vec![json!({"track_id":3,"pose":joints,
                     "detection":candidate(frame,[0.50,0.35,0.58,0.67],None)})]
-            } else if frame >= 41 {
+            } else if frame >= 82 {
                 vec![json!({"track_id":7,"pose":joints,
                     "detection":candidate(frame,[0.52,0.43,0.56,0.51],None)})]
             } else {
@@ -594,13 +594,13 @@ mod tests {
         }
         fs::write(&path, &raw).unwrap();
         let sha = format!("{:x}", Sha256::digest(&raw));
-        let separate = rally_scope(vec![(0, 17), (41, 64)]);
-        assert!(find_handoffs(&path, &sha, 65, Some(&separate))
+        let separate = rally_scope(vec![(0, 17), (82, 105)]);
+        assert!(find_handoffs(&path, &sha, 106, Some(&separate))
             .unwrap()
             .is_empty());
-        let rally = rally_scope(vec![(0, 64)]);
+        let rally = rally_scope(vec![(0, 105)]);
         assert_eq!(
-            find_handoffs(&path, &sha, 65, Some(&rally)).unwrap(),
+            find_handoffs(&path, &sha, 106, Some(&rally)).unwrap(),
             BTreeMap::from([(7, 3)])
         );
         fs::remove_file(path).unwrap();

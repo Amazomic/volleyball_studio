@@ -997,6 +997,7 @@ pub async fn get(
         } else {
             false
         };
+        continuity::fill_torso_points(&mut frames, &windows.intervals);
         continuity::fill(
             &mut frames,
             &windows.intervals,

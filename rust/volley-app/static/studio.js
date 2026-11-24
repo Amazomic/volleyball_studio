@@ -1076,14 +1076,16 @@
       ctx.save();
       ctx.font="bold 11px Inter, sans-serif";
       ctx.textBaseline="middle";
-      for(const player of current.players||[]){
-        if(!Array.isArray(player.torso_point))continue;
-        const [px,py]=point(player.torso_point);
+      for(const torso of current.torso_points||[]){
+        const [px,py]=point(torso.point);
         ctx.beginPath();ctx.arc(px,py,4,0,2*Math.PI);
-        ctx.fillStyle="#ffda77";ctx.fill();
-        ctx.lineWidth=1.5;ctx.strokeStyle="#15202b";ctx.stroke();
-        const id=String(player.id);
-        ctx.lineWidth=3;ctx.strokeText(id,px+7,py);
+        const inferred=torso.interpolated||torso.predicted;
+        ctx.fillStyle="#ffda77";
+        ctx.lineWidth=1.5;ctx.strokeStyle=inferred?"#ffda77":"#15202b";
+        if(!inferred)ctx.fill();
+        ctx.stroke();
+        const id=String(torso.track_id);
+        ctx.strokeStyle="#15202b";ctx.lineWidth=3;ctx.strokeText(id,px+7,py);
         ctx.fillText(id,px+7,py);
       }
       ctx.restore();

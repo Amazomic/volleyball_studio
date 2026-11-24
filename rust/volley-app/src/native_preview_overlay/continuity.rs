@@ -59,6 +59,59 @@ pub(super) fn context(start: u64, end: u64, intervals: &[(u64, u64)]) -> (u64, u
         })
 }
 
+const MAX_TORSO_MISSING_FRAMES: usize = 2 * 30;
+
+pub(super) fn fill_torso_points(frames: &mut [Value], intervals: &[(u64, u64)]) {
+    for &(start, end) in intervals {
+        let lo = frames.partition_point(|row| row["frame"].as_u64().unwrap_or(u64::MAX) < start);
+        let hi = frames.partition_point(|row| row["frame"].as_u64().unwrap_or(u64::MAX) <= end);
+        let rows = &mut frames[lo..hi];
+        let mut anchors = BTreeMap::<u64, Vec<(usize, Value)>>::new();
+        for (index, row) in rows.iter().enumerate() {
+            for player in row["players"].as_array().into_iter().flatten() {
+                if let Some(id) = player["id"].as_u64() {
+                    if player["torso_point"].is_array() {
+                        anchors
+                            .entry(id)
+                            .or_default()
+                            .push((index, player["torso_point"].clone()));
+                    }
+                }
+            }
+        }
+        let mut points = vec![Vec::new(); rows.len()];
+        for (id, positions) in anchors {
+            for (index, (frame, point)) in positions.iter().enumerate() {
+                points[*frame].push(json!({"track_id":id,"point":point}));
+                if let Some((next, target)) = positions.get(index + 1) {
+                    let span = next.saturating_sub(*frame);
+                    if (2..=MAX_TORSO_MISSING_FRAMES + 1).contains(&span) {
+                        for (step, row) in points[*frame + 1..*next].iter_mut().enumerate() {
+                            if let Some(position) =
+                                blend(point, target, (step + 1) as f64 / span as f64, 2)
+                            {
+                                row.push(
+                                    json!({"track_id":id,"point":position,"interpolated":true}),
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    let stop = (*frame + 1 + MAX_TORSO_MISSING_FRAMES).min(points.len());
+                    for row in &mut points[*frame + 1..stop] {
+                        row.push(json!({"track_id":id,"point":point,"predicted":true}));
+                    }
+                }
+            }
+        }
+        for (row, points) in rows.iter_mut().zip(points) {
+            if !points.is_empty() {
+                row["torso_points"] = json!(points);
+            }
+        }
+    }
+}
+
 fn same_joints(a: &Value, b: &Value) -> bool {
     let (Some(a), Some(b)) = (a.as_array(), b.as_array()) else {
         return false;
@@ -332,6 +385,25 @@ pub(super) fn fill(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn torso_points_fill_two_seconds_and_resume_after_longer_break() {
+        let mut frames = (0..=185)
+            .map(|frame| json!({"frame":frame,"in_rally":true,"players":[]}))
+            .collect::<Vec<_>>();
+        for (frame, x) in [(0, 0.2), (61, 0.4), (123, 0.5)] {
+            frames[frame]["players"] = json!([{"id":7,"torso_point":[x,0.5]}]);
+        }
+        fill_torso_points(&mut frames, &[(0, 184)]);
+        assert_eq!(frames[1]["torso_points"][0]["track_id"], 7);
+        assert_eq!(frames[60]["torso_points"][0]["interpolated"], true);
+        assert_eq!(frames[61]["torso_points"][0]["point"], json!([0.4, 0.5]));
+        assert!(frames[62]["torso_points"].is_null());
+        assert_eq!(frames[123]["torso_points"][0]["track_id"], 7);
+        assert_eq!(frames[183]["torso_points"][0]["predicted"], true);
+        assert!(frames[184]["torso_points"].is_null());
+        assert!(frames[185]["torso_points"].is_null());
+    }
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
 
