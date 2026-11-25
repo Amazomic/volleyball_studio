@@ -4304,3 +4304,8 @@ Studio показывает кнопку перехода между debug и re
 
 - База 9cb43499; владельцы UI: studio.js, studio.css, test_studio_rally_cards.mjs. Удалена дублирующая строка результата; +1 остаётся у выигравшей команды, при неизвестном победителе очко не отображается. CSS явно размещает команды перед шкалой только на карточках с составами, без изменения карточек обучения.
 - RED: тест выявил лишнюю третью строку блока команд. GREEN: DOM-порядок, CSS grid, +1 и перемотка; test_studio_rally_cards.mjs, test_studio_rally_card_progress.mjs, test_studio_dom_ids.mjs, test_studio_viewport_layout.mjs, test_studio_team_side.mjs PASS. scripts/check-all.ps1 (RUST_TEST_THREADS=1) PASS: 996 Rust, 22 ignored, 111 Node gates, fmt/clippy/WASM. Ручная визуальная проверка и отдельные GPU/media gates NOT TESTED; развёртывание штатной очередью.
+
+## 2026-11-25 — Показатели розыгрыша в одной строке
+
+- База 1f47e203; владельцы UI: studio.css, test_studio_rally_cards.mjs. Длительность больше не занимает всю строку, справа расположены касания и игроки, общая базовая линия; при недостатке ширины сохраняется перенос без обрезки текста.
+- RED: новый тест выявил flex-basis:100%. GREEN: целевые тесты и scripts/check-all.ps1 (RUST_TEST_THREADS=1) PASS: 996 Rust, 22 ignored, 111 Node gates, fmt/clippy/WASM. Изолированный headless Edge: ширины карточек 290, 330, 480 px — одна строка, 210–250 px — перенос без переполнения. Полный ручной сценарий UI и отдельные GPU/media gates NOT TESTED. Развёртывание штатной очередью.
