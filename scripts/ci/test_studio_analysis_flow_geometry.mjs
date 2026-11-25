@@ -20,6 +20,8 @@ for(const selector of [".analysis-flow-node-title",".analysis-flow-node-stats"])
 assert.match(css,/@container \(max-width:330px\)\{\.analysis-flow-phase\[data-phase\] \.analysis-flow-cards\{grid-template-columns:minmax\(0,1fr\)/);
 assert.doesNotMatch(css,/\.analysis-flow-diagram\{[^}]*min-width:950px/);
 assert.match(flow,/phases\.get\(row\)\.append\(cell\)/);
+assert.match(rule('.analysis-flow-phase[data-phase="cpu"] .analysis-flow-cards'),/direction:rtl/);
+assert.match(rule('.analysis-flow-phase[data-phase="cpu"] .analysis-flow-cell'),/direction:ltr/);
 
 const start=flow.indexOf("const graphRoutes=");
 const end=flow.indexOf("const drawGraphEdges=",start);
@@ -37,7 +39,8 @@ for(const columns of [8,7,4,3,2,1]){
     const count=Math.min(columns,cards.length);
     const pitch=(width-64)/count;
     for(const [index,[id]] of cards.entries()){
-      const l=32+index%count*pitch,t=top+Math.floor(index/count)*150;
+      const column=phase===2?count-1-index%count:index%count;
+      const l=32+column*pitch,t=top+Math.floor(index/count)*150;
       boxes.set(id,{l,r:l+pitch-19,t,b:t+78});
     }
     top+=Math.ceil(cards.length/count)*150+55;
