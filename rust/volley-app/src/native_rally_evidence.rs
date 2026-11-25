@@ -75,7 +75,7 @@ pub(crate) fn finalize_touch(
         && event
             .provisional_track_id
             .is_some_and(|id| retain_rally_touch(last, event.frame_index, id, pose_supported));
-    let kind = if attributed && pose_supported {
+    let kind = if attributed && event.supports_action_estimate() {
         let predicted = event.predicted_kind();
         match context {
             Some((_, _, kind)) => predicted
@@ -212,6 +212,18 @@ impl NativeMotion {
     }
     pub(crate) fn ball_occluded_at_contact(&self) -> bool {
         self.ball_occluded_at_contact
+    }
+    fn supports_action_estimate(&self) -> bool {
+        (self.body_contact_supported && self.contact_landmark.is_some())
+            || (self.physical_motion_supported
+                && !self.ball_occluded_at_contact
+                && self.provisional_track_id.is_some()
+                && self.direction_change_deg >= 45.0
+                && self.velocity_residual_px_frame >= 12.0
+                && self.action_prediction.as_ref().is_some_and(|prediction| {
+                    prediction.kind == ActionKind::OverheadPass
+                        && prediction.method == PredictionMethod::PoseKeypointsMotionV1
+                }))
     }
     pub(crate) fn predicted_kind(&self) -> Option<ActionKind> {
         self.action_prediction
@@ -1093,7 +1105,7 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
             }
             let prev = row["motion_event_count"].as_u64().unwrap_or(0);
             row["motion_event_count"] = json!(prev + 1);
-            let resolved_kind = if pose_verified {
+            let resolved_kind = if event.supports_action_estimate() {
                 let predicted = event.predicted_kind();
                 if let Some(ref resolved) = context {
                     predicted
@@ -1123,7 +1135,7 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
                     .map_err(|e| format!("Serialize motion evidence: {e}"))?;
                 detail["frame_index"] = json!(event.frame_index);
                 detail["ball_position_px"] = json!([event.ball_x_px, event.ball_y_px]);
-                detail["action_prediction"] = if pose_verified {
+                detail["action_prediction"] = if event.supports_action_estimate() {
                     json!(event.action_prediction)
                 } else {
                     Value::Null
@@ -1133,7 +1145,7 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
                 } else {
                     "nearest_player"
                 });
-                if pose_verified {
+                if event.supports_action_estimate() {
                     if let Some(ref rally_context) = context {
                         detail["rally_context"] = rally_context.clone();
                     }

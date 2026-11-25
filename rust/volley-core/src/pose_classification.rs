@@ -3,7 +3,7 @@
 //! No serving or blocking verdict without verified rally/court context.
 use crate::action_prediction::{ActionKind, ActionPrediction, PredictionMethod};
 
-pub const ACTION_PREDICTION_POLICY_VERSION: &str = "pose_keypoints_motion_v8_or_unknown_touch";
+pub const ACTION_PREDICTION_POLICY_VERSION: &str = "pose_keypoints_motion_v9_or_unknown_touch";
 
 #[derive(Clone, Copy, Debug)]
 pub struct PoseEvidence {
@@ -322,6 +322,8 @@ pub(crate) fn refine_overhead_peak(
         return None;
     }
     let mut movement = 0.0_f64;
+    let mut bilateral_elbow_motion = true;
+    let mut bilateral_wrist_rise = true;
     for (s, el, w) in [(5, 7, 9), (6, 8, 10)] {
         let shoulder = point(cur, s, 0.28)?;
         let elbow = point(cur, el, 0.28)?;
@@ -336,12 +338,18 @@ pub(crate) fn refine_overhead_peak(
         let prior = (point(before, el, 0.28)?[1] - point(before, s, 0.28)?[1]) / height;
         let next = (point(after, el, 0.28)?[1] - point(after, s, 0.28)?[1]) / height;
         let change = (prior - relative).abs().max((next - relative).abs());
-        if change < 0.035 {
-            return None;
-        }
+        bilateral_elbow_motion &= change >= 0.035;
         movement = movement.max(change);
+        let wrist_relative =
+            |p: &[[f64; 3]; 17]| Some((point(p, w, 0.35)?[1] - point(p, s, 0.28)?[1]) / height);
+        bilateral_wrist_rise &= wrist_relative(before)
+            .zip(wrist_relative(cur))
+            .zip(wrist_relative(after))
+            .is_some_and(|((start, impact), end)| {
+                start - impact >= 0.025 && start - end >= 0.06 && end <= impact + 0.015
+            });
     }
-    if movement < 0.065 {
+    if !(bilateral_elbow_motion && movement >= 0.065 || bilateral_wrist_rise) {
         return None;
     }
     Some(ActionPrediction {
@@ -503,6 +511,37 @@ mod tests {
         );
         evidence.keypoints[8][1] = 0.47;
         assert!(refine_overhead_peak(&evidence, &geom(), &before, &after).is_none());
+    }
+
+    #[test]
+    fn bilateral_wrist_rise_with_small_elbow_motion_is_overhead_pass() {
+        let mut e = data();
+        e.video_width = 1000.0;
+        e.video_height = 1000.0;
+        e.player_bbox_norm = [0.45, 0.37, 0.55, 0.57];
+        e.ball_x_norm = 0.50;
+        e.ball_y_norm = 0.39;
+        e.keypoints[0] = [0.50, 0.42, 0.8];
+        e.keypoints[5] = [0.48, 0.45, 0.8];
+        e.keypoints[6] = [0.52, 0.45, 0.8];
+        e.keypoints[7] = [0.48, 0.425, 0.8];
+        e.keypoints[8] = [0.52, 0.425, 0.8];
+        e.keypoints[9] = [0.49, 0.397, 0.8];
+        e.keypoints[10] = [0.51, 0.397, 0.8];
+        let mut before = e.keypoints;
+        let mut after = e.keypoints;
+        for i in [9, 10] {
+            before[i][1] += 0.012;
+            after[i][1] -= 0.004;
+        }
+        assert_eq!(
+            refine_overhead_peak(&e, &geom(), &before, &after).map(|p| p.kind),
+            Some(ActionKind::OverheadPass)
+        );
+        assert!(refine_overhead_peak(&e, &geom(), &after, &before).is_none());
+        before[10] = after[10];
+        assert!(refine_overhead_peak(&e, &geom(), &before, &after).is_none());
+        assert!(refine_overhead_peak(&e, &geom(), &e.keypoints, &e.keypoints).is_none());
     }
 
     fn geom() -> ActionPrediction {

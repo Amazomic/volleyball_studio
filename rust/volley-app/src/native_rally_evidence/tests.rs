@@ -1,6 +1,71 @@
 use super::*;
 
 #[test]
+fn overhead_motion_estimate_survives_without_verified_landmark() {
+    let (mut run, root) = fixture();
+    let mut events: Vec<Value> = fs::read_to_string(&run.touch_file)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for (index, method) in ["pose_keypoints_motion_v1", "contact_geometry_v1"]
+        .into_iter()
+        .enumerate()
+    {
+        events[index]["body_contact_supported"] = json!(false);
+        events[index]["contact_landmark"] = Value::Null;
+        events[index]["velocity_residual_px_frame"] = json!(22.0);
+        events[index]["action_prediction"] = json!({
+            "kind":"overhead_pass","method":method,"evidence_score":0.7,
+            "depth_ratio":0.02,"posture_ratio":0.4
+        });
+    }
+    let mut bytes = Vec::new();
+    for event in &events {
+        bytes.extend(serde_json::to_vec(event).unwrap());
+        bytes.push(b'\n');
+    }
+    fs::write(&run.touch_file, &bytes).unwrap();
+    run.touch_sha = format!("{:x}", Sha256::digest(&bytes));
+    let page = generate(
+        &run,
+        Choice::Page {
+            offset: 0,
+            limit: 1,
+            filter: "all".into(),
+            sort_by: "time".into(),
+            marked: BTreeSet::new(),
+        },
+    )
+    .unwrap();
+    let card = &page.value["items"][0];
+    assert_eq!(card["estimated_action_counts"]["overhead_pass"], 1);
+    assert_eq!(card["unclassified_action_count"], 1);
+    assert_eq!(
+        card["motion_events"][0]["action_prediction"]["kind"],
+        "overhead_pass"
+    );
+    assert_eq!(
+        card["motion_events"][0]["assignment_method"],
+        "nearest_player"
+    );
+    assert_eq!(card["motion_events"][1]["action_prediction"], Value::Null);
+    let timeline = generate(&run, Choice::Timeline).unwrap();
+    assert_eq!(
+        timeline.value["touch_annotations"][0]["kind"],
+        "overhead_pass"
+    );
+    assert_eq!(
+        timeline.value["touch_annotations"][0]["contact_verified"],
+        false
+    );
+    assert_eq!(
+        timeline.value["touch_annotations"][1]["kind"],
+        "unknown_touch"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
 fn unlinked_ball_trajectory_touch_remains_a_valid_unknown_candidate() {
     let event: NativeMotion = serde_json::from_value(json!({
         "frame_index":651,
