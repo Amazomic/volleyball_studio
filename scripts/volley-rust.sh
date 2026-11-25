@@ -247,6 +247,8 @@ case "$action" in
   stop) stop_owned;;
   start|restart|detach)
     if [[ "$action" == restart ]];then
+      cargo build --release --locked --offline -p volley-web --target wasm32-unknown-unknown
+      cp target/wasm32-unknown-unknown/release/volley_web.wasm volley-app/static/volley_web.wasm
       cargo build --release --locked --offline -p volley-app
     fi
     if [[ "$action" == restart ]];then stop_owned;fi
@@ -276,7 +278,7 @@ case "$action" in
     if [[ "$action" == start || "$action" == detach ]];then
       cargo build --release --locked --offline -p volley-app
     fi
-    if [[ "$action" == detach ]];then
+    if [[ "$action" == detach || "$action" == restart ]];then
       # A remote executor can time out even while the Rust service is healthy.
       # Its process and diagnostic log must be independent of that executor.
       command -v setsid >/dev/null 2>&1 || { echo "setsid is required for detached Studio" >&2;exit 3; }

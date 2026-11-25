@@ -2,11 +2,11 @@
 param(
     [ValidateSet("Start","Detach","Status","Stop","Restart","Build","Doctor","Check")]
     [string]$Action="Start",
-    [string]$Bind="127.0.0.1:8875",
+    [string]$Bind=$(if($env:VOLLEY_STUDIO_BIND){$env:VOLLEY_STUDIO_BIND}else{"127.0.0.1:8875"}),
     [string]$DataRoot="",
     [string]$OrtLibrary="",
     [string]$OpenvinoLibrary="",
-    [switch]$ReadOnly,
+    [switch]$ReadOnly=($env:VOLLEY_STUDIO_RESTART_READONLY -eq "1"),
     [switch]$CheckOnly
 )
 $ErrorActionPreference="Stop"
@@ -52,7 +52,10 @@ function Get-Sha {
     return Git-Value -GitArgs @("rev-parse","HEAD")
 }
 function Get-Candidate {
-    return Join-Path (Join-Path $runtime "bin") ("volley-app-"+(Get-Sha)+".exe")
+    $generation=$env:VOLLEY_STUDIO_RESTART_GENERATION
+    if($generation -and $generation -notmatch '^[0-9a-f]{32}$'){throw "Invalid restart generation"}
+    $suffix=if($generation){"-restart-$generation"}else{""}
+    return Join-Path (Join-Path $runtime "bin") ("volley-app-"+(Get-Sha)+$suffix+".exe")
 }
 function Read-Status {
     try {return Invoke-RestMethod -Uri "$bindUrl/internal/rewrite-status" -TimeoutSec 3}

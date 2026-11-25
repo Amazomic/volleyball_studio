@@ -3,6 +3,11 @@ param(
     [ValidateSet("Deploy","Probe","LauncherProbe")]
     [string]$Action="Deploy",
     [string]$DeploymentRoot=$env:VOLLEY_STUDIO_DEPLOY_ROOT,
+    [ValidatePattern('^127\.0\.0\.1:[0-9]{4,5}$')]
+    [string]$Bind="127.0.0.1:8875",
+    [int]$RestartFromPid=0,
+    [string]$RuntimeDataRoot="",
+    [switch]$RuntimeReadOnly,
     [ValidateRange(1,3600)]
     [int]$LockTimeoutSeconds=1800,
     [ValidateRange(0,3600)]
@@ -22,6 +27,15 @@ if([string]::IsNullOrWhiteSpace($DeploymentRoot)){
     $DeploymentRoot=Join-Path $PSScriptRoot ".."
 }
 $root=[System.IO.Path]::GetFullPath($DeploymentRoot).TrimEnd([char[]]@('\','/'))
+$bindUrl="http://$Bind"
+$env:VOLLEY_STUDIO_BIND=$Bind
+if($RestartFromPid -lt 0){throw "Invalid restart PID"}
+if($RestartFromPid -gt 0){
+    if($RuntimeReadOnly -and $RuntimeDataRoot){throw "Conflicting runtime data modes"}
+    $env:VOLLEY_STUDIO_RESTART_READONLY=if($RuntimeReadOnly){"1"}else{"0"}
+    if($RuntimeDataRoot){$env:VOLLEY_STUDIO_DATA_ROOT=$RuntimeDataRoot}
+    $env:VOLLEY_STUDIO_RESTART_GENERATION=[guid]::NewGuid().ToString("N")
+}
 $shaHasher=[System.Security.Cryptography.SHA256]::Create()
 try{
     $digest=$shaHasher.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($root.ToLowerInvariant()))
@@ -75,7 +89,7 @@ function Published-Sha {
 
 function Get-LiveSha {
     try{
-        $response=Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8875/studio" -TimeoutSec 5
+        $response=Invoke-WebRequest -UseBasicParsing -Uri "$bindUrl/studio" -TimeoutSec 5
         if($response.StatusCode -ne 200){return ""}
         $match=[regex]::Match($response.Content,'class="studio-build-commit"\s+title="[^"]*?([0-9a-fA-F]{40})"')
         if($match.Success){return $match.Groups[1].Value.ToLowerInvariant()}
@@ -111,12 +125,12 @@ function Wait-For-Idle {
     $deadline=[DateTime]::UtcNow.AddSeconds($IdleTimeoutSeconds)
     while($true){
         try{
-            $status=Invoke-RestMethod -Uri "http://127.0.0.1:8875/internal/rewrite-status" -TimeoutSec 5
+            $status=Invoke-RestMethod -Uri "$bindUrl/internal/rewrite-status" -TimeoutSec 5
         }catch [System.Net.WebException]{
             return
         }
         if($status.name -notin @("Volleyball Studio - development instance","Volleyball Studio - standalone Rust rewrite (development only)")){
-            throw "Port 8875 belongs to an unrecognized service"
+            throw "Port $Bind belongs to an unrecognized service"
         }
         if($status.shutdown_safe -eq $true -and @($status.active_jobs).Count -eq 0){
             return
@@ -128,6 +142,35 @@ function Wait-For-Idle {
     }
 }
 
+function Stop-When-Idle {
+    $deadline=[DateTime]::UtcNow.AddSeconds($IdleTimeoutSeconds)
+    while($true){
+        Wait-For-Idle
+        try{
+            Invoke-Launcher "/stop"
+            return
+        }catch{
+            if($_.Exception.Message -notmatch 'graceful shutdown refused|409|Conflict' -or [DateTime]::UtcNow -ge $deadline){throw}
+            Start-Sleep -Milliseconds 500
+        }
+    }
+}
+
+function Get-LivePid {
+    try{
+        $status=Invoke-RestMethod -Uri "$bindUrl/internal/rewrite-status" -TimeoutSec 5
+        return [int]$status.pid
+    }catch [System.Net.WebException]{
+        return 0
+    }
+}
+
+function Restart-Satisfied {
+    if($RestartFromPid -eq 0){return $true}
+    $livePid=Get-LivePid
+    return ($livePid -gt 0 -and $livePid -ne $RestartFromPid)
+}
+
 function Invoke-Deployment {
     for($attempt=1;$attempt -le $MaxBuildAttempts;$attempt++){
         Confirm-Checkout
@@ -135,7 +178,7 @@ function Invoke-Deployment {
         $published=Published-Sha
         $local=Git-Text @("rev-parse","HEAD")
         if($local -eq $published -and (Get-LiveSha) -eq $published){
-            if((Published-Sha) -eq $published){
+            if((Restart-Satisfied) -and (Published-Sha) -eq $published){
                 Write-Output "SKIPPED: Studio already serves $published"
                 return
             }
@@ -143,7 +186,7 @@ function Invoke-Deployment {
         Wait-For-Idle
         $target=Update-Checkout
         $live=Get-LiveSha
-        if($live -eq $target){
+        if($live -eq $target -and (Restart-Satisfied)){
             if((Published-Sha) -eq $target){
                 Write-Output "SKIPPED: Studio already serves $target"
                 return
@@ -164,14 +207,19 @@ function Invoke-Deployment {
             continue
         }
 
-        Invoke-Launcher "/stop"
+        $previousPid=Get-LivePid
+        Stop-When-Idle
         Invoke-Launcher "/daemon"
         $deployed=Get-LiveSha
         if($deployed -ne $target){
             throw "Live Studio SHA $deployed does not match built SHA $target"
         }
+        $deployedPid=Get-LivePid
+        if($deployedPid -le 0 -or $deployedPid -eq $previousPid -or ($RestartFromPid -gt 0 -and $deployedPid -eq $RestartFromPid)){
+            throw "Studio did not start a new verified process"
+        }
         if((Published-Sha) -eq $target){
-            Write-Output "DEPLOYED: $target http://127.0.0.1:8875/studio"
+            Write-Output "DEPLOYED: $target $bindUrl/studio PID $deployedPid"
             return
         }
         Write-Output "SUPERSEDED: another published commit requires the next build"

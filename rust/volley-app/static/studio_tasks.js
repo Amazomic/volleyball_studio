@@ -122,6 +122,7 @@
   // 30 s. User actions and server events wake the loop immediately.
   function schedule(){
     if(pollTimer!==null)clearTimeout(pollTimer);
+    if(restarting){pollTimer=null;return;}
     pollTimer=setTimeout(async()=>{
       pollTimer=null;
       await refresh();
@@ -219,7 +220,7 @@
       progress:Number.isFinite(data.overall_percent)?data.overall_percent:null});
   }
   async function refresh(){
-    if(document.hidden)return;
+    if(document.hidden||restarting)return;
     if(polling){refreshPending=true;return;}
     if(!window.VolleyballStudioActivity?.fetch)return;
     polling=true;
@@ -233,7 +234,32 @@
     }
   }
   const restartButton=$("studio-restart"),restartMessage=$("studio-restart-status");
-  let restarting=false,restartWatcher=null;
+  let restarting=false,restartWatcher=null,restartMedia=[];
+  const releaseRestartMedia=()=>{
+    restartMedia=[];
+    for(const video of document.querySelectorAll?.("video[src]")||[]){
+      restartMedia.push({video,src:video.getAttribute("src"),time:video.currentTime});
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
+  };
+  const restartFailed=message=>{
+    if(restartWatcher!==null)clearInterval(restartWatcher);
+    restartWatcher=null;
+    restarting=false;
+    restartButton.disabled=false;
+    for(const {video,src,time} of restartMedia){
+      if(!video.isConnected||video.getAttribute("src"))continue;
+      video.addEventListener("loadedmetadata",()=>{if(Number.isFinite(time))video.currentTime=time;},{once:true});
+      video.src=src;
+      video.load();
+    }
+    restartMedia=[];
+    restartNotice(message,true);
+    schedule();
+    void refresh();
+  };
   const restartNotice=(message,isError=false)=>{
     if(!restartMessage)return;
     restartMessage.textContent=message;
@@ -247,6 +273,10 @@
       checking=true;
       try{
         const result=await api("/internal/rewrite-status");
+        if(result.pid===previousPid&&result.restart_failed===true){
+          restartFailed("Не удалось пересобрать или перезапустить студию. Проверьте .studio-runtime/studio-restart.log.");
+          return;
+        }
         if(Number.isSafeInteger(result.pid)&&result.pid!==previousPid){
           clearInterval(restartWatcher);
           restartNotice("Студия перезапущена. Обновляем интерфейс…");
@@ -255,11 +285,8 @@
         }
       }catch{/* A short connection loss is expected during the restart. */}
       finally{checking=false;}
-      if(++attempts>=600){
-        clearInterval(restartWatcher);
-        restarting=false;
-        restartButton.disabled=false;
-        restartNotice("Не удалось подтвердить перезапуск. Проверьте состояние сервера.",true);
+      if(++attempts>=2400){
+        restartFailed("Не удалось подтвердить перезапуск. Проверьте состояние сервера.");
       }
     },1500);
   };
@@ -278,12 +305,12 @@
       if(result.scheduled!==true||!Number.isSafeInteger(result.previous_pid)){
         throw Error("Сервер не подтвердил перезапуск");
       }
-      restartNotice("Ожидаем запуска новой версии студии…");
+      releaseRestartMedia();
+      schedule();
+      restartNotice("Ожидаем пересборки и запуска новой версии студии…");
       waitForRestart(result.previous_pid);
     }catch(error){
-      restarting=false;
-      restartButton.disabled=false;
-      restartNotice(error.message||String(error),true);
+      restartFailed(error.message||String(error));
     }
   };
   restartButton?.addEventListener("click",restart);

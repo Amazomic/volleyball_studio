@@ -313,6 +313,7 @@ pub(crate) struct RewriteStatus {
     supported_api_endpoints: &'static [&'static str],
     pid: u32,
     build_profile: &'static str,
+    restart_failed: bool,
 }
 
 /// Status report is intentionally read-only. The launch script checks
@@ -458,6 +459,7 @@ pub(crate) async fn rewrite_status(
         ],
         pid: std::process::id(),
         build_profile: crate::studio_restart::current_profile(),
+        restart_failed: crate::studio_restart::restart_failed(),
     })
 }
 

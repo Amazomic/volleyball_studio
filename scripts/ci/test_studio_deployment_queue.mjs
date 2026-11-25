@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {readFileSync,mkdtempSync,rmSync,existsSync,readFileSync as read,writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join,resolve} from "node:path";
-import {spawn} from "node:child_process";
+import {spawn,spawnSync} from "node:child_process";
 
 const root=resolve(import.meta.dirname,"../..");
 const ps=join(root,"scripts","deploy-volley-queue.ps1");
@@ -24,9 +24,28 @@ assert.match(text,/function Wait-For-Idle/);
 assert.match(text,/shutdown_safe/);
 assert.match(text,/active_jobs/);
 assert.match(text,/SUPERSEDED:/);
+assert.match(text,/\[int\]\$RestartFromPid=0/);
+assert.match(text,/if\(\(Restart-Satisfied\) -and \(Published-Sha\) -eq \$published\)/);
+assert.match(text,/if\(\$live -eq \$target -and \(Restart-Satisfied\)\)/);
+assert.match(text,/\$deployedPid -eq \$previousPid/);
+assert.match(text,/VOLLEY_STUDIO_RESTART_GENERATION/);
 assert.match(text,/Invoke-Launcher "\/status"/);
 assert.match(text,/if\(\$local -eq \$published -and \(Get-LiveSha\) -eq \$published\)/);
 assert.ok(text.indexOf("if($local -eq $published") < text.indexOf("        Wait-For-Idle",text.indexOf("function Invoke-Deployment")),"Already-live SHA must skip before waiting for active jobs");
+if(process.platform==="win32"){
+  const start=text.indexOf("function Restart-Satisfied {"),end=text.indexOf("function Invoke-Deployment {",start);
+  assert.ok(start>=0&&end>start);
+  const probe=text.slice(start,end)+[
+    '$ErrorActionPreference="Stop"',
+    'function Get-LivePid {return $fakePid}',
+    '$RestartFromPid=0; $fakePid=0; if(-not (Restart-Satisfied)){throw "normal deploy"}',
+    '$RestartFromPid=41; $fakePid=41; if(Restart-Satisfied){throw "same PID must rebuild"}',
+    '$fakePid=0; if(Restart-Satisfied){throw "missing live PID"}',
+    '$fakePid=42; if(-not (Restart-Satisfied)){throw "already restarted"}'
+  ].join("\n");
+  const result=spawnSync("powershell.exe",["-NoProfile","-NonInteractive","-EncodedCommand",Buffer.from(probe,"utf16le").toString("base64")],{encoding:"utf8",windowsHide:true});
+  assert.equal(result.status,0,result.stderr);
+}
 if(process.platform==="win32"){
   const temp=mkdtempSync(join(tmpdir(),"volley-deploy-queue-test-"));
   const trace=join(temp,"trace.txt"),state=join(temp,"state.txt");

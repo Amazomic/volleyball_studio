@@ -17,6 +17,10 @@ assert.match(css,/\.sidebar>.studio-sidebar-bottom\{[^}]*margin-top:auto/);
 assert.match(routes,/\.route\("\/api\/studio\/restart", post\(studio_restart::restart\)\)/);
 assert.match(backend,/runtime::active_job_types/);
 assert.match(backend,/storage::validate_origin/);
+assert.match(backend,/\#\[cfg\(windows\)\]/);
+assert.match(backend,/deploy-volley-queue\.ps1/);
+assert.match(backend,/\.arg\("-RestartFromPid"\)/);
+assert.match(backend,/\#\[cfg\(target_os = "linux"\)\]/);
 assert.match(backend,/\.arg\("-f"\)/);
 
 class Node {
@@ -38,11 +42,22 @@ class Node {
 const ids=["studio-sidebar-tasks","studio-sidebar-task-list","studio-project",
   "studio-restart","studio-restart-status"];
 const nodes=new Map(ids.map(id=>[id,new Node()]));
+const video={
+  source:"/api/video-media",currentTime:17,isConnected:true,paused:false,loads:0,
+  getAttribute(name){return name==="src"?this.source:null;},
+  removeAttribute(name){if(name==="src")this.source=null;},
+  get src(){return this.source;},
+  set src(value){this.source=value;},
+  pause(){this.paused=true;},
+  load(){this.loads++;},
+  addEventListener(name,handler){if(name==="loadedmetadata")handler();}
+};
 const doc={hidden:false,getElementById:id=>nodes.get(id),createElement:()=>new Node(),
+  querySelectorAll:selector=>selector==="video[src]"&&video.source?[video]:[],
   addEventListener(){}};
 const button=nodes.get("studio-restart"),message=nodes.get("studio-restart-status");
 nodes.get("studio-project").value="project-a";
-let restartStatus=409,oldPid=201,newPid=201,reloaded=0,asked=0;
+let restartStatus=409,oldPid=201,newPid=201,reloaded=0,asked=0,restartFailed=false;
 const win={
   location:{reload(){reloaded++;}},
   addEventListener(){},
@@ -54,7 +69,7 @@ const win={
         return{ok:true,json:async()=>({scheduled:true,previous_pid:oldPid})};
       }
       if(url==="/internal/rewrite-status")
-        return {ok:true,json:async()=>({pid:newPid})};
+        return {ok:true,json:async()=>({pid:newPid,restart_failed:restartFailed})};
       if(url.startsWith("/api/inference/native/full/active?"))
         return {ok:true,json:async()=>({schema:"volley-native-active-gpu/1",project_id:"project-a",active:false})};
       return {ok:true,json:async()=>({status:"idle"})};
@@ -71,14 +86,27 @@ await button.click();
 assert.equal(asked,1);
 assert.equal(button.disabled,false);
 assert.match(message.textContent,/GPU still active/);
+assert.equal(video.source,"/api/video-media","A rejected restart must preserve media");
 assert.ok(message.classList.contains("is-error"));
 restartStatus=200;
 await button.click();
 assert.equal(asked,2);
 assert.equal(button.disabled,true);
 assert.match(message.textContent,/Ожидаем/);
+assert.equal(video.source,null,"Accepted restart releases streaming media");
+assert.equal(video.paused,true);
+assert.equal(video.loads,1);
 await latestInterval();
 assert.equal(reloaded,0,"Must not reload until a different process serves the API");
+restartFailed=true;
+await latestInterval();
+assert.equal(button.disabled,false,"A failed build must unlock the restart button");
+assert.equal(video.source,"/api/video-media","A failed build restores media");
+assert.equal(video.currentTime,17);
+assert.ok(message.classList.contains("is-error"));
+restartFailed=false;
+await button.click();
+assert.equal(button.disabled,true);
 newPid=202;
 await latestInterval();
 assert.equal(reloaded,1,"Reload after a confirmed PID change");
