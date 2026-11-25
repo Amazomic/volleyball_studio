@@ -146,6 +146,8 @@ struct NativeRally {
     ball_coverage: f64,
     motion_supported_touch_proposals: u64,
     #[serde(default)]
+    stable_track_count: Option<u8>,
+    #[serde(default)]
     method: Option<String>,
     first_touch_frame: u64,
     last_touch_frame: u64,
@@ -617,6 +619,7 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
             || !item.max_touch_probability.is_finite()
             || !(0.0..=1.0).contains(&item.max_touch_probability)
             || item.ball_observations > end - start + 1
+            || item.stable_track_count.is_some_and(|count| count > 128)
             || (item.motion_supported_touch_proposals == 0
                 && !matches!(
                     item.method.as_deref(),
@@ -673,11 +676,15 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
                     }
                 }
             }
-            timeline_rallies.push(json!({
+            let mut row = json!({
                 "candidate_id":item.candidate_id.clone(),
                 "start_frame":start,
                 "end_frame":end,
-            }));
+            });
+            if let Some(count) = item.stable_track_count {
+                row["stable_track_count"] = json!(count);
+            }
+            timeline_rallies.push(row);
         }
         let chosen = if timeline {
             false

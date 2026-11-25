@@ -63,6 +63,47 @@ pub async fn timeline(
     Ok(Json(result))
 }
 
+fn fill_legacy_track_counts(
+    state: &AppState,
+    run: &crate::native_rally_evidence::ValidatedRun,
+    page: &mut Value,
+) -> Result<(), ApiError> {
+    let cards = page["items"]
+        .as_array_mut()
+        .ok_or_else(|| storage::bad_request("Invalid rally preview items"))?;
+    if cards.iter().all(|card| card["stable_track_count"].is_u64()) {
+        return Ok(());
+    }
+    let folder = crate::projects::project_root(state)
+        .join(&run.project_id)
+        .join("native_cpu_replays")
+        .join(&run.replay_id);
+    storage::safe_folder(&folder).map_err(storage::bad_request)?;
+    let replay = storage::safe_file(&folder, "tracked_frames.jsonl", 64 * 1024 * 1024 * 1024)
+        .map_err(storage::bad_request)?;
+    let counts =
+        crate::native_player_tracks::replay_track_counts(&replay, &run.replay_sha, run.frames)
+            .map_err(storage::bad_request)?;
+    for card in cards
+        .iter_mut()
+        .filter(|card| !card["stable_track_count"].is_u64())
+    {
+        let start = card["detected_start_frame"]
+            .as_u64()
+            .ok_or_else(|| storage::bad_request("Invalid rally start"))?;
+        let end = card["detected_end_frame"]
+            .as_u64()
+            .ok_or_else(|| storage::bad_request("Invalid rally end"))?;
+        let sample = counts
+            .get(start as usize..=end as usize)
+            .ok_or_else(|| storage::bad_request("Rally track count outside source"))?;
+        card["stable_track_count"] = json!(volley_core::rally_reconstruction::stable_track_count(
+            sample
+        ));
+    }
+    Ok(())
+}
+
 pub async fn preview(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PreviewQuery>,
@@ -76,7 +117,7 @@ pub async fn preview(
             &query.project_id,
             &query.rally_run_id,
         )?;
-        Ok(generate(
+        let mut page = generate(
             &run,
             Choice::Page {
                 offset: query.offset,
@@ -87,7 +128,11 @@ pub async fn preview(
             },
         )
         .map_err(storage::bad_request)?
-        .value)
+        .value;
+        if fill_legacy_track_counts(&state, &run, &mut page).is_err() {
+            page["stable_track_count_status"] = json!("unavailable");
+        }
+        Ok(page)
     })
     .await
     .map_err(|e| storage::internal(format!("Native rally preview task: {e}")))??;

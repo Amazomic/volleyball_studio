@@ -57,6 +57,29 @@ impl RallySettings {
     }
 }
 
+pub fn stable_track_count(counts: &[u8]) -> u8 {
+    let mut frequencies = [0usize; 256];
+    for &count in counts.iter().filter(|&&count| count > 0) {
+        frequencies[count as usize] += 1;
+    }
+    let mut stable = 0;
+    for count in 1..frequencies.len() {
+        if frequencies[count] > frequencies[stable] {
+            stable = count;
+        }
+    }
+    stable as u8
+}
+
+#[test]
+fn stable_track_count_ignores_short_spikes_dropouts_and_unsampled_frames() {
+    assert_eq!(stable_track_count(&[0, 4, 0, 4, 5, 4, 3, 4, 0, 4]), 4);
+    assert_eq!(stable_track_count(&[3, 4, 3, 4]), 3);
+    assert_eq!(stable_track_count(&[6, 6, 5, 6]), 6);
+    assert_eq!(stable_track_count(&[0, 0]), 0);
+    assert_eq!(stable_track_count(&[]), 0);
+}
+
 pub fn preliminary_rally_scope_usable(
     impact_count: usize,
     intervals: &[(u64, u64)],

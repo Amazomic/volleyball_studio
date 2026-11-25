@@ -5,7 +5,7 @@ const bytes=readFileSync(new URL("../../rust/volley-app/static/volley_web.wasm",
 const {instance:{exports:e}}=await WebAssembly.instantiate(bytes,{});
 assert.equal(typeof e.volley_evidence_fps,"function");
 const js=readFileSync(new URL("../../rust/volley-app/static/studio.js",import.meta.url),"utf8");
-const segment=js.slice(js.indexOf("  const fps="),js.indexOf("  // Count only players"));
+const segment=js.slice(js.indexOf("  const fps="),js.indexOf("  const rallyPlayerCount="));
 for(const rate of [25,30,30000/1001,60]){
  const context={s:{fps:rate},window:{VolleyballUi:{engine:e}}};
  runInNewContext(segment+'\nthis.second=second;this.length=length;',context);

@@ -32,8 +32,9 @@ use volley_core::{
     fusion::Candidate,
     rally_contact_context::{BallSample as CourtBallSample, ContactEvidence},
     rally_reconstruction::{
-        ground_bounce_candidate, net_deflection_candidate, BallFrame, ContactFrame, RallyProposal,
-        RallySegmenter, RallySettings, RallyTotals, SurfaceEventProposal,
+        ground_bounce_candidate, net_deflection_candidate, stable_track_count, BallFrame,
+        ContactFrame, RallyProposal, RallySegmenter, RallySettings, RallyTotals,
+        SurfaceEventProposal,
     },
 };
 
@@ -74,6 +75,8 @@ struct ReplayFrame {
     frame_index: u64,
     #[serde(default)]
     tracked_players: Vec<ReplayTrack>,
+    #[serde(default)]
+    interpolated_track_ids: Vec<u64>,
     selected_ball: Option<SelectedBall>,
     track_ids_provisional: bool,
     confirmed_athlete_identities: bool,
@@ -201,6 +204,7 @@ struct OutputCounters {
     proposals: u64,
     ingested_touch_candidates: u64,
 }
+#[expect(clippy::too_many_arguments)]
 fn write_proposal(
     writer: &mut BufWriter<File>,
     out_hash: &mut Sha256,
@@ -209,12 +213,18 @@ fn write_proposal(
     surface_events: &std::collections::VecDeque<SurfaceEventProposal>,
     source_ids: (&str, &str),
     counters: &mut OutputCounters,
+    track_counts: &[u8],
 ) -> Result<(), String> {
     let (replay_id, touch_id) = source_ids;
     let mut value =
         serde_json::to_value(&proposal).map_err(|e| format!("Serialize rally candidate: {e}"))?;
     // Physical surface candidates have no athlete Track ID and must remain
     // separate from the player Touch statistics/review contract.
+    value["stable_track_count"] = json!(stable_track_count(
+        track_counts
+            .get(proposal.detected_start_frame as usize..=proposal.detected_end_frame as usize)
+            .ok_or("Rally track-count interval outside source")?
+    ));
     value["surface_event_candidates"] = json!(surface_events
         .iter()
         .filter(
@@ -353,6 +363,7 @@ fn rebuild_from_snapshots_with_scope(
     let mut digest = Sha256::new();
     let mut totals = OutputCounters::default();
     let mut segmenter = RallySegmenter::new(settings, width, height)?;
+    let mut track_counts = Vec::with_capacity(frames as usize);
     let mut continuous =
         preliminary_intervals.map(|intervals| intervals.iter().copied().peekable());
     let mut continuity_ball_frames = 0u64;
@@ -459,6 +470,14 @@ fn rebuild_from_snapshots_with_scope(
                 .detection
                 .validate(frame_index - frame_index % 9, "players")?;
         }
+        let inferred: std::collections::BTreeSet<_> =
+            frame.interpolated_track_ids.iter().copied().collect();
+        if inferred.len() != frame.interpolated_track_ids.len()
+            || !inferred.is_subset(&verified_frame_ids)
+        {
+            return Err("Invalid interpolated Track ID metadata".into());
+        }
+        track_counts.push((verified_frame_ids.len() - inferred.len()) as u8);
         let mut events = Vec::new();
         while next.as_ref().is_some_and(|t| t.frame_index == frame_index) {
             if !in_preliminary_rally {
@@ -536,6 +555,7 @@ fn rebuild_from_snapshots_with_scope(
                     &surface_events,
                     (replay_id, touch_id),
                     &mut totals,
+                    &track_counts,
                 )?;
             }
         } else if in_preliminary_rally && reliable_ball.is_some() {
@@ -597,6 +617,7 @@ fn rebuild_from_snapshots_with_scope(
                             &surface_events,
                             (replay_id, touch_id),
                             &mut totals,
+                            &track_counts,
                         )?;
                     }
                 } else if let Some(surface) = net_surface.as_ref() {
@@ -662,6 +683,7 @@ fn rebuild_from_snapshots_with_scope(
                         &surface_events,
                         (replay_id, touch_id),
                         &mut totals,
+                        &track_counts,
                     )?;
                     intervals.next();
                     continuity_ball_frames = 0;
@@ -695,6 +717,7 @@ fn rebuild_from_snapshots_with_scope(
                 &surface_events,
                 (replay_id, touch_id),
                 &mut totals,
+                &track_counts,
             )?;
         }
     }
@@ -725,8 +748,12 @@ fn publish_primary_from_touches(
     output: &Path,
     replay_id: &str,
     touch_id: &str,
+    track_counts: &[u8],
     cancel: Option<&AtomicBool>,
 ) -> Result<(String, RallyTotals, OutputCounters), String> {
+    if track_counts.len() as u64 != frames {
+        return Err("Primary rally track counts differ from replay length".into());
+    }
     if intervals
         .iter()
         .any(|&(start, end)| start > end || end >= frames)
@@ -808,6 +835,7 @@ fn publish_primary_from_touches(
             &surface_events,
             (replay_id, touch_id),
             &mut counters,
+            track_counts,
         )?;
     }
     if next.is_some()
@@ -1165,6 +1193,11 @@ fn process_inner(
                 &part,
                 &request.replay_id,
                 &request.touch_id,
+                &crate::native_player_tracks::replay_track_counts(
+                    &tracked_file,
+                    &replay_sha,
+                    frames,
+                )?,
                 cancel,
             )?
         } else {
@@ -1234,6 +1267,7 @@ fn process_inner(
                 "cpu_rally_frame_reconstruction_v1"
             },
             "touch_candidates_ingested":output.ingested_touch_candidates,
+            "stable_track_count_policy":"observed_nonzero_frame_mode_v1",
             "physical_touch_player_gate":"same_frame_verified_cpu_track",
             "physical_touch_ball_gate":"same_frame_selected_ball",
             "unknown_player_contacts_allowed":true,
@@ -1339,6 +1373,10 @@ mod tests {
         bytes.push(b'\n');
         fs::write(&touches, &bytes).unwrap();
         let touch_sha = format!("{:x}", Sha256::digest(&bytes));
+        let mut counts = vec![4; 90];
+        counts[50..79].fill(6);
+        counts[12] = 8;
+        counts[51] = 0;
         let (sha, stats, output_counts) = publish_primary_from_touches(
             &touches,
             &touch_sha,
@@ -1351,6 +1389,7 @@ mod tests {
             &output,
             "replay-primary",
             "touch-primary",
+            &counts,
             None,
         )
         .unwrap();
@@ -1367,6 +1406,8 @@ mod tests {
         assert_eq!(rows[0]["detected_start_frame"], 12);
         assert_eq!(rows[0]["detected_end_frame"], 33);
         assert_eq!(rows[0]["provisional_track_ids"], json!([7]));
+        assert_eq!(rows[0]["stable_track_count"], 4);
+        assert_eq!(rows[1]["stable_track_count"], 6);
         assert_eq!(rows[0]["motion_supported_touch_proposals"], 1);
         assert_eq!(rows[1]["detected_start_frame"], 50);
         assert_eq!(rows[1]["detected_end_frame"], 78);
@@ -1389,6 +1430,7 @@ mod tests {
             &root.join("outside.jsonl"),
             "replay-primary",
             "touch-primary",
+            &counts,
             None,
         )
         .is_err());
@@ -1950,6 +1992,7 @@ mod tests {
         for (proposal, expected) in proposals.iter().zip(scope) {
             assert_eq!(proposal["detected_start_frame"], expected.0);
             assert_eq!(proposal["detected_end_frame"], expected.1);
+            assert_eq!(proposal["stable_track_count"], 1);
             assert_eq!(proposal["motion_supported_touch_proposals"], 0);
             assert_eq!(proposal["method"], "coherent_vballnet_motion_v2");
             assert_eq!(proposal["authoritative_rally"], false);

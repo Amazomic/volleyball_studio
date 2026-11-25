@@ -29,7 +29,7 @@ const s={items:[{
   candidate_id:"a".repeat(24),detected_start_frame:1263,detected_end_frame:1592,
   manual_clip:{start_frame:1218,end_frame:1637},
   motion_event_count:7,motion_supported_touch_proposals:7,
-  provisional_track_ids:[4,4,9],ball_coverage:0.8,
+  provisional_track_ids:[4,4,9],stable_track_count:6,ball_coverage:0.8,
   estimated_action_counts:{attack:3,dig:2},unclassified_action_count:2,
 }],offset:0,limit:24,filtered:1,gold:new Set(),current:"",
 selected:{has:()=>false}};
@@ -83,7 +83,7 @@ assert.match(text,/11\.0 с/,"duration should use every frame including final");
 assert.match(text,/42,1–53,1 с/,
   "Start and end must show absolute seconds as a readable interval");
 assert.match(text,/Касаний 7/);
-assert.match(text,/Игроков 2/,"unique source Track IDs only");
+assert.match(text,/Игроков 6/,"All observed players, including players without touches");
 assert.match(text,/Атака ×3/,"Show all provisional attacks in the card");
 assert.match(text,/Приём снизу ×2/,"Show provisional digs in the card");
 assert.match(css,/grid-template-areas:"head" "foot"/);
@@ -98,7 +98,7 @@ assert.match(css,/#studio-preview-view \.rally-card\.active\{[\s\S]*?inset 3px 0
   "Selected rally uses a restrained left rail, not a neon outline");
 assert.match(css,/#studio-preview-view \.rally-card \.card-bottom\{[\s\S]*?display:flex/);
 assert.match(css,/#studio-preview-view \.rally-card-time-range/);
-s.items[0].provisional_track_ids=undefined;
+s.items[0].stable_track_count=undefined;
 context.render();
 assert.match(values(list.children[0]).join(" "),/Игроков —/,
   "No Track ID evidence must not be represented as zero players");

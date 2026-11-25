@@ -298,6 +298,32 @@ pub(super) fn index_replay(
     index_with_scope(path, expected_sha, frames, None).map(|(all, _)| all)
 }
 
+pub(crate) fn replay_track_counts(path: &Path, sha: &str, frames: u64) -> Result<Vec<u8>, String> {
+    let tracks = index_replay(path, sha, frames)?;
+    let mut counts = vec![0i32; frames as usize + 1];
+    for track in tracks.values() {
+        for &(start, end) in &track.visible_spans {
+            if start > end || end >= frames {
+                return Err("Invalid observed track interval".into());
+            }
+            counts[start as usize] += 1;
+            counts[end as usize + 1] -= 1;
+        }
+    }
+    let mut active = 0;
+    counts.pop();
+    counts
+        .into_iter()
+        .map(|delta| {
+            active += delta;
+            u8::try_from(active)
+                .ok()
+                .filter(|&count| count <= 128)
+                .ok_or_else(|| "Invalid observed track count".into())
+        })
+        .collect()
+}
+
 pub(super) fn index_rally_replay(
     path: &Path,
     expected_sha: &str,

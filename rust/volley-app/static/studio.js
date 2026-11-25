@@ -103,7 +103,7 @@
   // Cache only small derived metadata and immutable CPU preview pages, never video bytes.
   // A versioned session cache survives refresh; all writes / new pipeline results invalidate it.
   const previewCache=(()=>{
-    const prefix="volley:studio-preview:v3:";
+    const prefix="volley:studio-preview:v4:";
     const memory=new Map(),inflight=new Map(),limit=24;
     let epoch=0;
     const storage=()=>{
@@ -2843,10 +2843,8 @@
     (Number(item.detected_end_frame)-Number(item.detected_start_frame)+1)/fps())).toFixed(1)+" с";
   const second=frame=>(Math.max(0,Number(frame)||0)/fps())
     .toLocaleString("ru-RU",{minimumFractionDigits:1,maximumFractionDigits:1});
-  // Count only players with a source-bound Touch Track ID; other people
-  // visible on court are not necessarily participants in the rally.
-  const touchingPlayers=item=>Array.isArray(item.provisional_track_ids)?
-    new Set(item.provisional_track_ids.filter(id=>Number.isSafeInteger(id)&&id>0)).size:null;
+  const rallyPlayerCount=item=>Number.isSafeInteger(item.stable_track_count)&&item.stable_track_count>=0?
+    item.stable_track_count:null;
   const valid=id=>typeof id==="string"&&/^[a-f0-9]{24}$/.test(id);
   // The Rust timeline index is source-verified and spans the complete original
   // video; unlike rally cards it is independent of pagination and gold filters.
@@ -4276,8 +4274,8 @@
       touches.append(make("span","","Касаний"),
         make("strong","",Number.isSafeInteger(count)&&count>=0?count:"—"));
       const players=make("div","rally-card-stat");
-      const countPlayers=touchingPlayers(item);
-      players.title="Число уникальных Track ID с обнаруженными касаниями, не всех игроков в кадре";
+      const countPlayers=rallyPlayerCount(item);
+      players.title="Устойчивое число одновременно наблюдаемых Track ID в границах розыгрыша";
       players.append(make("span","","Игроков"),
         make("strong","",countPlayers===null?"—":countPlayers));
       stats.append(duration,touches,players);

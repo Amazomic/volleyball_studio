@@ -156,7 +156,7 @@ pub(crate) use volley_core::contracts::player_id as valid_player_id;
 pub(crate) use volley_core::contracts::sha256 as valid_sha;
 mod source_index;
 use source_index::*;
-pub(crate) use source_index::{prepare_rally_index, prepare_replay_index};
+pub(crate) use source_index::{prepare_rally_index, prepare_replay_index, replay_track_counts};
 mod assignments;
 pub(crate) use assignments::*;
 
