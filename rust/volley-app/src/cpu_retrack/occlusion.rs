@@ -198,24 +198,46 @@ fn track_frame(row: &mut Value, anchors: &mut BTreeMap<u64, Anchor>, frame: u64)
             {
                 return None;
             }
-            let full = if assigned
-                && c.score >= 0.35
-                && b[3] - b[1] >= 0.85 * (predicted[3] - predicted[1])
-            {
-                b
-            } else {
-                align_fragment(predicted, b)
-            };
+            let aligned = align_fragment(predicted, b);
+            let mut full = aligned;
+            let initial_fronts = fronts_for(aligned);
+            if initial_fronts.is_empty() {
+                return None;
+            }
+            let exposed = visible_regions(b, &initial_fronts);
+            let exposed_area = exposed.iter().map(|&r| area(r)).sum::<f64>();
+            if exposed_area < 0.02 * area(b) {
+                return None;
+            }
+            let fraction = exposed_area / area(b);
+            let h = predicted[3] - predicted[1];
+            let top = exposed.iter().map(|r| r[1]).fold(1.0_f64, f64::min);
+            let bottom = exposed.iter().map(|r| r[3]).fold(0.0_f64, f64::max);
+            if assigned && c.score >= 0.35 && fraction >= 0.65 && b[3] - b[1] >= 0.85 * h {
+                full = b;
+            } else if full[1] > predicted[1] {
+                let max_drop = if fraction >= 0.35 && bottom - top >= 0.25 * h {
+                    0.003
+                } else {
+                    0.0
+                };
+                let correction = (full[1] - predicted[1] - max_drop).max(0.0);
+                full[1] -= correction;
+                full[3] -= correction;
+            }
+            full[0] = full[0].min(b[0]);
+            full[1] = full[1].min(top);
+            full[2] = full[2].max(b[2]);
             let fronts = fronts_for(full);
             if fronts.is_empty() {
                 return None;
             }
             let visible = visible_regions(intersection(full, b), &fronts);
-            if visible.iter().map(|&r| area(r)).sum::<f64>() < 0.02 * area(b) {
+            if visible.is_empty() {
                 return None;
             }
             Some(Fragment {
-                cost,
+                cost: cost - 0.85 * fraction - 0.25 * ((bottom - top) / h).min(1.0),
                 full,
                 fronts,
                 visible,
@@ -229,20 +251,29 @@ fn track_frame(row: &mut Value, anchors: &mut BTreeMap<u64, Anchor>, frame: u64)
         }) {
             continue;
         }
-        let fragment = measured.and_then(|c| candidate(c, true)).or_else(|| {
-            let mut choices: Vec<_> = raw.iter().filter_map(|c| candidate(c, false)).collect();
-            choices.sort_by(|a, b| a.cost.total_cmp(&b.cost));
-            if choices.len() > 1
-                && choices[1].cost - choices[0].cost <= 0.12
-                && volley_core::bbox_iou(
-                    choices[0].detection.bbox_xyxy_norm,
-                    choices[1].detection.bbox_xyxy_norm,
-                ) < 0.30
-            {
-                return None;
-            }
+        let mut choices: Vec<_> = raw.iter().filter_map(|c| candidate(c, false)).collect();
+        if let Some(assigned) = measured.and_then(|c| candidate(c, true)) {
+            choices.retain(|c| {
+                c.detection.query_index != assigned.detection.query_index
+                    || volley_core::bbox_iou(
+                        c.detection.bbox_xyxy_norm,
+                        assigned.detection.bbox_xyxy_norm,
+                    ) < 0.90
+            });
+            choices.push(assigned);
+        }
+        choices.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+        let fragment = if choices.len() > 1
+            && choices[1].cost - choices[0].cost <= 0.12
+            && volley_core::bbox_iou(
+                choices[0].detection.bbox_xyxy_norm,
+                choices[1].detection.bbox_xyxy_norm,
+            ) < 0.30
+        {
+            None
+        } else {
             choices.into_iter().next()
-        });
+        };
         let (full, fronts, regions, score) = if let Some(fragment) = fragment {
             let mut next = anchor.clone();
             next.frame = frame;
@@ -286,7 +317,23 @@ fn track_frame(row: &mut Value, anchors: &mut BTreeMap<u64, Anchor>, frame: u64)
             }));
         }
         let front_ids = fronts.iter().map(|(id, _)| *id).collect::<Vec<_>>();
-        metadata.insert(id, (full, front_ids, regions));
+        let pose_regions = if regions.is_empty() {
+            Vec::new()
+        } else {
+            let mut search = full;
+            search[1] = (search[1] - 0.12 * (full[3] - full[1])).max(0.0);
+            let mut blockers = fronts;
+            for (&other, c) in &observed {
+                if other != id
+                    && !blockers.iter().any(|(front, _)| *front == other)
+                    && area(intersection(search, c.bbox_xyxy_norm)) > 0.0
+                {
+                    blockers.push((other, c.bbox_xyxy_norm));
+                }
+            }
+            visible_regions(search, &blockers)
+        };
+        metadata.insert(id, (full, front_ids, regions, pose_regions));
     }
     let inferred = additions.len() as u64;
     let ids: Vec<_> = additions
@@ -296,13 +343,28 @@ fn track_frame(row: &mut Value, anchors: &mut BTreeMap<u64, Anchor>, frame: u64)
     if let Some(players) = row["tracked_players"].as_array_mut() {
         players.extend(additions);
         for player in players {
-            if let Some((full, fronts, regions)) =
+            if let Some((full, fronts, regions, pose_regions)) =
                 player["track_id"].as_u64().and_then(|id| metadata.get(&id))
             {
                 player["occluding_track_id"] = json!(fronts[0]);
                 player["occluding_track_ids"] = json!(fronts);
                 player["visible_regions"] = json!(regions);
                 player["full_track_box"] = json!(full);
+                player["pose_visible_regions"] = json!(pose_regions);
+            } else if let Some(id) = player["track_id"].as_u64() {
+                if metadata
+                    .values()
+                    .any(|(_, fronts, _, _)| fronts.contains(&id))
+                {
+                    if let Some(measured) = observed.get(&id) {
+                        let original = measured.bbox_xyxy_norm;
+                        if existing.get(&id).is_some_and(|c| {
+                            volley_core::bbox_iou(c.bbox_xyxy_norm, original) < 0.98
+                        }) {
+                            player["pose_visible_regions"] = json!([original]);
+                        }
+                    }
+                }
             }
         }
     }
@@ -475,6 +537,48 @@ mod tests {
         assert!(visible
             .iter()
             .all(|r| area(intersection(*r, neighbor)) == 0.0));
+    }
+
+    #[test]
+    fn low_sliver_does_not_drag_rear_box_down_and_higher_fragment_wins() {
+        let rear = [0.45, 0.40, 0.49, 0.52];
+        let front = [0.44, 0.44, 0.50, 0.61];
+        let mut anchors = BTreeMap::from([
+            (
+                7,
+                Anchor {
+                    frame: 10,
+                    confirmed: 10,
+                    detection: detection(10, rear, 0.8),
+                    support: 12,
+                    velocity: [0.0; 2],
+                },
+            ),
+            (
+                4,
+                Anchor {
+                    frame: 10,
+                    confirmed: 10,
+                    detection: detection(10, front, 0.9),
+                    support: 12,
+                    velocity: [0.0; 2],
+                },
+            ),
+        ]);
+        let mut row = json!({"tracked_players":[{"track_id":4,"measurement_source":"detector_bbox","detection":detection(11,front,0.9)}],
+            "raw_player_candidates":[detection(11,front,0.9),detection(11,[0.46,0.433,0.48,0.55],0.30)]});
+        track_frame(&mut row, &mut anchors, 11);
+        assert!(anchors[&7].detection.bbox_xyxy_norm[1] <= 0.405);
+        let mut row = json!({"tracked_players":[{"track_id":4,"measurement_source":"detector_bbox","detection":detection(12,front,0.9)}],
+            "raw_player_candidates":[detection(12,front,0.9),detection(12,[0.46,0.433,0.48,0.55],0.30),detection(12,[0.46,0.39,0.48,0.465],0.22)]});
+        track_frame(&mut row, &mut anchors, 12);
+        let rear = row["tracked_players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["track_id"] == 7)
+            .unwrap();
+        assert!(rear["visible_regions"][0][1].as_f64().unwrap() < 0.40);
     }
 
     fn detection(frame: u64, bbox: BBox, score: f64) -> Candidate {

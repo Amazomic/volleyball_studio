@@ -180,6 +180,7 @@ struct TrackedCandidate {
     pose: Option<[[f64; 3]; 17]>,
     pose_source: Option<String>,
     visible_regions: Option<Vec<[f64; 4]>>,
+    full_track_box: Option<[f64; 4]>,
 }
 #[derive(Deserialize)]
 struct SelectedBall {
@@ -231,12 +232,21 @@ pub(crate) fn transform_frame(item: TrackedFrame, expected: u64) -> Result<Touch
             {
                 return Err("Invalid visible track regions".into());
             }
-            regions
-                .into_iter()
-                .max_by(|a, b| {
-                    ((a[2] - a[0]) * (a[3] - a[1])).total_cmp(&((b[2] - b[0]) * (b[3] - b[1])))
-                })
-                .ok_or("Missing visible track region")?
+            if let Some(full) = player.full_track_box.filter(|r| {
+                player.pose.is_some()
+                    && r.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                    && r[0] < r[2]
+                    && r[1] < r[3]
+            }) {
+                full
+            } else {
+                regions
+                    .into_iter()
+                    .max_by(|a, b| {
+                        ((a[2] - a[0]) * (a[3] - a[1])).total_cmp(&((b[2] - b[0]) * (b[3] - b[1])))
+                    })
+                    .ok_or("Missing visible track region")?
+            }
         } else {
             sample.bbox_xyxy_norm
         };
@@ -1828,6 +1838,28 @@ fn refine_pose_events(
     )
 }
 
+fn overhead_contact_contradicted(
+    pose: &PosePlayer,
+    ball_y: f64,
+    radius: f64,
+    height: f64,
+    confidence: f64,
+) -> bool {
+    if pose.interpolated || height <= 0.0 {
+        return false;
+    }
+    let p = &pose.keypoints;
+    [0, 5, 6, 7, 8, 9, 10].iter().all(|&i| {
+        p[i].iter()
+            .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            && p[i][2] >= confidence
+    }) && ball_y + radius < p[0][1] - height * 0.08
+        && p[7][1] >= p[5][1]
+        && p[9][1] >= p[5][1]
+        && p[8][1] >= p[6][1]
+        && p[10][1] >= p[6][1]
+}
+
 #[expect(clippy::too_many_arguments)]
 fn refine_pose_events_policy(
     events: &mut Vec<PhysicalTouchCandidate>,
@@ -1945,7 +1977,13 @@ fn refine_pose_events_policy(
                     .find(|p| p.track_id == id)
                     .map(|p| (p.bbox_xyxy_norm[3] - p.bbox_xyxy_norm[1]) * h);
                 if measured.zip(height).is_some_and(|(pose, height)| {
-                    height >= 26.0
+                    overhead_contact_contradicted(
+                        pose,
+                        center[1] / h,
+                        radius / h,
+                        height / h,
+                        settings.pose_min_confidence,
+                    ) || (height >= 26.0
                         && radius > 0.0
                         && radius <= height * 0.2
                         && [0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
@@ -1965,7 +2003,7 @@ fn refine_pose_events_policy(
                             settings.pose_min_confidence,
                             settings.pose_max_distance,
                         )
-                        .is_none()
+                        .is_none())
                 }) {
                     event.provisional_track_id = None;
                     event.action_prediction = None;
@@ -3205,6 +3243,37 @@ pub async fn status(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn overhead_ball_cannot_be_assigned_to_player_with_both_arms_down() {
+        let mut pose = super::PosePlayer {
+            track_id: 4,
+            keypoints: [[0.0; 3]; 17],
+            interpolated: false,
+        };
+        for (i, y) in [
+            (0, 0.46),
+            (5, 0.48),
+            (6, 0.48),
+            (7, 0.51),
+            (8, 0.51),
+            (9, 0.54),
+            (10, 0.53),
+        ] {
+            pose.keypoints[i] = [0.48, y, 0.8];
+        }
+        assert!(super::overhead_contact_contradicted(
+            &pose, 0.38, 0.008, 0.15, 0.28
+        ));
+        pose.keypoints[10][1] = 0.40;
+        assert!(!super::overhead_contact_contradicted(
+            &pose, 0.38, 0.008, 0.15, 0.28
+        ));
+        pose.keypoints[10][1] = 0.53;
+        pose.keypoints[10][2] = 0.1;
+        assert!(!super::overhead_contact_contradicted(
+            &pose, 0.38, 0.008, 0.15, 0.28
+        ));
+    }
     #[test]
     fn occlusion_visibility_keeps_hidden_tracks_out_of_touch_geometry() {
         let player = |id, score, regions: serde_json::Value| {

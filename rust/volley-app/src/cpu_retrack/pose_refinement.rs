@@ -238,6 +238,31 @@ pub(super) struct Source<'a> {
     pub scope: &'a PlayerFrameScope,
 }
 
+fn pose_visibility(player: &Value) -> Option<Vec<[f64; 4]>> {
+    serde_json::from_value(
+        player
+            .get("pose_visible_regions")
+            .unwrap_or(&player["visible_regions"])
+            .clone(),
+    )
+    .ok()
+}
+
+fn valid_attached_pose(pose: &PoseEvidence, bbox: [f64; 4], mask: Option<&[[f64; 4]]>) -> bool {
+    let Some(mask) = mask else {
+        return pose.valid() && pose.inside_crop(bbox, 0.02);
+    };
+    let reliable = pose.joints.iter().filter(|p| p[2] >= 0.32);
+    pose.joints
+        .iter()
+        .all(|p| p.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)))
+        && reliable.clone().all(|p| {
+            mask.iter()
+                .any(|r| p[0] >= r[0] && p[0] < r[2] && p[1] >= r[1] && p[1] < r[3])
+        })
+        && (reliable.count() >= 2 || pose.joints[5..11].iter().any(|p| p[2] >= 0.50))
+}
+
 fn proposals(players: &[Value]) -> Vec<(usize, [f64; 4], &'static str)> {
     players
         .iter()
@@ -399,12 +424,7 @@ pub(super) fn refine(
                     let boxes = group.iter().map(|(_, bbox, _)| *bbox).collect::<Vec<_>>();
                     let visibility = group
                         .iter()
-                        .map(|(player, _, _)| {
-                            serde_json::from_value::<Vec<[f64; 4]>>(
-                                players[*player]["visible_regions"].clone(),
-                            )
-                            .ok()
-                        })
+                        .map(|(player, _, _)| pose_visibility(&players[*player]))
                         .collect::<Vec<_>>();
                     let estimates = engine.infer_batch_original_visible(
                         pixels,
@@ -430,7 +450,7 @@ pub(super) fn refine(
                             [x, y, score]
                         });
                         let evidence = PoseEvidence { joints };
-                        if evidence.valid() && evidence.inside_crop(*bbox, 0.02) {
+                        if valid_attached_pose(&evidence, *bbox, visible.as_deref()) {
                             measured.push(json!({
                                 "track_id": players[*player]["track_id"],
                                 "box": bbox,
@@ -559,7 +579,11 @@ pub(super) fn attach(
                     let joints = serde_json::from_value(measured["keypoints"].clone())
                         .map_err(|e| e.to_string())?;
                     let pose = PoseEvidence { joints };
-                    if !pose.valid() || !pose.inside_crop(bbox, 0.02) {
+                    if !valid_attached_pose(
+                        &pose,
+                        bbox,
+                        pose_visibility(&players[index]).as_deref(),
+                    ) {
                         return Err("Invalid measured RTMPose evidence".into());
                     }
                     players[index]["pose"] = measured["keypoints"].clone();
@@ -593,6 +617,24 @@ pub(super) fn attach(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn masked_partial_arm_is_saved_without_inventing_other_joints() {
+        let mut joints = [[0.0; 3]; 17];
+        joints[9] = [0.45, 0.30, 0.75];
+        let evidence = super::PoseEvidence { joints };
+        let bbox = [0.4, 0.2, 0.5, 0.6];
+        assert!(!super::valid_attached_pose(&evidence, bbox, None));
+        assert!(super::valid_attached_pose(
+            &evidence,
+            bbox,
+            Some(&[[0.4, 0.2, 0.5, 0.35]])
+        ));
+        assert!(!super::valid_attached_pose(
+            &evidence,
+            bbox,
+            Some(&[[0.4, 0.4, 0.5, 0.6]])
+        ));
+    }
     #[test]
     fn occlusion_pose_proposals_use_full_geometry_only_for_visible_players() {
         let players = vec![
