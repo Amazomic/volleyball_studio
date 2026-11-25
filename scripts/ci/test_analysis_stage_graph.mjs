@@ -23,6 +23,7 @@ const run={status:"running",gpu_rally_mask:{merged:[[0,30],[90,130]]}};
 const entry={started_ms:1000,finished_ms:null,frames_processed:1450,frames_total:1450};
 assert.equal(format("players",entry,run,3662000,true,true),"1 450 / 1 450 кадров · 01:01:01");
 assert.equal(format("rallies",{started_ms:1000,finished_ms:3662000,duration_ms:3661000},run,4000000,true,false),"2 розыгрыша · 01:01:01");
+assert.equal(format("rallies",{duration_ms:2000,finished_ms:3000},{gpu_rally_count:2,gpu_rally_mask:{ground_detector:{calibrated:true,candidate_count:3}}},4000,true,false),"2 розыгрыша · 3 канд. пола · 00:00:02");
 assert.equal(format("rallies",null,{status:"complete",gpu_rally_mask:{merged:[]}},0,false,false),"—");
 assert.equal(format("video",{duration_ms:423000,finished_ms:500000},{status:"complete"},0,true,false),"Готово · 00:07:03");
 assert.equal(format("touches",null,null,0,false,false),"—");
@@ -59,28 +60,38 @@ const extract=(begin,end)=>{
 const definitions=extract("const pipelineStages=","const pipelineEdges=");
 const context=vm.createContext({});
 context.$=()=>({checked:false});
-vm.runInContext(definitions+"this.stages=pipelineStages;this.id=pipelineId;this.model=pipelineModelMeta;",context);
+vm.runInContext(definitions+"this.stages=pipelineStages;this.id=pipelineId;this.model=pipelineModelMeta;this.combine=combineRallyStages;",context);
 assert.equal(context.model("ball")[0],"VballNetV4c");
 assert.equal(context.model("ball_stabilizer")[0],"Ball Stabilizer");
 assert.equal(context.model("players")[0],"RF-DETR Medium");
 assert.equal(context.model("pose")[0],"RTMPose-M Body7");
 assert.equal(context.model("tracking")[1],"algorithm");
 assert.equal(context.model("touch_detector")[0],"Touch Detector");
-assert.equal(context.model("ground_detector")[0],"Ground Detector");
+assert.equal(context.model("ground_detector"),null);
+const legacyGround={id:"ground_detector",name:"Ground Detector",started_ms:1000,finished_ms:4000,duration_ms:3000};
+const legacyRally={id:"rallies",name:"Поиск розыгрышей",started_ms:4000,finished_ms:5000,duration_ms:1000};
+const historical=context.combine([legacyGround,legacyRally]);
+assert.equal(historical.length,1);
+assert.equal(historical[0].id,"rallies");
+assert.equal(historical[0].started_ms,1000);
+assert.equal(historical[0].duration_ms,4000);
+assert.equal(context.combine([legacyRally]).length,1);
+assert.equal(legacyRally.duration_ms,1000);
 assert.equal(context.model("touch_types")[1],"algorithm");
 assert.equal(context.model("rallies")[1],"algorithm");
 const labelContext=vm.createContext({window:{VolleyballUi:{translate:x=>x}},$:context.$});
 vm.runInContext(definitions+extract("const graphLabel=","const graphText=")+"this.label=graphLabel;",labelContext);
-for(const [id,name] of [["ball","VballNetV4c"],["ball_stabilizer","Ball Stabilizer"],["players","RF-DETR Medium"],["ground_detector","Ground Detector"],["touch_detector","Touch Detector"],["boxes","ByteTrack · BBox"],["tracking","ByteTrack · Track ID"],["touches","Touch Attribution"],["touch_types","Pose Geometry"],["rallies","Rally Detector"],["identity","ReID"]])assert.equal(labelContext.label(id),name,id);
+for(const [id,name] of [["ball","VballNetV4c"],["ball_stabilizer","Ball Stabilizer"],["players","RF-DETR Medium"],["touch_detector","Touch Detector"],["boxes","ByteTrack · BBox"],["tracking","ByteTrack · Track ID"],["touches","Touch Attribution"],["touch_types","Pose Geometry"],["rallies","Rally Detector"],["identity","ReID"]])assert.equal(labelContext.label(id),name,id);
 assert.equal(labelContext.label("players",{profile:{gpu:{person_detector:"rfdetr-large"}}}),"RF-DETR Large");
 assert.doesNotMatch(extract("const createPipelineGraph=","const updatePipelineGraph="),/analysis-flow-node-model/);
 assert.match(extract("const updatePipelineGraph=","const paintGraphEdges="),/node\.title=graphDescriptions\[id\]/);
 const stages=context.stages;
 const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
-assert.equal(stages.length,16);
+assert.equal(stages.length,15);
+assert.ok(!ids.includes("ground_detector"));
 assert.ok(ids.includes("publish")&&!ids.includes("material"));
-for(const [row,count] of [[1,7],[2,9]]){
+for(const [row,count] of [[1,6],[2,9]]){
   const nodes=stages.filter(item=>item[3]===row);
   assert.equal(nodes.length,count);
 }
@@ -135,7 +146,8 @@ const examples=[
   ["Проверка исходного видео","video"],
   ["GPU · VBallNet: траектория мяча и розыгрыши","ball"],
   ["Интерполяция траектории мяча · Ball Stabilizer","ball_stabilizer"],
-  ["Ground Detector","ground_detector"],
+  ["Ground Detector","rallies"],
+  ["Rally Detector","rallies"],
   ["Поиск розыгрышей","rallies"],
   ["GPU · RF-DETR + RTMPose: игровые интервалы","players"],
   ["GPU · RTMPose-M: позы игроков","pose"],
@@ -205,16 +217,17 @@ const dataLinks=vm.runInNewContext(extract("const pipelineEdges=","const graphSe
   +"({links:pipelineEdges,state:graphLinkState});");
 const actualInputs=target=>Array.from(dataLinks.links.filter(link=>link[1]===target),link=>link[0]).sort();
 assert.deepEqual(actualInputs("ball_stabilizer"),["ball"]);
-assert.deepEqual(actualInputs("rallies"),["ball_stabilizer","ground_detector"]);
+assert.deepEqual(actualInputs("rallies"),["ball_stabilizer"]);
 assert.deepEqual(actualInputs("fusion"),["ball","players"]);
 assert.deepEqual(actualInputs("boxes"),["fusion","rallies"]);
 assert.deepEqual(actualInputs("tracking"),["boxes","pose"]);
 assert.equal(dataLinks.state("no_pose",{profile:{gpu:{pose_enabled:false}}}),"available");
 assert.equal(dataLinks.state("no_pose",{gpu_jobs:{pose:"saved"}}),"disabled");
-assert.deepEqual(actualInputs("ground_detector"),["ball_stabilizer"]);
+assert.deepEqual(actualInputs("ground_detector"),[]);
+assert.equal(context.id({id:"ground_detector"}),"rallies");
 assert.equal(stages.find(item=>item[0]==="touch_detector")[3],2);
-assert.deepEqual(actualInputs("touch_detector"),["ball_stabilizer","ground_detector","rallies"]);
-assert.deepEqual(actualInputs("touches"),["ball_stabilizer","ground_detector","rallies","touch_detector","tracking"]);
+assert.deepEqual(actualInputs("touch_detector"),["ball_stabilizer","rallies"]);
+assert.deepEqual(actualInputs("touches"),["ball_stabilizer","rallies","touch_detector","tracking"]);
 assert.deepEqual(actualInputs("publish"),["rallies","touches","tracking"]);
 assert.deepEqual(actualInputs("identity"),["photos","publish","tracking","video"]);
 assert.equal(dataLinks.state("pose",null),"optional");

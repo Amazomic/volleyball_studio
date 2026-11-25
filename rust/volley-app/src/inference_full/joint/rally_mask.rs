@@ -1,9 +1,11 @@
 use super::super::RawDetection;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::AtomicBool;
 use volley_core::ball_interpolation::{
     stabilize_ball_motion, BallStabilizerSettings, ScoredBallSample, StabilizedBallMotion,
     BALL_STABILIZER_ALGORITHM_VERSION,
 };
+use volley_core::{court_geometry::CourtTransform, motion::GroundContact};
 
 #[derive(Debug, Serialize)]
 struct RallyBallStabilizer {
@@ -91,14 +93,25 @@ impl RallyMask {
         .map(|(mask, _)| mask)
     }
 
-    pub fn with_ball_stabilizer(
+    #[cfg(test)]
+    fn with_ball_stabilizer(
         samples: &[RawDetection],
         frames: u64,
         settings: PrimaryRallySettings,
         stabilizer_settings: BallStabilizerSettings,
-        on_stabilized: impl FnOnce(&StabilizedBallMotion, &[(u64, u64)]) -> Result<Vec<u64>, String>,
+        ground_frames: impl FnOnce(&StabilizedBallMotion, &[(u64, u64)]) -> Result<Vec<u64>, String>,
     ) -> Result<(Self, StabilizedBallMotion), String> {
-        settings.validate()?;
+        let trajectory = Self::stabilize(samples, frames, stabilizer_settings)?;
+        let mask =
+            Self::from_stabilized(&trajectory, settings, stabilizer_settings, ground_frames)?;
+        Ok((mask, trajectory))
+    }
+
+    pub(super) fn stabilize(
+        samples: &[RawDetection],
+        frames: u64,
+        stabilizer_settings: BallStabilizerSettings,
+    ) -> Result<StabilizedBallMotion, String> {
         let len = usize::try_from(frames).map_err(|_| "Rally mask frame count overflow")?;
         if len == 0 || len > 48 * 3600 * 30 {
             return Err("Rally mask video duration out of range".into());
@@ -139,7 +152,50 @@ impl RallyMask {
                 })
             })
             .collect::<Vec<_>>();
-        let trajectory = stabilize_ball_motion(&samples, len, stabilizer_settings)?;
+        Ok(stabilize_ball_motion(&samples, len, stabilizer_settings)?)
+    }
+
+    pub(super) fn detect(
+        trajectory: &StabilizedBallMotion,
+        settings: PrimaryRallySettings,
+        stabilizer_settings: BallStabilizerSettings,
+        court: Option<&CourtTransform>,
+        dimensions: (u32, u32),
+        cancelled: &AtomicBool,
+    ) -> Result<(Self, Vec<GroundContact>), String> {
+        let mut contacts = Vec::new();
+        let mask = Self::from_stabilized(
+            trajectory,
+            settings,
+            stabilizer_settings,
+            |motion, intervals| {
+                if court.is_some() {
+                    let breaks =
+                        crate::cpu_touches::trajectory_breaks(motion, dimensions, cancelled)?;
+                    contacts = crate::cpu_touches::ground_stage::candidates(
+                        motion,
+                        &breaks,
+                        intervals,
+                        court,
+                        dimensions.0,
+                        dimensions.1,
+                        cancelled,
+                    )?;
+                }
+                Ok(contacts.iter().map(|contact| contact.frame).collect())
+            },
+        )?;
+        Ok((mask, contacts))
+    }
+
+    fn from_stabilized(
+        trajectory: &StabilizedBallMotion,
+        settings: PrimaryRallySettings,
+        stabilizer_settings: BallStabilizerSettings,
+        ground_candidates: impl FnOnce(&StabilizedBallMotion, &[(u64, u64)]) -> Result<Vec<u64>, String>,
+    ) -> Result<Self, String> {
+        settings.validate()?;
+        let frames = trajectory.points.len() as u64;
         let observed_ball_frames = trajectory.observed_frames;
         let mut points = trajectory.points.clone();
         let motion = crate::cpu_retrack::ball_track::analyze_moving_ball(
@@ -148,7 +204,7 @@ impl RallyMask {
             settings.merge_gap_seconds,
             settings.stationary_ball_ms,
         )?;
-        let mut ground_frames = on_stabilized(&trajectory, &motion.merged)?;
+        let mut ground_frames = ground_candidates(trajectory, &motion.merged)?;
         ground_frames.sort_unstable();
         ground_frames.dedup();
         let detected = motion.detected;
@@ -235,31 +291,28 @@ impl RallyMask {
         if fallback_reason.is_some() {
             selected.clear();
         }
-        Ok((
-            Self {
-                schema: "volley-primary-rally-mask/1",
-                source_frame_count: frames,
-                min_trajectory_seconds: settings.min_trajectory_seconds,
-                merge_gap_seconds: settings.merge_gap_seconds,
-                min_rally_seconds: crate::cpu_retrack::ball_track::MIN_RALLY_FRAMES as f64 / 30.0,
-                stationary_ball_ms: settings.stationary_ball_ms,
-                stationary_intervals: motion.stationary,
-                unobserved_intervals: motion.unobserved,
-                movement_filter_version: "stationary_ball_min_rally_5s_v3",
-                context_seconds: CONTEXT_FRAMES as f64 / 30.0,
-                observed_ball_frames,
-                ball_stabilizer: RallyBallStabilizer {
-                    algorithm: BALL_STABILIZER_ALGORITHM_VERSION,
-                    settings: stabilizer_settings,
-                },
-                detected,
-                merged,
-                selected,
-                uncertain,
-                fallback_reason,
+        Ok(Self {
+            schema: "volley-primary-rally-mask/1",
+            source_frame_count: frames,
+            min_trajectory_seconds: settings.min_trajectory_seconds,
+            merge_gap_seconds: settings.merge_gap_seconds,
+            min_rally_seconds: crate::cpu_retrack::ball_track::MIN_RALLY_FRAMES as f64 / 30.0,
+            stationary_ball_ms: settings.stationary_ball_ms,
+            stationary_intervals: motion.stationary,
+            unobserved_intervals: motion.unobserved,
+            movement_filter_version: "stationary_ball_min_rally_5s_v3",
+            context_seconds: CONTEXT_FRAMES as f64 / 30.0,
+            observed_ball_frames,
+            ball_stabilizer: RallyBallStabilizer {
+                algorithm: BALL_STABILIZER_ALGORITHM_VERSION,
+                settings: stabilizer_settings,
             },
-            trajectory,
-        ))
+            detected,
+            merged,
+            selected,
+            uncertain,
+            fallback_reason,
+        })
     }
 
     pub fn includes(&self, frame: u64) -> bool {
@@ -302,6 +355,44 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn rally_detector_owns_ground_detection_and_preserves_movement_without_court() {
+        let samples = moving_samples(80, 330);
+        let settings = PrimaryRallySettings::default();
+        let stabilizer = BallStabilizerSettings::default();
+        let trajectory = RallyMask::stabilize(&samples, 900, stabilizer).unwrap();
+        let baseline = RallyMask::from_ball_samples(&samples, 900, settings).unwrap();
+        let cancel = AtomicBool::new(false);
+        let (mask, contacts) = RallyMask::detect(
+            &trajectory,
+            settings,
+            stabilizer,
+            None,
+            (1920, 1080),
+            &cancel,
+        )
+        .unwrap();
+        assert!(contacts.is_empty());
+        assert_eq!(
+            serde_json::to_value(mask).unwrap(),
+            serde_json::to_value(baseline).unwrap()
+        );
+        let court = CourtTransform::new([[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]]).unwrap();
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            RallyMask::detect(
+                &trajectory,
+                settings,
+                stabilizer,
+                Some(&court),
+                (1920, 1080),
+                &cancelled
+            )
+            .unwrap_err(),
+            "cancelled"
+        );
     }
 
     #[test]

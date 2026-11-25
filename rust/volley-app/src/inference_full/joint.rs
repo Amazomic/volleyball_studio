@@ -466,8 +466,6 @@ pub(crate) fn run_joint_pair(
             total_frames,
             None,
         )?;
-        let mut trajectory_sha = String::new();
-        let mut ground_summary = Value::Null;
         let court = crate::video_edits::court_snapshot(state, project_id, video)
             .map_err(|e| format!("{e:?}"))?;
         let dimension = |key: &str| {
@@ -478,50 +476,34 @@ pub(crate) fn run_joint_pair(
                 .ok_or("Invalid Ground Detector dimensions")
         };
         let dimensions = (dimension("width")?, dimension("height")?);
-        let (mask, trajectory) = RallyMask::with_ball_stabilizer(
+        let trajectory = RallyMask::stabilize(
             ball_writer.ball_samples.as_deref().unwrap_or(&[]),
             ball_scan.decode.decoded_frames,
+            stabilizer_settings,
+        )?;
+        let trajectory_sha =
+            crate::cpu_touches::write_ball_trajectory(&ball.folder, &trajectory, cancelled)?;
+        report(
+            0.3999995,
+            ball_scan.decode.decoded_frames,
+            total_frames,
+            None,
+        )?;
+        let (mask, contacts) = RallyMask::detect(
+            &trajectory,
             rally_settings,
             stabilizer_settings,
-            |motion, preliminary_intervals| {
-                trajectory_sha =
-                    crate::cpu_touches::write_ball_trajectory(&ball.folder, motion, cancelled)?;
-                report(
-                    0.39999925,
-                    ball_scan.decode.decoded_frames,
-                    total_frames,
-                    None,
-                )?;
-                let breaks = if court.as_ref().and_then(|c| c.transform.as_ref()).is_some() {
-                    crate::cpu_touches::trajectory_breaks(motion, dimensions, cancelled)?
-                } else {
-                    Vec::new()
-                };
-                let contacts = crate::cpu_touches::ground_stage::candidates(
-                    motion,
-                    &breaks,
-                    preliminary_intervals,
-                    court.as_ref().and_then(|c| c.transform.as_ref()),
-                    dimensions.0,
-                    dimensions.1,
-                    cancelled,
-                )?;
-                ground_summary = crate::cpu_touches::ground_stage::publish(
-                    &ball.folder,
-                    &contacts,
-                    &trajectory_sha,
-                    dimensions,
-                    motion.points.len() as u64,
-                    court.as_ref(),
-                )?;
-                report(
-                    0.3999995,
-                    ball_scan.decode.decoded_frames,
-                    total_frames,
-                    None,
-                )?;
-                Ok(contacts.iter().map(|contact| contact.frame).collect())
-            },
+            court.as_ref().and_then(|c| c.transform.as_ref()),
+            dimensions,
+            cancelled,
+        )?;
+        let ground_summary = crate::cpu_touches::ground_stage::publish(
+            &ball.folder,
+            &contacts,
+            &trajectory_sha,
+            dimensions,
+            trajectory.points.len() as u64,
+            court.as_ref(),
         )?;
         if let Some(reason) = mask.fallback_reason {
             return Err(format!(

@@ -253,9 +253,9 @@ historical A/B measurements above remain valid experimental records.
 
 ## Ground boundary and phase separation (2026-11-25)
 
-The primary path is VBallNet → Ball Stabilizer → Ground Detector → Rally Detector.
-Rally Detector consumes the stabilized trajectory and the ordered ground-contact
-candidates saved in the primary ball job. Before finalizing the boundaries, Ground
+The primary path is VBallNet → Ball Stabilizer → Rally Detector (including Ground Detector).
+Rally Detector consumes the stabilized trajectory and internally computes the ground-contact
+candidates saved in the primary ball job. It exposes one stage and one duration. Before finalizing the boundaries, Ground
 Detector uses the provisional movement-only intervals: in-court rebounds qualify
 only within the last 45 frames; earlier line/OUT events require an observed contact.
 The original ground classifier is unchanged. The first qualifying contact within a moving-ball

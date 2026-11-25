@@ -778,8 +778,11 @@ fn pipeline_stage_id(name: &str) -> &'static str {
         "video"
     } else if name.contains("Ball Stabilizer") || name == "ball_stabilizer" {
         "ball_stabilizer"
-    } else if name == "Ground Detector" || name == "ground_detector" {
-        "ground_detector"
+    } else if matches!(
+        name,
+        "Ground Detector" | "ground_detector" | "Rally Detector"
+    ) {
+        "rallies"
     } else if name == "Touch Detector" {
         "touch_detector"
     } else if name.contains("Поиск розыгрышей") {
@@ -2064,10 +2067,8 @@ async fn pipeline(
                             }
                             let label = if fraction == 0.399999 && rally_mask.is_none() {
                                 "ball_stabilizer"
-                            } else if fraction == 0.39999925 && rally_mask.is_none() {
-                                "Ground Detector"
                             } else if fraction == 0.3999995 && rally_mask.is_none() {
-                                "Поиск розыгрышей"
+                                "Rally Detector"
                             } else if fraction < 0.4 {
                                 "GPU · VBallNet: траектория мяча и розыгрыши"
                             } else {
@@ -3333,7 +3334,8 @@ mod tests {
             pipeline_stage_id("Интерполяция траектории мяча · Ball Stabilizer"),
             "ball_stabilizer"
         );
-        assert_eq!(pipeline_stage_id("Ground Detector"), "ground_detector");
+        assert_eq!(pipeline_stage_id("Ground Detector"), "rallies");
+        assert_eq!(pipeline_stage_id("Rally Detector"), "rallies");
         assert_eq!(pipeline_stage_id("Поиск розыгрышей"), "rallies");
         assert_eq!(
             pipeline_stage_id("GPU · RF-DETR + RTMPose: игровые интервалы"),

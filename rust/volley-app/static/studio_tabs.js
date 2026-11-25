@@ -441,7 +441,6 @@
     ["video","Подготовка видео","input",1],
     ["ball","Детекция мяча","gpu",1],
     ["ball_stabilizer","ball_stabilizer","cpu",1],
-    ["ground_detector","Ground Detector","cpu",1],
     ["rallies","Розыгрыши","cpu",1],
     ["players","Поиск игроков","gpu",1],
     ["fusion","Данные GPU","output",1],
@@ -466,7 +465,6 @@
       pose:["RTMPose-M Body7","model"],
       boxes:["ByteTrack · BBox","algorithm"],
       tracking:["ByteTrack · Track ID","algorithm"],
-      ground_detector:["Ground Detector","algorithm"],
       touch_detector:["Touch Detector","algorithm"],
       rallies:["Rally Detector","algorithm"],
       touches:["Touch Attribution","algorithm"],
@@ -509,11 +507,12 @@
     return svg;
   };
   const pipelineId=entry=>{
+    if(entry?.id==="ground_detector")return "rallies";
     if(entry?.id&&pipelineNames.has(entry.id))return entry.id;
     const name=String(typeof entry==="string"?entry:entry?.name||"");
     if(/Проверка исходного видео|Подготовка исходного видео/.test(name))return "video";
     if(/ball_stabilizer|Ball Stabilizer|Интерполяция траектории мяча/.test(name))return "ball_stabilizer";
-    if(name==="Ground Detector"||name==="ground_detector")return "ground_detector";
+    if(name==="Ground Detector"||name==="ground_detector"||name==="Rally Detector")return "rallies";
     if(name==="Touch Detector")return "touch_detector";
     if(/Поиск розыгрышей/.test(name))return "rallies";
     if(/Связывание рамок игроков/.test(name))return "boxes";
@@ -529,6 +528,20 @@
     if(/Монтажная временная разметка/.test(name))return "material";
     if(/сохранённые версии|Сохранённый GPU-анализ|сохранённый GPU-анализ/.test(name))return "cache";
     return "";
+  };
+  const combineRallyStages=stages=>{
+    const result=[];
+    for(const item of stages){
+      const prev=result.at(-1);
+      const wasGround=prev&&(prev.id==="ground_detector"||["Ground Detector","ground_detector"].includes(prev.name));
+      if(wasGround&&pipelineId(item)==="rallies"&&prev.finished_ms!=null){
+        result[result.length-1]={...item,id:"rallies",
+          started_ms:prev.started_ms??item.started_ms,
+          duration_ms:Number.isFinite(prev.duration_ms)&&Number.isFinite(item.duration_ms)?
+            prev.duration_ms+item.duration_ms:item.duration_ms};
+      }else result.push(item);
+    }
+    return result;
   };
   const pipelineLabel=entry=>window.VolleyballUi.translate(pipelineNames.get(pipelineId(entry))||String(entry?.name||"Стадия"));
   const stageTime=ms=>{
@@ -584,10 +597,7 @@
       return "В составе касаний · "+stageTime(duration);
     }
     let result="";
-    if(id==="ground_detector"&&Number.isSafeInteger(run?.ground_detector?.candidate_count??run?.gpu_rally_mask?.ground_detector?.candidate_count)){
-      const ground=run.ground_detector||run.gpu_rally_mask.ground_detector;
-      result=ground.calibrated?String(ground.scoped_candidate_count??ground.candidate_count)+" кандидатов пола":"Нет разметки площадки";
-    }else if(id==="ball_stabilizer"&&entry&&run?.ball_stabilizer){
+    if(id==="ball_stabilizer"&&entry&&run?.ball_stabilizer){
       const stats=run.ball_stabilizer;
       result="−"+stats.rejected_frames+" / +"+stats.interpolated_frames+" точек";
     }else if(id==="rallies"&&entry&&Number.isSafeInteger(run?.gpu_rally_count??run?.gpu_rally_mask?.merged?.length)){
@@ -595,6 +605,9 @@
       const noun=count%10===1&&count%100!==11?"розыгрыш":
         count%10>=2&&count%10<=4&&(count%100<12||count%100>14)?"розыгрыша":"розыгрышей";
       result=count.toLocaleString("ru-RU")+" "+noun;
+      const ground=run?.gpu_rally_mask?.ground_detector;
+      if(Number.isSafeInteger(ground?.candidate_count))
+        result+=ground.calibrated?" · "+ground.candidate_count.toLocaleString("ru-RU")+" канд. пола":" · Нет разметки площадки";
     }else if(entry&&Number.isSafeInteger(entry.frames_processed)&&entry.frames_processed>=0&&
         Number.isSafeInteger(entry.frames_total)&&entry.frames_total>0){
       result=entry.frames_processed.toLocaleString("ru-RU")+" / "+
@@ -632,12 +645,8 @@
     ["pose","tracking","pose"],
     ["boxes","tracking","no_pose"],
     ["ball_stabilizer","rallies"],
-    ["ball_stabilizer","ground_detector"],
-    ["ground_detector","rallies"],
     ["ball_stabilizer","touch_detector"],
     ["rallies","touch_detector"],
-    ["ground_detector","touches"],
-    ["ground_detector","touch_detector"],
     ["touch_detector","touches"],
     ["ball_stabilizer","touches"],
     ["tracking","touches"],
@@ -684,9 +693,8 @@
   const graphDescriptions={
     video:"Выбор видео, интервалов анализа и разметки площадки.",
     ball:"VBallNetV4c работает с фиксированным окном из 9 кадров. Детекции мяча поступают в ball_stabilizer.",
-    ground_detector:"После стабилизации траектории ищет отскоки и остановки мяча у поверхности площадки. Сохраняет координаты и зону, отдельно от касаний игроков. Позы уточняют спорные события позднее.",
     ball_stabilizer:"Отбрасывает ложные точки и интерполирует короткие пропуски. Одна сохранённая траектория используется для поиска розыгрышей, касаний и предпросмотра.",
-    rallies:"Определяет игровые интервалы по стабилизированной траектории и событиям Ground Detector. Первое касание пола завершает розыгрыш.",
+    rallies:"Определяет предварительные интервалы по стабилизированной траектории. Внутренний Ground Detector проверяет касания пола и уточняет конец розыгрыша. Кандидаты пола передаются в Touch Detector.",
     players:"RF-DETR ищет игроков только внутри найденных игровых интервалов.",
     boxes:"ByteTrack связывает рамки детектора по движению в игровых интервалах, объединяет фрагменты одного трека и при включённой интерполяции восстанавливает пропуски между наблюдениями. Суставы на этой стадии не сравниваются.",
     pose:"RTMPose-M Body7 измеряет точки тела по стабилизированным рамкам в исходных кадрах. Измерения прикрепляются к стабильным Track ID без изменения рамок.",
@@ -970,21 +978,20 @@
   const updatePipelineGraph=(target,run)=>{
     target._graphRun=run;
     if(!target.querySelector(".analysis-flow-grid"))createPipelineGraph(target,run);
-    const stages=Array.isArray(run?.stages)?run.stages:[];
+    const stages=combineRallyStages(Array.isArray(run?.stages)?run.stages:[]);
     const seen=new Map();
     for(const item of stages){const id=pipelineId(item);if(id)seen.set(id,item);}
     const active=run&&["queued","running","cancelling"].includes(run.status);
-    const currentId=pipelineNames.has(run?.stage_id)?run.stage_id:pipelineId(run?.stage);
+    const currentId=pipelineId({id:run?.stage_id,name:run?.stage});
     const cached=run?.gpu_reused===true;
     const complete=run?.status==="complete";
     const savedGpu={
       ball:run?.gpu_jobs?.ball,rallies:run?.gpu_rally_mask||Number.isSafeInteger(run?.gpu_rally_count),players:run?.gpu_jobs?.players,
-      ground_detector:run?.gpu_rally_mask?.ground_detector,ball_stabilizer:run?.gpu_rally_mask?.ball_stabilizer,
+      ball_stabilizer:run?.gpu_rally_mask?.ball_stabilizer,
       fusion:run?.analysis_id,pose:run?.gpu_jobs?.pose||(Number(run?.player_tracking_stats?.refined_poses)>0?run?.cpu_runs?.tracking:null)
     };
     const savedCpu={
       boxes:run?.cpu_runs?.tracking,tracking:run?.cpu_runs?.tracking,ball_stabilizer:run?.ball_stabilizer,
-      ground_detector:run?.ground_detector,
       touch_detector:run?.cpu_runs?.touches,touches:run?.cpu_runs?.touches,touch_types:run?.cpu_runs?.touches&&(run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0),
       publish:run?.cpu_runs?.rallies,identity:run?.automatic_identity||run?.automatic_identity_available
     };
@@ -1273,8 +1280,8 @@
   };
   const renderStageTimeline=(target,row,current)=>{
     clear(target);
-    const stages=(Array.isArray(current?.stages)&&current.stages.length)?
-      current.stages:(Array.isArray(row?.stages)?row.stages:[]);
+    const stages=combineRallyStages((Array.isArray(current?.stages)&&current.stages.length)?
+      current.stages:(Array.isArray(row?.stages)?row.stages:[]));
     if(!stages.length){
       target.append(make("span","analysis-history-no-stages",
         current?"Стадии появятся после запуска.":"Время стадий не записано."));

@@ -1986,7 +1986,7 @@ body[data-ui-theme="light"] .analysis-flow{--flow-shell:#f7f9fc;--flow-phase:#ed
 .analysis-flow-phase-label{margin:0;color:var(--flow-text);font-size:14px;font-weight:650;line-height:1.35}
 .analysis-flow-phase-summary{color:var(--flow-muted);font-size:12px;font-weight:550;font-variant-numeric:tabular-nums;white-space:nowrap}
 .analysis-flow-cards{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:32px 19px}
-.analysis-flow-phase[data-phase="gpu"] .analysis-flow-cards{grid-template-columns:repeat(7,minmax(0,1fr))}
+.analysis-flow-phase[data-phase="gpu"] .analysis-flow-cards{grid-template-columns:repeat(6,minmax(0,1fr))}
 @container (max-width:1070px){.analysis-flow-phase[data-phase] .analysis-flow-cards{grid-template-columns:repeat(4,minmax(0,1fr))}}
 @container (max-width:570px){.analysis-flow-phase[data-phase] .analysis-flow-cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @container (max-width:330px){.analysis-flow-phase[data-phase] .analysis-flow-cards{grid-template-columns:minmax(0,1fr)}}
