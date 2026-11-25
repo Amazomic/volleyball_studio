@@ -1,4 +1,101 @@
-use std::collections::VecDeque;
+use serde::Serialize;
+use std::{
+    collections::VecDeque,
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+#[derive(Default, Serialize)]
+pub(crate) struct BlockStage {
+    state: &'static str,
+    started_ms: Option<u64>,
+    finished_ms: Option<u64>,
+    frames_processed: u64,
+    frames_total: u64,
+    rallies_completed: u64,
+    rallies_total: u64,
+    sampled_frames: u64,
+    tracks: u64,
+}
+
+impl BlockStage {
+    fn begin(&mut self) {
+        self.started_ms.get_or_insert_with(epoch_ms);
+        self.state = "running";
+    }
+
+    fn complete_rally(&mut self) {
+        self.rallies_completed += 1;
+        if self.rallies_completed == self.rallies_total {
+            self.state = "complete";
+            self.finished_ms = Some(epoch_ms());
+        } else {
+            self.state = "waiting";
+        }
+    }
+}
+
+fn epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+#[derive(Default, Serialize)]
+pub(crate) struct RallyStageProgress {
+    boxes: BlockStage,
+    pose: BlockStage,
+    detector_finished_ms: Option<u64>,
+    detector_rallies_ready: u64,
+}
+
+impl RallyStageProgress {
+    pub(crate) fn initialize(&mut self, windows: &[RallyWindow]) {
+        let total = windows
+            .iter()
+            .map(|window| window.right - window.left + 1)
+            .sum();
+        for stage in [&mut self.boxes, &mut self.pose] {
+            stage.state = "waiting";
+            stage.rallies_total = windows.len() as u64;
+            stage.frames_total = total;
+        }
+    }
+    pub(crate) fn detector_finished(&mut self) {
+        self.detector_finished_ms = Some(epoch_ms());
+    }
+    pub(crate) fn boxes_started(&mut self) {
+        self.detector_rallies_ready += 1;
+        self.boxes.begin();
+    }
+    pub(crate) fn boxes_finished(&mut self, frames: u64, tracks: u64) {
+        self.boxes.frames_processed += frames;
+        self.boxes.tracks += tracks;
+        self.boxes.complete_rally();
+    }
+    pub(crate) fn pose_started(&mut self) {
+        self.pose.begin();
+    }
+    pub(crate) fn pose_frame(&mut self, sampled: bool) {
+        self.pose.frames_processed += 1;
+        self.pose.sampled_frames += u64::from(sampled);
+    }
+    pub(crate) fn pose_finished(&mut self) {
+        self.pose.complete_rally();
+    }
+}
+
+pub(crate) fn update_progress<T>(
+    progress: &Mutex<RallyStageProgress>,
+    update: impl FnOnce(&mut RallyStageProgress) -> T,
+) -> Result<T, String> {
+    let mut guard = progress
+        .lock()
+        .map_err(|_| "Rally progress lock poisoned".to_owned())?;
+    Ok(update(&mut guard))
+}
 
 const DETECTOR_WINDOW: u64 = 9;
 const MAX_RALLY_OBSERVATIONS: usize = 1_000_000;
@@ -231,4 +328,59 @@ mod tests {
         assert_eq!(ready[0].observations, vec![4, 8, 9, 17]);
         handoff.finish().unwrap();
     }
+}
+
+#[cfg(test)]
+#[test]
+fn concurrent_rally_progress_tracks_real_boundaries_and_pose_samples() {
+    let windows = [
+        RallyWindow {
+            left: 0,
+            right: 2,
+            start: 0,
+            end: 2,
+        },
+        RallyWindow {
+            left: 5,
+            right: 6,
+            start: 5,
+            end: 6,
+        },
+    ];
+    let mut progress = RallyStageProgress::default();
+    progress.initialize(&windows);
+    assert_eq!(progress.boxes.frames_total, 5);
+    assert_eq!(progress.pose.frames_total, 5);
+    assert_eq!(progress.boxes.state, "waiting");
+    progress.boxes_started();
+    assert_eq!(progress.boxes.state, "running");
+    assert!(progress.detector_finished_ms.is_none());
+    progress.boxes_finished(3, 6);
+    progress.pose_started();
+    progress.pose_frame(true);
+    progress.pose_frame(false);
+    assert_eq!(progress.pose.state, "running");
+    assert_eq!(progress.pose.frames_processed, 2);
+    assert_eq!(progress.pose.sampled_frames, 1);
+    assert_eq!(progress.boxes.rallies_completed, 1);
+    assert_eq!(progress.boxes.state, "waiting");
+    progress.detector_finished();
+    assert!(progress.detector_finished_ms.is_some());
+    assert_eq!(progress.pose.state, "running");
+    progress.pose_frame(true);
+    progress.pose_finished();
+    assert_eq!(progress.pose.state, "waiting");
+    progress.boxes_started();
+    progress.boxes_finished(2, 5);
+    assert_eq!(progress.boxes.state, "complete");
+    assert_eq!(progress.boxes.tracks, 11);
+    progress.pose_started();
+    progress.pose_frame(false);
+    progress.pose_frame(true);
+    progress.pose_finished();
+    assert_eq!(progress.pose.state, "complete");
+    assert_eq!(progress.pose.frames_processed, 5);
+    assert_eq!(progress.pose.sampled_frames, 3);
+    assert_eq!(progress.pose.rallies_completed, 2);
+    assert!(progress.pose.finished_ms.is_some());
 }

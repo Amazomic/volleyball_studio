@@ -54,7 +54,7 @@ const pipelineContext={
   saveMessage(){},stopPipelinePolling(){},announce(){},updateLiveHistory(){},
   updateProfile(){},loadLog:()=>Promise.resolve(),failure:err=>{throw err;}
 };
-runInNewContext(section(tabs,"  const displayPipeline=(status,notifyCompletion=false)=>{",
+runInNewContext(section(tabs,"  const concurrentStageLabel=status=>{","  const liveHistoryLine=status=>{")+section(tabs,"  const displayPipeline=(status,notifyCompletion=false)=>{",
   "  const pollPipeline=async()=>{")+"\nthis.displayPipeline=displayPipeline;",pipelineContext);
 const status={schema:"volley-studio-pipeline/1",status:"complete",
   id:"old-result",project_id:"project-1",progress_percent:100};

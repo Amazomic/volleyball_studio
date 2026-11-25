@@ -2,11 +2,11 @@ use super::*;
 use crate::cpu_retrack::{
     replay_frames_with_pose_options, FusedFrame, ReplayOptions, ReplayPhase, ReplayTotals,
 };
-use crate::rally_handoff::{CompletedRally, RallyWindow};
+use crate::rally_handoff::{update_progress, CompletedRally, RallyStageProgress, RallyWindow};
 use std::{
     fs::File,
     path::PathBuf,
-    sync::{mpsc, Arc},
+    sync::{mpsc, Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -41,6 +41,7 @@ pub(crate) struct EarlyPoseOptions {
     pub interpolate_players: bool,
     pub threads: usize,
     pub cancelled: Arc<AtomicBool>,
+    pub progress: Arc<Mutex<RallyStageProgress>>,
 }
 
 pub(crate) struct EarlyPoseWorker {
@@ -100,6 +101,12 @@ impl EarlyPoseWorker {
             },
             sender,
         ))
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.handle
+            .as_ref()
+            .is_none_or(thread::JoinHandle::is_finished)
     }
 
     pub(crate) fn finish(mut self) -> Result<CompletedRallies, String> {
@@ -368,7 +375,8 @@ fn run(
     let impacts = crate::cpu_touches::trajectory_breaks(&input.motion, input.dimensions, stop)?;
     let serve_points = initial_serve_pose_points(&input.motion, &input.rallies);
     let make_plan = |packet| {
-        build_local_plan(
+        update_progress(&input.options.progress, RallyStageProgress::boxes_started)?;
+        let plan = build_local_plan(
             packet,
             &input.options,
             stop,
@@ -376,7 +384,14 @@ fn run(
             &impacts,
             &serve_points,
             input.dimensions,
-        )
+        )?;
+        update_progress(&input.options.progress, |p| {
+            p.boxes_finished(
+                plan.window.right - plan.window.left + 1,
+                plan.totals.tentative_tracks,
+            );
+        })?;
+        Ok::<_, String>(plan)
     };
     let mut plan = Some(make_plan(
         receive(&receiver, stop, &input.options.cancelled)?.ok_or("Missing first rally packet")?,
@@ -418,6 +433,9 @@ fn run(
             }
             if index > active.window.right {
                 return Err("Rally windows out of order".into());
+            }
+            if index == active.window.left {
+                update_progress(&input.options.progress, RallyStageProgress::pose_started)?;
             }
             let mut row = read_crop_plan_row(
                 &mut active.reader,
@@ -472,6 +490,7 @@ fn run(
             rebase(&mut row, active.window.left, totals.tentative_tracks)?;
             write_row(&mut tracks, &mut track_hash, &row)?;
             write_row(&mut poses, &mut pose_hash, &pose)?;
+            update_progress(&input.options.progress, |p| p.pose_frame(!crops.is_empty()))?;
             if index == active.window.right {
                 let mut finished = plan.take().ok_or("Missing completed rally")?;
                 if finished.reader.line()?.is_some() || finished.reader.finish() != finished.digest
@@ -481,6 +500,7 @@ fn run(
                 windows.push(finished.window);
                 add_totals(&mut totals, &finished.totals);
                 track_count += finished.track_count;
+                update_progress(&input.options.progress, RallyStageProgress::pose_finished)?;
             }
             Ok(())
         },

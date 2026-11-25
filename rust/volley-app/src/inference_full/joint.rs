@@ -5,7 +5,9 @@ mod rally_mask;
 mod zero_copy;
 use crate::cpu_retrack::{CompletedRallies, EarlyPoseOptions, EarlyPoseWorker};
 use crate::pose_inference::{GpuPoseStage, PendingPose, PoseStream};
-use crate::rally_handoff::{rally_windows, RallyHandoff};
+use crate::rally_handoff::{
+    rally_windows, update_progress as update_rally_progress, RallyHandoff, RallyStageProgress,
+};
 pub(crate) use rally_mask::PrimaryRallySettings;
 use rally_mask::RallyMask;
 use std::cell::RefCell;
@@ -400,6 +402,7 @@ pub(crate) fn run_joint_pair(
     });
     let mut gpu_pose = None;
     let mut early_worker = None;
+    let early_progress = early_pose.as_ref().map(|options| options.progress.clone());
     let early_pose_error = None;
     let rally_filter;
     let player_target;
@@ -575,6 +578,7 @@ pub(crate) fn run_joint_pair(
                 if windows.is_empty() {
                     return Err("No confirmed rally work windows".into());
                 }
+                update_rally_progress(&options.progress, |p| p.initialize(&windows))?;
                 let handoff = RallyHandoff::new(windows, frames)?;
                 let (worker, sender) = EarlyPoseWorker::start(
                     options,
@@ -747,6 +751,17 @@ pub(crate) fn run_joint_pair(
     };
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
+    }
+    if let (Some(worker), Some(progress)) = (&early_worker, &early_progress) {
+        update_rally_progress(progress, RallyStageProgress::detector_finished)?;
+        report(1.0, player_target, player_target, None)?;
+        while !worker.is_finished() {
+            if cancelled.load(Ordering::Acquire) {
+                return Err("cancelled".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            report(1.0, player_target, player_target, None)?;
+        }
     }
     let early_poses = early_worker.map(EarlyPoseWorker::finish).transpose()?;
     if cancelled.load(Ordering::Acquire) {

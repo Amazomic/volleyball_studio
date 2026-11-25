@@ -386,6 +386,7 @@ fn history_rows(state: &AppState, project_id: &str, offset: usize) -> Result<Val
             "gpu_rally_count":status["gpu_rally_mask"]["merged"].as_array().map(Vec::len),
             "shared_pose":status["shared_pose"],
             "pose_frame_progress":status["pose_frame_progress"],
+            "rally_stage_progress":status["rally_stage_progress"],
             "player_tracking_stats":status["player_tracking_stats"],
             "ball_stabilizer":status["ball_stabilizer"],
             "completion_quality":status["completion_quality"],
@@ -2138,6 +2139,10 @@ async fn pipeline(
                     8.0,
                     Some((0, total)),
                 )?;
+                let rally_progress = Arc::new(std::sync::Mutex::new(
+                    crate::rally_handoff::RallyStageProgress::default(),
+                ));
+                let block_mode = rally_pipeline_enabled(request);
                 let result = tokio::task::block_in_place(|| {
                     inference_full::run_joint_pair(
                         app,
@@ -2155,14 +2160,22 @@ async fn pipeline(
                         request.gpu.cpu_threads,
                         request.gpu.primary_rallies,
                         request.post.ball_stabilizer,
-                        rally_pipeline_enabled(request).then(|| cpu_retrack::EarlyPoseOptions {
+                        block_mode.then(|| cpu_retrack::EarlyPoseOptions {
                             tracking: request.post.tracking,
                             interpolate_players: request.post.interpolate_players,
                             threads: request.gpu.cpu_threads,
                             cancelled: cancel.clone(),
+                            progress: rally_progress.clone(),
                         }),
                         cancel,
                         |fraction, processed, total, rally_mask| {
+                            if block_mode && fraction >= 0.4 {
+                                status["rally_stage_progress"] =
+                                    crate::rally_handoff::update_progress(&rally_progress, |p| {
+                                        serde_json::to_value(p)
+                                    })?
+                                    .map_err(|e| e.to_string())?;
+                            }
                             if let Some((mask, decoded_frames)) = rally_mask {
                                 publish_primary_rally_mask(path, status, mask, decoded_frames)?;
                             }

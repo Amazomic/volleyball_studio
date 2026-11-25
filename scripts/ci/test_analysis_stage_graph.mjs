@@ -19,6 +19,25 @@ assert.ok(metricsSource.startsWith("const stageTime="));
 const metricsContext=vm.createContext({});
 vm.runInContext(metricsSource+"this.format=stageResultText;",metricsContext);
 const format=metricsContext.format;
+const blockRun={status:"running",stage_id:"players",rally_stage_progress:{
+  boxes:{state:"complete",started_ms:1000,finished_ms:2000,frames_processed:100,frames_total:100,rallies_completed:2,rallies_total:2},
+  pose:{state:"running",started_ms:2000,finished_ms:null,frames_processed:40,frames_total:100,rallies_completed:1,rallies_total:2,sampled_frames:20},
+  detector_finished_ms:3000
+}};
+const blockContext=vm.createContext({});
+vm.runInContext(metricsSource+"this.block=rallyStageEntry;this.state=rallyStageState;this.history=rallyStageHistory;",blockContext);
+const detector=blockContext.block("players",{started_ms:500,frames_processed:100,frames_total:100},blockRun);
+assert.equal(detector.finished_ms,3000);
+assert.equal(detector.duration_ms,2500);
+assert.equal(blockContext.state("players",detector,blockRun),"complete");
+assert.equal(blockContext.state("boxes",blockContext.block("boxes",null,blockRun),blockRun),"complete");
+assert.equal(blockContext.state("pose",blockContext.block("pose",null,blockRun),blockRun),"running");
+const blockHistory=blockContext.history([{id:"players",started_ms:500},{id:"boxes",started_ms:5000}],blockRun);
+assert.equal(blockHistory.length,3);
+assert.equal(blockHistory[0].finished_ms,3000);
+assert.equal(blockHistory[1].started_ms,1000);
+assert.equal(blockHistory[2].started_ms,2000);
+assert.match(format("pose",blockRun.rally_stage_progress.pose,blockRun,4000,false,true),/20 кадров.*1\/2 розыгр\./);
 const run={status:"running",gpu_rally_mask:{merged:[[0,30],[90,130]]}};
 const entry={started_ms:1000,finished_ms:null,frames_processed:1450,frames_total:1450};
 assert.equal(format("players",entry,run,3662000,true,true),"1 450 / 1 450 кадров · 01:01:01");
