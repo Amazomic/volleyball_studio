@@ -86,7 +86,7 @@ impl RallyMask {
             frames,
             settings,
             BallStabilizerSettings::default(),
-            |_| Ok(()),
+            |_| Ok(Vec::new()),
         )
         .map(|(mask, _)| mask)
     }
@@ -96,7 +96,7 @@ impl RallyMask {
         frames: u64,
         settings: PrimaryRallySettings,
         stabilizer_settings: BallStabilizerSettings,
-        on_stabilized: impl FnOnce(&StabilizedBallMotion) -> Result<(), String>,
+        on_stabilized: impl FnOnce(&StabilizedBallMotion) -> Result<Vec<u64>, String>,
     ) -> Result<(Self, StabilizedBallMotion), String> {
         settings.validate()?;
         let len = usize::try_from(frames).map_err(|_| "Rally mask frame count overflow")?;
@@ -140,7 +140,9 @@ impl RallyMask {
             })
             .collect::<Vec<_>>();
         let trajectory = stabilize_ball_motion(&samples, len, stabilizer_settings)?;
-        on_stabilized(&trajectory)?;
+        let mut ground_frames = on_stabilized(&trajectory)?;
+        ground_frames.sort_unstable();
+        ground_frames.dedup();
         let observed_ball_frames = trajectory.observed_frames;
         let mut points = trajectory.points.clone();
         let motion = crate::cpu_retrack::ball_track::analyze_moving_ball(
@@ -150,7 +152,24 @@ impl RallyMask {
             settings.stationary_ball_ms,
         )?;
         let detected = motion.detected;
-        let merged = motion.merged;
+        let mut grounded_intervals = Vec::new();
+        for (mut start, end) in motion.merged {
+            loop {
+                let index = ground_frames.partition_point(|&frame| frame < start);
+                let Some(&ground) = ground_frames.get(index).filter(|&&frame| frame <= end) else {
+                    grounded_intervals.push((start, end));
+                    break;
+                };
+                grounded_intervals.push((start, ground));
+                let next = detected.partition_point(|&(left, _)| left <= ground);
+                let Some(&(next_start, _)) = detected.get(next).filter(|&&(left, _)| left <= end)
+                else {
+                    break;
+                };
+                start = next_start;
+            }
+        }
+        let merged = crate::cpu_retrack::ball_track::filter_short_rallies(grounded_intervals);
         for &(start, end) in &motion.stationary {
             points[start as usize..=end as usize].fill(None);
         }
@@ -283,6 +302,39 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn first_ground_contact_ends_rally_without_reopening_on_bounce() {
+        let mut samples = moving_samples(80, 330);
+        samples.extend(moving_samples(500, 710));
+        let (mask, _) = RallyMask::with_ball_stabilizer(
+            &samples,
+            900,
+            PrimaryRallySettings::default(),
+            BallStabilizerSettings::default(),
+            |_| Ok(vec![240, 255]),
+        )
+        .unwrap();
+        assert_eq!(mask.merged, vec![(80, 240), (500, 710)]);
+    }
+
+    #[test]
+    fn floor_contact_prevents_merging_distinct_flights_across_short_gap() {
+        let mut samples = moving_samples(80, 280);
+        samples.extend(moving_samples(315, 520));
+        let baseline =
+            RallyMask::from_ball_samples(&samples, 900, PrimaryRallySettings::default()).unwrap();
+        assert_eq!(baseline.merged.len(), 1);
+        let (mask, _) = RallyMask::with_ball_stabilizer(
+            &samples,
+            900,
+            PrimaryRallySettings::default(),
+            BallStabilizerSettings::default(),
+            |_| Ok(vec![255, 270]),
+        )
+        .unwrap();
+        assert_eq!(mask.merged, vec![(80, 255), (315, 520)]);
     }
 
     #[test]

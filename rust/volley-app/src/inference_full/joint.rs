@@ -466,7 +466,6 @@ pub(crate) fn run_joint_pair(
             total_frames,
             None,
         )?;
-        let mut touch_sha = String::new();
         let mut trajectory_sha = String::new();
         let mut ground_summary = Value::Null;
         let court = crate::video_edits::court_snapshot(state, project_id, video)
@@ -493,8 +492,11 @@ pub(crate) fn run_joint_pair(
                     total_frames,
                     None,
                 )?;
-                let breaks =
-                    crate::cpu_touches::primary_touch_breaks(motion, dimensions, cancelled)?;
+                let breaks = if court.as_ref().and_then(|c| c.transform.as_ref()).is_some() {
+                    crate::cpu_touches::trajectory_breaks(motion, dimensions, cancelled)?
+                } else {
+                    Vec::new()
+                };
                 let contacts = crate::cpu_touches::ground_stage::candidates(
                     motion,
                     &breaks,
@@ -517,13 +519,7 @@ pub(crate) fn run_joint_pair(
                     total_frames,
                     None,
                 )?;
-                touch_sha = crate::cpu_touches::write_primary_touch_breaks(
-                    &ball.folder,
-                    &breaks,
-                    dimensions,
-                    motion.points.len(),
-                )?;
-                Ok(())
+                Ok(contacts.iter().map(|contact| contact.frame).collect())
             },
         )?;
         if let Some(reason) = mask.fallback_reason {
@@ -536,7 +532,7 @@ pub(crate) fn run_joint_pair(
         let mut mask_value = serde_json::to_value(&mask)
             .map_err(|error| format!("Serialize primary rally mask: {error}"))?;
         mask_value["selected_frames"] = json!(selected_frames);
-        mask_value["touch_detector_sha256"] = json!(touch_sha);
+        mask_value["ground_boundary_version"] = json!("ground_ends_rally_v1");
         mask_value["ground_detector"] = ground_summary;
         mask_value["ball_stabilizer"]["trajectory_sha256"] = json!(trajectory_sha);
         mask_value["ball_stabilizer"]["confidence_frames"] = json!(trajectory.confidence_frames);

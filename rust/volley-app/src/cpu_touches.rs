@@ -428,7 +428,7 @@ fn read_canonical_ball_motion(
 const PRIMARY_TOUCH_BREAKS_FILE: &str = "touch_detector.json";
 const PRIMARY_TOUCH_BREAKS_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-pub(crate) fn primary_touch_breaks(
+pub(crate) fn trajectory_breaks(
     motion: &volley_core::ball_interpolation::StabilizedBallMotion,
     dimensions: (u32, u32),
     cancel: &AtomicBool,
@@ -437,7 +437,7 @@ pub(crate) fn primary_touch_breaks(
 
     let (width, height) = dimensions;
     if !(64..=16384).contains(&width) || !(64..=16384).contains(&height) {
-        return Err("Invalid primary Touch Detector video dimensions".into());
+        return Err("Invalid trajectory analysis video dimensions".into());
     }
     let mut breaks = Vec::new();
     for start in (0..motion.points.len()).step_by(CHUNK) {
@@ -466,25 +466,6 @@ pub(crate) fn primary_touch_breaks(
         );
     }
     Ok(breaks)
-}
-
-pub(crate) fn write_primary_touch_breaks(
-    folder: &Path,
-    breaks: &[volley_core::motion::TrajectoryBreak],
-    dimensions: (u32, u32),
-    frames: usize,
-) -> Result<String, String> {
-    let (width, height) = dimensions;
-    let file = folder.join(PRIMARY_TOUCH_BREAKS_FILE);
-    storage::write_json_atomic(
-        &file,
-        &json!({
-            "width":width,"height":height,"frames":frames,"breaks":breaks
-        }),
-    )
-    .map_err(|e| format!("Save Touch Detector output: {e:?}"))?;
-    let bytes = fs::read(&file).map_err(|e| e.to_string())?;
-    Ok(format!("{:x}", Sha256::digest(&bytes)))
 }
 
 fn read_primary_touch_breaks(

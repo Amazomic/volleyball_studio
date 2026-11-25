@@ -442,13 +442,13 @@
     ["ball","Детекция мяча","gpu",1],
     ["ball_stabilizer","ball_stabilizer","cpu",1],
     ["ground_detector","Ground Detector","cpu",1],
-    ["touch_detector","Touch Detector","cpu",1],
     ["rallies","Розыгрыши","cpu",1],
     ["players","Поиск игроков","gpu",1],
     ["fusion","Данные GPU","output",1],
     ["boxes","Стабилизация рамок","cpu",2],
     ["pose","Позы по стабилизированным рамкам","gpu",2],
     ["tracking","Трекинг ID","cpu",2],
+    ["touch_detector","Touch Detector","cpu",2],
     ["touches","Уточнение касаний","cpu",2],
     ["touch_types","Типы касаний","cpu",2],
     ["publish","Публикация розыгрышей","output",2],
@@ -633,6 +633,9 @@
     ["boxes","tracking","no_pose"],
     ["ball_stabilizer","rallies"],
     ["ball_stabilizer","ground_detector"],
+    ["ground_detector","rallies"],
+    ["ball_stabilizer","touch_detector"],
+    ["rallies","touch_detector"],
     ["ground_detector","touches"],
     ["ground_detector","touch_detector"],
     ["touch_detector","touches"],
@@ -683,13 +686,13 @@
     ball:"VBallNetV4c работает с фиксированным окном из 9 кадров. Детекции мяча поступают в ball_stabilizer.",
     ground_detector:"После стабилизации траектории ищет отскоки и остановки мяча у поверхности площадки. Сохраняет координаты и зону, отдельно от касаний игроков. Позы уточняют спорные события позднее.",
     ball_stabilizer:"Отбрасывает ложные точки и интерполирует короткие пропуски. Одна сохранённая траектория используется для поиска розыгрышей, касаний и предпросмотра.",
-    rallies:"Определяет игровые интервалы по стабилизированной траектории, учитывая длительность, остановки мяча и пропуски детекции.",
+    rallies:"Определяет игровые интервалы по стабилизированной траектории и событиям Ground Detector. Первое касание пола завершает розыгрыш.",
     players:"RF-DETR ищет игроков только внутри найденных игровых интервалов.",
     boxes:"ByteTrack связывает рамки детектора по движению в игровых интервалах, объединяет фрагменты одного трека и при включённой интерполяции восстанавливает пропуски между наблюдениями. Суставы на этой стадии не сравниваются.",
     pose:"RTMPose-M Body7 измеряет точки тела по стабилизированным рамкам в исходных кадрах. Измерения прикрепляются к стабильным Track ID без изменения рамок.",
     fusion:"Сохранение общей версии GPU-наблюдений и повторное использование кэша.",
     tracking:"Сохраняет устойчивые Track ID, определённые по движению рамок до RTMPose. При наличии измеренных поз прикрепляет их к готовым трекам, не меняя ID и рамки.",
-    touch_detector:"Определяет моменты касаний исключительно по траектории мяча.",
+    touch_detector:"Во второй фазе определяет моменты касаний игроков по стабилизированной траектории внутри розыгрышей, исключая события пола.",
     touches:"Уточняет контакт мяча с телом и привязывает найденное событие к Track ID, не изменяя его время.",
     touch_types:"RTMPose и геометрия тела уточняют тип уже найденного касания. Без достаточных признаков остаётся unknown_touch. Привязка Track ID к конкретному игроку выполняется отдельно, позднее.",
     publish:"Публикует границы первичных розыгрышей с результатом Touch Detector для выбранной версии CPU replay.",
@@ -976,13 +979,13 @@
     const complete=run?.status==="complete";
     const savedGpu={
       ball:run?.gpu_jobs?.ball,rallies:run?.gpu_rally_mask||Number.isSafeInteger(run?.gpu_rally_count),players:run?.gpu_jobs?.players,
-      ground_detector:run?.gpu_rally_mask?.ground_detector,
+      ground_detector:run?.gpu_rally_mask?.ground_detector,ball_stabilizer:run?.gpu_rally_mask?.ball_stabilizer,
       fusion:run?.analysis_id,pose:run?.gpu_jobs?.pose||(Number(run?.player_tracking_stats?.refined_poses)>0?run?.cpu_runs?.tracking:null)
     };
     const savedCpu={
       boxes:run?.cpu_runs?.tracking,tracking:run?.cpu_runs?.tracking,ball_stabilizer:run?.ball_stabilizer,
       ground_detector:run?.ground_detector,
-      touches:run?.cpu_runs?.touches,touch_types:run?.cpu_runs?.touches&&(run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0),
+      touch_detector:run?.cpu_runs?.touches,touches:run?.cpu_runs?.touches,touch_types:run?.cpu_runs?.touches&&(run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0),
       publish:run?.cpu_runs?.rallies,identity:run?.automatic_identity||run?.automatic_identity_available
     };
     for(const node of target.querySelectorAll(".analysis-flow-node")){

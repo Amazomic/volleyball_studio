@@ -250,3 +250,26 @@ historical A/B measurements above remain valid experimental records.
 - Remaining limits: long-match timing and independent event accuracy are
   not measured; FFmpeg RGB fallback is not yet GOP-sparse; uncommon codec
   timestamp layouts may require that safe fallback.
+
+## Ground boundary and phase separation (2026-11-25)
+
+The primary path is VBallNet → Ball Stabilizer → Ground Detector → Rally Detector.
+Rally Detector consumes the stabilized trajectory and the ordered ground-contact
+candidates saved in the primary ball job. The first contact within a moving-ball
+rally closes its unpadded interval at that frame. A rebound within the same
+continuous segment does not start a new rally. A subsequent independently
+detected moving segment is eligible for a separate interval; the existing
+five-second minimum and person-scan context padding are unchanged.
+
+Ground Detector and Touch Detector share the trajectory-break primitive, but
+primary analysis does not publish player-touch candidates or a Touch Detector
+artifact. Touch Detector runs in phase two on the stabilized replay scoped to
+the saved rally intervals; it reuses validated floor evidence where available.
+The primary mask records ground_boundary_version=ground_ends_rally_v1,
+Ground Detector version, court revision and the artifact checksum. A new primary
+run does not reuse a mask without this boundary version, or one derived from
+a different court revision. Older immutable masks remain readable for explicit
+postprocessing; their original boundaries are not rewritten. Without a valid
+court transform Ground Detector emits no floor candidates and movement-only
+boundaries are retained. Ground candidates remain heuristic, not manually
+confirmed events.

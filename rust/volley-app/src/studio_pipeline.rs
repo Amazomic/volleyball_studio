@@ -1099,9 +1099,10 @@ fn gpu_lineage_valid(
             != volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION
             || saved["gpu_rally_mask"]["ball_stabilizer"]["settings"]
                 != json!(request.post.ball_stabilizer)
-            || !saved["gpu_rally_mask"]["touch_detector_sha256"]
-                .as_str()
-                .is_some_and(volley_core::contracts::sha256)
+            || saved["gpu_rally_mask"]["ground_boundary_version"] != "ground_ends_rally_v1"
+            || saved["gpu_rally_mask"]["ground_detector"]["version"]
+                != volley_core::motion::GROUND_DETECTOR_VERSION
+            || !valid_sha(&saved["gpu_rally_mask"]["ground_detector"]["sha256"])
             || !saved["gpu_rally_mask"]["ball_stabilizer"]["trajectory_sha256"]
                 .as_str()
                 .is_some_and(volley_core::contracts::sha256))
@@ -1466,6 +1467,7 @@ fn find_reusable(
         if saved["id"] != id
             || !compatible_version(&saved, request, identity)
             || !(complete_gpu || recoverable_pose)
+            || saved["gpu_rally_mask"]["ground_detector"]["court_revision"] != json!(court_revision)
         {
             continue;
         }
@@ -2065,7 +2067,7 @@ async fn pipeline(
                             } else if fraction == 0.39999925 && rally_mask.is_none() {
                                 "Ground Detector"
                             } else if fraction == 0.3999995 && rally_mask.is_none() {
-                                "Touch Detector"
+                                "Поиск розыгрышей"
                             } else if fraction < 0.4 {
                                 "GPU · VBallNet: траектория мяча и розыгрыши"
                             } else {
@@ -2356,7 +2358,7 @@ async fn pipeline(
         settings: Some(request.post.touches),
         pose_classification: request.post.pose_classification,
     };
-    progress(path, status, "Ground Detector", 91.0)?;
+    progress(path, status, "Touch Detector", 91.0)?;
     let ground = tokio::task::block_in_place(|| {
         cpu_touches::ground_stage::prepare(app, &touch_request, &stabilized, &primary, cancel)
     })?;
@@ -2367,10 +2369,11 @@ async fn pipeline(
     save(path, status)?;
     log_event(
         path,
-        "Ground Detector",
+        "Touch Detector",
         "success",
         &format!(
-            "Кандидаты пола: {}",
+            "Изломы траектории: {}; кандидаты пола в розыгрышах: {}",
+            ground.breaks.len(),
             ground.summary["scoped_candidate_count"]
         ),
     )?;
@@ -4325,7 +4328,8 @@ mod branching_tests {
                 "stationary_ball_ms":request.gpu.primary_rallies.stationary_ball_ms,
                 "movement_filter_version":"stationary_ball_min_rally_5s_v3",
                 "min_rally_seconds":5.0,
-                "touch_detector_sha256":sha,
+                "ground_boundary_version":"ground_ends_rally_v1",
+                "ground_detector":{"version":volley_core::motion::GROUND_DETECTOR_VERSION,"sha256":sha},
                 "ball_stabilizer":{
                     "algorithm":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
                     "trajectory_sha256":sha,

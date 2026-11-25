@@ -150,7 +150,7 @@ pub(crate) fn prepare(
     let primary_breaks_reused = saved_breaks.is_some();
     let mut breaks = match saved_breaks {
         Some(breaks) => breaks,
-        None => primary_touch_breaks(&stabilized.motion, dimensions, cancel)?,
+        None => trajectory_breaks(&stabilized.motion, dimensions, cancel)?,
     };
     breaks.retain(|impact| {
         impact.frame >= 0
