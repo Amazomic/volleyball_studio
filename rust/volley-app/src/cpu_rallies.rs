@@ -952,7 +952,16 @@ fn publish_primary_from_touches(
             &sides,
             roster,
             &observed,
-            first_floor.map(|event| (event.frame_index, event.outcome)),
+            first_floor.map(|event| {
+                (
+                    event.frame_index,
+                    volley_core::rally_score::scoring_landing(
+                        event.outcome,
+                        event.position,
+                        side_source.and_then(|(_, _, snapshot)| snapshot.transform.as_ref()),
+                    ),
+                )
+            }),
             offset_sec,
         );
         write_proposal(
@@ -1422,6 +1431,7 @@ fn process_inner(
             "montage_ready":false,
             "cpu_processing_complete":false,
         });
+        manifest["rally_score_version"] = json!(volley_core::rally_score::RALLY_SCORE_VERSION);
         record_preliminary_scope(&mut manifest, &contacts, preliminary_intervals.is_some());
         if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
             return Err("cancelled".into());
