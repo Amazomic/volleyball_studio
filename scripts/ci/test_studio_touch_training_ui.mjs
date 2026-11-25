@@ -34,7 +34,9 @@ assert.ok(scanner.includes("reconstruction.processed_frames += 1"));
 assert.ok(scanner.includes("reader.finish() != expected_sha"));
 assert.ok(typesRust.includes("scan_collision_trajectory(&state, &run, &intervals, req.impact)"));
 assert.match(server,/\/api\/training\/trajectory\/types"[\s\S]{0,100}touch_annotation::types::calculate/);
-assert.ok(typesRust.includes("observed_pose_motion")&&typesRust.includes("refine_with_motion"));
+const poseMotion=read("rust/volley-core/src/touch_pipeline/pose_motion.rs");
+assert.ok(typesRust.includes("refine_observed_pose_motion(&poses, frame, id, &evidence, &geometry)"));
+assert.match(poseMotion,/pub fn refine_observed_pose_motion\([\s\S]*?observed_pose_motion_offset\(poses, frame, track_id, 4\)[\s\S]*?refine_waist_rise[\s\S]*?observed_pose_motion\(poses, frame, track_id\)[\s\S]*?refine_with_motion/);
 assert.ok(typesRust.includes("expected != req.frames"),"Types must never invent a second touch detector");
 assert.ok(rust.includes("saved_manual_timing_calibrates_recalculation"));
 assert.ok(scanner.includes("reader.finish() != expected_sha")&&

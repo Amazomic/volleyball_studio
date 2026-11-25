@@ -14,7 +14,7 @@ pub use ball_continuity::{
 pub use player_gap::reconstruct as reconstruct_track_gaps;
 pub use pose_motion::{
     evaluate_pose_block, observed_pose_motion, pose_contact_at_frame,
-    pose_contact_from_nearby_sample, PoseFrame, PosePlayer,
+    pose_contact_from_nearby_sample, refine_observed_pose_motion, PoseFrame, PosePlayer,
 };
 pub use trajectory_tcn::{evaluate_tcn_peaks, trajectory_features};
 

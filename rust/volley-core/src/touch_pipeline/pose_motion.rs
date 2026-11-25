@@ -37,22 +37,49 @@ pub fn observed_pose_motion(
     frame: u64,
     track_id: u64,
 ) -> Option<PoseMotionSamples> {
+    observed_pose_motion_offset(poses, frame, track_id, 1)
+}
+
+fn observed_pose_motion_offset(
+    poses: &[PoseFrame],
+    frame: u64,
+    track_id: u64,
+    offset: u64,
+) -> Option<PoseMotionSamples> {
     let position = poses.partition_point(|item| item.frame_index < frame);
     let before = poses[..position]
         .iter()
         .rev()
         .take_while(|item| frame - item.frame_index <= 9)
+        .filter(|item| frame - item.frame_index >= offset)
         .flat_map(|item| &item.players)
         .find(|player| player.track_id == track_id && !player.interpolated)?;
     let after = poses[position..]
         .iter()
         .take_while(|item| item.frame_index <= frame.saturating_add(9))
-        .filter(|item| item.frame_index > frame)
+        .filter(|item| item.frame_index >= frame.saturating_add(offset))
         .flat_map(|item| &item.players)
         .find(|player| player.track_id == track_id && !player.interpolated)?;
     Some((before.keypoints, after.keypoints))
 }
 
+pub fn refine_observed_pose_motion(
+    poses: &[PoseFrame],
+    frame: u64,
+    track_id: u64,
+    evidence: &PoseEvidence,
+    geometry: &crate::action_prediction::ActionPrediction,
+) -> Option<crate::action_prediction::ActionPrediction> {
+    if let Some((before, after)) = observed_pose_motion_offset(poses, frame, track_id, 4) {
+        if let Some(prediction) =
+            pose_classification::refine_waist_rise(evidence, geometry, &before, &after)
+        {
+            return Some(prediction);
+        }
+    }
+    let (before, after) = observed_pose_motion(poses, frame, track_id)?;
+    pose_classification::refine_with_motion(evidence, geometry, &before, &after)
+}
 /// One rebound may create several nearby gravity-compensated motion peaks.
 /// For the same Track ID, only the strongest physical discontinuity survives
 /// the longer (up to 0.4s) impact window, not the strongest neural Touch score.
@@ -711,8 +738,13 @@ pub fn evaluate_pose_block(
                 })
             })
             .and_then(|geometry| {
-                let (before, after) = observed_pose_motion(poses, frame.frame_index, track_id)?;
-                pose_classification::refine_with_motion(&evidence, &geometry, &before, &after)
+                refine_observed_pose_motion(
+                    poses,
+                    frame.frame_index,
+                    track_id,
+                    &evidence,
+                    &geometry,
+                )
             });
         result.push(PhysicalTouchCandidate {
             frame_index: frame.frame_index,
@@ -843,8 +875,7 @@ pub fn evaluate_pose_block(
             })
             .and_then(|geometry| {
                 let evidence = witness.as_ref()?;
-                let (before, after) = observed_pose_motion(poses, frame.frame_index, track_id)?;
-                pose_classification::refine_with_motion(evidence, &geometry, &before, &after)
+                refine_observed_pose_motion(poses, frame.frame_index, track_id, evidence, &geometry)
             });
         result.push(PhysicalTouchCandidate {
             frame_index: frame.frame_index,

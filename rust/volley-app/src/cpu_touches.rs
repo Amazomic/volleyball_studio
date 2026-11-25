@@ -32,11 +32,10 @@ use volley_core::touch_pipeline::evaluate_block;
 use volley_core::{
     court_geometry::CourtTransform,
     fusion::Candidate,
-    pose_classification,
     touch_pipeline::{
         attach_touch_source_evidence, detect_ball_trajectory_touches, exclude_ball_teleports,
-        observed_pose_motion, pose_contact_at_frame, pose_contact_from_nearby_sample,
-        reconstruct_track_gaps, PhysicalTouchCandidate, PoseFrame, PosePlayer, TouchAlgorithm,
+        pose_contact_at_frame, pose_contact_from_nearby_sample, reconstruct_track_gaps,
+        refine_observed_pose_motion, PhysicalTouchCandidate, PoseFrame, PosePlayer, TouchAlgorithm,
         TouchBall, TouchFrame, TouchPlayer, TouchSettings,
     },
 };
@@ -1963,9 +1962,13 @@ fn refine_pose_events_policy(
             .then_some(event.action_prediction.as_ref())
             .flatten()
             .and_then(|geometry| {
-                let (before, after) =
-                    observed_pose_motion(&poses, event.frame_index, selected_track)?;
-                pose_classification::refine_with_motion(&evidence, geometry, &before, &after)
+                refine_observed_pose_motion(
+                    &poses,
+                    event.frame_index,
+                    selected_track,
+                    &evidence,
+                    geometry,
+                )
             });
     }
     if settings.require_pose {
@@ -2423,15 +2426,6 @@ fn detect_stream_with_pose(
                             else {
                                 continue;
                             };
-                            let Some((before, after)) =
-                                volley_core::touch_pipeline::observed_pose_motion(
-                                    &poses,
-                                    event.frame_index,
-                                    id,
-                                )
-                            else {
-                                continue;
-                            };
                             let evidence = volley_core::pose_classification::PoseEvidence {
                                 keypoints: pose.keypoints,
                                 ball_x_norm: event.ball_x_px / f64::from(width),
@@ -2440,11 +2434,13 @@ fn detect_stream_with_pose(
                                 video_height: f64::from(height),
                                 player_bbox_norm: player.bbox_xyxy_norm,
                             };
-                            if let Some(prediction) =
-                                volley_core::pose_classification::refine_with_motion(
-                                    &evidence, geometry, &before, &after,
-                                )
-                            {
+                            if let Some(prediction) = refine_observed_pose_motion(
+                                &poses,
+                                event.frame_index,
+                                id,
+                                &evidence,
+                                geometry,
+                            ) {
                                 event.action_prediction = Some(prediction);
                             }
                         }

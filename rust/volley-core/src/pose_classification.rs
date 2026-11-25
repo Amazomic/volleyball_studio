@@ -3,7 +3,7 @@
 //! No serving or blocking verdict without verified rally/court context.
 use crate::action_prediction::{ActionKind, ActionPrediction, PredictionMethod};
 
-pub const ACTION_PREDICTION_POLICY_VERSION: &str = "pose_keypoints_motion_v5_or_unknown_touch";
+pub const ACTION_PREDICTION_POLICY_VERSION: &str = "pose_keypoints_motion_v6_or_unknown_touch";
 
 #[derive(Clone, Copy, Debug)]
 pub struct PoseEvidence {
@@ -198,6 +198,83 @@ pub fn refine(e: &PoseEvidence, geometry: &ActionPrediction) -> Option<ActionPre
     prediction.valid().then_some(prediction)
 }
 
+pub(crate) fn refine_waist_rise(
+    e: &PoseEvidence,
+    geometry: &ActionPrediction,
+    before: &[[f64; 3]; 17],
+    after: &[[f64; 3]; 17],
+) -> Option<ActionPrediction> {
+    if !geometry.valid()
+        || matches!(geometry.kind, ActionKind::Serve | ActionKind::Block)
+        || ![e.video_width, e.video_height, e.ball_x_norm, e.ball_y_norm]
+            .iter()
+            .all(|v| v.is_finite())
+        || e.video_width < 64.0
+        || e.video_height < 64.0
+        || !(0.0..=1.0).contains(&e.ball_x_norm)
+        || !(0.0..=1.0).contains(&e.ball_y_norm)
+    {
+        return None;
+    }
+    let [x1, y1, x2, y2] = e.player_bbox_norm;
+    let height = (y2 - y1) * e.video_height;
+    if ![x1, y1, x2, y2].iter().all(|v| (0.0..=1.0).contains(v)) || x1 >= x2 || height < 26.0 {
+        return None;
+    }
+    let start = PoseEvidence {
+        keypoints: *before,
+        ..*e
+    };
+    let end = PoseEvidence {
+        keypoints: *after,
+        ..*e
+    };
+    let ball = [
+        e.ball_x_norm * e.video_width,
+        e.ball_y_norm * e.video_height,
+    ];
+    let extended = |pose: &PoseEvidence, shoulder, elbow, wrist| {
+        let s = pixel(pose, shoulder)?;
+        let el = pixel(pose, elbow)?;
+        let w = pixel(pose, wrist)?;
+        let upper = distance(s, el);
+        let lower = distance(el, w);
+        let length = upper + lower;
+        (upper >= height * 0.05
+            && lower >= height * 0.05
+            && length >= height * 0.16
+            && distance(s, w) >= length * 0.94)
+            .then_some((s, el, w))
+    };
+    let support = [(5, 7, 9, 11), (6, 8, 10, 12)]
+        .into_iter()
+        .filter_map(|(shoulder, elbow, wrist, hip)| {
+            let (s0, _, w0) = extended(&start, shoulder, elbow, wrist)?;
+            let (s, el, w) = extended(e, shoulder, elbow, wrist)?;
+            let (s1, _, w1) = extended(&end, shoulder, elbow, wrist)?;
+            let h0 = pixel(&start, hip)?;
+            let a = (w0[1] - s0[1]) / height;
+            let b = (w[1] - s[1]) / height;
+            let c = (w1[1] - s1[1]) / height;
+            let proximity = segment_distance(ball, el, w) / height;
+            (a >= 0.16
+                && (w0[1] - h0[1]).abs() <= height * 0.12
+                && (-0.12..=0.35).contains(&b)
+                && (-0.20..=0.12).contains(&c)
+                && a - b >= 0.035
+                && b - c >= 0.035
+                && a - c >= 0.18
+                && proximity <= 0.24)
+                .then_some(e.keypoints[wrist][2] * (1.0 - proximity / 0.6))
+        })
+        .max_by(f64::total_cmp)?;
+    Some(ActionPrediction {
+        kind: ActionKind::Dig,
+        method: PredictionMethod::PoseKeypointsMotionV1,
+        evidence_score: (geometry.evidence_score * support).clamp(0.0, 1.0),
+        ..geometry.clone()
+    })
+}
 #[must_use]
 pub fn refine_with_motion(
     e: &PoseEvidence,
@@ -205,6 +282,9 @@ pub fn refine_with_motion(
     before: &[[f64; 3]; 17],
     after: &[[f64; 3]; 17],
 ) -> Option<ActionPrediction> {
+    if let Some(prediction) = refine_waist_rise(e, geometry, before, after) {
+        return Some(prediction);
+    }
     let prediction = refine(e, geometry)?;
     let height = (e.player_bbox_norm[3] - e.player_bbox_norm[1]) * e.video_height;
     if !height.is_finite() || height < 26.0 {
@@ -505,6 +585,74 @@ mod tests {
                 .unwrap()
                 .kind,
             ActionKind::Attack
+        );
+    }
+
+    #[test]
+    fn waist_to_shoulder_extended_receive_is_dig_even_with_one_reliable_arm() {
+        let mut e = data();
+        e.player_bbox_norm = [0.30, 0.20, 0.70, 0.80];
+        e.keypoints[5] = [0.49, 0.35, 0.8];
+        e.keypoints[6] = [0.55, 0.35, 0.8];
+        e.keypoints[8] = [0.51, 0.39, 0.8];
+        e.keypoints[10] = [0.47, 0.43, 0.8];
+        e.keypoints[7][2] = 0.1;
+        e.keypoints[9][2] = 0.1;
+        e.keypoints[12] = [0.55, 0.54, 0.8];
+        e.ball_x_norm = 0.47;
+        e.ball_y_norm = 0.33;
+        let mut before = e.keypoints;
+        before[8] = [0.53, 0.45, 0.8];
+        before[10] = [0.51, 0.54, 0.8];
+        let mut after = e.keypoints;
+        after[8] = [0.50, 0.34, 0.8];
+        after[10] = [0.45, 0.33, 0.8];
+        assert_eq!(
+            refine_with_motion(&e, &geom(), &before, &after).map(|p| p.kind),
+            Some(ActionKind::Dig)
+        );
+        assert_ne!(
+            refine_with_motion(&e, &geom(), &after, &before).map(|p| p.kind),
+            Some(ActionKind::Dig)
+        );
+        use crate::touch_pipeline::{refine_observed_pose_motion, PoseFrame, PosePlayer};
+        let row = |frame_index, keypoints, track_id, interpolated| PoseFrame {
+            frame_index,
+            players: vec![PosePlayer {
+                track_id,
+                keypoints,
+                interpolated,
+            }],
+        };
+        let poses = [
+            row(6, before, 3, false),
+            row(9, e.keypoints, 3, false),
+            row(10, e.keypoints, 3, false),
+            row(11, e.keypoints, 3, false),
+            row(14, after, 3, false),
+        ];
+        assert_eq!(
+            refine_observed_pose_motion(&poses, 10, 3, &e, &geom()).map(|p| p.kind),
+            Some(ActionKind::Dig)
+        );
+        let mut wrong_track = poses.clone();
+        wrong_track[0].players[0].track_id = 4;
+        assert_ne!(
+            refine_observed_pose_motion(&wrong_track, 10, 3, &e, &geom()).map(|p| p.kind),
+            Some(ActionKind::Dig)
+        );
+        let mut synthetic = poses;
+        synthetic[4].players[0].interpolated = true;
+        assert_ne!(
+            refine_observed_pose_motion(&synthetic, 10, 3, &e, &geom()).map(|p| p.kind),
+            Some(ActionKind::Dig)
+        );
+
+        let mut bent = e;
+        bent.keypoints[8] = [0.55, 0.33, 0.8];
+        assert_ne!(
+            refine_with_motion(&bent, &geom(), &before, &after).map(|p| p.kind),
+            Some(ActionKind::Dig)
         );
     }
 

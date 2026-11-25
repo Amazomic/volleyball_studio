@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use volley_core::{
     action_prediction::{self, CourtContext, PositionEvidence},
     pose_classification::{self, PoseEvidence},
-    touch_pipeline::{observed_pose_motion, PoseFrame, PosePlayer},
+    touch_pipeline::{refine_observed_pose_motion, PoseFrame, PosePlayer},
 };
 
 #[derive(Deserialize)]
@@ -166,11 +166,7 @@ fn classify(
             context: CourtContext::Unavailable,
         });
         let Some(geometry) = geometry else { continue };
-        let Some((before, after)) = observed_pose_motion(&poses, frame, id) else {
-            continue;
-        };
-        let Some(predicted) =
-            pose_classification::refine_with_motion(&evidence, &geometry, &before, &after)
+        let Some(predicted) = refine_observed_pose_motion(&poses, frame, id, &evidence, &geometry)
         else {
             continue;
         };
