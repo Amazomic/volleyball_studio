@@ -346,7 +346,7 @@
   const overlay = {
     canvas:$("studio-video-overlay"),status:$("studio-overlay-status"),
     rallies:$("studio-overlay-rallies"),touches:$("studio-overlay-touches"),
-    trajectory:$("studio-overlay-trajectory"),players:$("studio-overlay-players"),torso:$("studio-overlay-torso"),
+    trajectory:$("studio-overlay-trajectory"),players:$("studio-overlay-players"),
     pose:$("studio-overlay-pose"),court:$("studio-overlay-court"),
     mode:$("studio-overlay-processed"),rawMode:$("studio-overlay-raw"),
     stabilizerMode:$("studio-debug-stabilizer-compare"),
@@ -360,7 +360,7 @@
     actionFlags:{unknown_touch:true,attack:true,block:true,serve:true,overhead_pass:true,dig:true},
     source:null,cache:new Map(),rawFrames:new Map(),rawDetectors:new Map(),rawOffsets:new Map(),presentedTime:null,
     fetching:new Set(),controllers:new Map(),failed:new Map(),loop:0,
-    flags:{rallies:true,touches:true,trajectory:true,players:true,torso:false,pose:true,court:true}
+    flags:{rallies:true,touches:true,trajectory:true,players:true,pose:true,court:true}
   };
   try {
     const current=localStorage.getItem("volley:preview-overlays:v2");
@@ -371,7 +371,7 @@
           overlay.flags[k]=saved[k];
   }catch{}
   const updateOverlayToggles=()=>{
-    for(const key of ["rallies","touches","trajectory","players","torso","pose","court"]){
+    for(const key of ["rallies","touches","trajectory","players","pose","court"]){
       const button=overlay[key];
       button.setAttribute("aria-pressed",String(overlay.flags[key]));
     }
@@ -800,7 +800,7 @@
     if(!ui.video.paused&&typeof ui.video.requestVideoFrameCallback==="function"&&
        !Number.isFinite(overlay.presentedTime))return;
     if(!overlay.raw&&!overlay.flags.touches&&!overlay.flags.trajectory&&!overlay.flags.players&&
-       !overlay.flags.torso&&!overlay.flags.pose&&!showBallCandidates())return;
+       !overlay.flags.pose&&!showBallCandidates())return;
     // HTMLVideoElement.currentTime can advance before a frame is decoded.
     // requestVideoFrameCallback.mediaTime is the actual frame on screen.
     const shown=Number.isFinite(overlay.presentedTime)?
@@ -1073,24 +1073,6 @@
         ctx.fillStyle="#f1f8ff";ctx.fillText(name,px+5,py+rh+1,tw-10);
       }
     }
-    if(overlay.flags.torso&&current?.in_rally){
-      ctx.save();
-      ctx.font="bold 11px Inter, sans-serif";
-      ctx.textBaseline="middle";
-      for(const torso of current.torso_points||[]){
-        const [px,py]=point(torso.point);
-        ctx.beginPath();ctx.arc(px,py,4,0,2*Math.PI);
-        const inferred=torso.interpolated||torso.predicted;
-        ctx.fillStyle="#ffda77";
-        ctx.lineWidth=1.5;ctx.strokeStyle=inferred?"#ffda77":"#15202b";
-        if(!inferred)ctx.fill();
-        ctx.stroke();
-        const id=String(torso.track_id);
-        ctx.strokeStyle="#15202b";ctx.lineWidth=3;ctx.strokeText(id,px+7,py);
-        ctx.fillText(id,px+7,py);
-      }
-      ctx.restore();
-    }
     if(current&&Array.isArray(displayedBall(current))&&overlay.flags.trajectory){
       const [px,py]=point(displayedBall(current));
       ctx.save();
@@ -1143,7 +1125,7 @@
       drawOverlay();
     });
   }
-  for(const key of ["rallies","touches","trajectory","players","torso","pose","court"]){
+  for(const key of ["rallies","touches","trajectory","players","pose","court"]){
     overlay[key].addEventListener("click",()=>{
       overlay.flags[key]=!overlay.flags[key];
       overlay.actionControls.classList.toggle("hidden",overlay.raw||!overlay.flags.touches);

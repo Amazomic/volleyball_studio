@@ -11,16 +11,28 @@ const part=(start,end)=>{
   return js.slice(from,to);
 };
 
+assert.doesNotMatch(html,/id="studio-overlay-torso"/);
+assert.doesNotMatch(js,/overlay\.flags\.torso|current\.torso_points|studio-overlay-torso/);
+const savedOverlayContext={
+  $:()=>({setAttribute(){},classList:{toggle(){}}}),
+  localStorage:{getItem:()=>JSON.stringify({torso:true,players:false,pose:true})}
+};
+runInNewContext(part("  const overlay = {","  const overlayMessage=")+
+  "\nthis.flags=overlay.flags;",savedOverlayContext);
+assert.equal(savedOverlayContext.flags.torso,undefined,"Legacy saved torso toggle must be ignored");
+assert.equal(savedOverlayContext.flags.players,false,"Existing box preference is preserved");
+assert.equal(savedOverlayContext.flags.pose,true,"Existing pose preference is preserved");
+
 const actionMarkup=html.match(/<fieldset id="studio-overlay-actions"[\s\S]*?<\/fieldset>/)?.[0]??"";
 assert.equal((actionMarkup.match(/data-overlay-action=/g)||[]).length,6);
 assert.match(css,/\.video-overlay-actions\{[^}]*justify-content:flex-start;[^}]*align-self:flex-start/);
 
-const buttons=Object.fromEntries(["rallies","touches","trajectory","players","torso","pose","court"]
+const buttons=Object.fromEntries(["rallies","touches","trajectory","players","pose","court"]
   .map(key=>[key,{setAttribute(){}}]));
 let filterHidden=false;
 const overlay={
   ...buttons,raw:false,
-  flags:{rallies:true,touches:true,trajectory:true,players:true,torso:false,pose:true,court:true},
+  flags:{rallies:true,touches:true,trajectory:true,players:true,pose:true,court:true},
   actionControls:{classList:{toggle(_name,hidden){filterHidden=hidden;}}}
 };
 const toggleCtx={overlay};
