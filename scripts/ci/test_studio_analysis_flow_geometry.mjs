@@ -28,7 +28,7 @@ const route=vm.runInNewContext(flow.slice(start,end)+"graphRoutes;");
 const definition=(begin,end)=>flow.slice(flow.indexOf(begin),flow.indexOf(end,flow.indexOf(begin)));
 const stages=vm.runInNewContext(definition("const pipelineStages=","const pipelineNames=")+"pipelineStages;");
 const links=vm.runInNewContext(definition("const pipelineEdges=","const graphLinkState=")+"pipelineEdges;");
-for(const columns of [7,3,2,1]){
+for(const columns of [8,7,4,3,2,1]){
   const width=columns*140+64;
   const boxes=new Map();
   let top=66;

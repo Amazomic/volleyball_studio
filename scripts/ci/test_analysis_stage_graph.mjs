@@ -38,9 +38,17 @@ assert.equal(format("pose",null,{gpu_jobs:{pose:"pose-run"},stages:[{id:"players
   "С RF-DETR · 00:00:36");
 assert.equal(format("pose",null,{gpu_jobs:{pose:"pose-run"},stages:[]},0,true,false),
   "Позы сохранены · время не измерено");
+assert.match(css,/\.analysis-flow-node\{[^}]*background:var\(--flow-card\)/);
 for(const kind of ["input","gpu","cpu","mixed","output"]){
-  assert.match(css,new RegExp('\\.analysis-flow-node\\[data-kind="'+kind+'"\\]\\{background:linear-gradient\\('));
+  assert.match(css,new RegExp('\\.analysis-flow-node\\[data-kind="'+kind+'"\\]\\s+\\.analysis-flow-node-icon\\{color:'));
+  assert.doesNotMatch(css,new RegExp('\\.analysis-flow-node\\[data-kind="'+kind+'"\\]\\{[^}]*background:'));
 }
+assert.match(css,/\.analysis-flow-node\.is-complete\{[^}]*border-color:var\(--flow-complete\)/);
+assert.match(css,/\.analysis-flow-node\.is-active\{[^}]*border-color:var\(--flow-active\)/);
+assert.match(css,/body\[data-ui-theme="light"\] \.analysis-flow\{/);
+assert.match(html,/class="analysis-flow-legend"/);
+assert.ok(html.indexOf('id="analysis-flow-result"')<html.indexOf('id="analysis-flow-diagram"'));
+assert.match(js,/analysis-flow-phase-summary/);
 assert.match(js,/edge\.classList\.toggle\("is-active",!!running\)/);
 
 const extract=(begin,end)=>{
@@ -182,6 +190,17 @@ assert.match(js,/primary_rallies:\{\s*min_trajectory_seconds:/);
 assert.match(js,/merge_gap_seconds:inputValue\("studio-gpu-rally-merge-seconds"\)/);
 assert.match(js,/stationary_ball_ms:inputValue\("studio-gpu-rally-stationary-ms"\)/);
 
+const summarizePhase=vm.runInNewContext(extract("const graphPhaseSummary=","const createPipelineGraph=")+"graphPhaseSummary;");
+const phaseNode=(stageId,...classes)=>({dataset:{stageId},classList:{contains:name=>classes.includes(name)}});
+const phaseSummary=summarizePhase([
+  phaseNode("video","is-complete"),phaseNode("ball","is-reused"),
+  phaseNode("pose","is-skipped"),phaseNode("photos"),
+  phaseNode("touches","is-active"),phaseNode("tracking","is-complete","is-failed"),
+  phaseNode("publish"),phaseNode("identity","is-complete","is-active")
+]);
+assert.equal(phaseSummary.ready,2);
+assert.equal(phaseSummary.total,6);
+assert.equal(summarizePhase([]).total,0);
 const dataLinks=vm.runInNewContext(extract("const pipelineEdges=","const graphSettings=")
   +"({links:pipelineEdges,state:graphLinkState});");
 const actualInputs=target=>Array.from(dataLinks.links.filter(link=>link[1]===target),link=>link[0]).sort();

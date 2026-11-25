@@ -903,6 +903,16 @@
     return element;
   };
   let graphId=0;
+  const graphPhaseSummary=nodes=>{
+    let ready=0,total=0;
+    for(const node of nodes){
+      if(node.dataset.stageId==="photos"||node.classList.contains("is-skipped"))continue;
+      total++;
+      if(!node.classList.contains("is-failed")&&!node.classList.contains("is-active")&&
+        (node.classList.contains("is-complete")||node.classList.contains("is-reused")))ready++;
+    }
+    return {ready,total};
+  };
   const createPipelineGraph=(target,run)=>{
     clear(target);
     const grid=make("div","analysis-flow-grid");
@@ -916,7 +926,10 @@
       const title=make("h3","analysis-flow-phase-label");
       graphText(title,label);
       const cards=make("div","analysis-flow-cards");
-      panel.append(title,cards);
+      const header=make("div","analysis-flow-phase-header");
+      const summary=make("span","analysis-flow-phase-summary");
+      header.append(title,summary);
+      panel.append(header,cards);
       phases.set(row,cards);
       grid.append(panel);
     }
@@ -1025,6 +1038,12 @@
       node.title+=
         (entry?.frames_total?" · "+(entry.frames_processed||0)+"/"+entry.frames_total+" кадров":"")+
         (running?" · выполняется":done?" · завершено":reused?" · из кэша":"");
+    }
+    for(const panel of target.querySelectorAll(".analysis-flow-phase")){
+      const summary=panel.querySelector(".analysis-flow-phase-summary");
+      const {ready,total}=graphPhaseSummary(panel.querySelectorAll(".analysis-flow-node"));
+      const text=window.VolleyballUi.translate("Готово")+" "+ready+" / "+total;
+      if(summary.textContent!==text)summary.textContent=text;
     }
     for(const option of target._graphFocusSelect?.options||[]){
       if(option.value){
