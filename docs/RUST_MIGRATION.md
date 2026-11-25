@@ -4206,3 +4206,9 @@ Studio показывает кнопку перехода между debug и re
 
 - База c75cb577. Владелец studio.css; CSS Grid второй фазы направлен справа налево, содержимое карточек сохраняет LTR. Порядок выполнения и зависимости неизменны: публикация предшествует ReID. Первая фаза не изменена.
 - RED: test_studio_analysis_flow_geometry.mjs (отсутствует RTL, exit 1). GREEN: геометрия стрелок на шести ширинах, граф стадий и DOM. scripts/check-all.ps1 PASS: fmt, clippy, 968 Rust tests, 22 ignored, 110 Node gates. GPU/media parity и ручная визуальная проверка NOT TESTED. Развёртывание штатной очередью после публикации.
+
+
+## 2026-11-25 — Сохранение GPU-данных не является стадией графа
+
+- База fb68735b. Владелец studio_tabs.js/studio.css: исключён блок fusion из графа, первая фаза содержит семь карточек, прямые связи с ByteTrack BBox и переход к Track ID сохраняют зависимости. Сохранение данных, кэш, исторические записи и серверный pipeline неизменны. Вторая фаза сохраняет RTL.
+- RED: test_analysis_stage_graph.mjs (13 вместо 12 блоков, exit 1). GREEN: граф, геометрия, DOM, Edge headless (7 карточек LTR и 5 RTL). scripts/check-all.ps1 PASS: fmt, clippy, 968 Rust tests, 22 ignored, 110 Node gates. GPU/media parity и ручная проверка реального проекта NOT TESTED. Развёртывание штатной очередью после публикации.
