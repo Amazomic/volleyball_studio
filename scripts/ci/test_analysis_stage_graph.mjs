@@ -56,7 +56,7 @@ assert.equal(format("rallies",{started_ms:1000,finished_ms:3662000,duration_ms:3
 assert.equal(format("rallies",{duration_ms:2000,finished_ms:3000},{gpu_rally_count:2,gpu_rally_mask:{ground_detector:{calibrated:true,candidate_count:3}}},4000,true,false),"2 розыгрыша · 00:00:02");
 assert.equal(format("rallies",{duration_ms:2000,finished_ms:3000},{gpu_rally_count:2,gpu_rally_mask:{ground_detector:{calibrated:false,candidate_count:3}}},4000,true,false),"2 розыгрыша · 00:00:02");
 assert.equal(format("rallies",null,{status:"complete",gpu_rally_mask:{merged:[]}},0,false,false),"—");
-assert.equal(format("video",{duration_ms:423000,finished_ms:500000},{status:"complete"},0,true,false),"Готово · 00:07:03");
+assert.equal(format("video",{duration_ms:423000,finished_ms:500000},{status:"complete"},0,true,false),"00:07:03");
 assert.equal(format("touches",null,null,0,false,false),"—");
 assert.equal(format("pose",{started_ms:1000,frames_processed:30,frames_total:120},run,3000,false,true),"30 / 120 кадров · 00:00:02");
 assert.equal(format("pose",{duration_ms:4000,finished_ms:5000,frames_processed:120,frames_total:120},run,5000,true,false),"120 / 120 кадров · 00:00:04");
@@ -135,7 +135,7 @@ vm.runInContext(definitions+extract("const graphLabel=","const graphText=")+"thi
 for(const [id,name] of [["ball","VballNetV4c"],["ball_stabilizer","Ball Stabilizer"],["players","RF-DETR Medium"],["touch_detector","Touch Detector"],["boxes","ByteTrack · BBox"],["tracking","ByteTrack · Track ID"],["touches","Touch Attribution"],["rallies","Rally Detector"],["identity","ReID"]])assert.equal(labelContext.label(id),name,id);
 assert.equal(labelContext.label("players",{profile:{gpu:{person_detector:"rfdetr-large"}}}),"RF-DETR Large");
 assert.doesNotMatch(extract("const createPipelineGraph=","const updatePipelineGraph="),/analysis-flow-node-model/);
-assert.match(extract("const updatePipelineGraph=","const paintGraphEdges="),/node\.title=graphDescriptions\[id\]/);
+assert.match(extract("const updatePipelineGraph=","const paintGraphEdges="),/node\.title=graphHoverDescriptions\[id\]/);
 const stages=context.stages;
 const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
@@ -342,22 +342,36 @@ vm.runInContext(definitions+extract("const pipelineEdges=","const graphSettings=
   extract("const graphLabel=",'$("analysis-flow-feedback")')+
   'updatePipelineGraph(graph,{status:"complete",gpu_jobs:{pose:"saved"},stages:[{id:"ball",finished_ms:2000}]});',stageContext);
 assert.equal(ballCard.classList["is-complete"],true);
-assert.match(ballCard.title,/фиксированным окном из 9 кадров/);
+assert.equal(ballCard.title,"Находит мяч на кадрах видео.");
+assert.equal(ballCard.dataset.status,"complete");
+assert.equal(poseCard.dataset.status,"complete");
 assert.equal(poseCard.classList["is-complete"],true);
 ballCard.classList.toggle("is-linked-focus",true);
 vm.runInContext('updatePipelineGraph(graph,{status:"running",stage_id:"pose",stages:[{id:"ball",finished_ms:2000},{id:"pose",started_ms:2000}]});',stageContext);
 assert.equal(ballCard.classList["is-active"],false);
 assert.equal(ballCard.classList["is-complete"],true);
 assert.equal(poseCard.classList["is-active"],true);
+assert.equal(poseCard.dataset.status,"running");
+assert.equal(ballCard.title,"Находит мяч на кадрах видео.");
 vm.runInContext('updatePipelineGraph(graph,{status:"running",stage_id:"touches",profile:{gpu:{pose_enabled:false}},stages:[{id:"touch_detector",finished_ms:1000},{id:"touches",started_ms:1000}]});',stageContext);
 assert.equal(touchCard.classList["is-active"],true);
 assert.equal(touchCard.classList["is-skipped"],false);
 vm.runInContext('updatePipelineGraph(graph,{status:"complete",profile:{gpu:{pose_enabled:false}},stages:[{id:"touches",finished_ms:3000}]});',stageContext);
 assert.equal(detectorCard.classList["is-skipped"],true);
+assert.equal(detectorCard.dataset.status,"idle");
 assert.equal(touchCard.classList["is-complete"],true);
 assert.equal(touchCard.classList["is-skipped"],false);
 vm.runInContext('updatePipelineGraph(graph,{status:"complete",gpu_reused:true,primary_tracking:{pose_ready:true,pose_sampling:{version:"touch_guided_pose_sampling_v1"}}});',stageContext);
 assert.equal(detectorCard.classList["is-reused"],true);
+assert.equal(detectorCard.dataset.status,"complete");
+vm.runInContext('updatePipelineGraph(graph,{status:"failed",stage_id:"ball",stages:[{id:"ball",finished_ms:3000}]});',stageContext);
+assert.equal(ballCard.dataset.status,"failed");
+assert.equal(poseCard.dataset.status,"idle");
+assert.match(js,/analysis-flow-node-device/);
+assert.match(js,/identity:"GPU\/CPU"/);
+assert.match(js,/analysis-flow-node-status/);
+assert.match(css,/data-status="complete"/);
+assert.match(css,/data-status="failed"/);
 const historyProjection=rust.slice(rust.indexOf('rows.push(json!({"id":id'),rust.indexOf("    rows.sort_by"));
 for(const key of ["gpu_jobs","cpu_runs","analysis_id","profile","gpu_rally_count","automatic_identity_available"])
   assert.ok(historyProjection.includes('"'+key+'":'),"Saved graph needs "+key);

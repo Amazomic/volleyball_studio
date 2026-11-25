@@ -41,7 +41,7 @@ const profileSelects=[...markup.matchAll(/<select[^>]*id="(studio-(?:gpu|post)[^
   .map(row=>Object.fromEntries([...row[0].matchAll(/([\w-]+)="([^"]*)"/g)]
     .map(attr=>[attr[1],attr[2]])));
 assert.deepEqual(profileSelects.map(attrs=>attrs.id).sort(),
-  ["studio-gpu-person-detector","studio-gpu-pose-enabled"]);
+  ["studio-gpu-person-detector","studio-gpu-pose-enabled","studio-post-reid-device"]);
 
 const names=["preview","analysis","players","montage","quick","report"];
 class Node {
@@ -298,6 +298,7 @@ assert.equal(golden.video,"rally.mp4");
 assert.equal(golden.mode,"full");
 assert.deepEqual(golden.gpu,{stride:9,person_detector:"rfdetr-medium",gpu_memory_limit_mb:0,cpu_threads:0,pose_enabled:true,pose_mode:"photo",pose_stride:1,primary_rallies:{min_trajectory_seconds:1.5,merge_gap_seconds:4,stationary_ball_ms:1000,padding_before_ms:500,padding_after_ms:500}});
 assert.equal(golden.post.pose_classification,true);
+assert.equal(golden.post.reid_device,"auto");
 assert.equal(golden.post.interpolate_players,true);
 assert.equal(golden.post.interpolate_pose,true);
 assert.equal(golden.post.tracking.min_player_score,0.28);
@@ -324,13 +325,16 @@ a.nodes.get("studio-gpu-rally-padding-before-ms").value="750";
 a.nodes.get("studio-gpu-rally-padding-before-ms").dispatch("input");
 a.nodes.get("studio-gpu-rally-padding-after-ms").value="0";
 a.nodes.get("studio-gpu-rally-padding-after-ms").dispatch("input");
-assert.match(a.nodes.get("studio-analysis-profile-delta").textContent,/Изменено параметров: 6/);
+a.nodes.get("studio-post-reid-device").value="gpu";
+a.nodes.get("studio-post-reid-device").dispatch("change");
+assert.match(a.nodes.get("studio-analysis-profile-delta").textContent,/Изменено параметров: 7/);
 a.nodes.get("studio-analysis-start").dispatch("click");
 await tick();
 assert.equal(pipelineStarts().length,2,"Second explicit pipeline launch only");
 const override=JSON.parse(pipelineStarts()[1].options.body);
 assert.deepEqual(override.gpu,{stride:9,person_detector:"rfdetr-large",gpu_memory_limit_mb:8192,cpu_threads:12,pose_enabled:true,pose_mode:"photo",pose_stride:1,primary_rallies:{min_trajectory_seconds:1.5,merge_gap_seconds:4,stationary_ball_ms:1000,padding_before_ms:750,padding_after_ms:0}});
 assert.equal(override.post.tracking.min_player_score,0.28);
+assert.equal(override.post.reid_device,"gpu");
 a.nodes.get("studio-gpu-memory").value="-1";
 a.nodes.get("studio-gpu-memory").dispatch("input");
 assert.match(a.nodes.get("studio-analysis-profile-delta").textContent,/недопустимое значение/);
@@ -341,6 +345,7 @@ a.nodes.get("studio-analysis-reset").dispatch("click");
 await tick();
 assert.equal(a.nodes.get("studio-gpu-stride").value,"9");
 assert.equal(a.nodes.get("studio-gpu-memory").value,"0");
+assert.equal(a.nodes.get("studio-post-reid-device").value,"auto");
 assert.equal(a.nodes.get("studio-gpu-threads").value,"0");
 assert.ok(a.nodes.get("studio-analysis-profile-delta").textContent.includes("Эталонный профиль активен"),
   "Reset must restore the reference profile");

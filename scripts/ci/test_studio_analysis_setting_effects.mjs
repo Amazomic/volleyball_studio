@@ -13,11 +13,11 @@ assert.doesNotMatch(view,/02 \/ ПОЛНЫЙ ЦИКЛ/);
 assert.doesNotMatch(view,/studio-post-ball-stabilizer-score/);
 assert.match(css,/@property --stage-progress\{syntax:"<percentage>"/);
 assert.match(css,/analysis-stage-pulse 2\.2s ease-in-out infinite/);
-assert.match(css,/analysis-flow-node\{.*padding:7px 12px/);
+assert.match(css,/analysis-flow-node\{.*padding:19px 12px 19px/);
 
 // All parameter names have visible hover/focus explanations and a11y descriptions.
 const labels=[...view.matchAll(/<label\b([^>]*data-analysis-hint="([^"]+)"[^>]*)>([\s\S]*?)<\/label>/g)];
-assert.equal(labels.length,45,"Tooltip inventory changed: audit new setting labels");
+assert.equal(labels.length,46,"Tooltip inventory changed: audit new setting labels");
 const ids=new Set();
 for(const [,attrs,hint,body] of labels){
   assert.ok(hint.length>=50,"Explanations must state the effect, not only repeat the title");
@@ -51,7 +51,7 @@ const controls=[...view.matchAll(/<(input|select)\b([^>]*\bdata-default="([^"]+)
     assert.ok(id);
     return {id,kind,baseline,min,max,check:attributes.includes('type="checkbox"')};
   });
-assert.equal(controls.length,42,"Unexpected primary and CPU profile controls");
+assert.equal(controls.length,43,"Unexpected primary and CPU profile controls");
 const state=new Map(controls.map(c=>[c.id,c.baseline]));
 const node=id=>({value:state.get(id),checked:state.get(id)==="1"});
 const scope={
@@ -70,7 +70,7 @@ for(const c of controls){
     assert.match(view,/id="studio-gpu-stride"[^>]*readonly/);
     continue;
   }
-  const next=c.id==="studio-gpu-person-detector"?"rfdetr-large":c.check?(c.baseline==="1"?"0":"1"):
+  const next=c.id==="studio-post-reid-device"?"cpu":c.id==="studio-gpu-person-detector"?"rfdetr-large":c.check?(c.baseline==="1"?"0":"1"):
     c.kind==="select"?(c.baseline==="1"?"0":"1"):
     Number.isFinite(c.max)&&c.max!==Number(c.baseline)?String(c.max):
     String(c.min);
@@ -78,6 +78,7 @@ for(const c of controls){
   state.set(c.id,next);
   assert.notEqual(snapshot(),original,"Setting "+c.id+" does not enter the native request");
   if(c.id==="studio-gpu-person-detector")assert.equal(scope.profiles.gpuProfile().person_detector,"rfdetr-large");
+  if(c.id==="studio-post-reid-device")assert.equal(scope.profiles.postProfile().reid_device,"cpu");
   state.set(c.id,c.baseline);
 }
 assert.equal(snapshot(),original,"Settings fixture must restore exactly");

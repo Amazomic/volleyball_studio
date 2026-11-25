@@ -32,7 +32,7 @@ assert.equal(context.summary(null,"tracking"),null);
 assert.equal(context.summary({player_tracking_stats:{total_track_ids:1,short_track_ids:0,track_ids:2}},"tracking"),null);
 assert.equal(context.summary({player_tracking_stats:{raw_detections:-1}},"players"),null);
 assert.match(script,/if\(id==="boxes"\|\|id==="tracking"\)cell\.append\(make\("small","analysis-flow-node-stage-metrics hidden"\)\)/);
-assert.match(script,/if\(id==="boxes"\|\|id==="tracking"\)\{\s*const metrics=done\|\|reused\?playerTrackingSummary\(run,id\):null/);
+assert.match(script,/if\(id==="boxes"\|\|id==="tracking"\)\{\s*const metrics=\(done\|\|reused\)&&!\(id==="boxes"&&entry\?\.rallies_total\)\?playerTrackingSummary\(run,id\):null/);
 assert.match(script,/node\.parentElement\.querySelector\("\.analysis-flow-node-stage-metrics"\)/);
 assert.match(css,/\.analysis-flow-node-stage-metrics\{/);
 assert.doesNotMatch(script,/analysis-flow-node-player-ids/);

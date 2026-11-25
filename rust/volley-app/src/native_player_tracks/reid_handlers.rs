@@ -241,6 +241,8 @@ pub struct ReidReviewRequest {
     pub(crate) threshold_percent: u8,
     #[serde(default)]
     pub(crate) auto_threshold_percent: Option<u8>,
+    #[serde(default)]
+    pub(crate) reid_device: volley_inference::reid_openvino::ReidDevice,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

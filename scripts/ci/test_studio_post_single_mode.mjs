@@ -22,6 +22,7 @@ for(const id of [
   "studio-post-touch-threshold",
   "studio-post-player-score",
   "studio-post-auto-assign-threshold",
+  "studio-post-reid-device",
   "studio-post-max-gap",
   "studio-post-lost-low-gap",
   "studio-post-lost-low-iou",
@@ -42,7 +43,7 @@ const a=tabs.indexOf("  const postProfile=()=>({");
 const b=tabs.indexOf("  const allProfileFields=()=>",a);
 assert.ok(a>=0&&b>a,"Postprocessing request factory is missing");
 const env={
-  $:id=>({checked:true,value:"1",id}),
+  $:id=>({checked:true,value:id==="studio-post-reid-device"?"gpu":"1",id}),
   inputValue:id=>({"studio-post-auto-assign-threshold":75,
     "studio-post-lost-low-gap":30,"studio-post-lost-low-iou":0.30}[id]??0.48)
 };
@@ -56,6 +57,7 @@ assert.equal(env.profile().touches.algorithm,"ball_trajectory",
   "Unrelated toggles cannot replace Touch Detector");
 assert.equal(profile.touches.threshold,0.48);
 assert.equal(profile.auto_assign_threshold_percent,75);
+assert.equal(profile.reid_device,"gpu");
 assert.equal(profile.touches.require_pose,false);
 assert.equal(profile.interpolate_players,true);
 assert.equal(profile.tracking.lost_low_confidence_max_gap_frames,30);

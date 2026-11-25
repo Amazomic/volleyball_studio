@@ -487,6 +487,8 @@ pub struct PostProfile {
     pose_classification: bool,
     #[serde(default = "default_auto_assign_threshold_percent")]
     auto_assign_threshold_percent: u8,
+    #[serde(default)]
+    reid_device: volley_inference::reid_openvino::ReidDevice,
 }
 fn default_pose_classification() -> bool {
     true
@@ -509,6 +511,7 @@ impl Default for PostProfile {
             rallies: RallySettings::default(),
             pose_classification: true,
             auto_assign_threshold_percent: default_auto_assign_threshold_percent(),
+            reid_device: Default::default(),
         }
     }
 }
@@ -2616,6 +2619,7 @@ async fn pipeline(
             expected_revision: None,
             threshold_percent: 30,
             auto_threshold_percent: Some(request.post.auto_assign_threshold_percent),
+            reid_device: request.post.reid_device,
         }),
     )
     .await;
@@ -4441,6 +4445,24 @@ mod tests {
         assert_eq!(manual.gpu.cpu_threads, 12);
         assert_eq!(manual.gpu.gpu_memory_limit_mb, 4096);
         assert_eq!(profile.post.auto_assign_threshold_percent, 65);
+        assert_eq!(
+            profile.post.reid_device,
+            volley_inference::reid_openvino::ReidDevice::Auto
+        );
+        let manual: StartRequest = serde_json::from_value(json!({
+            "project_id":"abc123def456","video":"match.mp4",
+            "post":{"reid_device":"cpu"}
+        }))
+        .unwrap();
+        assert_eq!(
+            manual.post.reid_device,
+            volley_inference::reid_openvino::ReidDevice::Cpu
+        );
+        assert!(serde_json::from_value::<StartRequest>(json!({
+            "project_id":"abc123def456","video":"match.mp4",
+            "post":{"reid_device":"invalid"}
+        }))
+        .is_err());
         let custom: StartRequest = serde_json::from_value(json!({
             "project_id":"abc123def456","video":"match.mp4",
             "post":{"auto_assign_threshold_percent":87}

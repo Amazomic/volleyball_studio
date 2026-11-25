@@ -576,6 +576,7 @@ pub(super) async fn compare(
     }
     let cloned = state.clone();
     let query = req.clone();
+    let reid_device = req.reid_device;
     let mut snap = tokio::task::spawn_blocking(move || snapshot(&cloned, &query))
         .await
         .map_err(|e| storage::internal(format!("Photo comparison source: {e}")))??;
@@ -627,6 +628,7 @@ pub(super) async fn compare(
                 // Source crop provenance is now part of the SHA/model-bound
                 // cache. Subsequent comparisons reuse exactly the same crop.
                 transient: false,
+                reid_device: req.reid_device,
             }),
         )
         .await?;
@@ -715,10 +717,11 @@ pub(super) async fn compare(
             let inferred =
                 tokio::task::spawn_blocking(move || -> Result<Vec<Vec<f32>>, ApiError> {
                     let refs: Vec<&[f32]> = inputs.iter().map(Vec::as_slice).collect();
-                    volley_inference::reid_openvino::infer_batch(
+                    volley_inference::reid_openvino::infer_batch_on(
                         &batch_repo,
                         Path::new(&batch_library),
                         &refs,
+                        reid_device,
                     )
                     .map_err(storage::bad_request)
                 })
@@ -865,10 +868,11 @@ pub(super) async fn compare(
                         .iter()
                         .map(|(_, _, _, input)| input.as_slice())
                         .collect();
-                    let vectors = volley_inference::reid_openvino::infer_batch(
+                    let vectors = volley_inference::reid_openvino::infer_batch_on(
                         &repo,
                         Path::new(&library),
                         &refs,
+                        reid_device,
                     )
                     .map_err(storage::bad_request)?;
                     Ok(decoded

@@ -2474,6 +2474,7 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
                     rally_run_id: None,
                     track_ids: vec![7],
                     transient: false,
+                    reid_device: Default::default(),
                     expected_source_sha256: source_sha.clone(),
                 }),
             )
@@ -2504,6 +2505,7 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
                     rally_run_id: None,
                     track_ids: vec![7],
                     transient: false,
+                    reid_device: Default::default(),
                     expected_source_sha256: source_sha.clone(),
                 }),
             )
@@ -2530,6 +2532,7 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
                     rally_run_id: None,
                     track_ids: vec![7],
                     transient: false,
+                    reid_device: Default::default(),
                     expected_source_sha256: "0".repeat(64),
                 })
             )

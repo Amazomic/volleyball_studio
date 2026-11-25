@@ -714,3 +714,17 @@ ReID · сопоставление на CPU	ReID · matching on CPU
 Геометрия поз	Pose geometry
 Алгоритм	Algorithm
 Ошибка	Error
+Устройство ReID	ReID device
+Авто	Auto
+Проверяет исходное видео и выбранный интервал.	Checks the source video and selected interval.
+Находит мяч на кадрах видео.	Detects the ball in video frames.
+Убирает ошибочные точки и восстанавливает пропуски траектории мяча.	Removes erroneous points and fills gaps in the ball trajectory.
+Определяет начало и конец розыгрышей по движению мяча и касаниям пола.	Finds rally boundaries from ball movement and floor contacts.
+Находит игроков на кадрах розыгрыша.	Detects players in rally frames.
+Связывает рамки одного игрока и восстанавливает пропуски его движения.	Links player boxes and fills gaps in their movement.
+Находит возможные касания мяча и выбирает игроков для анализа поз.	Finds possible ball contacts and selects players for pose analysis.
+Определяет положение тела игроков.	Estimates player body poses.
+Закрепляет устойчивые ID игроков и связывает рамки с позами.	Assigns stable player IDs and links boxes with poses.
+Определяет игрока и тип касания мяча.	Identifies the player and type of ball contact.
+Сохраняет розыгрыши и их события для просмотра.	Saves rallies and their events for review.
+Сравнивает фотографии и связывает треки с известными игроками.	Compares photos and links tracks to known players.

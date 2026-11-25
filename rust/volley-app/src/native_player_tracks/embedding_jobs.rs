@@ -11,6 +11,8 @@ pub struct EmbeddingRequest {
     pub(super) track_ids: Vec<u64>,
     #[serde(default)]
     pub(super) transient: bool,
+    #[serde(default)]
+    pub(super) reid_device: volley_inference::reid_openvino::ReidDevice,
 }
 
 const MAX_EMBEDDING_BATCH_TRACKS: usize = native_reid_cache::MAX_CACHE_BATCH_TRACKS;
@@ -108,6 +110,7 @@ pub async fn embeddings(
     // Legacy full-replay vectors may come from intermissions. Scoped requests
     // must decode a real frame within play, even if a legacy vector is cached.
     let transient = req.transient;
+    let reid_device = req.reid_device;
     let scope_requires_new_embedding = req.rally_run_id.is_some() || transient;
     let planned_state = state.clone();
     let (source_file, source_stamp, replay_file, replay_stamp, crops, evidence, analysis_offset) =
@@ -240,9 +243,13 @@ pub async fn embeddings(
         })?;
         tokio::task::spawn_blocking(move || -> Result<Vec<(u64, Vec<f32>)>, ApiError> {
             let inputs: Vec<&[f32]> = frames.iter().map(|(_, _, chw)| chw.as_slice()).collect();
-            let vectors =
-                volley_inference::reid_openvino::infer_batch(&repo, Path::new(&library), &inputs)
-                    .map_err(storage::bad_request)?;
+            let vectors = volley_inference::reid_openvino::infer_batch_on(
+                &repo,
+                Path::new(&library),
+                &inputs,
+                reid_device,
+            )
+            .map_err(storage::bad_request)?;
             Ok(frames
                 .into_iter()
                 .zip(vectors)

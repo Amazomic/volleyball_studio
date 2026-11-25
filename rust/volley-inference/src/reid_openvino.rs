@@ -400,10 +400,28 @@ fn valid_input(input: &[f32]) -> bool {
             .all(|v| v.is_finite() && (0.0..=255.0).contains(v))
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReidDevice {
+    #[default]
+    Auto,
+    Cpu,
+    Gpu,
+}
+
 pub fn infer_batch(
     repository: &Path,
     library: &Path,
     inputs: &[&[f32]],
+) -> Result<Vec<Vec<f32>>, String> {
+    infer_batch_on(repository, library, inputs, ReidDevice::Auto)
+}
+
+pub fn infer_batch_on(
+    repository: &Path,
+    library: &Path,
+    inputs: &[&[f32]],
+    device: ReidDevice,
 ) -> Result<Vec<Vec<f32>>, String> {
     use std::sync::{Mutex, OnceLock};
     static GPU: OnceLock<Result<Mutex<ort::session::Session>, String>> = OnceLock::new();
@@ -413,13 +431,26 @@ pub fn infer_batch(
     if inputs.is_empty() {
         return Ok(Vec::new());
     }
-    let mut gpu_enabled = inputs.len() >= CUDA_MIN_BATCH
-        && fingerprint(repository)? == CUDA_SOURCE_FINGERPRINT
-        && std::env::var("VOLLEY_REID_DEVICE").as_deref() != Ok("cpu");
+    let mut gpu_enabled = match device {
+        ReidDevice::Cpu => false,
+        ReidDevice::Gpu => {
+            if fingerprint(repository)? != CUDA_SOURCE_FINGERPRINT {
+                return Err(
+                    "ReID CUDA model does not match the verified source fingerprint".into(),
+                );
+            }
+            true
+        }
+        ReidDevice::Auto => {
+            inputs.len() >= CUDA_MIN_BATCH
+                && fingerprint(repository)? == CUDA_SOURCE_FINGERPRINT
+                && std::env::var("VOLLEY_REID_DEVICE").as_deref() != Ok("cpu")
+        }
+    };
     let mut cpu = None;
     let mut output = Vec::with_capacity(inputs.len());
     for chunk in inputs.chunks(CUDA_BATCH) {
-        if gpu_enabled && chunk.len() >= CUDA_MIN_BATCH {
+        if gpu_enabled && (device == ReidDevice::Gpu || chunk.len() >= CUDA_MIN_BATCH) {
             let result = match GPU.get_or_init(|| cuda_session(repository).map(Mutex::new)) {
                 Ok(session) => session
                     .lock()
@@ -432,6 +463,7 @@ pub fn infer_batch(
                     output.extend(vectors);
                     continue;
                 }
+                Err(error) if device == ReidDevice::Gpu => return Err(error),
                 Err(error) => {
                     eprintln!("ReID CUDA unavailable; using existing CPU encoder: {error}");
                     gpu_enabled = false;
@@ -462,6 +494,19 @@ mod tests {
         assert_eq!(&float[PIXELS..PIXELS + 2], &[21.0, 22.0]);
         assert_eq!(&float[2 * PIXELS..2 * PIXELS + 2], &[31.0, 32.0]);
         assert!(bgr24_to_nchw(&data[..data.len() - 1]).is_err());
+    }
+    #[test]
+    fn explicit_reid_device_is_validated() {
+        assert_eq!(
+            serde_json::from_str::<ReidDevice>("\"cpu\"").unwrap(),
+            ReidDevice::Cpu
+        );
+        assert_eq!(
+            serde_json::from_str::<ReidDevice>("\"gpu\"").unwrap(),
+            ReidDevice::Gpu
+        );
+        assert!(serde_json::from_str::<ReidDevice>("\"invalid\"").is_err());
+        assert_eq!(ReidDevice::default(), ReidDevice::Auto);
     }
     #[test]
     fn normalization_rejects_bad_features() {

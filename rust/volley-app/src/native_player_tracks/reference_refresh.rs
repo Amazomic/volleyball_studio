@@ -394,6 +394,7 @@ pub async fn refresh_reference_features(
                 expected_source_sha256: req.expected_source_sha256.clone(),
                 track_ids: batch.iter().map(|(id, _)| *id).collect(),
                 transient: false,
+                reid_device: Default::default(),
             }),
         )
         .await?;

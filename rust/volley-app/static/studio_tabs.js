@@ -225,6 +225,7 @@
     interpolate_pose:$("studio-gpu-interpolate-pose").checked,
     pose_classification:true,
     auto_assign_threshold_percent:inputValue("studio-post-auto-assign-threshold"),
+    reid_device:$("studio-post-reid-device").value,
     tracking:{
       min_player_score:inputValue("studio-post-player-score"),
       nms_iou:inputValue("studio-post-nms"),
@@ -655,7 +656,7 @@
         Number.isSafeInteger(entry.frames_total)&&entry.frames_total>0){
       result=entry.frames_processed.toLocaleString("ru-RU")+" / "+
         entry.frames_total.toLocaleString("ru-RU")+" кадров";
-    }else if(done)result="Готово";
+    }else if(done)return stageTime(entry?.duration_ms);
     else if(running)result="Выполняется";
     if(!result)return "—";
     const duration=running&&Number.isFinite(entry?.started_ms)&&entry?.finished_ms==null?
@@ -726,7 +727,7 @@
       "#studio-post-idle","#studio-post-stationary","#studio-post-rally-min",
       "#studio-post-coverage","#studio-post-samples","#studio-post-min-touches",
       "#studio-post-no-touch","#studio-post-context"],
-    identity:["#studio-post-auto-assign-threshold"]
+    identity:["#studio-post-reid-device","#studio-post-auto-assign-threshold"]
   };
   const graphDescriptions={
     video:"Выбор видео, интервалов анализа и разметки площадки.",
@@ -743,6 +744,23 @@
     identity:"Подготавливает фотографии игроков из исходных кадров, сравнивает признаки внешности с библиотекой и автоматически привязывает Track ID к игрокам внутри опубликованных розыгрышей.",
     cache:"Готовый GPU-анализ переиспользуется при совместимых настройках."
   };
+  const graphHoverDescriptions={
+    video:"Проверяет исходное видео и выбранный интервал.",
+    ball:"Находит мяч на кадрах видео.",
+    ball_stabilizer:"Убирает ошибочные точки и восстанавливает пропуски траектории мяча.",
+    rallies:"Определяет начало и конец розыгрышей по движению мяча и касаниям пола.",
+    players:"Находит игроков на кадрах розыгрыша.",
+    boxes:"Связывает рамки одного игрока и восстанавливает пропуски его движения.",
+    touch_detector:"Находит возможные касания мяча и выбирает игроков для анализа поз.",
+    pose:"Определяет положение тела игроков.",
+    tracking:"Закрепляет устойчивые ID игроков и связывает рамки с позами.",
+    touches:"Определяет игрока и тип касания мяча.",
+    publish:"Сохраняет розыгрыши и их события для просмотра.",
+    identity:"Сравнивает фотографии и связывает треки с известными игроками."
+  };
+  const graphDevices={video:"CPU",ball:"GPU",ball_stabilizer:"CPU",rallies:"CPU",
+    players:"GPU",boxes:"CPU",touch_detector:"CPU",pose:"GPU",tracking:"CPU",
+    touches:"CPU",publish:"CPU",identity:"GPU/CPU"};
   let graphMoved=[],graphFocus=null,graphHintTarget=null;
   const graphDialog=$("analysis-flow-dialog");
   const graphHint=document.createElement("div");
@@ -986,8 +1004,13 @@
       const heading=make("span","analysis-flow-node-title",graphLabel(id,run));
       const headingRow=make("span","analysis-flow-node-heading-row");
       headingRow.append(pipelineIcon(id),heading);
-      node.append(headingRow);
-      if(graphDescriptions[id])node.title=graphDescriptions[id];
+      const device=make("span","analysis-flow-node-device",graphDevices[id]);
+      device.dataset.device=graphDevices[id];
+      const indicator=make("span","analysis-flow-node-status");
+      indicator.setAttribute("aria-hidden","true");
+      node.append(device,headingRow,indicator);
+      node.dataset.status="idle";
+      node.title=graphHoverDescriptions[id]||graphLabel(id,run);
       node.addEventListener("click",()=>openGraphSettings(id));
       const stats=make("small","analysis-flow-node-stats","—");
       cell.append(node,stats);
@@ -1052,6 +1075,8 @@
       node.classList.toggle("is-failed",
         run?.status==="failed"&&id===currentId||
         id==="identity"&&run?.completion_quality==="identity_failed");
+      node.dataset.status=node.classList.contains("is-failed")?"failed":
+        node.classList.contains("is-skipped")?"idle":running?"running":done||reused?"complete":"idle";
       const pct=stageProgressPercent(entry,!!running||blockState==="waiting",done);
       node.style.setProperty("--stage-progress",(pct??0)+"%");
       node.classList.toggle("is-progress-unknown",!!running&&pct===null);
@@ -1071,7 +1096,7 @@
           sharedPose?"RTMPose и RF-DETR использовали общий GPU-проход; время указано совместное. "+stats.textContent:stats.textContent;
       }
       if(id==="boxes"||id==="tracking"){
-        const metrics=done||reused?playerTrackingSummary(run,id):null;
+        const metrics=(done||reused)&&!(id==="boxes"&&entry?.rallies_total)?playerTrackingSummary(run,id):null;
         const detail=node.parentElement.querySelector(".analysis-flow-node-stage-metrics");
         if(detail){
           detail.textContent=metrics?.text||"";
@@ -1079,10 +1104,9 @@
           detail.classList.toggle("hidden",!metrics);
         }
       }
-      node.title=graphDescriptions[id]||label;
-      node.title+=
-        (entry?.frames_total?" · "+(entry.frames_processed||0)+"/"+entry.frames_total+" кадров":"")+
-        (running?" · выполняется":done?" · завершено":reused?" · из кэша":"");
+      if(node.title!==(graphHoverDescriptions[id]||label))node.title=graphHoverDescriptions[id]||label;
+      const statusLabel={complete:"Завершено",failed:"Ошибка",running:"Выполняется",idle:"Не выполнялось"};
+      node.setAttribute?.("aria-label",label+" · "+graphDevices[id]+" · "+statusLabel[node.dataset.status]);
     }
     paintGraphEdges(target,run);
     target._scheduleGraphDraw?.();
