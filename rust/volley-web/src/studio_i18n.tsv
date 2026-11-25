@@ -728,3 +728,4 @@ ReID · сопоставление на CPU	ReID · matching on CPU
 Определяет игрока и тип касания мяча.	Identifies the player and type of ball contact.
 Сохраняет розыгрыши и их события для просмотра.	Saves rallies and their events for review.
 Сравнивает фотографии и связывает треки с известными игроками.	Compares photos and links tracks to known players.
+Буфер ReID (МиБ)	ReID buffer (MiB)

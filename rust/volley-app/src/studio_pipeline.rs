@@ -489,6 +489,7 @@ pub struct PostProfile {
     auto_assign_threshold_percent: u8,
     #[serde(default)]
     reid_device: volley_inference::reid_openvino::ReidDevice,
+    reid_buffer_mib: u32,
 }
 fn default_pose_classification() -> bool {
     true
@@ -512,6 +513,7 @@ impl Default for PostProfile {
             pose_classification: true,
             auto_assign_threshold_percent: default_auto_assign_threshold_percent(),
             reid_device: Default::default(),
+            reid_buffer_mib: crate::native_player_tracks::DEFAULT_REID_BUFFER_MIB,
         }
     }
 }
@@ -589,9 +591,13 @@ fn decode_profiles(mut gpu: Value, mut post: Value) -> Result<(GpuProfile, PostP
             post_fields.entry(key).or_insert(value);
         }
     }
+    let post: PostProfile = serde_json::from_value(post).map_err(|e| e.to_string())?;
+    if post.reid_buffer_mib > crate::native_player_tracks::MAX_REID_BUFFER_MIB {
+        return Err("ReID crop buffer must be between 0 and 4096 MiB".into());
+    }
     Ok((
         serde_json::from_value(gpu).map_err(|e| e.to_string())?,
-        serde_json::from_value(post).map_err(|e| e.to_string())?,
+        post,
     ))
 }
 
@@ -1868,7 +1874,8 @@ async fn pipeline(
     #[cfg(any(unix, windows))]
     let mut pending_shared_pose: Option<crate::pose_inference::PendingPose>;
     let mut early_poses = None;
-    let shared_reid_crops = crate::native_player_tracks::SharedReidCrops::default();
+    let shared_reid_crops =
+        crate::native_player_tracks::SharedReidCrops::new(request.post.reid_buffer_mib)?;
     log_native(
         path,
         "Проверка исходного видео",
@@ -2170,7 +2177,8 @@ async fn pipeline(
                             threads: request.gpu.cpu_threads,
                             cancelled: cancel.clone(),
                             progress: rally_progress.clone(),
-                            reid_crops: (request.mode == PipelineMode::Full)
+                            reid_crops: (request.mode == PipelineMode::Full
+                                && request.post.reid_buffer_mib > 0)
                                 .then(|| shared_reid_crops.clone()),
                         }),
                         cancel,
@@ -4450,6 +4458,22 @@ mod tests {
         assert_eq!(manual.gpu.cpu_threads, 12);
         assert_eq!(manual.gpu.gpu_memory_limit_mb, 4096);
         assert_eq!(profile.post.auto_assign_threshold_percent, 65);
+        assert_eq!(profile.post.reid_buffer_mib, 512);
+        for value in [0, 528, 4096] {
+            let custom: StartRequest = serde_json::from_value(json!({
+                "project_id":"abc123def456","video":"match.mp4",
+                "post":{"reid_buffer_mib":value}
+            }))
+            .unwrap();
+            assert_eq!(custom.post.reid_buffer_mib, value);
+        }
+        for value in [json!(-1), json!(4097), json!(512.5), json!("512")] {
+            assert!(serde_json::from_value::<StartRequest>(json!({
+                "project_id":"abc123def456","video":"match.mp4",
+                "post":{"reid_buffer_mib":value}
+            }))
+            .is_err());
+        }
         assert_eq!(
             profile.post.reid_device,
             volley_inference::reid_openvino::ReidDevice::Auto

@@ -172,7 +172,9 @@ mod photo_comparison;
 mod photos;
 pub(crate) use photos::*;
 mod shared_crops;
-pub(crate) use shared_crops::{plan_shared_reid_crops, SharedReidCrops};
+pub(crate) use shared_crops::{
+    plan_shared_reid_crops, SharedReidCrops, DEFAULT_REID_BUFFER_MIB, MAX_REID_BUFFER_MIB,
+};
 mod embedding_jobs;
 pub(crate) use embedding_jobs::*;
 mod reference_store;

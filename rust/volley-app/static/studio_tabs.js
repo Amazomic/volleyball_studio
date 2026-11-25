@@ -226,6 +226,7 @@
     pose_classification:true,
     auto_assign_threshold_percent:inputValue("studio-post-auto-assign-threshold"),
     reid_device:$("studio-post-reid-device").value,
+    reid_buffer_mib:inputValue("studio-post-reid-buffer"),
     tracking:{
       min_player_score:inputValue("studio-post-player-score"),
       nms_iou:inputValue("studio-post-nms"),
@@ -727,7 +728,7 @@
       "#studio-post-idle","#studio-post-stationary","#studio-post-rally-min",
       "#studio-post-coverage","#studio-post-samples","#studio-post-min-touches",
       "#studio-post-no-touch","#studio-post-context"],
-    identity:["#studio-post-reid-device","#studio-post-auto-assign-threshold"]
+    identity:["#studio-post-reid-device","#studio-post-reid-buffer","#studio-post-auto-assign-threshold"]
   };
   const graphDescriptions={
     video:"Выбор видео, интервалов анализа и разметки площадки.",

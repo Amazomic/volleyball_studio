@@ -2,15 +2,18 @@ use super::*;
 use volley_inference::reid_openvino::{bgr24_to_nchw, HEIGHT, WIDTH};
 
 const CROP_BYTES: usize = WIDTH * HEIGHT * 3;
-const MAX_CROPS: usize = 128 * 1024 * 1024 / CROP_BYTES;
+pub(crate) const DEFAULT_REID_BUFFER_MIB: u32 = 512;
+pub(crate) const MAX_REID_BUFFER_MIB: u32 = 4096;
 type CropKey = (u64, [u32; 4]);
 type CropPlan = BTreeMap<u64, Vec<[f64; 4]>>;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct SharedReidCrops(Arc<Mutex<Buffer>>);
 
 #[derive(Default)]
 struct Buffer {
+    limit_mib: u32,
+    capacity: usize,
     source: Option<(PathBuf, (u64, u128), u64)>,
     crops: BTreeMap<CropKey, Vec<u8>>,
     hits: usize,
@@ -18,6 +21,18 @@ struct Buffer {
 }
 
 impl SharedReidCrops {
+    pub(crate) fn new(limit_mib: u32) -> Result<Self, String> {
+        if limit_mib > MAX_REID_BUFFER_MIB {
+            return Err("ReID crop buffer limit exceeds 4096 MiB".into());
+        }
+        let capacity = (u64::from(limit_mib) * 1024 * 1024 / CROP_BYTES as u64) as usize;
+        Ok(Self(Arc::new(Mutex::new(Buffer {
+            limit_mib,
+            capacity,
+            ..Buffer::default()
+        }))))
+    }
+
     pub(crate) fn bind(&self, source: &Path, offset: f64) -> Result<(), String> {
         let stamp = inference_stream::source_stamp(source)?;
         let mut buffer = self
@@ -34,7 +49,7 @@ impl SharedReidCrops {
     pub(crate) fn stats(&self) -> Value {
         self.0.lock().map_or(Value::Null, |buffer| {
             json!({"bound":buffer.source.is_some(),"captured":buffer.crops.len(),"hits":buffer.hits,"misses":buffer.misses,
-                "bytes":buffer.crops.len()*CROP_BYTES,"capacity":MAX_CROPS})
+                "bytes":buffer.crops.len()*CROP_BYTES,"capacity":buffer.capacity,"limit_mib":buffer.limit_mib})
         })
     }
 
@@ -51,7 +66,7 @@ impl SharedReidCrops {
             .lock()
             .map_err(|_| "ReID crop buffer lock poisoned")?;
         for &bbox in boxes {
-            if buffer.crops.len() >= MAX_CROPS {
+            if buffer.crops.len() >= buffer.capacity {
                 break;
             }
             let Ok(crop) = crop_box(bbox, width as u32, height as u32) else {
@@ -267,7 +282,7 @@ mod tests {
             String::from_utf8_lossy(&created.stderr)
         );
         let stamp = inference_stream::source_stamp(&source).unwrap();
-        let shared = SharedReidCrops::default();
+        let shared = SharedReidCrops::new(DEFAULT_REID_BUFFER_MIB).unwrap();
         shared.bind(&source, 0.0).unwrap();
         let bbox = [0.2, 0.1, 0.8, 0.9];
         let crop = crop_box(bbox, 320, 256).unwrap();
@@ -380,8 +395,41 @@ mod tests {
     }
 
     #[test]
+    fn shared_crop_buffer_capacity_is_configurable() {
+        for (mib, expected) in [
+            (0, 0),
+            (1, 10),
+            (DEFAULT_REID_BUFFER_MIB, 5461),
+            (528, 5632),
+            (4096, 43690),
+        ] {
+            let stats = SharedReidCrops::new(mib).unwrap().stats();
+            let capacity = stats["capacity"].as_u64().unwrap() as usize;
+            assert_eq!(capacity, expected);
+            assert_eq!(stats["limit_mib"], mib);
+            assert_eq!(stats["bytes"], 0);
+            assert!(capacity as u64 * CROP_BYTES as u64 <= u64::from(mib) * 1024 * 1024);
+            assert!((capacity as u64 + 1) * CROP_BYTES as u64 > u64::from(mib) * 1024 * 1024);
+        }
+        assert!(SharedReidCrops::new(4097).is_err());
+    }
+
+    #[test]
+    fn shared_crop_buffer_stops_at_configured_capacity() {
+        let rgb = [25, 100, 200].repeat(64 * 64);
+        let bbox = [0.25, 0.25, 0.75, 0.75];
+        for (mib, expected) in [(0, 0), (1, 10)] {
+            let shared = SharedReidCrops::new(mib).unwrap();
+            for frame in 0..12 {
+                shared.capture(frame, &rgb, 64, 64, &[bbox]).unwrap();
+            }
+            assert_eq!(shared.stats()["captured"], expected);
+        }
+    }
+
+    #[test]
     fn shared_crop_lookup_rejects_other_source_time_and_box() {
-        let shared = SharedReidCrops::default();
+        let shared = SharedReidCrops::new(DEFAULT_REID_BUFFER_MIB).unwrap();
         let source = PathBuf::from("source.mp4");
         let stamp = (100, 123);
         shared.0.lock().unwrap().source = Some((source.clone(), stamp, 2.0_f64.to_bits()));
