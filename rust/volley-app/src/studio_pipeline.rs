@@ -808,7 +808,9 @@ fn pipeline_stage_id(name: &str) -> &'static str {
         "fusion"
     } else if name.contains("Track ID") {
         "tracking"
-    } else if name.contains("касания в первичных") || name.contains("физические касания")
+    } else if matches!(name, "Touch Attribution" | "Pose Geometry")
+        || name.contains("касания в первичных")
+        || name.contains("физические касания")
     {
         "touches"
     } else if name.contains("Публикация розыгрышей") {
@@ -2377,7 +2379,13 @@ async fn pipeline(
     };
     progress(path, status, "Touch Detector", 91.0)?;
     let ground = tokio::task::block_in_place(|| {
-        cpu_touches::ground_stage::prepare(app, &touch_request, &stabilized, &primary, cancel)
+        cpu_touches::ground_stage::prepare_touch_detection(
+            app,
+            &touch_request,
+            &stabilized,
+            &primary,
+            cancel,
+        )
     })?;
     if ground.summary["court_revision"] != status["court_revision"] {
         return Err("Court calibration changed during Ground Detector".into());
@@ -2394,20 +2402,15 @@ async fn pipeline(
             ground.summary["scoped_candidate_count"]
         ),
     )?;
-    progress(
-        path,
-        status,
-        "Постобработка · касания в первичных розыгрышах",
-        91.5,
-    )?;
+    progress(path, status, "Touch Attribution", 91.5)?;
     log_native(
         path,
-        "Касания",
-        "cpu_touches::process_primary_with_progress_cancel",
+        "Touch Attribution",
+        "cpu_touches::attribute_primary_with_progress_cancel",
         json!({"project_id":request.project_id,"video":request.video,"replay_id":replay_id,"settings":request.post.touches,"primary_ball_job_id":primary.ball_job_id}),
     )?;
     let touches = tokio::task::block_in_place(|| {
-        cpu_touches::process_primary_with_progress_cancel(
+        cpu_touches::attribute_primary_with_progress_cancel(
             app,
             &touch_request,
             request.post.rallies,
@@ -2418,7 +2421,7 @@ async fn pipeline(
                 progress_with_frames(
                     path,
                     status,
-                    "Постобработка · касания в первичных розыгрышах",
+                    "Touch Attribution",
                     91.5 + 3.5 * done as f64 / total.max(1) as f64,
                     Some((done, total)),
                 )
@@ -2435,9 +2438,9 @@ async fn pipeline(
     save(path, status)?;
     log_event(
         path,
-        "Касания",
+        "Touch Attribution",
         "success",
-        &format!("Касания сохранены: touch_id={touch_id}"),
+        &format!("Track ID и типы касаний сохранены: touch_id={touch_id}"),
     )?;
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
@@ -3353,6 +3356,9 @@ mod tests {
             "ball_stabilizer"
         );
         assert_eq!(pipeline_stage_id("Ground Detector"), "rallies");
+        assert_eq!(pipeline_stage_id("Touch Detector"), "touch_detector");
+        assert_eq!(pipeline_stage_id("Touch Attribution"), "touches");
+        assert_eq!(pipeline_stage_id("Pose Geometry"), "touches");
         assert_eq!(pipeline_stage_id("Rally Detector"), "rallies");
         assert_eq!(pipeline_stage_id("Поиск розыгрышей"), "rallies");
         assert_eq!(
