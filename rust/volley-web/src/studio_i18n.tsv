@@ -132,9 +132,9 @@ MP4, MOV, MKV, AVI, WEBM, M4V, MTS · до 30 файлов · до 32 ГиБ к�
 Обрезка видео и разметка площадки	Video trimming and court annotation
 Отрезок: —	Trim range: —
 ▶ / Пауза	Play / Pause
-Установить начало по курсору	Set start at playhead
-Установить конец по курсору	Set end at playhead
-Передвиньте курсор на шкале под видео и задайте начало или конец фрагмента. Для площадки отметьте 4 угла по часовой стрелке; точки можно перетаскивать.	Move the playhead on the timeline below the video and set the clip start or end. Mark four court corners clockwise; points can be dragged.
+Установить начало по метке	Set start at playhead
+Установить конец по метке	Set end at playhead
+Передвиньте метку на временной шкале и задайте начало или конец фрагмента. Для площадки отметьте 4 угла по часовой стрелке; точки можно перетаскивать.	Move the playhead on the timeline below the video and set the clip start or end. Mark four court corners clockwise; points can be dragged.
 Начало, сек	Start, sec
 Конец, сек	End, sec
 Разметить поле	Mark court

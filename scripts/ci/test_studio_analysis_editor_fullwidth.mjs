@@ -18,4 +18,10 @@ assert.match(stage,/aspect-ratio:var\(--frame-ratio/);
 assert.doesNotMatch(css,/\.analysis-editor-media\{[^}]*width:min\(/g);
 for (const id of ["studio-analysis-player","studio-analysis-court","studio-analysis-seek"])
   assert.ok(html.includes('id="'+id+'"'));
+assert.match(html,/id="studio-analysis-player"[\s\S]*class="analysis-editor-controls"[\s\S]*<\/div>\s*<div class="analysis-editor-timeline">/);
+assert.match(css,/\.analysis-editor-timeline\{[^}]*grid-column:1\/-1/);
+assert.match(css,/\.analysis-flow-dialog-body :is\(input:not\(\[type="checkbox"\]\):not\(\[type="range"\]\),select\)/);
+assert.match(css,/\.analysis-editor-selected-range\{[^}]*background:#efb84a/);
+assert.match(html,/id="studio-analysis-set-start">Установить начало по метке<\/button>/);
+assert.match(html,/id="studio-analysis-set-end">Установить конец по метке<\/button>/);
 console.log("PASS: primary-analysis video fills container width with preserved aspect and aligned timeline/overlay");

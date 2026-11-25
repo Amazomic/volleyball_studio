@@ -97,6 +97,14 @@ await el("studio-analysis-seek").fire("input");
 await el("studio-analysis-set-end").fire("click");
 assert.equal(el("studio-analysis-trim-end").value,"300.00");
 assert.ok(el("studio-analysis-range-label").textContent.includes("05:00.00"));
+const rangeBand=el("studio-analysis-selected-range");
+assert.ok(Math.abs(parseFloat(rangeBand.style.left)-150/3600*100)<0.001);
+assert.ok(Math.abs(parseFloat(rangeBand.style.width)-150/3600*100)<0.001);
+el("studio-analysis-trim-end").value="450";
+await el("studio-analysis-trim-end").fire("input");
+assert.ok(Math.abs(parseFloat(rangeBand.style.width)-300/3600*100)<0.001);
+el("studio-analysis-trim-end").value="300";
+await el("studio-analysis-trim-end").fire("input");
 
 await el("studio-analysis-court-mode").fire("click");
 assert.equal(el("studio-analysis-stage").style["--editor-zoom"],"0.84");
