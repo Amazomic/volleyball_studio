@@ -851,9 +851,16 @@
       return top-7-index*Math.min(3.5,21/Math.max(1,laneCounts.get(top)-1));
     };
     return routes.map(({from,to,a,b,neighbors},index)=>{
+      const cyA=(a.t+a.b)/2,cyB=(b.t+b.b)/2;
       if(neighbors){
-        const forward=a.l<b.l,y=Math.min(a.b,b.b,a.t+28);
-        return [[forward?a.r:a.l,y],[forward?b.l:b.r,y]];
+        const forward=a.l<b.l,ax=forward?a.r:a.l,bx=forward?b.l:b.r;
+        const mid=(ax+bx)/2;
+        return cyA===cyB?[[ax,cyA],[bx,cyB]]:[[ax,cyA],[mid,cyA],[mid,cyB],[bx,cyB]];
+      }
+      if(to==="tracking"&&(from==="pose"||from==="boxes")&&a.t!==b.t&&
+        rows.get(a.t).at(-1)===a&&rows.get(b.t).at(-1)===b){
+        const x=(Math.max(...[...boxes.values()].map(box=>box.r))+width)/2;
+        return [[a.r,cyA],[x,cyA],[x,cyB],[b.r,cyB]];
       }
       const ax=port(from,a),bx=port(to,b),ay=lane(a.t);
       if(a.t===b.t)return [[ax,a.t],[ax,ay],[bx,ay],[bx,b.t]];
@@ -875,18 +882,21 @@
         t:rect.top-origin.top,b:rect.bottom-origin.top}];
     }));
     const ordered=[...boxes.values()];
-    const rowTops=[...new Set(ordered.map(box=>box.t))];
     const focus=target.dataset.focusStage;
-    const edges=[...svg.querySelectorAll(".analysis-flow-edge")].filter(edge=>{
+    const allEdges=[...svg.querySelectorAll(".analysis-flow-edge")];
+    const handoffSource=allEdges.some(edge=>edge.dataset.edgeSource==="pose"&&
+      edge.dataset.edgeTarget==="tracking"&&edge.dataset.state!=="disabled")?"pose":"boxes";
+    const edges=allEdges.filter(edge=>{
       const {edgeSource,edgeTarget,state}=edge.dataset;
       const a=boxes.get(edgeSource),b=boxes.get(edgeTarget);
       const consecutive=Math.abs(ordered.indexOf(a)-ordered.indexOf(b))===1;
-      const handoff=(edgeSource==="pose"||edgeSource==="boxes")&&edgeTarget==="tracking"&&
-        rowTops.indexOf(b.t)-rowTops.indexOf(a.t)===1;
+      const crossPhase=pipelineStages.find(stage=>stage[0]===edgeSource)?.[3]!==
+        pipelineStages.find(stage=>stage[0]===edgeTarget)?.[3];
+      const handoff=edgeSource===handoffSource&&edgeTarget==="tracking";
       const publication=a.t===b.t&&(edgeSource==="touches"&&edgeTarget==="publish"||
         edgeSource==="publish"&&edgeTarget==="identity");
       const focused=focus===edgeSource||focus===edgeTarget;
-      const visible=graphEdgeVisible({local:consecutive||handoff||publication,state,focus,focused,
+      const visible=(!crossPhase||!!focus||handoff)&&graphEdgeVisible({local:consecutive||handoff||publication,state,focus,focused,
         active:edge.classList.contains("is-active")});
       edge.classList.toggle("is-highlighted",focused);
       edge.classList.toggle("is-outgoing",focus===edgeSource);

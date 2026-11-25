@@ -30,6 +30,20 @@ const route=vm.runInNewContext(flow.slice(start,end)+"graphRoutes;");
 const definition=(begin,end)=>flow.slice(flow.indexOf(begin),flow.indexOf(end,flow.indexOf(begin)));
 const stages=vm.runInNewContext(definition("const pipelineStages=","const pipelineNames=")+"pipelineStages;");
 const links=vm.runInNewContext(definition("const pipelineEdges=","const graphLinkState=")+"pipelineEdges;");
+const uneven=new Map([
+  ["a",{l:20,r:120,t:30,b:106}],
+  ["b",{l:140,r:240,t:30,b:130}],
+  ["pose",{l:260,r:360,t:30,b:106}],
+  ["tracking",{l:220,r:360,t:220,b:312}],
+  ["touches",{l:60,r:200,t:220,b:312}]
+]);
+const checkRoute=(from,to,expected)=>{
+  const points=route(uneven,[[from,to]],380)[0];
+  assert.equal(JSON.stringify(points),JSON.stringify(expected));
+};
+checkRoute("a","b",[[120,68],[130,68],[130,80],[140,80]]);
+checkRoute("tracking","touches",[[220,266],[200,266]]);
+checkRoute("pose","tracking",[[360,68],[370,68],[370,266],[360,266]]);
 for(const columns of [8,7,4,3,2,1]){
   const width=columns*140+64;
   const boxes=new Map();
@@ -71,3 +85,31 @@ assert.equal(visible({local:false,state:"available"}),false);
 assert.equal(visible({local:false,state:"optional",focus:"pose",focused:true}),true);
 assert.equal(visible({local:true,state:"available",focus:"ball",focused:false,active:true}),false);
 assert.equal(visible({local:true,state:"disabled",focused:true,active:true}),false);
+
+const draw=vm.runInNewContext(
+  definition("const pipelineStages=","const pipelineNames=")+
+  definition("const graphRoutes=","const graphSvg=")+"drawGraphEdges;");
+const mockNodes=stages.map(([id,,,phase],index)=>{
+  const col=phase===1?index:11-index;
+  const left=20+col*120,top=phase===1?20:220;
+  return {dataset:{stageId:id},getBoundingClientRect:()=>({left,right:left+100,top,bottom:top+76})};
+});
+const mockEdges=links.map(([edgeSource,edgeTarget,condition])=>({
+  dataset:{edgeSource,edgeTarget,state:condition?"optional":"available"},
+  classList:{contains:()=>true,toggle:()=>{}},
+  setAttribute(name,value){this[name]=value;},
+  removeAttribute(name){delete this[name];}
+}));
+const mockSvg={querySelectorAll:()=>mockEdges,setAttribute:()=>{}};
+const mockTarget={dataset:{},clientWidth:980,clientHeight:340,
+  getBoundingClientRect:()=>({left:0,top:0}),
+  querySelector:()=>mockSvg,querySelectorAll:()=>mockNodes};
+const phaseOf=id=>stages.find(stage=>stage[0]===id)[3];
+const handoffs=()=>mockEdges.filter(edge=>edge.d&&phaseOf(edge.dataset.edgeSource)!==phaseOf(edge.dataset.edgeTarget));
+draw(mockTarget);
+assert.equal(handoffs().length,1);
+assert.equal(handoffs()[0].dataset.edgeSource,"pose");
+mockEdges.find(edge=>edge.dataset.edgeSource==="pose"&&edge.dataset.edgeTarget==="tracking").dataset.state="disabled";
+draw(mockTarget);
+assert.equal(handoffs().length,1);
+assert.equal(handoffs()[0].dataset.edgeSource,"boxes");
