@@ -77,7 +77,7 @@ const {renderHistory,updateLiveHistory,recordHistoryRun}=runInNewContext(registr
     requestAnimationFrame:()=>{}
   });
 renderHistory();
-assert.equal(ui.historyList.children.length,0,"Old result is not placed in new-session history");
+assert.equal(ui.historyList.children.length,1,"Server history is visible without a sessionStorage marker");
 recordHistoryRun("aaaabbbbcccc",id);
 renderHistory();
 const run=ui.historyList.children[0];

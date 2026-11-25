@@ -176,6 +176,7 @@ pub(crate) struct JointPair {
     pub early_pose_error: Option<String>,
     pub source_provenance: Value,
     pub rally_filter: Option<Value>,
+    pub checkpoint_key: Option<String>,
 }
 
 #[derive(Default)]
@@ -385,6 +386,58 @@ pub(crate) fn run_joint_pair(
         Err(error) => (None, Some(error)),
     };
     let zero_copy = zero_copy_codec.is_some();
+    let court = crate::video_edits::court_snapshot(state, project_id, video)
+        .map_err(|e| format!("{e:?}"))?;
+    let preference = backend_preference()?;
+    let checkpoint_root = early_pose
+        .as_ref()
+        .and_then(|options| options.checkpoint_root.as_ref())
+        .filter(|_| !pose_enabled);
+    let (preference, backend_tag) = if zero_copy {
+        (preference, "nvdec_zero_copy")
+    } else if checkpoint_root.is_some() {
+        let selection =
+            volley_media::raw_decoder::select_decode_backend(original, preference, cancelled)?;
+        match selection.backend {
+            DecodeBackend::Nvdec => (DecodePreference::Nvdec, "nvdec"),
+            DecodeBackend::Software => (DecodePreference::Software, "software"),
+        }
+    } else {
+        (preference, "no_checkpoint")
+    };
+    let checkpoint_dir = checkpoint_root.map(|root| {
+        let options = early_pose.as_ref().ok_or("Missing rally checkpoint settings")?;
+        let ball_model = "VballNetV4c_seq9_grayscale_20260908_213829.onnx";
+        let detector_model = format!("rf-detr-{}.onnx", match person_detector {
+            volley_inference::person::DetectorVariant::RfDetrMedium => "medium",
+            volley_inference::person::DetectorVariant::RfDetrLarge => "large",
+        });
+        let identity = json!({
+            "schema":"volley-phase1-checkpoint/1",
+            "build":env!("VOLLEY_BUILD_GIT_SHA"),
+            "project":project_id,"video":video,
+            "source":original_provenance,"stamp":[before.0,before.1],
+            "range":range,"duration":duration,"backend":backend_tag,
+            "person_stride":person_stride,"person_detector":person_detector,
+            "ball_model_sha256":checkpoint::model_digest(&state.repository_root, ball_model)?,
+            "ball_sidecar_sha256":checkpoint::model_digest(&state.repository_root, "VballNetV4c_seq9_grayscale_20260908_213829.json")?,
+            "person_model_sha256":checkpoint::model_digest(&state.repository_root, &detector_model)?,
+            "pose_model_sha256":checkpoint::model_digest(&state.repository_root, volley_inference::pose::MODEL_FILE)?,
+            "rally_settings":rally_settings,"stabilizer_settings":stabilizer_settings,
+            "tracking":options.tracking,"interpolate_players":options.interpolate_players,
+            "reid_capture":options.reid_crops.is_some(),
+            "court_revision":court.as_ref().map(|c| &c.revision),
+            "memory_mb":gpu_memory_limit_mb,"threads":cpu_threads,
+        });
+        checkpoint::directory(root, &identity)
+    }).transpose()?;
+    if let Some(directory) = &checkpoint_dir {
+        ball_writer.checkpoint = Some(checkpoint::DetectionJournal::open(
+            directory,
+            "ball.jsonl.partial",
+            "ball",
+        )?);
+    }
     let (pose_original, pose_source) = pose_manifest_identities(&original_provenance, before);
     let pose = RefCell::new(if pose_enabled && !zero_copy {
         Some(PoseStream::new(
@@ -435,7 +488,7 @@ pub(crate) fn run_joint_pair(
             volley_media::raw_decoder::decode_full_video_shared_with_native_and_tail_in_range(
                 original,
                 9,
-                backend_preference()?,
+                preference,
                 cpu_threads,
                 range,
                 cancelled,
@@ -444,12 +497,15 @@ pub(crate) fn run_joint_pair(
                     if cancelled.load(Ordering::Acquire) {
                         return Err("cancelled".into());
                     }
-                    let balls = detect_ball_window(
-                        &mut ball_engine,
-                        &batch.gray,
-                        batch.first_frame,
-                        cancelled,
-                    )?;
+                    let balls = match ball_writer.cached(batch.first_frame)? {
+                        Some(records) => records,
+                        None => detect_ball_window(
+                            &mut ball_engine,
+                            &batch.gray,
+                            batch.first_frame,
+                            cancelled,
+                        )?,
+                    };
                     ball_writer.push(batch.first_frame, &balls)?;
                     if ball_writer.count.is_multiple_of(10) {
                         let frames = batch.first_frame + 9;
@@ -476,8 +532,6 @@ pub(crate) fn run_joint_pair(
             total_frames,
             None,
         )?;
-        let court = crate::video_edits::court_snapshot(state, project_id, video)
-            .map_err(|e| format!("{e:?}"))?;
         let dimension = |key: &str| {
             original_provenance["video"][key]
                 .as_u64()
@@ -555,8 +609,31 @@ pub(crate) fn run_joint_pair(
             Some((&mask_value, ball_scan.decode.decoded_frames)),
         )?;
         rally_filter = Some(mask_value);
+        let rally_checkpoint = checkpoint_dir
+            .as_ref()
+            .map(|directory| {
+                checkpoint::directory(
+                    directory,
+                    &json!({
+                        "schema":"volley-phase1-rally-scope/1",
+                        "trajectory_sha256":trajectory_sha,
+                        "selected":mask.selected,
+                        "rallies":mask.rally_intervals,
+                        "decoded_frames":ball_scan.decode.decoded_frames,
+                    }),
+                )
+            })
+            .transpose()?;
+        if let Some(directory) = &rally_checkpoint {
+            person_writer.checkpoint = Some(checkpoint::DetectionJournal::open(
+                directory,
+                "players.jsonl.partial",
+                "player",
+            )?);
+        }
         let mut player_samples = 0u64;
         if let Some(mut options) = early_pose.filter(|_| !pose_enabled) {
+            options.checkpoint_root = rally_checkpoint;
             options.tracking.min_track_observations = crate::cpu_retrack::confirmation_threshold(
                 options.tracking.min_track_observations,
                 Some(person_stride as u64),
@@ -641,7 +718,7 @@ pub(crate) fn run_joint_pair(
             volley_media::raw_decoder::decode_full_video_shared_with_native_and_tail_in_range(
                 original,
                 9,
-                backend_preference()?,
+                preference,
                 cpu_threads,
                 range,
                 cancelled,
@@ -653,16 +730,16 @@ pub(crate) fn run_joint_pair(
                     let selected = (batch.first_frame..batch.first_frame + 9).any(|frame| {
                         frame.is_multiple_of(person_stride as u64) && mask.includes(frame)
                     });
-                    let mut persons = if selected {
-                        detect_player_window(
+                    let mut persons = match person_writer.cached(batch.first_frame)? {
+                        Some(records) => records,
+                        None if selected => detect_player_window(
                             &mut person_engine,
                             &batch.rgb,
                             batch.first_frame,
                             person_stride as u64,
                             cancelled,
-                        )?
-                    } else {
-                        Vec::new()
+                        )?,
+                        None => Vec::new(),
                     };
                     persons.retain(|person| mask.includes(person.frame_index));
                     player_samples += (batch.first_frame..batch.first_frame + 9)
@@ -782,6 +859,11 @@ pub(crate) fn run_joint_pair(
         early_pose_error,
         source_provenance: original_provenance,
         rally_filter,
+        checkpoint_key: checkpoint_dir
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .map(str::to_owned),
     })
 }
 

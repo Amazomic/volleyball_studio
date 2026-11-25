@@ -52,6 +52,7 @@ pub(crate) struct RallyStageProgress {
     touch_detector: BlockStage,
     detector_finished_ms: Option<u64>,
     detector_rallies_ready: u64,
+    rallies_recovered: u64,
 }
 
 impl RallyStageProgress {
@@ -104,6 +105,18 @@ impl RallyStageProgress {
     pub(crate) fn pose_finished(&mut self) {
         self.pose.complete_rally();
     }
+    pub(crate) fn rally_recovered(&mut self, frames: u64, tracks: u64, sampled: u64) {
+        self.boxes_started();
+        self.boxes_finished(frames, tracks);
+        self.touch_started();
+        self.touch_detector.frames_processed += frames;
+        self.touch_finished();
+        self.pose_started();
+        self.pose.frames_processed += frames;
+        self.pose.sampled_frames += sampled;
+        self.pose_finished();
+        self.rallies_recovered += 1;
+    }
 }
 
 pub(crate) fn update_progress<T>(
@@ -119,7 +132,7 @@ pub(crate) fn update_progress<T>(
 const DETECTOR_WINDOW: u64 = 9;
 const MAX_RALLY_OBSERVATIONS: usize = 1_000_000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub(crate) struct RallyWindow {
     pub left: u64,
     pub right: u64,

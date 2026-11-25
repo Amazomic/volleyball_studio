@@ -187,7 +187,7 @@ fn load_player_frame_scope(
     }))
 }
 
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct ReplayTotals {
     frames: u64,
     detections: u64,

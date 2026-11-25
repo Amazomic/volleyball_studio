@@ -43,6 +43,7 @@ pub(crate) struct EarlyPoseOptions {
     pub cancelled: Arc<AtomicBool>,
     pub progress: Arc<Mutex<RallyStageProgress>>,
     pub reid_crops: Option<crate::native_player_tracks::SharedReidCrops>,
+    pub checkpoint_root: Option<PathBuf>,
 }
 
 pub(crate) struct EarlyPoseWorker {
@@ -390,6 +391,185 @@ fn add_totals(total: &mut ReplayTotals, block: &ReplayTotals) {
     );
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RallyReceipt {
+    schema: String,
+    window: RallyWindow,
+    packet_sha: String,
+    id_offset: u64,
+    totals: ReplayTotals,
+    track_count: u64,
+    groups: usize,
+    sampled_frames: u64,
+    track_sha: String,
+    pose_sha: String,
+    reid_plan: BTreeMap<u64, Vec<[f64; 4]>>,
+}
+
+struct RallyStart {
+    packet_sha: String,
+    track_offset: u64,
+    pose_offset: u64,
+    groups: usize,
+    sampled_frames: u64,
+    reid_plan: BTreeMap<u64, Vec<[f64; 4]>>,
+}
+
+fn packet_sha(packet: &Packet) -> Result<String, String> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&packet.observations).map_err(|e| e.to_string())?)
+    ))
+}
+
+fn rally_directory(root: &Path, window: RallyWindow) -> PathBuf {
+    root.join(format!("rally-{}-{}", window.left, window.right))
+}
+
+fn copy_checkpoint_segment(source: &Path, target: &Path, offset: u64) -> Result<String, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut source = File::open(source).map_err(|e| e.to_string())?;
+    let bytes = source
+        .metadata()
+        .map_err(|e| e.to_string())?
+        .len()
+        .checked_sub(offset)
+        .ok_or("Invalid rally checkpoint offset")?;
+    source
+        .seek(SeekFrom::Start(offset))
+        .map_err(|e| e.to_string())?;
+    let mut source = source.take(bytes);
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .map_err(|e| e.to_string())?;
+    let mut hash = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let count = source.read(&mut buf).map_err(|e| e.to_string())?;
+        if count == 0 {
+            break;
+        }
+        output.write_all(&buf[..count]).map_err(|e| e.to_string())?;
+        hash.update(&buf[..count]);
+    }
+    if source.limit() != 0 {
+        return Err("Rally checkpoint segment was truncated".into());
+    }
+    output.sync_all().map_err(|e| e.to_string())?;
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn save_rally_checkpoint(
+    root: &Path,
+    scratch: &Scratch,
+    start: &RallyStart,
+    mut receipt: RallyReceipt,
+) -> Result<(), String> {
+    crate::storage::safe_folder(root)?;
+    let target = rally_directory(root, receipt.window);
+    let tmp = root.join(format!(".rally-{}.tmp", uuid::Uuid::new_v4()));
+    fs::create_dir(&tmp).map_err(|e| e.to_string())?;
+    let saved = (|| {
+        receipt.track_sha = copy_checkpoint_segment(
+            &scratch.0.join("tracks.jsonl"),
+            &tmp.join("tracks.jsonl"),
+            start.track_offset,
+        )?;
+        receipt.pose_sha = copy_checkpoint_segment(
+            &scratch.0.join("poses.jsonl"),
+            &tmp.join("poses.jsonl"),
+            start.pose_offset,
+        )?;
+        let payload = serde_json::to_string(&receipt).map_err(|e| e.to_string())?;
+        crate::storage::write_json_atomic(
+            &tmp.join("receipt.json"),
+            &json!({
+                "payload":payload,
+                "sha256":format!("{:x}", Sha256::digest(payload.as_bytes())),
+            }),
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        if target.exists() {
+            return Err("Rally checkpoint already committed".into());
+        }
+        fs::rename(&tmp, &target).map_err(|e| format!("Publish rally checkpoint: {e}"))
+    })();
+    if saved.is_err() {
+        let _ = fs::remove_dir_all(&tmp);
+    }
+    saved
+}
+
+fn load_rally_checkpoint(
+    root: &Path,
+    window: RallyWindow,
+    sha: &str,
+    id_offset: u64,
+) -> Result<Option<(RallyReceipt, PathBuf)>, String> {
+    let folder = rally_directory(root, window);
+    match fs::symlink_metadata(&folder) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+        Ok(_) => crate::storage::safe_folder(&folder)?,
+    }
+    let envelope = crate::storage::read_json(&folder.join("receipt.json"))
+        .map_err(|e| format!("{e:?}"))?
+        .ok_or("Missing rally checkpoint receipt")?;
+    let payload = envelope["payload"]
+        .as_str()
+        .ok_or("Missing rally checkpoint payload")?;
+    if envelope["sha256"] != format!("{:x}", Sha256::digest(payload.as_bytes())) {
+        return Err("Rally checkpoint receipt checksum mismatch".into());
+    }
+    let receipt: RallyReceipt = serde_json::from_str(payload).map_err(|e| e.to_string())?;
+    let frames = window.right - window.left + 1;
+    if receipt.schema != "volley-phase1-rally/1"
+        || receipt.window != window
+        || receipt.packet_sha != sha
+        || receipt.id_offset != id_offset
+        || receipt.totals.processed_player_frames != frames
+        || receipt.sampled_frames > frames
+        || receipt.reid_plan.iter().any(|(frame, boxes)| {
+            !(window.left..=window.right).contains(frame)
+                || boxes.iter().flatten().any(|n| !n.is_finite())
+        })
+    {
+        return Err(
+            "Rally checkpoint does not match current observations or track identity offset".into(),
+        );
+    }
+    Ok(Some((receipt, folder)))
+}
+
+fn replay_checkpoint_rows(
+    folder: &Path,
+    name: &str,
+    expected_sha: &str,
+    window: RallyWindow,
+    frame_key: &str,
+    writer: &mut BufWriter<File>,
+    hash: &mut Sha256,
+) -> Result<(), String> {
+    let path = crate::storage::safe_file(folder, name, 64 * 1024 * 1024 * 1024)?;
+    let mut reader = BoundedReader::open(&path)?;
+    for frame in window.left..=window.right {
+        let bytes = reader.line()?.ok_or("Truncated rally checkpoint")?;
+        let row: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if row[frame_key].as_u64() != Some(frame) {
+            return Err("Rally checkpoint frame order mismatch".into());
+        }
+        writer.write_all(&bytes).map_err(|e| e.to_string())?;
+        hash.update(&bytes);
+    }
+    if reader.line()?.is_some() || reader.finish() != expected_sha {
+        return Err("Rally checkpoint output checksum or coverage mismatch".into());
+    }
+    Ok(())
+}
+
 fn run(
     input: WorkerInput,
     receiver: mpsc::Receiver<Packet>,
@@ -414,9 +594,9 @@ fn run(
             input.dimensions,
         )
     };
-    let mut plan = Some(make_plan(
-        receive(&receiver, stop, &input.options.cancelled)?.ok_or("Missing first rally packet")?,
-    )?);
+    let mut plan: Option<LocalPlan> = None;
+    let mut block_start: Option<RallyStart> = None;
+    let mut recovered_reid = BTreeMap::<u64, Vec<[f64; 4]>>::new();
     let scratch = Scratch::new()?;
     let mut tracks =
         BufWriter::new(File::create(scratch.0.join("tracks.jsonl")).map_err(|e| e.to_string())?);
@@ -445,13 +625,85 @@ fn run(
             if input.options.cancelled.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
                 return Err("cancelled".into());
             }
-            if plan.is_none() {
-                plan = receive(&receiver, stop, &input.options.cancelled)?
-                    .map(make_plan)
-                    .transpose()?;
+            while plan.is_none() && !done {
+                let Some(packet) = receive(&receiver, stop, &input.options.cancelled)? else {
+                    if windows.is_empty() {
+                        return Err("Missing first rally packet".into());
+                    }
+                    done = true;
+                    break;
+                };
+                if let Some(root) = input.options.checkpoint_root.as_deref() {
+                    let sha = packet_sha(&packet)?;
+                    if let Some((receipt, folder)) =
+                        load_rally_checkpoint(root, packet.window, &sha, totals.tentative_tracks)?
+                    {
+                        replay_checkpoint_rows(
+                            &folder,
+                            "tracks.jsonl",
+                            &receipt.track_sha,
+                            receipt.window,
+                            "frame_index",
+                            &mut tracks,
+                            &mut track_hash,
+                        )?;
+                        replay_checkpoint_rows(
+                            &folder,
+                            "poses.jsonl",
+                            &receipt.pose_sha,
+                            receipt.window,
+                            "frame",
+                            &mut poses,
+                            &mut pose_hash,
+                        )?;
+                        windows.push(receipt.window);
+                        add_totals(&mut totals, &receipt.totals);
+                        track_count += receipt.track_count;
+                        groups += receipt.groups;
+                        sampled_frames += receipt.sampled_frames;
+                        if shared_reid.is_some() {
+                            recovered_reid.extend(receipt.reid_plan);
+                        }
+                        update_progress(&input.options.progress, |p| {
+                            p.rally_recovered(
+                                receipt.window.right - receipt.window.left + 1,
+                                receipt.totals.tentative_tracks,
+                                receipt.sampled_frames,
+                            )
+                        })?;
+                        continue;
+                    }
+                    let active = make_plan(packet)?;
+                    tracks.flush().map_err(|e| e.to_string())?;
+                    poses.flush().map_err(|e| e.to_string())?;
+                    block_start = Some(RallyStart {
+                        packet_sha: sha,
+                        track_offset: tracks
+                            .get_ref()
+                            .metadata()
+                            .map_err(|e| e.to_string())?
+                            .len(),
+                        pose_offset: poses.get_ref().metadata().map_err(|e| e.to_string())?.len(),
+                        groups,
+                        sampled_frames,
+                        reid_plan: active.reid_plan.clone(),
+                    });
+                    plan = Some(active);
+                } else {
+                    plan = Some(make_plan(packet)?);
+                }
+            }
+            if let Some(shared_reid) = shared_reid {
+                if let Some(boxes) = recovered_reid.remove(&index) {
+                    if let Err(error) = shared_reid.capture(index, pixels, width, height, &boxes) {
+                        eprintln!("Shared recovered ReID crop unavailable: {error}");
+                    }
+                }
             }
             let Some(active) = plan.as_mut() else {
-                done = true;
+                if !recovered_reid.is_empty() {
+                    return Ok(());
+                }
                 return Err("rally intervals complete".into());
             };
             if index < active.window.left {
@@ -530,6 +782,30 @@ fn run(
                 {
                     return Err("Rally crop plan changed".into());
                 }
+                if let (Some(root), Some(start)) =
+                    (input.options.checkpoint_root.as_deref(), block_start.take())
+                {
+                    flush(&mut tracks)?;
+                    flush(&mut poses)?;
+                    save_rally_checkpoint(
+                        root,
+                        &scratch,
+                        &start,
+                        RallyReceipt {
+                            schema: "volley-phase1-rally/1".into(),
+                            window: finished.window,
+                            packet_sha: start.packet_sha.clone(),
+                            id_offset: totals.tentative_tracks,
+                            totals: finished.totals.clone(),
+                            track_count: finished.track_count,
+                            groups: groups - start.groups,
+                            sampled_frames: sampled_frames - start.sampled_frames,
+                            track_sha: String::new(),
+                            pose_sha: String::new(),
+                            reid_plan: start.reid_plan.clone(),
+                        },
+                    )?;
+                }
                 windows.push(finished.window);
                 add_totals(&mut totals, &finished.totals);
                 track_count += finished.track_count;
@@ -538,9 +814,12 @@ fn run(
             Ok(())
         },
     );
-    if !done {
+    if !done || !recovered_reid.is_empty() {
         outcome?;
-        if plan.is_some() || receive(&receiver, stop, &input.options.cancelled)?.is_some() {
+        if plan.is_some()
+            || !recovered_reid.is_empty()
+            || receive(&receiver, stop, &input.options.cancelled)?.is_some()
+        {
             return Err("Rally pipeline ended with unfinished windows".into());
         }
     }
@@ -674,6 +953,94 @@ impl CompletedRallies {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rally_checkpoint_recovers_only_committed_rows_and_checks_identity() {
+        let root = Scratch::new().unwrap();
+        let scratch = Scratch::new().unwrap();
+        let window = RallyWindow {
+            left: 2,
+            right: 3,
+            start: 2,
+            end: 3,
+        };
+        let prefix = b"{\"frame_index\":1}\n";
+        let tracks = b"{\"frame_index\":2}\n{\"frame_index\":3}\n";
+        let poses = b"{\"frame\":2}\n{\"frame\":3}\n";
+        fs::write(
+            scratch.0.join("tracks.jsonl"),
+            [prefix.as_slice(), tracks.as_slice()].concat(),
+        )
+        .unwrap();
+        fs::write(scratch.0.join("poses.jsonl"), poses).unwrap();
+        assert!(load_rally_checkpoint(&root.0, window, "packet", 10)
+            .unwrap()
+            .is_none());
+        let start = RallyStart {
+            packet_sha: "packet".into(),
+            track_offset: prefix.len() as u64,
+            pose_offset: 0,
+            groups: 0,
+            sampled_frames: 0,
+            reid_plan: BTreeMap::new(),
+        };
+        save_rally_checkpoint(
+            &root.0,
+            &scratch,
+            &start,
+            RallyReceipt {
+                schema: "volley-phase1-rally/1".into(),
+                window,
+                packet_sha: "packet".into(),
+                id_offset: 10,
+                totals: ReplayTotals {
+                    processed_player_frames: 2,
+                    ..Default::default()
+                },
+                track_count: 1,
+                groups: 1,
+                sampled_frames: 2,
+                track_sha: String::new(),
+                pose_sha: String::new(),
+                reid_plan: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let (receipt, folder) = load_rally_checkpoint(&root.0, window, "packet", 10)
+            .unwrap()
+            .unwrap();
+        assert!(load_rally_checkpoint(&root.0, window, "different", 10).is_err());
+        assert!(load_rally_checkpoint(&root.0, window, "packet", 11).is_err());
+        let output = scratch.0.join("restored.jsonl");
+        let mut writer = BufWriter::new(File::create(&output).unwrap());
+        replay_checkpoint_rows(
+            &folder,
+            "tracks.jsonl",
+            &receipt.track_sha,
+            window,
+            "frame_index",
+            &mut writer,
+            &mut Sha256::new(),
+        )
+        .unwrap();
+        writer.flush().unwrap();
+        assert_eq!(fs::read(output).unwrap(), tracks);
+        fs::write(
+            folder.join("tracks.jsonl"),
+            b"{\"frame_index\":2,\"changed\":true}\n{\"frame_index\":3}\n",
+        )
+        .unwrap();
+        assert!(replay_checkpoint_rows(
+            &folder,
+            "tracks.jsonl",
+            &receipt.track_sha,
+            window,
+            "frame_index",
+            &mut writer,
+            &mut Sha256::new()
+        )
+        .is_err());
+    }
 
     #[test]
     fn assembly_uses_completed_rows_and_rejects_missing_or_changed_evidence() {

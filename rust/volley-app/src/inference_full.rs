@@ -1,6 +1,7 @@
 //! Experimental full prepared-video ONNX processing with bounded memory.
 //! One model/video per job, immutable raw-detections JSONL, durable status.
 //! This is *not* a complete Studio GPU/CPU analysis or player Track ID result.
+mod checkpoint;
 #[cfg(any(unix, windows))]
 mod joint;
 use crate::{
@@ -226,6 +227,7 @@ struct EvidenceWriter {
     writer: BufWriter<File>,
     digest: Sha256,
     count: usize,
+    checkpoint: Option<checkpoint::DetectionJournal>,
     ball_samples: Option<Vec<RawDetection>>,
     rally_handoff: Option<(
         crate::rally_handoff::RallyHandoff<RawDetection>,
@@ -243,11 +245,22 @@ impl EvidenceWriter {
             writer: BufWriter::new(file),
             digest: Sha256::new(),
             count: 0,
+            checkpoint: None,
             ball_samples: None,
             rally_handoff: None,
         })
     }
+    fn cached(&mut self, frame: u64) -> Result<Option<Vec<RawDetection>>, String> {
+        self.checkpoint
+            .as_mut()
+            .map(|journal| journal.cached(frame))
+            .transpose()
+            .map(Option::flatten)
+    }
     fn push(&mut self, frame: u64, records: &[RawDetection]) -> Result<(), String> {
+        if let Some(journal) = self.checkpoint.as_mut() {
+            journal.commit(frame, records)?;
+        }
         if let Some(samples) = self.ball_samples.as_mut() {
             samples.extend(
                 records
@@ -280,6 +293,9 @@ impl EvidenceWriter {
         Ok(())
     }
     fn finish(mut self) -> Result<(String, usize), String> {
+        if let Some(journal) = self.checkpoint.as_mut() {
+            journal.finish()?;
+        }
         if let Some((handoff, _)) = self.rally_handoff.take() {
             handoff.finish()?;
         }

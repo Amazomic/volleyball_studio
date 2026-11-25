@@ -1064,3 +1064,102 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
     );
     Ok(())
 }
+
+#[test]
+#[ignore = "requires Windows CUDA/ORT and repository example video"]
+fn phase1_checkpoint_cuda_resume() -> Result<(), String> {
+    let repository =
+        PathBuf::from(std::env::var("VOLLEY_AB_MODEL_ROOT").map_err(|e| e.to_string())?);
+    let original = PathBuf::from(std::env::var("VOLLEY_AB_SOURCE").map_err(|e| e.to_string())?);
+    let base = std::env::temp_dir().join(format!("volley-resume-gpu-{}", Uuid::new_v4().simple()));
+    fs::create_dir(&base).map_err(|e| e.to_string())?;
+    let _cleanup = IsolatedGpuFixture(base.clone());
+    let data = base.join("sandbox");
+    let uploads = data.join("uploads/project_sources");
+    let project = data.join("projects/012345abcdef");
+    let checkpoints = project.join("native_studio_pipelines");
+    fs::create_dir_all(&uploads).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&checkpoints).map_err(|e| e.to_string())?;
+    let video = "resume-example.mp4";
+    let source = uploads.join(video);
+    let status = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
+        .arg(original)
+        .args([
+            "-vf", "fps=30", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y",
+        ])
+        .arg(&source)
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("Cannot create GPU example fixture".into());
+    }
+    crate::storage::write_json_atomic(&data.join("projects/projects.json"),
+        &json!({"schema":1,"projects":[{"id":"012345abcdef","name":"Resume smoke","videos":[video]}]}))
+        .map_err(|e| format!("{e:?}"))?;
+    let duration = volley_media::probe(&source)?.duration_sec;
+    let app = state(repository, data);
+    let run = |interrupt: bool| -> Result<(Result<JointPair, String>, Value), String> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(StdMutex::new(RallyStageProgress::default()));
+        let result = run_joint_pair(
+            &app,
+            "012345abcdef",
+            video,
+            &source,
+            duration,
+            None,
+            3,
+            false,
+            volley_inference::person::DetectorVariant::RfDetrMedium,
+            0,
+            4,
+            PrimaryRallySettings {
+                min_trajectory_seconds: 1.0,
+                ..Default::default()
+            },
+            Default::default(),
+            Some(EarlyPoseOptions {
+                tracking: Default::default(),
+                interpolate_players: true,
+                threads: 4,
+                cancelled: cancel.clone(),
+                progress: progress.clone(),
+                reid_crops: None,
+                checkpoint_root: Some(checkpoints.clone()),
+            }),
+            &cancel,
+            |_, _, _, _| {
+                let snapshot = serde_json::to_value(&*progress.lock().map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+                if interrupt && snapshot["pose"]["rallies_completed"].as_u64().unwrap_or(0) > 0 {
+                    cancel.store(true, Ordering::Release);
+                    return Err("cancelled".into());
+                }
+                Ok(())
+            },
+        );
+        let snapshot = serde_json::to_value(&*progress.lock().map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        Ok((result, snapshot))
+    };
+    let (first, before) = run(true)?;
+    println!("Interrupted: {before}");
+    if first.err().as_deref() != Some("cancelled")
+        || before["pose"]["rallies_completed"].as_u64().unwrap_or(0) == 0
+    {
+        return Err("GPU example did not reach a committed rally before interruption".into());
+    }
+    let (resumed, after) = run(false)?;
+    let resumed = resumed?;
+    println!("Resumed: {after}");
+    if after["rallies_recovered"].as_u64().unwrap_or(0)
+        < before["pose"]["rallies_completed"].as_u64().unwrap_or(0)
+        || after["pose"]["rallies_completed"] != after["pose"]["rallies_total"]
+        || resumed.early_poses.is_none()
+    {
+        return Err("Resume did not restore all committed rallies".into());
+    }
+    let _fusion = fusion_pair(&app, video, &resumed.ball_job_id, &resumed.player_job_id)?;
+    Ok(())
+}

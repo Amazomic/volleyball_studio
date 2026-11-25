@@ -1359,11 +1359,13 @@
     renderGraphSummary();
     const active=latest&&["queued","running","cancelling"].includes(latest.status);
     const visibleIds=visibleHistoryRuns(projectId());
-    const rows=projectHistoryRows().filter(row=>visibleIds.has(row.id)&&
-      (state.historyFilter==="all"||row.mode===state.historyFilter||
-        !row.mode||row.mode==="full"||(active&&row.id===latest.id)));
+    // The server owns durable history. Browser session state is only a fallback
+    // for a just-queued run that has not appeared in the history page yet.
+    const rows=projectHistoryRows().filter(row=>
+      state.historyFilter==="all"||row.mode===state.historyFilter||
+      !row.mode||row.mode==="full"||(active&&row.id===latest.id));
     // The status endpoint can observe a new job before the history endpoint lists it.
-    if(active&&visibleIds.has(latest.id)&&!rows.some(row=>row.id===latest.id)){
+    if(active&&!rows.some(row=>row.id===latest.id)){
       rows.unshift({id:latest.id,mode:latest.mode,video:latest.video,
         status:latest.status,stage:latest.stage,stages:[],started_ms:null});
     }

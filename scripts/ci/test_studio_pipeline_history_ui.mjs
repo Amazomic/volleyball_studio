@@ -80,7 +80,7 @@ const current={
 };
 state.latestPipeline=current;
 result.renderHistory();
-assert.equal(ui.historyList.children.length,0,"Previous result stays above history until next launch");
+assert.equal(ui.historyList.children.length,1,"Server history is visible even without a sessionStorage marker");
 result.recordHistoryRun(project,id);
 assert.deepEqual(JSON.parse(sessionStorage.getItem("volley:analysis-session-runs:v1:"+project)),[id]);
 result.renderHistory();
@@ -105,16 +105,16 @@ state.historyRows=[
   {id:"b".repeat(32),mode:"gpu",video:"older.mp4",status:"complete",stages:[],started_ms:500}
 ];
 result.renderHistory();
-assert.equal(ui.historyList.children.length,1,"Older server records must be hidden");
+assert.equal(ui.historyList.children.length,2,"All server history records must be visible");
 assert.strictEqual(progress.parent,logPanel.parent,"Progress and log remain colocated after reload");
 assert.equal(host.children.length,0,"Live nodes must not remain duplicated in the hidden host");
 row=ui.historyList.children[0];
 assert.equal(row.querySelector(".analysis-history-live-stage").textContent,"CPU · касания · 45.7%");
-assert.equal(ui.historyList.children[1],undefined,"No duplicate history graph from prior runs");
+assert.equal(ui.historyList.children[1].dataset.runId,"b".repeat(32),"Older server run is retained in history");
 
 state.historyFilter="gpu";
 result.renderHistory();
-assert.equal(ui.historyList.children.length,1,"Active run remains visible regardless of history filter");
+assert.equal(ui.historyList.children.length,2,"History filter retains active run and only matching phase rows");
 state.historyFilter="all";
 result.updateLiveHistory({...running,status:"complete",stage:"Готово",progress_percent:100});
 assert.equal(ui.historyList.children[0].querySelector(".analysis-history-status").textContent,"Завершён");
@@ -149,7 +149,8 @@ const restored=runInNewContext(registry+source.slice(from,to)+
     $:key=>key==="studio-analysis-live-host"?restoredHost:null
   });
 restored.renderHistory();
-assert.equal(restoredUi.historyList.children.length,1,
-  "Only a run accepted in this browser session survives reload, not older archived runs");
-assert.equal(restoredUi.historyList.children[0].dataset.runId,id);
+assert.equal(restoredUi.historyList.children.length,2,
+  "All archived server runs survive browser-session changes");
+assert.equal(restoredUi.historyList.children[0].dataset.runId,id,"Newest server row remains first");
+assert.equal(restoredUi.historyList.children[1].dataset.runId,"b".repeat(32),"Older server row remains visible");
 console.log("Studio analysis history: session-only runs, compact timing, reload persistence and project isolation");

@@ -2177,6 +2177,10 @@ async fn pipeline(
                             threads: request.gpu.cpu_threads,
                             cancelled: cancel.clone(),
                             progress: rally_progress.clone(),
+                            checkpoint_root: path
+                                .parent()
+                                .and_then(Path::parent)
+                                .map(Path::to_path_buf),
                             reid_crops: (request.mode == PipelineMode::Full
                                 && request.post.reid_buffer_mib > 0)
                                 .then(|| shared_reid_crops.clone()),
@@ -2231,6 +2235,7 @@ async fn pipeline(
                         result.fallback_reason.as_deref().unwrap_or("none")
                     ),
                 )?;
+                status["phase1_checkpoint_key"] = json!(result.checkpoint_key);
                 status["zero_copy_active"] = json!(result.zero_copy);
                 status["gpu_rally_mask"] = result.rally_filter.unwrap_or(Value::Null);
                 save(path, status)?;
@@ -2832,7 +2837,20 @@ async fn perform(
     }
     status["current_gpu_job_id"] = Value::Null;
     finish_timed_stage(&mut status);
-    let _ = save(&path, &status);
+    let saved = save(&path, &status).is_ok();
+    if saved && status["status"] == "complete" {
+        if let (Some(key), Some(root)) = (
+            status["phase1_checkpoint_key"].as_str(),
+            path.parent().and_then(Path::parent),
+        ) {
+            if key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()) {
+                let folder = root.join("phase1_checkpoints").join(key);
+                if storage::safe_folder(&folder).is_ok() {
+                    let _ = fs::remove_dir_all(folder);
+                }
+            }
+        }
+    }
     if slot.as_ref().is_some_and(|current| current.id == id) {
         *slot = None;
     }
