@@ -643,6 +643,20 @@
     unknown_touch:["#c6bf96","Касание"]
   };
   const cpuTouchKind=kind=>Object.hasOwn(cpuTouchStyle,kind)?kind:"unknown_touch";
+  const floorContactColor="#e8b84e";
+  const floorContactLabel=outcome=>"Касание пола · "+({
+    line_uncertain:"Граница площадки",out:"За пределами площадки",
+    near_half:"Ближняя половина",far_half:"Дальняя половина"
+  }[outcome]||"Зона не определена");
+  const floorContacts=data=>(data?.surface_contact_candidates||[]).filter(event=>event.surface==="floor");
+  const validSurfaceContacts=raw=>raw.surface_contact_candidates===undefined||
+    (Array.isArray(raw.surface_contact_candidates)&&raw.surface_contact_candidates.every((event,index,all)=>
+      Number.isSafeInteger(event.frame_index)&&event.frame_index>=0&&event.frame_index<raw.total_frames&&
+      (index===0||all[index-1].frame_index<=event.frame_index)&&event.provisional===true&&
+      (event.surface==="net"&&event.outcome==="possible_deflection"||
+        event.surface==="floor"&&["near_half","far_half","out","line_uncertain"].includes(event.outcome))&&
+      (event.position==null||Array.isArray(event.position)&&event.position.length===2&&
+        event.position.every(v=>Number.isFinite(v)&&v>=-0.5&&v<=1.5))));
   // The timeline belongs to the selected saved CPU postprocessing snapshot.
   // Raw GPU detections and limited rally-card motion_events are never Touchs.
   const cpuTouchesForFrame=(project,run,video,sha,frame)=>{
@@ -702,6 +716,31 @@
       ctx.fillStyle="rgba(9,20,35,.94)";
       ctx.fillRect(tx-4,ty-14,textWidth+8,17);
       ctx.fillStyle=color;ctx.fillText(touchLabel,tx,ty);
+    }
+    const data=timeline.data;
+    if(data?.project_id!==project||data?.rally_run_id!==run||data?.video!==video||
+       data?.source_replay_sha256!==record.replay_sha256)return;
+    const surface=data.surface_contact_candidates||[];
+    let left=0,right=surface.length;
+    while(left<right){
+      const mid=(left+right)>>>1;
+      if(surface[mid].frame_index<frame-8)left=mid+1;else right=mid;
+    }
+    for(let i=left;i<surface.length&&surface[i].frame_index<=frame+8;i++){
+      const event=surface[i];
+      if(event.surface!=="floor"||!Array.isArray(event.position))continue;
+      const [bx,by]=event.position;
+      if(bx<0||bx>1||by<0||by>1)continue;
+      const px=x+bx*width,py=y+by*height;
+      ctx.beginPath();ctx.arc(px,py,10,0,2*Math.PI);
+      ctx.strokeStyle=floorContactColor;ctx.lineWidth=2.5;ctx.stroke();
+      ctx.font="bold 12px Inter, sans-serif";ctx.textBaseline="bottom";
+      const label=floorContactLabel(event.outcome);
+      const tw=ctx.measureText(label).width;
+      const tx=Math.max(x+5,Math.min(x+width-tw-9,px+15));
+      const ty=Math.max(y+17,Math.min(y+height-5,py-6));
+      ctx.fillStyle="rgba(9,20,35,.94)";ctx.fillRect(tx-4,ty-14,tw+8,17);
+      ctx.fillStyle=floorContactColor;ctx.fillText(label,tx,ty);
     }
   };
   const courtPreview={key:"",data:null,loading:false,failed:false};
@@ -3074,6 +3113,14 @@
           }
         }
       }
+      if(!training.active&&overlay.flags.touches){
+        for(const event of floorContacts(data)){
+          const x=Math.floor(((Number(s.analysisOffset)||0)+event.frame_index/fps())/duration*width);
+          if(!Number.isFinite(x)||x<0||x>=width)continue;
+          ctx.fillStyle=floorContactColor;
+          ctx.fillRect(x,y,Math.max(3,Math.ceil(dpr)),bandHeight);
+        }
+      }
       if(!training.active&&overlay.flags.touches&&Array.isArray(data.touch_annotations)){
         for(const classified of [false,true]){
           for(const touch of data.touch_annotations){
@@ -3126,7 +3173,7 @@
         !raw.touch_annotations.every((event,index)=>
           event.frame_index===raw.touch_frames[index]&&
           (event.kind===null||Object.hasOwn(cpuTouchStyle,event.kind)))||
-        raw.authoritative_game_events!==false||
+        !validSurfaceContacts(raw)||raw.authoritative_game_events!==false||
         (s.video&&raw.video!==s.video))
         throw Error("Недостоверный индекс временной шкалы");
       timeline.data=raw;
@@ -3138,7 +3185,7 @@
       const attacks=actual.filter(e=>e.kind==="attack").length;
       const blocks=actual.filter(e=>e.kind==="block").length;
       timeline.status.textContent=raw.rallies.length+" розыгрышей · "+
-        actual.length+" касаний (CPU) · "+
+        actual.length+" касаний (CPU) · "+floorContacts(raw).length+" касаний пола · "+
         attacks+" атак · "+blocks+" блоков";
       const duration=timelineDuration();
       timeline.middle.textContent="00:00.0";
@@ -3832,7 +3879,7 @@
       const raw=await previewCache.load(path,900000,true);
       if(token!==s.generation)return;
       if(raw.schema!=="volley-native-rally-preview/1"||
-        raw.authoritative_game_events!==false||
+        !validSurfaceContacts(raw)||raw.authoritative_game_events!==false||
         raw.automatic_montage_eligible!==false||
         !Array.isArray(raw.items))
         throw Error("Неподдерживаемая версия предварительного CPU-анализа");
@@ -3930,6 +3977,7 @@
     const touches=validTimeline&&(typeof training==="undefined"||!training.active)&&
       !overlay.raw&&overlay.flags.touches?data.touch_annotations.filter(event=>
       overlay.actionFlags[cpuTouchKind(event.kind)]):[];
+    const ground=validTimeline&&!overlay.raw&&overlay.flags.touches?floorContacts(data):[];
     for(const {progress,markers,start,end} of rallyCardProgresses.values()){
       wipe(markers);
       if(!validTimeline){
@@ -3949,6 +3997,16 @@
         tick.setAttribute("aria-hidden","true");
         markers.append(tick);
         count++;
+      }
+      for(const event of ground){
+        if(event.frame_index<start||event.frame_index>end)continue;
+        const tick=make("span","rally-card-touch-tick");
+        tick.style.left=(100*(event.frame_index-start)/duration)+"%";
+        tick.style.backgroundColor=floorContactColor;
+        tick.style.color=floorContactColor;
+        tick.title=second(event.frame_index)+" с · "+floorContactLabel(event.outcome);
+        tick.setAttribute("aria-hidden","true");
+        markers.append(tick);
       }
       for(const serve of serves){
         const frame=Number(serve.trajectory_start_frame??serve.rally_start_frame);
@@ -4005,6 +4063,7 @@
     }):[];
     const touches=data.touch_annotations.filter(event=>
       event.frame_index>=start&&event.frame_index<=end);
+    const ground=floorContacts(data).filter(event=>event.frame_index>=start&&event.frame_index<=end);
     const labels={attack:"Атака",block:"Блок",serve:"Подача",
       overhead_pass:"Передача сверху",dig:"Приём снизу"};
     const counts=new Map();
@@ -4019,6 +4078,7 @@
       breakdown.push("Касание ×"+counts.get("unknown_touch"));
     ui.viewDescription.textContent="Фрагмент "+clock(start)+" – "+clock(end)+
       ". Касаний из CPU-постобработки: "+touches.length+
+      ". Касаний пола: "+ground.length+
       ". Оценка типов: "+(breakdown.join(" · ")||"нет данных")+
       ". Классификация автоматическая, не подтверждена вручную.";
     for(const serve of serves){
@@ -4037,6 +4097,12 @@
       const pill=make("span","event-pill",clock(touch.frame_index)+" · "+label);
       pill.title="Результат выбранной CPU-постобработки. Автоматическая оценка.";
       pill.style.borderColor=cpuTouchStyle[kind][0];
+      ui.events.append(pill);
+    }
+    for(const event of ground){
+      const pill=make("span","event-pill",clock(event.frame_index)+" · "+floorContactLabel(event.outcome));
+      pill.title="Предполагаемый контакт с поверхностью по траектории мяча. Не решение судьи.";
+      pill.style.borderColor=floorContactColor;
       ui.events.append(pill);
     }
   };
@@ -4359,7 +4425,7 @@
       }),900000,true);
       if(token!==s.generation||project!==s.project||run!==s.run)return;
       if(raw.schema!=="volley-native-rally-preview/1"||
-        raw.authoritative_game_events!==false||
+        !validSurfaceContacts(raw)||raw.authoritative_game_events!==false||
         raw.automatic_montage_eligible!==false||
         !Array.isArray(raw.items))
         throw Error("Неподдерживаемая версия предварительного CPU-анализа");

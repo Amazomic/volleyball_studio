@@ -1329,6 +1329,25 @@ fn is_launch_departure_echo(
             <= 16.0 + launch.speed_after_px_frame * elapsed as f64 * 1.45
 }
 
+fn separate_ground_contacts(
+    events: &mut Vec<PhysicalTouchCandidate>,
+    ground: &mut Vec<volley_core::motion::GroundContact>,
+) {
+    ground.retain(|contact| {
+        !events.iter().any(|event| {
+            event.frame_index == contact.frame
+                && event.body_contact_supported
+                && event.contact_landmark.is_some()
+                && event.provisional_track_id.is_some()
+        })
+    });
+    events.retain(|event| {
+        !ground
+            .iter()
+            .any(|contact| contact.frame == event.frame_index)
+    });
+}
+
 fn source_frame_contains_track(frames: &[TouchFrame], frame_index: u64, track_id: u64) -> bool {
     let Some(first) = frames.first() else {
         return false;
@@ -1960,6 +1979,7 @@ fn detect_stream_with_pose(
     let mut motion_candidates: u64 = 0;
     let mut pending: Option<PhysicalTouchCandidate> = None;
     let mut initial_serves = Vec::<InitialServeProposal>::new();
+    let mut ground_contacts = Vec::<volley_core::motion::GroundContact>::new();
     let separation = (settings.min_interval_sec * 30.0).round().max(1.0) as u64;
     let mut process_block = |start: u64,
                              end: u64,
@@ -2032,6 +2052,7 @@ fn detect_stream_with_pose(
             if start >= end {
                 continue;
             }
+            let mut possible_ground = Vec::new();
             let mut events = detect_ball_trajectory_touches(
                 evidence_frames,
                 width,
@@ -2045,6 +2066,7 @@ fn detect_stream_with_pose(
                     let last = events.partition_point(|event| event.frame < end as i64);
                     &events[first..last]
                 }),
+                &mut possible_ground,
             )?;
             attach_touch_source_evidence(
                 &mut events,
@@ -2103,7 +2125,7 @@ fn detect_stream_with_pose(
                 }
             }
 
-            for mut event in events {
+            for event in &mut events {
                 if let Some(track_id) = event.provisional_track_id {
                     let (first_slice, second_slice) = input.as_slices();
                     if !source_frame_contains_track(first_slice, event.frame_index, track_id)
@@ -2117,6 +2139,13 @@ fn detect_stream_with_pose(
                         event.court = None;
                     }
                 }
+            }
+            separate_ground_contacts(&mut events, &mut possible_ground);
+            if ground_contacts.len() + possible_ground.len() > 30_000 {
+                return Err("Ground contact count exceeds limit".into());
+            }
+            ground_contacts.extend(possible_ground);
+            for event in events {
                 motion_candidates += 1;
 
                 if let Some(last) = select_pending_touch(&mut pending, event, separation) {
@@ -2237,7 +2266,7 @@ fn detect_stream_with_pose(
         let path = output.with_file_name("initial_serve_proposals.partial.json");
         fs::write(
             &path,
-            serde_json::to_vec(&initial_serves).map_err(|e| e.to_string())?,
+            serde_json::to_vec(&json!({"initial_serve_proposals":initial_serves,"ground_contacts":ground_contacts})).map_err(|e| e.to_string())?,
         )
         .map_err(|e| format!("Save initial serve proposals: {e}"))?;
     }
@@ -2692,17 +2721,22 @@ fn process_with_ball_scope_and_rally_settings_report(
             record["ball_stabilizer"] = stabilized.summary();
         }
         let serve_proposals_file = folder.join("initial_serve_proposals.partial.json");
-        let serve_proposals: Value = serde_json::from_slice(
+        let mut surface_data: Value = serde_json::from_slice(
             &fs::read(&serve_proposals_file)
                 .map_err(|e| format!("Read initial serve proposals: {e}"))?,
         )
         .map_err(|e| format!("Invalid initial serve proposals: {e}"))?;
         fs::remove_file(&serve_proposals_file)
             .map_err(|e| format!("Remove temporary serve proposals: {e}"))?;
+        let serve_proposals = surface_data["initial_serve_proposals"].take();
+        let ground_contacts = surface_data["ground_contacts"].take();
+        record["ground_detector_version"] = json!(volley_core::motion::GROUND_DETECTOR_VERSION);
+        record["ground_contact_count"] = json!(ground_contacts.as_array().map_or(0, Vec::len));
         record["initial_serve_proposal_count"] =
             json!(serve_proposals.as_array().map_or(0, Vec::len));
         let preliminary_data = json!({
             "initial_serve_proposals":serve_proposals,
+            "ground_contacts":ground_contacts,
             "schema":"volley-native-preliminary-continuous-rallies/1",
             "source_replay_id":req.replay_id,
             "source_replay_sha256":sha,
@@ -2949,6 +2983,36 @@ mod tests {
         let normalized = published_touch_settings(Some(optional)).unwrap();
         assert!(!normalized.require_pose);
         assert_eq!(normalized.algorithm, TouchAlgorithm::BallTrajectory);
+    }
+
+    #[test]
+    fn floor_contacts_do_not_remove_body_confirmed_player_contacts() {
+        let [mut player, floor] = recorded_rebound_and_departure(235);
+        player.contact_landmark = Some(volley_core::pose_contact::BodyContact {
+            joint_indices: [9, 9],
+            point_px: [496.25, 350.0],
+            distance_px: 0.0,
+            normalized_distance: 0.0,
+        });
+        let mut touches = vec![player, floor];
+        let mut ground = vec![
+            volley_core::motion::GroundContact {
+                frame: 235,
+                position: [0.3, 0.6],
+                landing: "line_uncertain",
+            },
+            volley_core::motion::GroundContact {
+                frame: 239,
+                position: [0.2, 0.7],
+                landing: "out",
+            },
+        ];
+        separate_ground_contacts(&mut touches, &mut ground);
+        assert_eq!(touches.len(), 1);
+        assert_eq!(touches[0].frame_index, 235);
+        assert_eq!(ground.len(), 1);
+        assert_eq!(ground[0].frame, 239);
+        assert_eq!(ground[0].landing, "out");
     }
 
     #[test]

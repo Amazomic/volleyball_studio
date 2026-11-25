@@ -239,6 +239,7 @@ pub fn detect_ball_trajectory_touches(
     settings: TouchSettings,
     court_scope: Option<(&crate::court_geometry::CourtTransform, u64)>,
     primary_breaks: Option<&[crate::motion::TrajectoryBreak]>,
+    ground_contacts: &mut Vec<crate::motion::GroundContact>,
 ) -> Result<Vec<PhysicalTouchCandidate>, String> {
     settings.validate()?;
     if !(64..=16384).contains(&width)
@@ -313,7 +314,7 @@ pub fn detect_ball_trajectory_touches(
         {
             continue;
         }
-        if court_scope.is_some_and(|(court, rally_end_frame)| {
+        if let Some(contact) = court_scope.and_then(|(court, rally_end_frame)| {
             crate::motion::classify_ground_contact(
                 &points,
                 impact,
@@ -322,9 +323,8 @@ pub fn detect_ball_trajectory_touches(
                 height,
                 rally_end_frame,
             )
-            .is_some()
         }) {
-            continue;
+            ground_contacts.push(contact);
         }
         let strength = (impact.motion.angle / 170.0).clamp(0.0, 1.0);
         let fit_confidence = 1.0 / (1.0 + impact.fit_error / 6.0);
@@ -699,6 +699,7 @@ mod tests {
             TouchSettings::default(),
             None,
             Some(&[impact]),
+            &mut Vec::new(),
         )
         .unwrap();
         assert_eq!(events.len(), 1);
@@ -753,6 +754,7 @@ mod tests {
             TouchSettings::default(),
             None,
             None,
+            &mut Vec::new(),
         )
         .unwrap();
         assert!(baseline
@@ -785,6 +787,7 @@ mod tests {
             TouchSettings::default(),
             None,
             None,
+            &mut Vec::new(),
         )
         .unwrap();
         let baseline_moments = baseline

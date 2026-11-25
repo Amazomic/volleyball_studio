@@ -255,6 +255,23 @@ fn primary_gpu_rallies_are_visible_in_preview_even_without_cpu_touch_events() {
         .as_array()
         .unwrap()
         .is_empty());
+    rows[1]["surface_event_candidates"] = json!([
+        {"frame_index": 140, "surface": "floor", "outcome": "line_uncertain", "position": [0.3, 0.6], "evidence": "trajectory_ground_contact_v3", "provisional": true},
+        {"frame_index": 150, "surface": "floor", "outcome": "out", "position": [0.2, 0.7], "evidence": "trajectory_ground_contact_v3", "provisional": true}
+    ]);
+    let bytes = rows
+        .iter()
+        .map(|row| format!("{}\n", serde_json::to_string(row).unwrap()))
+        .collect::<String>();
+    fs::write(&run.rally_file, &bytes).unwrap();
+    run.rally_sha = format!("{:x}", Sha256::digest(bytes.as_bytes()));
+    let timeline = generate(&run, Choice::Timeline).unwrap().value;
+    let floor = timeline["surface_contact_candidates"].as_array().unwrap();
+    assert_eq!(floor.len(), 2);
+    assert_eq!(floor[0]["outcome"], "line_uncertain");
+    assert_eq!(floor[1]["outcome"], "out");
+    assert_eq!(floor[0]["position"], json!([0.3, 0.6]));
+    assert!(timeline["touch_annotations"].as_array().unwrap().is_empty());
     fs::remove_dir_all(root).unwrap();
 }
 

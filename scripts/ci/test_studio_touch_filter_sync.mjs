@@ -47,7 +47,7 @@ assert.equal(filterHidden,true,"Raw data never shows CPU touch filters");
 
 const filterCtx={overlay};
 runInNewContext(part("  const cpuTouchStyle={","  // The timeline belongs")+
-  "\nthis.visible=kind=>overlay.actionFlags[cpuTouchKind(kind)]===true;this.cpuTouchStyle=cpuTouchStyle;this.cpuTouchKind=cpuTouchKind;",filterCtx);
+  "\nthis.visible=kind=>overlay.actionFlags[cpuTouchKind(kind)]===true;this.cpuTouchStyle=cpuTouchStyle;this.cpuTouchKind=cpuTouchKind;this.floorContacts=floorContacts;this.floorContactColor=floorContactColor;",filterCtx);
 overlay.raw=false;
 overlay.actionFlags={unknown_touch:true,attack:true,block:true,serve:true,overhead_pass:true,dig:true};
 assert.equal(filterCtx.visible("attack"),true);
@@ -67,13 +67,14 @@ const events=[
   {frame_index:20,kind:"serve",touch_attributed:true},
   {frame_index:30,kind:null,contact_verified:true}
 ];
-const timeline={canvas,data:{rallies:[],touch_annotations:events}};
+const timeline={canvas,data:{rallies:[],touch_annotations:events,surface_contact_candidates:[{frame_index:40,surface:"floor",outcome:"line_uncertain"},{frame_index:47,surface:"floor",outcome:"out"}]}};
 const dummy={hidden:false};
 const timelineCtx={
   timeline,overlay,window:{devicePixelRatio:1},
   s:{analysisOffset:0},training:{active:false},fps:()=>10,
   timelineDuration:()=>10,updateTimelineProgress(){},showBallCandidates:()=>false,
   cpuTouchStyle:filterCtx.cpuTouchStyle,cpuTouchKind:filterCtx.cpuTouchKind,
+  floorContacts:filterCtx.floorContacts,floorContactColor:filterCtx.floorContactColor,
   $:()=>dummy
 };
 runInNewContext(part("  const drawTimeline=()=>{","  const clearTimeline=()=>{")+
@@ -83,6 +84,7 @@ paints.length=0;timelineCtx.draw();
 assert.ok(!paints.includes("#ff6b6b"),"Attack markers obey the unchecked filter");
 assert.ok(paints.includes("#f29d49"),"Selected serve remains on timeline");
 assert.ok(!paints.includes("#c6bf96"),"Unclassified markers follow their own disabled filter");
+assert.ok(paints.includes(filterCtx.floorContactColor),"Floor markers remain independent of player touch type filters");
 overlay.actionFlags.attack=true;overlay.actionFlags.unknown_touch=true;
 paints.length=0;timelineCtx.draw();
 assert.ok(paints.includes("#ff6b6b"));
