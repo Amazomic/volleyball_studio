@@ -89,6 +89,7 @@
                                          "rust/volley-app/src/native_player_tracks/reid_handlers.rs",
                                          "rust/volley-app/src/native_player_tracks/photo_comparison.rs",
                                          "rust/volley-app/src/native_player_tracks/embedding_jobs.rs",
+                                         "rust/volley-app/src/native_player_tracks/shared_crops.rs",
                                          "rust/volley-app/src/native_player_tracks/reference_store.rs",
                                          "rust/volley-app/src/native_player_tracks/reference_refresh.rs"
                                      ],

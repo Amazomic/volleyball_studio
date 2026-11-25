@@ -42,6 +42,7 @@ pub(crate) struct EarlyPoseOptions {
     pub threads: usize,
     pub cancelled: Arc<AtomicBool>,
     pub progress: Arc<Mutex<RallyStageProgress>>,
+    pub reid_crops: Option<crate::native_player_tracks::SharedReidCrops>,
 }
 
 pub(crate) struct EarlyPoseWorker {
@@ -151,6 +152,7 @@ struct LocalPlan {
     digest: String,
     totals: ReplayTotals,
     track_count: u64,
+    reid_plan: BTreeMap<u64, Vec<[f64; 4]>>,
     _scratch: Scratch,
 }
 
@@ -257,6 +259,21 @@ fn build_local_plan(
         return Err("Early crop plan changed before pose inference".into());
     }
     update_progress(&options.progress, RallyStageProgress::touch_finished)?;
+    let reid_plan = if options.reid_crops.is_some() {
+        crate::native_player_tracks::plan_shared_reid_crops(
+            &tracked,
+            &digest,
+            frames,
+            (window.start - window.left, window.end - window.left),
+            window.left,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("Shared ReID crop plan unavailable: {error}");
+            BTreeMap::new()
+        })
+    } else {
+        BTreeMap::new()
+    };
     Ok(LocalPlan {
         window,
         scope,
@@ -266,6 +283,7 @@ fn build_local_plan(
         digest,
         totals,
         track_count,
+        reid_plan,
         _scratch: scratch,
     })
 }
@@ -413,6 +431,11 @@ fn run(
     let mut sampled_frames = 0;
     let mut engine = None;
     let mut done = false;
+    let shared_reid = input.options.reid_crops.as_ref().filter(|buffer| {
+        buffer
+            .bind(&input.original, input.range.map_or(0.0, |r| r.start_sec))
+            .is_ok()
+    });
     let outcome = decode_original_frames_in_range(
         &input.original,
         input.decoded_frames,
@@ -445,6 +468,13 @@ fn run(
                 index - active.window.left,
                 &active.scope,
             )?;
+            if let Some(shared_reid) = shared_reid {
+                if let Some(boxes) = active.reid_plan.remove(&index) {
+                    if let Err(error) = shared_reid.capture(index, pixels, width, height, &boxes) {
+                        eprintln!("Shared ReID crop unavailable: {error}");
+                    }
+                }
+            }
             let players = row["tracked_players"]
                 .as_array()
                 .ok_or("Missing rally tracks")?;

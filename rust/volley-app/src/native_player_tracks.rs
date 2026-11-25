@@ -171,6 +171,8 @@ pub(crate) use reid_handlers::*;
 mod photo_comparison;
 mod photos;
 pub(crate) use photos::*;
+mod shared_crops;
+pub(crate) use shared_crops::{plan_shared_reid_crops, SharedReidCrops};
 mod embedding_jobs;
 pub(crate) use embedding_jobs::*;
 mod reference_store;

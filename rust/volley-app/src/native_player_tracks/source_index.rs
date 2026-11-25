@@ -677,7 +677,7 @@ fn record_observed_pairs(tracks: &mut TrackObservations, frame: u64, boxes: &[Ob
     }
 }
 
-fn scan_with_scope(
+pub(super) fn scan_with_scope(
     path: &Path,
     expected_sha: &str,
     frames: u64,

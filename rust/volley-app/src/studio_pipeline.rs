@@ -1868,6 +1868,7 @@ async fn pipeline(
     #[cfg(any(unix, windows))]
     let mut pending_shared_pose: Option<crate::pose_inference::PendingPose>;
     let mut early_poses = None;
+    let shared_reid_crops = crate::native_player_tracks::SharedReidCrops::default();
     log_native(
         path,
         "Проверка исходного видео",
@@ -2169,6 +2170,8 @@ async fn pipeline(
                             threads: request.gpu.cpu_threads,
                             cancelled: cancel.clone(),
                             progress: rally_progress.clone(),
+                            reid_crops: (request.mode == PipelineMode::Full)
+                                .then(|| shared_reid_crops.clone()),
                         }),
                         cancel,
                         |fraction, processed, total, rally_mask| {
@@ -2604,7 +2607,7 @@ async fn pipeline(
     let replay_sha = replay["sha256"]
         .as_str()
         .ok_or("У треков отсутствует SHA-256")?;
-    let identity_result = crate::native_player_tracks::reid_review(
+    let identity_result = crate::native_player_tracks::reid_review_with_crops(
         State(app.clone()),
         HeaderMap::new(),
         Json(crate::native_player_tracks::ReidReviewRequest {
@@ -2621,8 +2624,10 @@ async fn pipeline(
             auto_threshold_percent: Some(request.post.auto_assign_threshold_percent),
             reid_device: request.post.reid_device,
         }),
+        Some(&shared_reid_crops),
     )
     .await;
+    status["reid_shared_crops"] = shared_reid_crops.stats();
     let identities = match identity_result {
         Ok(Json(value)) => value,
         Err(error) => {

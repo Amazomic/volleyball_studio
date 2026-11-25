@@ -749,6 +749,15 @@ pub async fn reid_review(
     headers: HeaderMap,
     Json(req): Json<ReidReviewRequest>,
 ) -> ApiResult<Value> {
+    reid_review_with_crops(State(state), headers, Json(req), None).await
+}
+
+pub(crate) async fn reid_review_with_crops(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<ReidReviewRequest>,
+    shared: Option<&SharedReidCrops>,
+) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
     if matches!(
         req.action.as_str(),
@@ -777,8 +786,13 @@ pub async fn reid_review(
                 "Сохранённые оценки сходства отсутствуют или устарели. Нажмите «Обновить признаки»",
             ));
         }
-        let comparison =
-            super::photo_comparison::compare(state.clone(), headers, req.clone()).await?;
+        let comparison = super::photo_comparison::compare_with_crops(
+            state.clone(),
+            headers,
+            req.clone(),
+            shared,
+        )
+        .await?;
         let result = tokio::task::spawn_blocking(move || {
             save_automatic_photo_links(&state, &req, &comparison)
         })

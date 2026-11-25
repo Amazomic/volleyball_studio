@@ -76,6 +76,15 @@ pub async fn embeddings(
     headers: HeaderMap,
     Json(req): Json<EmbeddingRequest>,
 ) -> ApiResult<Value> {
+    embeddings_with_crops(State(state), headers, Json(req), None).await
+}
+
+pub(super) async fn embeddings_with_crops(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<EmbeddingRequest>,
+    shared: Option<&SharedReidCrops>,
+) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
     if !valid_sha(&req.expected_source_sha256)
         || req.track_ids.is_empty()
@@ -177,7 +186,7 @@ pub async fn embeddings(
             .map_err(|e| storage::internal(format!("ReID cache read task: {e}")))?
             .map_err(storage::bad_request)?;
     let cache_invalidated = cache.invalidated;
-    let crop_provenance = crops
+    let mut crop_provenance = crops
         .iter()
         .map(|(id, frame, crop)| {
             (
@@ -185,13 +194,20 @@ pub async fn embeddings(
                 native_reid_cache::CropProvenance {
                     frame: *frame,
                     crop: *crop,
+                    shared_rgb: false,
                 },
             )
         })
         .collect::<BTreeMap<_, _>>();
     let mut selected = BTreeMap::<u64, Vec<f32>>::new();
     for (id, _, _) in &crops {
-        let verified_crop = cache.provenance.get(id) == crop_provenance.get(id);
+        let verified_crop = cache
+            .provenance
+            .get(id)
+            .zip(crop_provenance.get(id))
+            .is_some_and(|(saved, requested)| {
+                saved.frame == requested.frame && saved.crop == requested.crop
+            });
         if !scope_requires_new_embedding || verified_crop {
             if let Some(vector) = cache.vectors.get(id) {
                 selected.insert(*id, vector.clone());
@@ -213,6 +229,21 @@ pub async fn embeddings(
     let mut decoders = tokio::task::JoinSet::new();
     for &(track_id, best_frame, crop) in &crops {
         if selected.contains_key(&track_id) {
+            continue;
+        }
+        if let Some(chw) = shared.and_then(|buffer| {
+            buffer.get(
+                &source_file,
+                source_stamp,
+                analysis_offset,
+                best_frame,
+                crop,
+            )
+        }) {
+            if let Some(provenance) = crop_provenance.get_mut(&track_id) {
+                provenance.shared_rgb = true;
+            }
+            frames.push((track_id, best_frame, chw));
             continue;
         }
         if decoders.len() >= 2 {

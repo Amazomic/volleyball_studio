@@ -74,6 +74,8 @@ struct CacheDocument {
 pub(crate) struct CropProvenance {
     pub frame: u64,
     pub crop: [u32; 4],
+    #[serde(default)]
+    pub shared_rgb: bool,
 }
 
 #[derive(Default)]
@@ -308,10 +310,12 @@ mod tests {
         let first = CropProvenance {
             frame: 120,
             crop: [10, 20, 80, 160],
+            shared_rgb: false,
         };
         let second = CropProvenance {
             frame: 220,
             crop: [12, 20, 80, 160],
+            shared_rgb: false,
         };
         // Legacy vectors are valid for full-replay grouping but do not claim
         // to identify any particular rally crop.
@@ -374,6 +378,7 @@ mod tests {
         let crop = CropProvenance {
             frame: 512,
             crop: [8, 4, 64, 128],
+            shared_rgb: false,
         };
         let provenance = BTreeMap::from([(1025_u64, crop.clone())]);
         assert_eq!(
@@ -401,6 +406,7 @@ mod tests {
                     CropProvenance {
                         frame: id * 9,
                         crop: [10, 12, 64, 128],
+                        shared_rgb: false,
                     },
                 )
             })
@@ -423,6 +429,7 @@ mod tests {
                     CropProvenance {
                         frame: id * 9,
                         crop: [10, 12, 64, 128],
+                        shared_rgb: false,
                     },
                 )
             })

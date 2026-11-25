@@ -569,6 +569,15 @@ pub(super) async fn compare(
     headers: HeaderMap,
     req: ReidReviewRequest,
 ) -> Result<Value, ApiError> {
+    compare_with_crops(state, headers, req, None).await
+}
+
+pub(super) async fn compare_with_crops(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    req: ReidReviewRequest,
+    shared: Option<&SharedReidCrops>,
+) -> Result<Value, ApiError> {
     if req.rally_run_id.as_deref().is_some_and(|id| !opaque_id(id)) {
         return Err(storage::bad_request(
             "Invalid rally run for photo comparison",
@@ -615,7 +624,7 @@ pub(super) async fn compare(
         );
     }
     for chunk in ids.chunks(48) {
-        let Json(result) = embeddings(
+        let Json(result) = embeddings_with_crops(
             State(state.clone()),
             headers.clone(),
             Json(EmbeddingRequest {
@@ -630,6 +639,7 @@ pub(super) async fn compare(
                 transient: false,
                 reid_device: req.reid_device,
             }),
+            shared,
         )
         .await?;
         if result["model_fingerprint"] != snap.model {
@@ -780,6 +790,7 @@ pub(super) async fn compare(
     let mut independently_verified = BTreeMap::<u64, BTreeMap<usize, Vec<f32>>>::new();
     let mut cached_inputs = Vec::<(u64, usize, String, u64, [u32; 4])>::new();
     let mut source_for_sampling = None;
+    let mut shared_inputs = Vec::new();
     if first_pass.as_object().is_some_and(|rows| !rows.is_empty()) {
         let plan = preparation::plan_for(&state, &req.project_id, &req.video)?;
         let source = plan
@@ -816,12 +827,28 @@ pub(super) async fn compare(
                 let Ok(crop) = crop_box(sample.bbox, video.width, video.height) else {
                     continue;
                 };
-                let key = format!("{cache_prefix}:{id}:{}:{crop:?}", sample.frame);
+                let input = shared.and_then(|buffer| {
+                    buffer.get(
+                        source,
+                        source_stamp,
+                        snap.ctx.analysis_offset_sec,
+                        sample.frame,
+                        crop,
+                    )
+                });
+                let policy = if input.is_some() {
+                    "shared_rgb_bilinear_v1"
+                } else {
+                    "seek_ffmpeg_v1"
+                };
+                let key = format!("{cache_prefix}:{id}:{}:{crop:?}:{policy}", sample.frame);
                 if let Some(vector) = cache.get(&key) {
                     independently_verified
                         .entry(id)
                         .or_default()
                         .insert(index, vector.clone());
+                } else if let Some(input) = input {
+                    shared_inputs.push((id, index, key, input));
                 } else {
                     cached_inputs.push((id, index, key, sample.frame, crop));
                 }
@@ -832,7 +859,7 @@ pub(super) async fn compare(
     }
     if let Some(source) = source_for_sampling {
         let mut set = tokio::task::JoinSet::new();
-        let mut decoded = Vec::new();
+        let mut decoded = shared_inputs;
         for (id, index, key, frame, crop) in cached_inputs {
             let path = source.clone();
             let analysis_offset = snap.ctx.analysis_offset_sec;
