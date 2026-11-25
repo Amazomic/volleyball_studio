@@ -467,12 +467,50 @@ pub(crate) fn run_joint_pair(
             None,
         )?;
         let mut touch_sha = String::new();
+        let mut trajectory_sha = String::new();
+        let mut ground_summary = Value::Null;
+        let court = crate::video_edits::court_snapshot(state, project_id, video)
+            .map_err(|e| format!("{e:?}"))?;
+        let dimension = |key: &str| {
+            original_provenance["video"][key]
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| (64..=16384).contains(n))
+                .ok_or("Invalid Ground Detector dimensions")
+        };
+        let dimensions = (dimension("width")?, dimension("height")?);
         let (mask, trajectory) = RallyMask::with_ball_stabilizer(
             ball_writer.ball_samples.as_deref().unwrap_or(&[]),
             ball_scan.decode.decoded_frames,
             rally_settings,
             stabilizer_settings,
             |motion| {
+                trajectory_sha =
+                    crate::cpu_touches::write_ball_trajectory(&ball.folder, motion, cancelled)?;
+                report(
+                    0.39999925,
+                    ball_scan.decode.decoded_frames,
+                    total_frames,
+                    None,
+                )?;
+                let breaks =
+                    crate::cpu_touches::primary_touch_breaks(motion, dimensions, cancelled)?;
+                let contacts = crate::cpu_touches::ground_stage::candidates(
+                    motion,
+                    &breaks,
+                    court.as_ref().and_then(|c| c.transform.as_ref()),
+                    dimensions.0,
+                    dimensions.1,
+                    cancelled,
+                )?;
+                ground_summary = crate::cpu_touches::ground_stage::publish(
+                    &ball.folder,
+                    &contacts,
+                    &trajectory_sha,
+                    dimensions,
+                    motion.points.len() as u64,
+                    court.as_ref(),
+                )?;
                 report(
                     0.3999995,
                     ball_scan.decode.decoded_frames,
@@ -481,9 +519,9 @@ pub(crate) fn run_joint_pair(
                 )?;
                 touch_sha = crate::cpu_touches::write_primary_touch_breaks(
                     &ball.folder,
-                    motion,
-                    &original_provenance["video"],
-                    cancelled,
+                    &breaks,
+                    dimensions,
+                    motion.points.len(),
                 )?;
                 Ok(())
             },
@@ -499,8 +537,7 @@ pub(crate) fn run_joint_pair(
             .map_err(|error| format!("Serialize primary rally mask: {error}"))?;
         mask_value["selected_frames"] = json!(selected_frames);
         mask_value["touch_detector_sha256"] = json!(touch_sha);
-        let trajectory_sha =
-            crate::cpu_touches::write_ball_trajectory(&ball.folder, &trajectory, cancelled)?;
+        mask_value["ground_detector"] = ground_summary;
         mask_value["ball_stabilizer"]["trajectory_sha256"] = json!(trajectory_sha);
         mask_value["ball_stabilizer"]["confidence_frames"] = json!(trajectory.confidence_frames);
         mask_value["ball_stabilizer"]["observed_frames"] = json!(trajectory.observed_frames);

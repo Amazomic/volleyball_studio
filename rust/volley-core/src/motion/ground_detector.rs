@@ -3,11 +3,11 @@ use crate::court_geometry::CourtTransform;
 
 pub const GROUND_DETECTOR_VERSION: &str = "court_ball_rebound_v3";
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroundContact {
     pub frame: u64,
     pub position: [f64; 2],
-    pub landing: &'static str,
+    pub landing: String,
 }
 
 pub fn classify_ground_contact(
@@ -117,7 +117,7 @@ pub fn classify_ground_contact(
     Some(GroundContact {
         frame: impact.frame as u64,
         position,
-        landing,
+        landing: landing.to_owned(),
     })
 }
 

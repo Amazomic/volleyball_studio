@@ -441,6 +441,7 @@
     ["video","Подготовка видео","input",1],
     ["ball","Детекция мяча","gpu",1],
     ["ball_stabilizer","ball_stabilizer","cpu",1],
+    ["ground_detector","Ground Detector","cpu",1],
     ["touch_detector","Touch Detector","cpu",1],
     ["rallies","Розыгрыши","cpu",1],
     ["players","Поиск игроков","gpu",1],
@@ -465,6 +466,7 @@
       pose:["RTMPose-M Body7","model"],
       boxes:["ByteTrack","algorithm"],
       tracking:["ByteTrack","algorithm"],
+      ground_detector:["Ground Detector","algorithm"],
       touch_detector:["Touch Detector","algorithm"],
       rallies:["Маска игровых интервалов","algorithm"],
       touch_types:["Геометрия поз","algorithm"],
@@ -510,6 +512,7 @@
     const name=String(typeof entry==="string"?entry:entry?.name||"");
     if(/Проверка исходного видео|Подготовка исходного видео/.test(name))return "video";
     if(/ball_stabilizer|Ball Stabilizer|Интерполяция траектории мяча/.test(name))return "ball_stabilizer";
+    if(name==="Ground Detector"||name==="ground_detector")return "ground_detector";
     if(name==="Touch Detector")return "touch_detector";
     if(/Поиск розыгрышей/.test(name))return "rallies";
     if(/Связывание рамок игроков/.test(name))return "boxes";
@@ -580,7 +583,10 @@
       return "В составе касаний · "+stageTime(duration);
     }
     let result="";
-    if(id==="ball_stabilizer"&&entry&&run?.ball_stabilizer){
+    if(id==="ground_detector"&&Number.isSafeInteger(run?.ground_detector?.candidate_count??run?.gpu_rally_mask?.ground_detector?.candidate_count)){
+      const ground=run.ground_detector||run.gpu_rally_mask.ground_detector;
+      result=ground.calibrated?String(ground.scoped_candidate_count??ground.candidate_count)+" кандидатов пола":"Нет разметки площадки";
+    }else if(id==="ball_stabilizer"&&entry&&run?.ball_stabilizer){
       const stats=run.ball_stabilizer;
       result="−"+stats.rejected_frames+" / +"+stats.interpolated_frames+" точек";
     }else if(id==="rallies"&&entry&&Number.isSafeInteger(run?.gpu_rally_count??run?.gpu_rally_mask?.merged?.length)){
@@ -625,7 +631,9 @@
     ["pose","tracking","pose"],
     ["boxes","tracking","no_pose"],
     ["ball_stabilizer","rallies"],
-    ["ball_stabilizer","touch_detector"],
+    ["ball_stabilizer","ground_detector"],
+    ["ground_detector","touches"],
+    ["ground_detector","touch_detector"],
     ["touch_detector","touches"],
     ["ball_stabilizer","touches"],
     ["tracking","touches"],
@@ -672,6 +680,7 @@
   const graphDescriptions={
     video:"Выбор видео, интервалов анализа и разметки площадки.",
     ball:"VBallNetV4c работает с фиксированным окном из 9 кадров. Детекции мяча поступают в ball_stabilizer.",
+    ground_detector:"После стабилизации траектории ищет отскоки и остановки мяча у поверхности площадки. Сохраняет координаты и зону, отдельно от касаний игроков. Позы уточняют спорные события позднее.",
     ball_stabilizer:"Отбрасывает ложные точки и интерполирует короткие пропуски. Одна сохранённая траектория используется для поиска розыгрышей, касаний и предпросмотра.",
     rallies:"Рабочие настройки первичного анализа: длительность траектории, остановка мяча в миллисекундах и объединение без перекрытия удержаний или пропусков детекции от 3 секунд. Эксперименты в «Дебаге» имеют собственные значения и не меняют этот GPU-профиль.",
     players:"RF-DETR ищет игроков только внутри найденных игровых интервалов.",
@@ -957,10 +966,12 @@
     const complete=run?.status==="complete";
     const savedGpu={
       ball:run?.gpu_jobs?.ball,rallies:run?.gpu_rally_mask||Number.isSafeInteger(run?.gpu_rally_count),players:run?.gpu_jobs?.players,
+      ground_detector:run?.gpu_rally_mask?.ground_detector,
       fusion:run?.analysis_id,pose:run?.gpu_jobs?.pose||(Number(run?.player_tracking_stats?.refined_poses)>0?run?.cpu_runs?.tracking:null)
     };
     const savedCpu={
       boxes:run?.cpu_runs?.tracking,tracking:run?.cpu_runs?.tracking,ball_stabilizer:run?.ball_stabilizer,
+      ground_detector:run?.ground_detector,
       touches:run?.cpu_runs?.touches,touch_types:run?.cpu_runs?.touches&&(run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0),
       publish:run?.cpu_runs?.rallies,identity:run?.automatic_identity||run?.automatic_identity_available
     };

@@ -778,6 +778,8 @@ fn pipeline_stage_id(name: &str) -> &'static str {
         "video"
     } else if name.contains("Ball Stabilizer") || name == "ball_stabilizer" {
         "ball_stabilizer"
+    } else if name == "Ground Detector" || name == "ground_detector" {
+        "ground_detector"
     } else if name == "Touch Detector" {
         "touch_detector"
     } else if name.contains("Поиск розыгрышей") {
@@ -942,6 +944,7 @@ fn publish_primary_rally_mask(
         Some((decoded_frames, decoded_frames)),
     )?;
     status["gpu_rally_mask"] = mask.clone();
+    status["ground_detector"] = mask["ground_detector"].clone();
     save(path, status)?;
     log_event(
         path,
@@ -1919,6 +1922,7 @@ async fn pipeline(
         status["result_reused"] = json!(true);
         status["reused_from_id"] = existing["id"].clone();
         status["ball_stabilizer"] = existing["ball_stabilizer"].clone();
+        status["ground_detector"] = existing["ground_detector"].clone();
         status["automatic_identity"] = existing["automatic_identity"].clone();
         status["automatic_identity_complete"] = existing["automatic_identity_complete"].clone();
         status["automatic_identity_error"] = existing["automatic_identity_error"].clone();
@@ -2060,6 +2064,8 @@ async fn pipeline(
                             }
                             let label = if fraction == 0.399999 && rally_mask.is_none() {
                                 "ball_stabilizer"
+                            } else if fraction == 0.39999925 && rally_mask.is_none() {
+                                "Ground Detector"
                             } else if fraction == 0.3999995 && rally_mask.is_none() {
                                 "Touch Detector"
                             } else if fraction < 0.4 {
@@ -2337,11 +2343,36 @@ async fn pipeline(
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
+    let touch_request = cpu_touches::TouchRequest {
+        project_id: request.project_id.clone(),
+        video: request.video.clone(),
+        replay_id: replay_id.clone(),
+        settings: Some(request.post.touches),
+        pose_classification: request.post.pose_classification,
+    };
+    progress(path, status, "Ground Detector", 91.0)?;
+    let ground = tokio::task::block_in_place(|| {
+        cpu_touches::ground_stage::prepare(app, &touch_request, &stabilized, &primary, cancel)
+    })?;
+    if ground.summary["court_revision"] != status["court_revision"] {
+        return Err("Court calibration changed during Ground Detector".into());
+    }
+    status["ground_detector"] = ground.summary.clone();
+    save(path, status)?;
+    log_event(
+        path,
+        "Ground Detector",
+        "success",
+        &format!(
+            "Кандидаты пола: {}",
+            ground.summary["scoped_candidate_count"]
+        ),
+    )?;
     progress(
         path,
         status,
         "Постобработка · касания в первичных розыгрышах",
-        91.0,
+        91.5,
     )?;
     log_native(
         path,
@@ -2352,22 +2383,17 @@ async fn pipeline(
     let touches = tokio::task::block_in_place(|| {
         cpu_touches::process_primary_with_progress_cancel(
             app,
-            &cpu_touches::TouchRequest {
-                project_id: request.project_id.clone(),
-                video: request.video.clone(),
-                replay_id: replay_id.clone(),
-                settings: Some(request.post.touches),
-                pose_classification: request.post.pose_classification,
-            },
+            &touch_request,
             request.post.rallies,
             &primary,
             &stabilized,
+            &ground,
             &mut |done, total| {
                 progress_with_frames(
                     path,
                     status,
                     "Постобработка · касания в первичных розыгрышах",
-                    91.0 + 4.0 * done as f64 / total.max(1) as f64,
+                    91.5 + 3.5 * done as f64 / total.max(1) as f64,
                     Some((done, total)),
                 )
             },
@@ -3298,6 +3324,7 @@ mod tests {
             pipeline_stage_id("Интерполяция траектории мяча · Ball Stabilizer"),
             "ball_stabilizer"
         );
+        assert_eq!(pipeline_stage_id("Ground Detector"), "ground_detector");
         assert_eq!(pipeline_stage_id("Поиск розыгрышей"), "rallies");
         assert_eq!(
             pipeline_stage_id("GPU · RF-DETR + RTMPose: игровые интервалы"),
