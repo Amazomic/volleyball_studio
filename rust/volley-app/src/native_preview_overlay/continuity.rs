@@ -156,6 +156,7 @@ pub(super) fn append_poses(frames: &mut [Value]) {
                     crate::cpu_retrack::POSE_REFINEMENT_POLICY
                         | crate::cpu_retrack::LEGACY_POSE_REFINEMENT_POLICY
                         | crate::cpu_retrack::PREVIOUS_POSE_REFINEMENT_POLICY
+                        | crate::cpu_retrack::PRIOR_CROP_REFINEMENT_POLICY
                 )
             )
         });

@@ -1415,6 +1415,84 @@ mod source_track_integrity_tests {
     }
 
     #[test]
+    fn measured_pose_rejects_distant_geometry_assignment() {
+        let root = std::env::temp_dir().join(format!("volley-touch-pose-{}", uuid::Uuid::new_v4()));
+        let mut event = occluded_launch(10);
+        event.provisional_track_id = Some(18);
+        event.ball_x_px = 960.0;
+        event.ball_y_px = 450.0;
+        event.ball_occluded_at_contact = false;
+        event.inferred_body_reach_supported = false;
+        event.direction_change_deg = 172.0;
+        event.velocity_residual_px_frame = 32.0;
+        let player = TouchPlayer {
+            track_id: 18,
+            score: 0.9,
+            touch_probability: None,
+            bbox_xyxy_norm: [0.50, 0.48, 0.54, 0.67],
+        };
+        let mut frame = TouchFrame {
+            frame_index: 10,
+            players: vec![player],
+            selected_ball: Some(TouchBall {
+                source_model: "vballnet".into(),
+                score: 0.9,
+                bbox_xyxy_norm: [0.495, 445.0 / 1080.0, 0.505, 455.0 / 1080.0],
+            }),
+        };
+        let points = std::array::from_fn(|i| [0.52, 0.49 + i as f64 * 0.01, 0.95]);
+        let mut refined = BTreeMap::from([(
+            10,
+            vec![PosePlayer {
+                track_id: 18,
+                keypoints: points,
+                interpolated: false,
+            }],
+        )]);
+        let mut events = vec![event.clone()];
+        refine_pose_events_policy(
+            &mut events,
+            std::slice::from_ref(&frame),
+            (1920, 1080),
+            &root,
+            "00000000000000000000000000000000",
+            TouchSettings::default(),
+            None,
+            &refined,
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].physical_motion_supported);
+        assert_eq!(events[0].provisional_track_id, None);
+        frame.players.push(TouchPlayer {
+            track_id: 21,
+            score: 0.8,
+            touch_probability: None,
+            bbox_xyxy_norm: [0.485, 0.40, 0.515, 0.55],
+        });
+        let mut near = [[0.50, 0.48, 0.95]; 17];
+        near[9] = [0.50, 450.0 / 1080.0, 0.95];
+        refined.get_mut(&10).unwrap().push(PosePlayer {
+            track_id: 21,
+            keypoints: near,
+            interpolated: false,
+        });
+        let mut events = vec![event];
+        refine_pose_events_policy(
+            &mut events,
+            &[frame],
+            (1920, 1080),
+            &root,
+            "00000000000000000000000000000000",
+            TouchSettings::default(),
+            None,
+            &refined,
+        )
+        .unwrap();
+        assert_eq!(events[0].provisional_track_id, Some(21));
+        assert!(events[0].body_contact_supported);
+    }
+    #[test]
     fn pose_refinement_keeps_only_pose_support_or_strong_occluded_impact() {
         let launch = occluded_launch(651);
         let mut weak = occluded_launch(652);
@@ -1754,6 +1832,52 @@ fn refine_pose_events_policy(
             })
             .min_by(|a, b| a.2.priority_distance().total_cmp(&b.2.priority_distance()));
         let Some((selected_track, evidence, point, sample_frame)) = contact else {
+            if let Some(id) = original_track_id {
+                let measured = poses
+                    .iter()
+                    .find(|p| p.frame_index == event.frame_index)
+                    .and_then(|p| {
+                        p.players
+                            .iter()
+                            .find(|p| p.track_id == id && !p.interpolated)
+                    });
+                let height = frame
+                    .players
+                    .iter()
+                    .find(|p| p.track_id == id)
+                    .map(|p| (p.bbox_xyxy_norm[3] - p.bbox_xyxy_norm[1]) * h);
+                if measured.zip(height).is_some_and(|(pose, height)| {
+                    height >= 26.0
+                        && radius > 0.0
+                        && radius <= height * 0.2
+                        && [0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+                            .iter()
+                            .all(|&i| {
+                                let [x, y, c] = pose.keypoints[i];
+                                (0.0..=1.0).contains(&x)
+                                    && (0.0..=1.0).contains(&y)
+                                    && (settings.pose_min_confidence..=1.0).contains(&c)
+                            })
+                        && volley_core::pose_contact::sampled_body_contact(
+                            pose.keypoints,
+                            center,
+                            (w, h),
+                            height,
+                            radius,
+                            settings.pose_min_confidence,
+                            settings.pose_max_distance,
+                        )
+                        .is_none()
+                }) {
+                    event.provisional_track_id = None;
+                    event.action_prediction = None;
+                    event.court = None;
+                    event.body_contact_supported = false;
+                    event.contact_landmark = None;
+                    event.contact_pose_sample_frame = None;
+                    event.inferred_body_reach_supported = false;
+                }
+            }
             continue;
         };
         supported[index] = true;
@@ -2150,6 +2274,7 @@ fn detect_stream_with_pose(
                         crate::cpu_retrack::POSE_REFINEMENT_POLICY
                             | crate::cpu_retrack::LEGACY_POSE_REFINEMENT_POLICY
                             | crate::cpu_retrack::PREVIOUS_POSE_REFINEMENT_POLICY
+                            | crate::cpu_retrack::PRIOR_CROP_REFINEMENT_POLICY
                     )
                 )
                 .then_some(PosePlayer {
@@ -2665,7 +2790,7 @@ fn process_with_ball_scope_and_rally_settings_report(
                 TouchAlgorithm::PoseMotion => "vballnet_trajectory_body_contact_v12",
                 TouchAlgorithm::Legacy => "vballnet_gravity_player_geometry_pose_contact_v11",
                 TouchAlgorithm::TrajectoryTcn => "vballnet_volley3d_tcn_v1",
-                TouchAlgorithm::BallTrajectory => "vballnet_touch_detector_v4",
+                TouchAlgorithm::BallTrajectory => "vballnet_touch_detector_v5",
             },
             "tcn_model_sha256":tcn_sha,
             "trajectory_detector_version":volley_core::touch_pipeline::TRAJECTORY_DETECTOR_VERSION,
