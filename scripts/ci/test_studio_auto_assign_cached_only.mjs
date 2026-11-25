@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 
 const handlers=readFileSync(new URL("../../rust/volley-app/src/native_player_tracks/reid_handlers.rs",import.meta.url),"utf8");
-const start=handlers.indexOf("pub async fn reid_review(");
+const entry=handlers.indexOf("pub async fn reid_review(");
+const start=handlers.indexOf("pub(crate) async fn reid_review_with_crops(",entry);
+assert.match(handlers.slice(entry,start),/reid_review_with_crops\(State\(state\), headers, Json\(req\), None\)\.await/);
 const end=handlers.indexOf('if req.action == "refresh_matches"',start);
 assert.ok(start>0&&end>start);
 const auto=handlers.slice(start,end);
 const cached=auto.indexOf("save_cached_automatic_photo_links(");
 const strict=auto.indexOf('if req.action == "auto_assign"');
-const expensive=auto.indexOf("photo_comparison::compare(");
+const expensive=auto.indexOf("photo_comparison::compare_with_crops(");
 assert.ok(cached>=0&&strict>cached&&expensive>strict,
   "Manual auto-assign must return a cache miss before entering full photo inference");
 assert.match(auto.slice(strict,expensive),/return Err\(storage::conflict/);
