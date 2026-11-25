@@ -305,11 +305,63 @@ impl CourtTransform {
     }
 }
 
+#[derive(Default)]
+pub struct TeamSideVotes {
+    near: u64,
+    far: u64,
+}
+
+impl TeamSideVotes {
+    pub fn observe(&mut self, court: &CourtTransform, bbox: [f64; 4]) {
+        if let Some(evidence) = court.player_evidence(bbox) {
+            if evidence.x_m.abs() >= 0.25 {
+                match evidence.side {
+                    CourtSide::Near => self.near += 1,
+                    CourtSide::Far => self.far += 1,
+                }
+            }
+        }
+    }
+
+    pub fn side(&self) -> Option<CourtSide> {
+        let total = self.near + self.far;
+        if total < 3 {
+            return None;
+        }
+        if self.near * 3 >= total * 2 {
+            Some(CourtSide::Near)
+        } else if self.far * 3 >= total * 2 {
+            Some(CourtSide::Far)
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const QUAD: [[f64; 2]; 4] = [[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]];
+    #[test]
+    fn team_side_uses_reliable_ground_observations() {
+        let court = CourtTransform::new(QUAD).unwrap();
+        let mut votes = TeamSideVotes::default();
+        for x in [0.25, 0.28, 0.30, 0.75, 0.50] {
+            votes.observe(&court, [x - 0.02, 0.3, x + 0.02, 0.6]);
+        }
+        assert_eq!(votes.side(), Some(CourtSide::Near));
+        let mut uncertain = TeamSideVotes::default();
+        for x in [0.25, 0.75, 0.50, 0.50] {
+            uncertain.observe(&court, [x - 0.02, 0.3, x + 0.02, 0.6]);
+        }
+        assert_eq!(uncertain.side(), None);
+        let mut far = TeamSideVotes::default();
+        for x in [0.72, 0.78, 0.94] {
+            far.observe(&court, [x - 0.02, 0.3, x + 0.02, 0.6]);
+        }
+        assert_eq!(far.side(), Some(CourtSide::Far));
+    }
 
     #[test]
     fn zones_use_projective_court_midline_and_landing_margin() {

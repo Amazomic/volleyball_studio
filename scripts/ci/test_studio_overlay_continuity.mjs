@@ -36,7 +36,10 @@ assert.match(html,/id="studio-raw-people-visible"/);
 const start=js.indexOf("  const rawFusion=()=>");
 const end=js.indexOf("  const setOverlaySource=",start);
 assert.ok(start>=0&&end>start,"Preview overlay window helpers must exist");
-const script=js.slice(start,end)+
+const colorStart=js.indexOf("  const playerTeamColor=");
+const colorEnd=js.indexOf(";",colorStart)+1;
+assert.ok(colorStart>=0&&colorEnd>colorStart);
+const script=js.slice(colorStart,colorEnd)+js.slice(start,end)+
   "\nthis.drawOverlay=drawOverlay;this.overlayWindowStart=overlayWindowStart;this.prefetchOverlayAtFrame=prefetchOverlayAtFrame;";
 
 const oldRecord={

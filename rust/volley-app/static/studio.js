@@ -347,7 +347,7 @@
     canvas:$("studio-video-overlay"),status:$("studio-overlay-status"),
     rallies:$("studio-overlay-rallies"),touches:$("studio-overlay-touches"),
     trajectory:$("studio-overlay-trajectory"),players:$("studio-overlay-players"),
-    pose:$("studio-overlay-pose"),court:$("studio-overlay-court"),
+    pose:$("studio-overlay-pose"),court:$("studio-overlay-court"),teams:$("studio-overlay-teams"),
     mode:$("studio-overlay-processed"),rawMode:$("studio-overlay-raw"),
     stabilizerMode:$("studio-debug-stabilizer-compare"),
     rawControls:$("studio-overlay-raw-controls"),actionControls:$("studio-overlay-actions"),
@@ -360,7 +360,7 @@
     actionFlags:{unknown_touch:true,attack:true,block:true,serve:true,overhead_pass:true,dig:true},
     source:null,cache:new Map(),rawFrames:new Map(),rawDetectors:new Map(),rawOffsets:new Map(),presentedTime:null,
     fetching:new Set(),controllers:new Map(),failed:new Map(),loop:0,
-    flags:{rallies:true,touches:true,trajectory:true,players:true,pose:true,court:true}
+    flags:{rallies:true,touches:true,trajectory:true,players:true,pose:true,court:true,teams:false}
   };
   try {
     const current=localStorage.getItem("volley:preview-overlays:v2");
@@ -370,8 +370,9 @@
         if(typeof saved[k]==="boolean"&&(current!==null||k!=="pose"))
           overlay.flags[k]=saved[k];
   }catch{}
+  const playerTeamColor=(side,enabled)=>!enabled||side==="near"?"#71acff":side==="far"?"#ff626e":"#b8c2ce";
   const updateOverlayToggles=()=>{
-    for(const key of ["rallies","touches","trajectory","players","pose","court"]){
+    for(const key of ["rallies","touches","trajectory","players","pose","court","teams"]){
       const button=overlay[key];
       button.setAttribute("aria-pressed",String(overlay.flags[key]));
     }
@@ -490,7 +491,7 @@
   };
   const overlayWindowStart=frame=>Math.max(0,Math.floor(frame/90)*90-60);
   const overlayWindowKey=(project,run,video,start)=>
-    [project,overlay.raw?(overlay.stabilizerView?"gpu-stabilizer":"gpu"):"cpu",run,video,start,...(!overlay.raw&&overlay.flags.pose?["pose"]:[])].join(":");
+    [project,overlay.raw?(overlay.stabilizerView?"gpu-stabilizer":"gpu"):"cpu",run,video,start,...(!overlay.raw&&overlay.flags.pose?["pose"]:[]),...(!overlay.raw&&overlay.flags.teams?["teams"]:[])].join(":");
   const rawFrameLimit=(project,run,video)=>overlay.rawFrames.get([project,run,video].join(":"));
   // The API returns overlapping 180-frame windows every 90 frames.
   // Keep drawing from a previous window while the next one loads.
@@ -542,7 +543,7 @@
       ...(overlay.stabilizerView?{stabilizer:true}:{})
     }):url("/api/cpu/native/rallies/overlays",{
       project_id:project,rally_run_id:run,start_frame:start,count:180,
-      ...(overlay.flags.pose?{pose:true}:{})
+      ...(overlay.flags.pose?{pose:true}:{}),...(overlay.flags.teams?{team_sides:true}:{})
     });
     request(path,controller?{signal:controller.signal}:{}).then(value=>{
       if(controller?.signal.aborted)return;
@@ -1098,6 +1099,7 @@
         const px=x+x1*width,py=y+y1*height;
         const rw=(x2-x1)*width,rh=(y2-y1)*height;
         ctx.save();
+        ctx.strokeStyle=playerTeamColor(player.team_side,overlay.flags.teams);
         if(player.interpolated===true){ctx.setLineDash([5,4]);ctx.globalAlpha=0.78;}
         ctx.strokeRect(px,py,rw,rh);
         ctx.restore();
@@ -1136,8 +1138,11 @@
     drawOverlay();
   };
   window.addEventListener("volley:court-calibration-updated",event=>{
-    if(courtPreview.key===event.detail?.project_id+":"+event.detail?.video){
-      courtPreview.data=null;courtPreview.failed=false;drawOverlay();
+    if(s.project===event.detail?.project_id&&s.video===event.detail?.video){
+      courtPreview.data=null;courtPreview.failed=false;
+      for(const controller of overlay.controllers.values())controller?.abort();
+      overlay.controllers.clear();overlay.fetching.clear();overlay.cache.clear();overlay.failed.clear();
+      drawOverlay();
     }
   });  window.addEventListener("volley:track-assignments-updated",event=>{
     const detail=event.detail||{};
@@ -1164,9 +1169,10 @@
       drawOverlay();
     });
   }
-  for(const key of ["rallies","touches","trajectory","players","pose","court"]){
+  for(const key of ["rallies","touches","trajectory","players","pose","court","teams"]){
     overlay[key].addEventListener("click",()=>{
       overlay.flags[key]=!overlay.flags[key];
+      if(key==="teams"&&overlay.flags.teams)overlay.flags.players=true;
       overlay.actionControls.classList.toggle("hidden",overlay.raw||!overlay.flags.touches);
       updateOverlayToggles();
       try{localStorage.setItem("volley:preview-overlays:v2",JSON.stringify(overlay.flags));}catch{}

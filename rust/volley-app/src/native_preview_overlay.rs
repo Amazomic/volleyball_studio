@@ -26,6 +26,7 @@ use std::{
 
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 mod continuity;
+mod team_sides;
 const MAX_REPLAY_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_LINE_BYTES: u64 = 512 * 1024 + 1;
 const MAX_WINDOW: u64 = 180;
@@ -42,6 +43,7 @@ pub struct OverlayQuery {
     count: u64,
     raw: Option<bool>,
     pose: Option<bool>,
+    team_sides: Option<bool>,
     ball_confidence: Option<u8>,
     player_confidence: Option<u8>,
     touch_confidence: Option<u8>,
@@ -927,6 +929,11 @@ pub async fn get(
         None
     };
     let pose_root = projects::project_root(&state).join(&query.project_id);
+    let team_court = if query.team_sides.unwrap_or(false) {
+        crate::video_edits::court_snapshot(&state, &query.project_id, &run.video)?
+    } else {
+        None
+    };
     let identity_state = state.clone();
     let continuity_state = state.clone();
     let has_canonical_ball = canonical_source.is_some();
@@ -1028,6 +1035,17 @@ pub async fn get(
             continuity::append_poses(&mut frames);
         }
         frames.retain(|row| row["frame"].as_u64().is_some_and(|f| f >= start && f < end));
+        if let Some(snapshot) = team_court {
+            if let Some(court) = snapshot.transform.as_ref() {
+                team_sides::annotate(
+                    &mut frames,
+                    (&replay_path, &replay_sha, total),
+                    &windows.intervals,
+                    court,
+                    &snapshot.revision,
+                )?;
+            }
+        }
         Ok::<_, String>((frames, poses_available, ball_policy))
     })
     .await
@@ -1067,6 +1085,7 @@ pub(crate) async fn training_frame(
             count: 13,
             raw: None,
             pose: Some(true),
+            team_sides: None,
             ball_confidence: None,
             player_confidence: None,
             touch_confidence: None,
