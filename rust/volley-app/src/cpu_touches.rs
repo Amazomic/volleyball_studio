@@ -1636,6 +1636,51 @@ pub(crate) struct InitialServeProposal {
     source: &'static str,
 }
 
+pub(crate) const INITIAL_SERVE_ATTRIBUTION_VERSION: &str = "track_edge_entry_v2";
+
+fn unique_post_serve_entry(
+    frames: &[TouchFrame],
+    rally_start: u64,
+    launch_frame: u64,
+) -> Option<u64> {
+    let mut tracks = BTreeMap::<u64, Vec<(u64, [f64; 4])>>::new();
+    for frame in frames.iter().filter(|frame| {
+        frame.frame_index >= rally_start && frame.frame_index < rally_start.saturating_add(90)
+    }) {
+        for player in &frame.players {
+            tracks
+                .entry(player.track_id)
+                .or_default()
+                .push((frame.frame_index, player.bbox_xyxy_norm));
+        }
+    }
+    let mut candidates = tracks.into_iter().filter_map(|(id, samples)| {
+        let &(first_frame, first) = samples.first()?;
+        if first_frame < launch_frame.saturating_add(5) {
+            return None;
+        }
+        let center = |bbox: [f64; 4]| [(bbox[0] + bbox[2]) * 0.5, (bbox[1] + bbox[3]) * 0.5];
+        let initial = center(first);
+        let mut observations = 0;
+        let mut last_frame = first_frame;
+        let mut entered = false;
+        for &(frame, bbox) in samples
+            .iter()
+            .take_while(|(frame, _)| *frame <= first_frame.saturating_add(30))
+        {
+            observations += 1;
+            last_frame = frame;
+            let current = center(bbox);
+            entered |= (first[0] <= 0.02 && current[0] - initial[0] >= 0.05)
+                || (first[2] >= 0.98 && initial[0] - current[0] >= 0.05)
+                || (first[1] <= 0.02 && current[1] - initial[1] >= 0.05)
+                || (first[3] >= 0.98 && initial[1] - current[1] >= 0.05);
+        }
+        (observations >= 8 && last_frame.saturating_sub(first_frame) >= 10 && entered).then_some(id)
+    });
+    let id = candidates.next()?;
+    candidates.next().is_none().then_some(id)
+}
 pub(crate) fn initial_serve_proposal(
     frames: &[TouchFrame],
     rally_start: u64,
@@ -1651,30 +1696,38 @@ pub(crate) fn initial_serve_proposal(
             let [x1, y1, x2, y2] = ball.bbox_xyxy_norm;
             [(x1 + x2) * 0.5, (y1 + y2) * 0.5]
         });
-    let candidate = first_position.and_then(|position| {
-        let mut distances = std::collections::BTreeMap::<u64, f64>::new();
-        for frame in frames.iter().filter(|frame| {
-            frame.frame_index >= rally_start && frame.frame_index < rally_start.saturating_add(90)
-        }) {
-            for player in &frame.players {
-                let [x1, y1, x2, y2] = player.bbox_xyxy_norm;
-                let distance = (position[0] - position[0].clamp(x1, x2))
-                    .hypot(position[1] - position[1].clamp(y1, y2));
-                distances
-                    .entry(player.track_id)
-                    .and_modify(|best| *best = best.min(distance))
-                    .or_insert(distance);
+    let candidate = first_ball
+        .zip(first_position)
+        .and_then(|(launch, position)| {
+            let mut distances = BTreeMap::<u64, f64>::new();
+            let mut visible_contact_possible = false;
+            for frame in frames.iter().filter(|frame| {
+                frame.frame_index >= launch.frame_index
+                    && frame.frame_index < launch.frame_index.saturating_add(5)
+            }) {
+                for player in &frame.players {
+                    let [x1, y1, x2, y2] = player.bbox_xyxy_norm;
+                    let distance = (position[0] - position[0].clamp(x1, x2))
+                        .hypot(position[1] - position[1].clamp(y1, y2));
+                    visible_contact_possible |= distance <= 0.06_f64.max((y2 - y1) * 0.35);
+                    distances
+                        .entry(player.track_id)
+                        .and_modify(|best| *best = best.min(distance))
+                        .or_insert(distance);
+                }
             }
-        }
-        let mut ranked = distances.into_iter().collect::<Vec<_>>();
-        ranked.sort_by(|a, b| a.1.total_cmp(&b.1));
-        let (id, distance) = *ranked.first()?;
-        (distance <= 0.035
-            && ranked
-                .get(1)
-                .is_none_or(|second| second.1 > distance + 0.035))
-        .then_some(id)
-    });
+            let mut ranked = distances.into_iter().collect::<Vec<_>>();
+            ranked.sort_by(|a, b| a.1.total_cmp(&b.1));
+            if visible_contact_possible {
+                let (id, distance) = *ranked.first()?;
+                return (distance <= 0.035
+                    && ranked
+                        .get(1)
+                        .is_none_or(|second| second.1 > distance + 0.035))
+                .then_some(id);
+            }
+            unique_post_serve_entry(frames, rally_start, launch.frame_index)
+        });
     InitialServeProposal {
         rally_start_frame: rally_start,
         trajectory_start_frame: first_ball.map(|frame| frame.frame_index),
@@ -2144,6 +2197,9 @@ fn detect_stream_with_pose(
         } else {
             exclude_ball_teleports(&block, width, height)
         };
+        if start == window.0 {
+            initial_serves.push(initial_serve_proposal(&clean, window.0));
+        }
         // Reconstruct bounded positions of existing tracked skeletons only.
         // The immutable replay and original GPU player detections remain unchanged.
         let continuous = if interpolate_players {
@@ -2151,9 +2207,6 @@ fn detect_stream_with_pose(
         } else {
             clean
         };
-        if start == window.0 {
-            initial_serves.push(initial_serve_proposal(&continuous, window.0));
-        }
         let filtered = if let Some(calibration) = court {
             court_touch::filter_on_court(&continuous, calibration)
         } else {
@@ -2867,6 +2920,7 @@ fn process_with_ball_scope_and_rally_settings_report(
             .map_err(|e| format!("Remove temporary serve proposals: {e}"))?;
         let serve_proposals = surface_data["initial_serve_proposals"].take();
         let ground_contacts = surface_data["ground_contacts"].take();
+        record["initial_serve_attribution_version"] = json!(INITIAL_SERVE_ATTRIBUTION_VERSION);
         record["ground_detector_version"] = json!(volley_core::motion::GROUND_DETECTOR_VERSION);
         record["ground_contact_count"] = json!(ground_contacts.as_array().map_or(0, Vec::len));
         record["initial_serve_proposal_count"] =
@@ -2969,8 +3023,99 @@ pub async fn status(
 
 #[cfg(test)]
 mod tests {
+    fn serve_entry_fixture(start: u64, delay: u64) -> Vec<TouchFrame> {
+        (start..start + 90)
+            .map(|frame_index| {
+                let offset = frame_index - start;
+                let mut players = vec![TouchPlayer {
+                    track_id: 7,
+                    score: 0.9,
+                    bbox_xyxy_norm: [0.45, 0.43, 0.48, 0.55],
+                    touch_probability: None,
+                }];
+                if offset >= delay {
+                    let movement = ((offset - delay) as f64 * 0.004).min(0.15);
+                    players.push(TouchPlayer {
+                        track_id: 42,
+                        score: 0.9,
+                        bbox_xyxy_norm: [0.50, 0.94 - movement, 0.54, 1.0 - movement],
+                        touch_probability: None,
+                    });
+                }
+                TouchFrame {
+                    frame_index,
+                    players,
+                    selected_ball: Some(TouchBall {
+                        source_model: "vballnet".into(),
+                        score: 0.9,
+                        bbox_xyxy_norm: [0.41, 0.30, 0.43, 0.32],
+                    }),
+                }
+            })
+            .collect()
+    }
+
     #[test]
-    fn initial_serve_can_link_a_track_visible_after_rally_start() {
+    fn offscreen_serve_links_unique_stable_edge_entry() {
+        for delay in [24, 50] {
+            let frames = serve_entry_fixture(100, delay);
+            let proposal = initial_serve_proposal(&frames, 100);
+            assert_eq!(proposal.provisional_track_id, Some(42));
+            assert!(!proposal.identity_verified);
+        }
+    }
+
+    #[test]
+    fn visible_serve_takes_precedence_over_late_entry() {
+        let mut frames = serve_entry_fixture(100, 24);
+        for frame in &mut frames {
+            frame.players[0].bbox_xyxy_norm = [0.40, 0.30, 0.45, 0.50];
+        }
+        assert_eq!(
+            initial_serve_proposal(&frames, 100).provisional_track_id,
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn ambiguous_visible_contact_blocks_offscreen_fallback() {
+        let mut frames = serve_entry_fixture(100, 24);
+        for frame in &mut frames {
+            frame.players[0].bbox_xyxy_norm = [0.40, 0.30, 0.45, 0.50];
+            let mut another = frame.players[0].clone();
+            another.track_id = 8;
+            frame.players.push(another);
+        }
+        assert_eq!(
+            initial_serve_proposal(&frames, 100).provisional_track_id,
+            None
+        );
+    }
+
+    #[test]
+    fn offscreen_serve_rejects_ambiguous_entries_and_interior_reappearance() {
+        let mut frames = serve_entry_fixture(100, 24);
+        for frame in &mut frames[24..] {
+            let mut another = frame.players[1].clone();
+            another.track_id = 43;
+            frame.players.push(another);
+        }
+        assert_eq!(
+            initial_serve_proposal(&frames, 100).provisional_track_id,
+            None
+        );
+        let mut frames = serve_entry_fixture(100, 24);
+        for frame in &mut frames[24..] {
+            frame.players[1].bbox_xyxy_norm = [0.60, 0.60, 0.65, 0.80];
+        }
+        assert_eq!(
+            initial_serve_proposal(&frames, 100).provisional_track_id,
+            None
+        );
+    }
+
+    #[test]
+    fn initial_serve_rejects_single_interior_detection_after_launch() {
         let mut frames = (100..200)
             .map(|frame_index| TouchFrame {
                 frame_index,
@@ -2991,7 +3136,7 @@ mod tests {
         let proposal = initial_serve_proposal(&frames, 100);
         assert_eq!(proposal.rally_start_frame, 100);
         assert_eq!(proposal.trajectory_start_frame, Some(100));
-        assert_eq!(proposal.provisional_track_id, Some(42));
+        assert_eq!(proposal.provisional_track_id, None);
         assert!(!proposal.identity_verified);
     }
 
