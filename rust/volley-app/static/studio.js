@@ -32,6 +32,7 @@
   const s = {
     project:"",analysis:"",run:"",video:"",items:[],total:0,offset:0,limit:24,
     projectCatalog:[],projectVideos:[],chain:null,chainEpoch:0,catalogEpoch:0,
+    pipelineBlocks:new Map(),pipelineCompleted:new Map(),
     filtered:0,gold:new Set(),revision:"absent",writable:false,marksLoaded:false,selected:new Map(),
     current:"",videoKey:"",seekAt:0,stopAt:null,clipStart:null,clipEnd:null,analysisOffset:0,
     playbackMode:"sequence",generation:0,busy:false,jobId:"",timer:null,
@@ -832,10 +833,11 @@
   };
   const drawOverlay=()=>{
     const box=overlayContext(),source=overlay.source;
-    if(box)drawCourtPreview(box);
-    if(!box||!source||(!overlay.raw&&!s.run)||!s.video||!ui.video.src||ui.video.seeking||
+    if(!box||!s.video||!ui.video.src||ui.video.seeking||
        s.videoKey!==s.project+":"+s.video||
        (ui.video.readyState!==undefined&&ui.video.readyState<2))return;
+    drawCourtPreview(box);
+    if(!source||(!overlay.raw&&!s.run))return;
     // Until the next decoded frame arrives, keep the canvas transparent.
     if(!ui.video.paused&&typeof ui.video.requestVideoFrameCallback==="function"&&
        !Number.isFinite(overlay.presentedTime))return;
@@ -1145,6 +1147,7 @@
       for(const controller of overlay.controllers.values())controller?.abort();
       overlay.controllers.clear();overlay.fetching.clear();
       overlay.cache.clear();overlay.rawFrames.clear();overlay.failed.clear();overlay.presentedTime=null;
+      overlay.canvas.width=overlay.canvas.width;
     }
     drawOverlay();
   };
@@ -3163,6 +3166,7 @@
   };
   const clearTimeline=()=>{
     timeline.epoch++;timeline.dragging=false;timeline.data=null;
+    timeline.canvas.width=timeline.canvas.width;
     if(training.active&&!annotation.dirty){annotation.epoch++;annotation.data=null;annotation.prediction=null;annotation.typePrediction=null;annotation.touchId=null;
       comparison.epoch++;comparison.data=null;comparison.sourceKey="";
       annotation.rallyId=null;annotation.pendingStart=null;drawAnnotation();}
@@ -3598,7 +3602,8 @@
   // The linked source chain is project -> GPU analysis (video + lineage) -> CPU snapshot.
   // Preserve selections on refresh; reset only dependent selections when an upstream
   // source changes. Stale async responses must never reselect a different project.
-  const setRuns=async(preferred="")=>{
+  const setRuns=async(preferred="",exact=false)=>{
+    if(s.pipelineBlocks?.has(s.project))return;
     reset();
     const source=s.chain?.choices.find(row=>row.value===s.analysis);
     if(source?.video){
@@ -3613,7 +3618,8 @@
       !s.analysis?"Сначала выберите анализ":
         rows.length?"Выберите постобработку":"Нет CPU-версий для анализа");
     ui.run.disabled=!s.analysis||!rows.length;
-    ui.run.value=window.VolleyStudioChain.latestRun(rows,preferred);
+    ui.run.value=exact?(rows.some(row=>row.rally_run_id===preferred)?preferred:""):
+      window.VolleyStudioChain.latestRun(rows,preferred);
     refreshPicker(ui.run);
     s.run=ui.run.value;
     s.video=rows.find(row=>row.rally_run_id===s.run)?.video||source?.video||"";
@@ -3640,13 +3646,13 @@
       "У выбранного анализа пока нет связанной CPU-постобработки.");
     if(overlay.raw&&rawFusion())prefetchOverlayAtFrame(0);
   };
-  const setAnalysis=async(preferredRun="")=>{
+  const setAnalysis=async(preferredRun="",exact=false)=>{
     s.analysis=ui.analysis.value;
     const source=s.chain?.choices.find(row=>row.value===s.analysis);
     window.dispatchEvent(new CustomEvent("volley:chain-change",{
       detail:{project_id:s.project,video:source?.video||"",analysis:s.analysis}
     }));
-    await setRuns(preferredRun);
+    await setRuns(preferredRun,exact);
   };
   const selectReferenceEntry=async entry=>{
     if(!reference.active||!entry||annotation.dirty)return;
@@ -3722,18 +3728,21 @@
       (Number(b.created_at)||0)-(Number(a.created_at)||0)||
       String(b.id||"").localeCompare(String(a.id||"")))[0]?.value||"";
   };
-  const renderChain=async(chain,preferredAnalysis="",preferredRun="",retainCurrent=false)=>{
+  const renderChain=async(chain,preferredAnalysis="",preferredRun="",retainCurrent=false,exact=false)=>{
     const unchanged=retainCurrent&&s.analysis===preferredAnalysis&&s.run===preferredRun&&
       chain.choices.some(row=>row.value===s.analysis)&&
       (!s.run||(chain.byAnalysis.get(s.analysis)||[]).some(row=>row.rally_run_id===s.run));
+    if(exact&&preferredAnalysis&&(!chain.choices.some(row=>row.value===preferredAnalysis)||
+       preferredRun&&!(chain.byAnalysis.get(preferredAnalysis)||[]).some(row=>row.rally_run_id===preferredRun)))
+      throw Error("Новая версия анализа ещё недоступна");
     s.chain=chain;
     options(ui.analysis,chain.choices,"value",item=>item.label,
       chain.choices.length?"Выберите 1 фазу":"Нет результатов 1 фазы",
-      !chain.choices.length);
+      !chain.choices.length||exact&&!preferredAnalysis);
     ui.analysis.disabled=!chain.choices.length;
     // Restore a valid explicit choice; otherwise select the most recently
     // created GPU analysis, including after the selected version is deleted.
-    ui.analysis.value=chain.choices.some(row=>row.value===preferredAnalysis)?
+    ui.analysis.value=exact||chain.choices.some(row=>row.value===preferredAnalysis)?
       preferredAnalysis:newestPrimaryAnalysis(chain.choices);
     refreshPicker(ui.analysis);
     if(unchanged){
@@ -3751,9 +3760,26 @@
     }
     // If the selected source was deleted (including dependent data), switch
     // to the remaining available versions using the normal reset flow.
-    await setAnalysis(preferredRun);
+    await setAnalysis(preferredRun,exact);
   };
-  const loadChain=async(preferredAnalysis="",preferredRun="",retainCurrent=false,freshOnly=false)=>{
+  const pipelineActive=status=>["queued","running","cancelling"].includes(status?.status);
+  const blockPipelinePreview=status=>{
+    const project=status.project_id;
+    if(!project||!status.id||s.pipelineCompleted?.get(project)===status.id)return;
+    const previous=s.pipelineBlocks?.get(project);
+    s.pipelineBlocks?.set(project,status.id);
+    if(project!==s.project||previous===status.id&&!s.run&&!s.analysis)return;
+    s.chainEpoch++;
+    reset();s.analysis="";s.chain=null;
+    options(ui.analysis,[],"value",x=>x,"Анализ выполняется…");
+    options(ui.run,[],"rally_run_id",x=>x,"Ожидаем завершения анализа");
+    ui.analysis.disabled=true;ui.run.disabled=true;
+    refreshPicker(ui.analysis);refreshPicker(ui.run);
+    window.dispatchEvent(new CustomEvent("volley:postprocessing-change",{
+      detail:{project_id:project,rally_run_id:""}
+    }));
+  };
+  const loadChain=async(preferredAnalysis="",preferredRun="",retainCurrent=false,freshOnly=false,exact=false)=>{
     const token=++s.chainEpoch,project=s.project;
     if(!retainCurrent){
       reset();
@@ -3770,11 +3796,25 @@
       message("Выберите проект для просмотра цепочки обработок.");
       return;
     }
+    const pipeline=await request(url("/api/studio/pipeline/status",{project_id:project}));
+    if(token!==s.chainEpoch||s.project!==project)return;
+    if(pipeline.schema!=="volley-studio-pipeline/1"||pipeline.project_id!==project)
+      throw Error("Некорректное состояние анализа");
+    if(pipelineActive(pipeline)){
+      blockPipelinePreview(pipeline);return;
+    }
+    if(pipeline.id&&s.pipelineBlocks?.get(project)===pipeline.id){
+      s.pipelineBlocks.delete(project);
+      s.pipelineCompleted?.set(project,pipeline.id);
+      preferredAnalysis=pipeline.status==="complete"?JSON.stringify([pipeline.video,"fusion",pipeline.analysis_id]):"";
+      preferredRun=pipeline.status==="complete"?pipeline.postprocessing_id||"":"";
+      freshOnly=true;exact=true;
+    }
     const videos=s.projectVideos.slice(0,40);
     const cached=freshOnly?null:chainSnapshot.read(project,videos);
     if(cached){
       await renderChain(cached,retainCurrent?s.analysis:preferredAnalysis,
-        retainCurrent?s.run:preferredRun,retainCurrent);
+        retainCurrent?s.run:preferredRun,retainCurrent,exact);
       if(token!==s.chainEpoch||s.project!==project)return;
     }else{
       message("Первичная загрузка списка GPU- и CPU-версий…");
@@ -3818,7 +3858,7 @@
         await renderChain(fresh,retainCurrent?s.analysis:
           cached?(s.analysis||preferredAnalysis):preferredAnalysis,
           retainCurrent?s.run:cached?(s.run||preferredRun):preferredRun,
-          retainCurrent);
+          retainCurrent,exact);
       }
     }catch(error){
       if(token!==s.chainEpoch||s.project!==project)return;
@@ -4811,19 +4851,38 @@
   });
   window.addEventListener("volley:refresh-projects",()=>{invalidateCatalog();projects().catch(failed);});
   window.addEventListener("volley:refresh-chain",()=>{invalidateCatalog();projects().catch(failed);});
+  window.addEventListener("volley:pipeline-status",event=>{
+    const status=event.detail;
+    if(status?.schema!=="volley-studio-pipeline/1")return;
+    if(pipelineActive(status)){blockPipelinePreview(status);return;}
+    if(!status.id||status.project_id!==s.project||s.pipelineBlocks?.get(status.project_id)!==status.id)return;
+    s.pipelineBlocks.delete(status.project_id);
+    if(status.status==="complete")window.dispatchEvent(new CustomEvent("volley:pipeline-complete",{
+      detail:{...status,pipeline_id:status.id}
+    }));
+    else{
+      s.pipelineCompleted?.set(status.project_id,status.id);
+      void loadChain("","",false,true,true).catch(failed);
+    }
+  });
   // One authoritative place to select the new GPU -> CPU lineage: header selects.
   window.addEventListener("volley:pipeline-complete",async event=>{
-    const {project_id,video,analysis_id,postprocessing_id}=event.detail||{};
+    const {project_id,video,analysis_id,postprocessing_id,pipeline_id}=event.detail||{};
     if(project_id!==s.project||typeof analysis_id!=="string")return;
+    if(pipeline_id&&s.pipelineCompleted?.get(project_id)===pipeline_id)return;
+    if(pipeline_id&&s.pipelineBlocks?.has(project_id)&&s.pipelineBlocks.get(project_id)!==pipeline_id)return;
+    if(pipeline_id)s.pipelineCompleted?.set(project_id,pipeline_id);
+    s.pipelineBlocks?.delete(project_id);
     try{
       invalidateCatalog();
-      await loadChain();
+      await loadChain(JSON.stringify([video,"fusion",analysis_id]),postprocessing_id||"",false,true,true);
       if(s.project!==project_id)return;
       const choice=s.chain?.choices.find(item=>item.kind==="fusion"&&
         item.id===analysis_id&&item.video===video);
       if(!choice)throw Error("Новая GPU-версия не найдена в индексе стадий");
       ui.analysis.value=choice.value;
-      await setAnalysis(typeof postprocessing_id==="string"?postprocessing_id:"");
+      if(s.analysis!==choice.value||s.run!==(postprocessing_id||""))
+        await setAnalysis(typeof postprocessing_id==="string"?postprocessing_id:"",true);
       if(typeof postprocessing_id==="string"&&s.run!==postprocessing_id)
         throw Error("Новая CPU-постобработка не привязана к GPU-версии");
     }catch(e){failed(e);}

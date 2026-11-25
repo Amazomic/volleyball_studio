@@ -113,6 +113,7 @@ const context={s,ui:{analysis,run:cpu,video:{currentTime:0}},overlay:{raw:false}
   CustomEvent:class{constructor(type){this.type=type;}},
   reset(){counters.reset++;s.run="";},
   options,refreshPicker(){},chainSnapshot:{read:()=>null,save(){}},
+  request:async path=>({schema:"volley-studio-pipeline/1",project_id:new URL(path,"http://localhost").searchParams.get("project_id"),status:"idle"}),
   previewCache:{load:async path=>path.includes("/runs")?{runs:[]}:overview},
   url:(path,params)=>path+"?"+new URLSearchParams(params),
   sourceSelection:{save(){}},
@@ -246,3 +247,51 @@ await Promise.all([stale,current]);
 assert.equal(reads,0,"Explicit project switching must not restore a persisted snapshot");
 assert.equal(s.project,"other");
 assert.equal(s.analysis,"");
+
+s.project="abc";s.projectVideos=["match.mp4"];
+s.pipelineBlocks=new Map();s.pipelineCompleted=new Map();
+context.request=async()=>({schema:"volley-studio-pipeline/1",project_id:"abc",id:"active",status:"running"});
+context.window.VolleyStudioChain.build=()=>chain([primaryA],{[primaryA]:[run(runA)]});
+context.chainSnapshot.read=()=>chain([primaryA],{[primaryA]:[run(runA)]});
+await context.loadChain(primaryA,runA,false);
+assert.equal(s.run,"","Running analysis must not restore a historical CPU snapshot");
+assert.equal(s.analysis,"","Running analysis must not restore a historical GPU snapshot");
+assert.equal(cpu.disabled,true);
+assert.equal(s.pipelineBlocks.get("abc"),"active");
+context.request=async()=>({schema:"volley-studio-pipeline/1",project_id:"abc",id:"active",status:"cancelled"});
+await context.loadChain(primaryA,runA,false);
+assert.equal(s.run,"","Cancelled analysis must not automatically resurrect previous results");
+assert.equal(s.pipelineBlocks.has("abc"),false);
+assert.equal(s.analysis,"","Cancelled analysis must keep the preview empty");
+assert.equal(analysis.disabled,false,"Historical analyses remain available for explicit selection");
+
+context.request=async()=>({schema:"volley-studio-pipeline/1",project_id:"abc",id:"new",status:"running"});
+await context.loadChain(primaryA,runA,false);
+context.request=async()=>({schema:"volley-studio-pipeline/1",project_id:"abc",id:"new",status:"complete",
+  video:"match.mp4",analysis_id:"b",postprocessing_id:runB});
+context.window.VolleyStudioChain.build=()=>chain([primaryA,primaryB],{[primaryA]:[run(runA)],[primaryB]:[run(runB)]});
+await context.loadChain(primaryA,runA,false);
+assert.equal(s.analysis,primaryB);
+assert.equal(s.run,runB,"Completion must select the actual new CPU run");
+
+context.request=async()=>({schema:"volley-studio-pipeline/1",project_id:"abc",id:"gpu",status:"running"});
+await context.loadChain(primaryB,runB,false);
+context.request=async()=>({schema:"volley-studio-pipeline/1",project_id:"abc",id:"gpu",status:"complete",
+  video:"match.mp4",analysis_id:"b",postprocessing_id:null});
+await context.loadChain(primaryB,runB,false);
+assert.equal(s.analysis,primaryB);
+assert.equal(s.run,"","GPU-only completion must not select a historical CPU run");
+await assert.rejects(context.loadChain(primaryA,"c".repeat(32),false,true,true),/Новая версия анализа/);
+assert.equal(s.run,"","Missing exact CPU result must not fall back to older results");
+
+let clears=0;
+const canvas={get width(){return 640;},set width(value){assert.equal(value,640);clears++;}};
+const overlayContext={overlay:{source:{},canvas,controllers:new Map(),fetching:new Set(),
+  cache:new Map(),rawFrames:new Map(),failed:new Map(),presentedTime:9},
+  overlayMessage(){},invalidateOverlayLabels(){},drawOverlay(){}};
+runInNewContext(slice("  const setOverlaySource=",'  window.addEventListener("volley:court-calibration-updated"')+
+  "\nthis.setOverlaySource=setOverlaySource;",overlayContext);
+overlayContext.setOverlaySource(null);
+assert.equal(clears,1,"A hidden canvas must clear even when it has zero client dimensions");
+assert.equal(overlayContext.overlay.source,null);
+console.log("PASS: active/failed/completed analysis preview isolation and hidden-canvas clearing.");

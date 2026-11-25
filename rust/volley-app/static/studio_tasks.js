@@ -157,6 +157,7 @@
     if(!project){clear("analysis");return;}
     const data=await api(query("/api/studio/pipeline/status",{project_id:project}));
     if(data.schema!=="volley-studio-pipeline/1"||data.project_id!==project)return;
+    window.dispatchEvent?.(new CustomEvent("volley:pipeline-status",{detail:data}));
     if(!["queued","running","cancelling"].includes(data.status)){
       if(project===trackedAnalysisProject)trackedAnalysisProject="";
       clear("analysis");return;

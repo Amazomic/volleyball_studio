@@ -1448,6 +1448,7 @@
     const runLabel=mode==="gpu"?"1 фаза · GPU":
       mode==="post"?"2 фаза · CPU":"Полный анализ · GPU/CPU";
     if(active){
+      window.dispatchEvent(new CustomEvent("volley:pipeline-status",{detail:status}));
       window.VolleyballTasks?.set("analysis",{label:runLabel,
         projectId:project,stage,progress:percent});
       saveMessage(status.status==="cancelling"?
@@ -1478,12 +1479,14 @@
         status.status==="failed"||status.status==="interrupted"||
           identityFailed||identityReview);
     }
+    if(notifyCompletion&&["failed","cancelled","interrupted"].includes(status.status))
+      window.dispatchEvent(new CustomEvent("volley:pipeline-status",{detail:status}));
     if(notifyCompletion&&status.status==="complete"&&status.id!==state.completedId&&
         status.project_id===projectId()){
       state.completedId=status.id;
       window.dispatchEvent(new CustomEvent("volley:pipeline-complete",{
         detail:{project_id:status.project_id,video:status.video,
-          analysis_id:status.analysis_id,postprocessing_id:status.postprocessing_id}
+          analysis_id:status.analysis_id,postprocessing_id:status.postprocessing_id,pipeline_id:status.id}
       }));
     }
     state.historyStatusAt=Date.now();
@@ -1618,6 +1621,8 @@
         throw Error("Сервер не подтвердил создание анализа");
       recordHistoryRun(project,response.id);
       state.pipelineId=response.id;state.pipelineProject=project;
+      if(["queued","running","cancelling"].includes(response.status))
+        window.dispatchEvent(new CustomEvent("volley:pipeline-status",{detail:response}));
       resetLog();ui.logPanel.open=true;
       state.latestPipeline=response;
       renderHistory();

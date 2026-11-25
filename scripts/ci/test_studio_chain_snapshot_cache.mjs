@@ -65,6 +65,7 @@ const context={
   CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail;}},
   sourceSelection:{save:(p,a,r)=>{saved.project=p;saved.analysis=a;saved.run=r;}},
   chainSnapshot,url:(path,params)=>path+"?"+new URLSearchParams(params),
+  request:async()=>({schema:"volley-studio-pipeline/1",project_id:project,status:"idle"}),
   previewCache:{load:path=>{
     metadataReads++;
     return path.includes("/runs?")?metadata:Promise.resolve(overview);
