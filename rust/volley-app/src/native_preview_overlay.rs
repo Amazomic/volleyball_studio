@@ -448,7 +448,12 @@ fn overlay_players(frame: &Value) -> Vec<Value> {
                 .as_u64()
                 .is_some_and(|id| !inferred.contains(&id))
         })
-        .filter_map(|p| box_norm(&p["detection"]["bbox_xyxy_norm"]))
+        .filter_map(|p| {
+            Some((
+                p["track_id"].as_u64()?,
+                box_norm(&p["detection"]["bbox_xyxy_norm"])?,
+            ))
+        })
         .collect::<Vec<_>>();
     players
         .into_iter()
@@ -460,14 +465,18 @@ fn overlay_players(frame: &Value) -> Vec<Value> {
                 return None;
             }
             let bb = box_norm(&p["detection"]["bbox_xyxy_norm"])?;
+            let occluder = p["occluding_track_id"].as_u64();
             if inferred.contains(&id)
                 && observed_boxes
                     .iter()
-                    .any(|measured| boxes_clash(bb, *measured))
+                    .any(|(other, measured)| Some(*other) != occluder && boxes_clash(bb, *measured))
             {
                 return None;
             }
             let mut player = json!({"id":id,"box":bb,"interpolated":inferred.contains(&id)});
+            if let Some(occluder) = occluder {
+                player["occluding_track_id"] = json!(occluder);
+            }
             if p["pose"]
                 .as_array()
                 .is_some_and(|points| points.len() == 17)
@@ -1463,6 +1472,27 @@ pub async fn gpu(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn preview_keeps_an_interpolated_track_behind_its_recorded_occluder() {
+        let observed = |id| {
+            json!({"track_id":id,"is_verified_athlete":false,
+            "detection":{"bbox_xyxy_norm":[0.44,0.46,0.49,0.62]}})
+        };
+        let mut row = json!({"frame_index":495,"interpolated_track_ids":[7],"tracked_players":[
+            observed(4),
+            {"track_id":7,"is_verified_athlete":false,"occluding_track_id":4,
+             "detection":{"bbox_xyxy_norm":[0.45,0.45,0.48,0.53]}}
+        ]});
+        let players = overlay_players(&row);
+        assert_eq!(players.len(), 2);
+        assert_eq!(players[1]["occluding_track_id"], 4);
+        row["tracked_players"]
+            .as_array_mut()
+            .unwrap()
+            .push(observed(9));
+        assert!(overlay_players(&row).iter().all(|player| player["id"] != 7));
+    }
+
     use super::*;
 
     #[test]

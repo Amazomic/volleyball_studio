@@ -35,7 +35,7 @@ use volley_core::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_occlusion_continuity_v12";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_occlusion_continuity_v13";
 pub(crate) mod ball_track;
 mod gap_interpolation;
 mod pose_refinement;
@@ -330,7 +330,7 @@ fn fill_confirmed_track_gaps(
         if row["frame_index"].as_u64() != Some(current) {
             return Err("Confirmed tracking frames out of order".into());
         }
-        let observations: Vec<(u64, Candidate)> = row["tracked_players"]
+        let observations: Vec<_> = row["tracked_players"]
             .as_array()
             .ok_or("Missing confirmed tracks")?
             .iter()
@@ -341,14 +341,18 @@ fn fill_confirmed_track_gaps(
                         .ok_or("Invalid confirmed Track ID")?,
                     serde_json::from_value::<Candidate>(entry["detection"].clone())
                         .map_err(|e| format!("Confirmed Track candidate: {e}"))?,
+                    entry["occlusion_bridge"]["left"]
+                        .as_u64()
+                        .zip(entry["occlusion_bridge"]["occluder"].as_u64()),
                 ))
             })
             .collect::<Result<_, String>>()?;
         queued.push_back(row);
         anchors.retain(|_, (last, _)| current.saturating_sub(*last) <= 90);
-        for (track_id, observation) in observations {
+        for (track_id, observation, bridge) in observations {
             if let Some((left, prior)) = anchors.get(&track_id) {
                 let duration = current - left;
+                let occluder = bridge.filter(|(start, _)| start == left).map(|(_, id)| id);
                 if (2..=90).contains(&duration)
                     && prior.score.min(observation.score) >= 0.35
                     && scope.is_none_or(|mask| mask.same_interval(*left, current))
@@ -417,12 +421,16 @@ fn fill_confirmed_track_gaps(
                             {
                                 continue;
                             }
-                            rows.push(json!({
+                            let mut estimate_row = json!({
                                 "track_id":track_id,
                                 "detection":estimate,
                                 "measurement_source":"interpolated_track_bbox",
                                 "is_verified_athlete":false
-                            }));
+                            });
+                            if let Some(occluder) = occluder {
+                                estimate_row["occluding_track_id"] = json!(occluder);
+                            }
+                            rows.push(estimate_row);
                             if entry["interpolated_track_ids"].is_null() {
                                 entry["interpolated_track_ids"] = json!([]);
                             }

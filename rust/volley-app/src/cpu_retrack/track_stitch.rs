@@ -75,11 +75,16 @@ fn observed_row(reader: &mut BoundedReader, expected_frame: u64) -> Result<Frame
     Ok(row)
 }
 
-fn occlusion_bridge(old: &Track, new: &Track, start: u64) -> Option<(f64, (u64, u64))> {
-    if start - old.end > 16
-        || old.last_occluder.is_none()
-        || old.last_occluder != new.first_occluder
-    {
+#[derive(Clone, Copy)]
+struct OcclusionBridge {
+    left: u64,
+    right: u64,
+    occluder: u64,
+}
+
+fn occlusion_bridge(old: &Track, new: &Track, start: u64) -> Option<(f64, OcclusionBridge)> {
+    let occluder = old.last_occluder?;
+    if start - old.end > 16 || Some(occluder) != new.first_occluder {
         return None;
     }
     let ((left, a), (right, b)) = (old.last_reliable?, new.first_reliable?);
@@ -98,7 +103,14 @@ fn occlusion_bridge(old: &Track, new: &Track, start: u64) -> Option<(f64, (u64, 
         && dx <= 1.55 * aw.max(bw)
         && dy <= 0.25 * ah.min(bh)
         && distance <= 0.045)
-        .then_some((distance, (left, right)))
+        .then_some((
+            distance,
+            OcclusionBridge {
+                left,
+                right,
+                occluder,
+            },
+        ))
 }
 
 fn foreground_track(target: &Observation, players: &[Observation]) -> Option<u64> {
@@ -121,7 +133,7 @@ fn foreground_track(target: &Observation, players: &[Observation]) -> Option<u64
 #[derive(Default)]
 struct Handoffs {
     aliases: BTreeMap<u64, u64>,
-    occlusions: BTreeMap<u64, Vec<(u64, u64)>>,
+    occlusions: BTreeMap<u64, Vec<OcclusionBridge>>,
 }
 
 #[cfg(test)]
@@ -304,8 +316,8 @@ fn find_links(
                 }
             }
             if let Some((distance, bridge)) =
-                occlusion_bridge(old, new, start).filter(|&(_, (left, right))| {
-                    scope.is_some_and(|mask| mask.same_confirmed_rally(left, right))
+                occlusion_bridge(old, new, start).filter(|&(_, bridge)| {
+                    scope.is_some_and(|mask| mask.same_confirmed_rally(bridge.left, bridge.right))
                 })
             {
                 gap_candidates.push((
@@ -359,7 +371,7 @@ fn find_links(
         successors.insert(old_id, (new_id, bridge));
         predecessors.insert(new_id);
     }
-    let mut occlusions = BTreeMap::<u64, Vec<(u64, u64)>>::new();
+    let mut occlusions = BTreeMap::<u64, Vec<OcclusionBridge>>::new();
     for &root in successors.keys().filter(|id| !predecessors.contains(id)) {
         let mut current = root;
         while let Some(&(next, bridge)) = successors.get(&current) {
@@ -426,10 +438,21 @@ pub(super) fn stitch(
                     && occlusions.get(&id).is_some_and(|bridges| {
                         bridges
                             .iter()
-                            .any(|&(left, right)| left < frame_index && frame_index < right)
+                            .any(|bridge| bridge.left < frame_index && frame_index < bridge.right)
                     })
                 {
                     continue;
+                }
+                if interpolate_players {
+                    if let Some(bridge) = occlusions
+                        .get(&id)
+                        .into_iter()
+                        .flatten()
+                        .find(|bridge| bridge.right == frame_index)
+                    {
+                        player["occlusion_bridge"] =
+                            json!({"left":bridge.left,"occluder":bridge.occluder});
+                    }
                 }
                 player["track_id"] = json!(id);
                 let quality = |player: &Value| {
@@ -610,6 +633,7 @@ mod tests {
             let player = players.iter().find(|p| p["track_id"] == 7).unwrap();
             if (20..34).contains(&frame) {
                 assert_eq!(player["measurement_source"], "interpolated_track_bbox");
+                assert_eq!(player["occluding_track_id"], 4);
                 if frame == 30 {
                     let x = player["detection"]["bbox_xyxy_norm"][0].as_f64().unwrap();
                     assert!(x > 0.423 && x < 0.468);

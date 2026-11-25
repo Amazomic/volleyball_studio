@@ -241,9 +241,10 @@ fn remove_synthetic_duplicates(rows: &mut [Value], support: &BTreeMap<(usize, u6
         for index in ranked {
             let candidate = &players[index];
             if candidate["interpolated"] == true
-                && retained
-                    .iter()
-                    .any(|&kept| same_synthetic_body(&candidate["box"], &players[kept]["box"]))
+                && retained.iter().any(|&kept| {
+                    candidate["occluding_track_id"].as_u64() != players[kept]["id"].as_u64()
+                        && same_synthetic_body(&candidate["box"], &players[kept]["box"])
+                })
             {
                 continue;
             }
