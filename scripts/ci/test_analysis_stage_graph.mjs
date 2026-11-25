@@ -66,10 +66,10 @@ const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
 assert.equal(stages.length,16);
 assert.ok(ids.includes("publish")&&!ids.includes("material"));
-for(const [row,count] of [[1,8],[2,8]]){
-  const nodes=stages.filter(item=>item[3]===row);
-  assert.equal(nodes.length,count);
-}
+assert.deepEqual(Array.from(stages.filter(item=>item[3]===1),item=>item[0]),
+  ["video","ball","players","fusion","boxes","pose"]);
+assert.deepEqual(Array.from(stages.filter(item=>item[3]===2),item=>item[0]),
+  ["ball_stabilizer","ground_detector","touch_detector","rallies","tracking","touches","touch_types","publish","photos","identity"]);
 assert.match(css,/\.analysis-flow-node::after\{[^}]*linear-gradient\(to right,/);
 assert.doesNotMatch(css,/\.analysis-flow-node::after\{[^}]*conic-gradient/);
 assert.match(js,/node\.style\.setProperty\("--stage-progress"/);
@@ -155,6 +155,14 @@ assert.match(timeline,/make\("span","analysis-history-stage-name",pipelineLabel\
 assert.match(js,/updatePipelineGraph\(mainGraph,source\)/);
 assert.match(rust,/rows\.push\(json!\(\{"name":stage_name,"id":stage_id/);
 assert.match(rust,/status\["stage_id"\] = json!\(stage_id\)/);
+assert.match(rust,/if request\.mode == PipelineMode::Gpu && !request\.gpu\.pose_enabled/);
+assert.match(rust,/let refine_pose = \(request\.mode\.allows_gpu_execution\(\) && request\.gpu\.pose_enabled\)/);
+const replayStart=rust.indexOf("let replay = tokio::task::block_in_place");
+const primaryDone=rust.indexOf('status["primary_pose_replay_id"]',replayStart);
+const trackingPublished=rust.indexOf('status["cpu_runs"]["tracking"] = json!(replay_id)',replayStart);
+assert.ok(replayStart>=0&&primaryDone>replayStart&&trackingPublished>primaryDone,
+  "Primary pose evidence is saved before publishing the CPU tracking result");
+assert.match(rust.slice(primaryDone,trackingPublished),/return Ok\(\(\)\);/);
 assert.match(rust,/status\["shared_pose"\] = shared_pose_metrics\(status, &pose\)/);
 assert.match(rust,/status\["shared_pose"\] = source\["shared_pose"\]\.clone\(\)/);
 assert.match(html,/id="analysis-flow-diagram"/);

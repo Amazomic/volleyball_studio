@@ -28,13 +28,13 @@ const route=vm.runInNewContext(flow.slice(start,end)+"graphRoutes;");
 const definition=(begin,end)=>flow.slice(flow.indexOf(begin),flow.indexOf(end,flow.indexOf(begin)));
 const stages=vm.runInNewContext(definition("const pipelineStages=","const pipelineNames=")+"pipelineStages;");
 const links=vm.runInNewContext(definition("const pipelineEdges=","const graphLinkState=")+"pipelineEdges;");
-for(const columns of [7,3,2,1]){
+for(const columns of [6,3,2,1]){
   const width=columns*140+64;
   const boxes=new Map();
   let top=66;
   for(const phase of [1,2]){
     const cards=stages.filter(stage=>stage[3]===phase);
-    const count=Math.min(columns,cards.length);
+    const count=Math.min(columns===6&&phase===2?5:columns,cards.length);
     const pitch=(width-64)/count;
     for(const [index,[id]] of cards.entries()){
       const l=32+index%count*pitch,t=top+Math.floor(index/count)*150;

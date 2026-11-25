@@ -1869,7 +1869,7 @@ async fn pipeline(
                     Some(&primary.sha256),
                 )?
             {
-                return Err("Для пересчёта нужны сохранённые позы RTMPose. Выполните полный анализ один раз.".into());
+                return Err("Для пересчёта нужны сохранённые позы RTMPose. Выполните первую фазу с включённым RTMPose.".into());
             }
         }
         status["analysis_id"] = source["analysis_id"].clone();
@@ -2174,7 +2174,7 @@ async fn pipeline(
         }
     }
 
-    if request.mode == PipelineMode::Gpu {
+    if request.mode == PipelineMode::Gpu && !request.gpu.pose_enabled {
         progress(path, status, "Первичный GPU-анализ завершён", 99.9)?;
         return Ok(());
     }
@@ -2192,7 +2192,7 @@ async fn pipeline(
         "cpu_retrack::process",
         json!({"project_id":request.project_id,"video":request.video,"fusion_id":fusion_id,"settings":request.post.tracking}),
     )?;
-    let refine_pose = (request.mode == PipelineMode::Full && request.gpu.pose_enabled).then_some(
+    let refine_pose = (request.mode.allows_gpu_execution() && request.gpu.pose_enabled).then_some(
         cpu_retrack::PoseRefinement {
             threads: request.gpu.cpu_threads,
             memory_mb: request.gpu.gpu_memory_limit_mb,
@@ -2228,7 +2228,14 @@ async fn pipeline(
     };
     let replay = tokio::task::block_in_place(|| {
         cpu_retrack::process_with_cancel(app, &replay_request, cancel, refine_pose, |final_pass| {
-            if final_pass {
+            if final_pass && request.mode == PipelineMode::Gpu {
+                progress(
+                    path,
+                    status,
+                    "GPU · RTMPose по стабилизированным рамкам",
+                    89.0,
+                )
+            } else if final_pass {
                 progress(path, status, "CPU · Track ID", 89.0)
             } else {
                 progress(
@@ -2248,6 +2255,18 @@ async fn pipeline(
         || replay["player_frame_scope_ball_job_id"] != status["gpu_jobs"]["ball"]
     {
         return Err("Трекинг CPU вышел за границы проверенной GPU-маски розыгрышей".into());
+    }
+    if request.mode == PipelineMode::Gpu {
+        if replay["pose_refinement_policy"] != cpu_retrack::POSE_REFINEMENT_POLICY {
+            return Err("Первичная фаза не сохранила позы RTMPose".into());
+        }
+        status["player_tracking_stats"] = json!({
+            "raw_detections": replay["raw_player_detections"],
+            "refined_poses": replay["refined_pose_count"],
+        });
+        status["primary_pose_replay_id"] = json!(replay_id);
+        progress(path, status, "Первичный GPU-анализ завершён", 99.9)?;
+        return Ok(());
     }
     status["cpu_runs"]["tracking"] = json!(replay_id);
     if replay["pose_refinement_policy"] == cpu_retrack::POSE_REFINEMENT_POLICY {
