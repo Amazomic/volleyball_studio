@@ -4422,7 +4422,7 @@
       types.title="Автоматические оценки по всем кандидатам касаний в розыгрыше; не подтверждены человеком";
       const {start,end}=rallyClipFrames(item);
       const progress=make("div","rally-card-progress");
-      progress.tabIndex=s.current===id?0:-1;
+      progress.tabIndex=0;
       progress.setAttribute("role","slider");
       progress.setAttribute("aria-orientation","horizontal");
       progress.setAttribute("aria-valuemin","0");
@@ -4446,10 +4446,10 @@
         if(!["ArrowLeft","ArrowRight","Home","End","PageUp","PageDown","Enter"," "].includes(key))return;
         event.preventDefault();event.stopPropagation();
         if(key==="Enter"||key===" "){
-          view(item,Number.isFinite(ui.video.currentTime)?ui.video.currentTime:(Number(s.analysisOffset)||0)+start/fps());
+          view(item,s.current===id&&Number.isFinite(ui.video.currentTime)?ui.video.currentTime:(Number(s.analysisOffset)||0)+start/fps());
           return;
         }
-        const current=Number.isFinite(ui.video.currentTime)?
+        const current=s.current===id&&Number.isFinite(ui.video.currentTime)?
           ui.video.currentTime:(Number(s.analysisOffset)||0)+start/fps();
         const duration=(end-start+1)/fps();
         const fraction=key==="Home"?0:key==="End"?1:
@@ -4467,13 +4467,33 @@
       const result=make("div","rally-card-teams");
       const metadata=item.metadata;
       const winner=metadata?.winning_team;
+      const serveIds=new Set((Array.isArray(metadata?.touches)?metadata.touches:[])
+        .filter(event=>event?.kind==="serve"&&Number.isSafeInteger(event.track_id)&&event.track_id>0)
+        .map(event=>event.track_id));
       for(const [key,label,side] of [["team_1","Команда 1","near"],["team_2","Команда 2","far"]]){
         const team=make("div","rally-card-team rally-team-"+side);
-        const ids=Array.isArray(metadata?.[key])?metadata[key]:[];
-        const names=ids.filter(id=>Number.isSafeInteger(id)&&id>0).map(id=>
-          (typeof overlayLabels!=="undefined"&&overlayLabels.loaded&&overlayLabels.key.startsWith([s.project,s.run,s.video].join(":")+":")?overlayLabels.names.get(String(id)):null)||"ID "+id);
-        team.append(make("strong","rally-team-label",label),
-          make("span","rally-team-members",names.length?names.join(", "):"Не определена"));
+        const ids=(Array.isArray(metadata?.[key])?metadata[key]:[])
+          .filter(id=>Number.isSafeInteger(id)&&id>0);
+        const icon=make("span","rally-team-label");
+        icon.setAttribute("role","img");
+        icon.setAttribute("aria-label",label);
+        icon.title=label;
+        const members=make("span","rally-team-members");
+        if(!ids.length)members.append(document.createTextNode("Не определена"));
+        ids.forEach((id,index)=>{
+          if(index)members.append(document.createTextNode(", "));
+          const name=(typeof overlayLabels!=="undefined"&&overlayLabels.loaded&&overlayLabels.key.startsWith([s.project,s.run,s.video].join(":")+":")?overlayLabels.names.get(String(id)):null)||"ID "+id;
+          if(serveIds.has(id)){
+            const member=make("span","rally-serving-member");
+            const palm=make("span","rally-serve-icon");
+            palm.setAttribute("role","img");
+            palm.setAttribute("aria-label","Подающий");
+            palm.title="Подающий";
+            member.append(palm,document.createTextNode(name));
+            members.append(member);
+          }else members.append(document.createTextNode(name));
+        });
+        team.append(icon,members);
         if(winner===key)team.append(make("strong","rally-team-point","+1"));
         result.append(team);
       }
