@@ -35,7 +35,7 @@ use volley_core::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_occlusion_visibility_v21";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_stationary_posts_v22";
 pub(crate) mod ball_track;
 mod gap_interpolation;
 mod occlusion;
@@ -197,6 +197,8 @@ struct ReplayTotals {
     tentative_tracks: u64,
     unconfirmed_tracks: u64,
     short_track_detections: u64,
+    static_tracks: u64,
+    static_track_detections: u64,
     duplicate_track_ids_merged: u64,
     identity_turnover_splits: u64,
     identity_handoff_splits: u64,
@@ -737,20 +739,22 @@ fn replay_frames_verified(
     totals.identity_turnover_splits = 0;
     totals.identity_handoff_splits = 0;
     let stitched_sha = if phase == ReplayPhase::StablePlan {
-        let (sha, tracks, detections) = track_stitch::prune_short(
+        let pruned = track_stitch::prune_unreliable(
             output,
             &stitched_sha,
             count,
             config.min_track_observations,
             cancel,
         )?;
-        totals.unconfirmed_tracks += tracks;
-        totals.short_track_detections += detections;
+        totals.unconfirmed_tracks += pruned.short_tracks;
+        totals.short_track_detections += pruned.short_detections;
+        totals.static_tracks = pruned.static_tracks;
+        totals.static_track_detections = pruned.static_detections;
         totals.detections = totals
             .detections
-            .checked_sub(detections)
-            .ok_or("Too many short detections")?;
-        sha
+            .checked_sub(pruned.short_detections + pruned.static_detections)
+            .ok_or("Too many pruned detections")?;
+        pruned.sha
     } else {
         stitched_sha
     };
@@ -796,7 +800,7 @@ fn replay_frames_verified(
         .checked_sub(
             merged
                 + if phase == ReplayPhase::StablePlan {
-                    totals.unconfirmed_tracks
+                    totals.unconfirmed_tracks + totals.static_tracks
                 } else {
                     0
                 },
@@ -1114,7 +1118,7 @@ fn process_inner(
             "frames":totals.frames,
             "tracked_player_detections":totals.detections,
             "raw_player_detections":totals.raw_player_detections,
-            "discarded_player_detections":totals.rejected + totals.short_track_detections,
+            "discarded_player_detections":totals.rejected + totals.short_track_detections + totals.static_track_detections,
             "discarded_short_track_detections":totals.short_track_detections,
             "discarded_short_track_ids":totals.unconfirmed_tracks,
             "tentative_track_count":totals.tentative_tracks,
@@ -1132,6 +1136,8 @@ fn process_inner(
             "touches_confirmed":false,
             "cpu_processing_complete":false,
         });
+        record["discarded_static_track_ids"] = json!(totals.static_tracks);
+        record["discarded_static_track_detections"] = json!(totals.static_track_detections);
         record["unassigned_rally_boxes"] = json!(totals.unassigned_rally_boxes);
         let has_refined = refine_pose || saved_refined.is_some();
         record["pose_refinement_policy"] = json!(has_refined.then_some(POSE_REFINEMENT_POLICY));
