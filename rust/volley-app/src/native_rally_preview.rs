@@ -246,6 +246,82 @@ fn fill_legacy_metadata(
     Ok(())
 }
 
+fn fill_saved_initial_serves(
+    run: &crate::native_rally_evidence::ValidatedRun,
+    page: &mut Value,
+) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let cards = page["items"]
+        .as_array_mut()
+        .ok_or("Invalid rally preview items")?;
+    if !cards
+        .iter()
+        .any(|card| card["method"] == "primary_gpu_rally_mask_v1" && card["metadata"].is_object())
+    {
+        return Ok(());
+    }
+    let dir = run.touch_file.parent().ok_or("Missing touch directory")?;
+    let manifest = crate::native_rally_evidence::read_manifest(dir, "Touch")?;
+    if manifest["initial_serve_proposal_count"].is_null() {
+        return Ok(());
+    }
+    let path = storage::safe_file(dir, "preliminary_rallies.json", 64 * 1024 * 1024)?;
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let checksum = format!("{:x}", Sha256::digest(&bytes));
+    if manifest["preliminary_rally_sha256"].as_str() != Some(checksum.as_str()) {
+        return Err("Initial serve source SHA mismatch".into());
+    }
+    let data: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if data["schema"] != "volley-native-preliminary-continuous-rallies/1"
+        || data["source_replay_id"].as_str() != Some(run.replay_id.as_str())
+        || data["source_replay_sha256"].as_str() != Some(run.replay_sha.as_str())
+        || data["frames"].as_u64() != Some(run.frames)
+    {
+        return Err("Initial serve source provenance mismatch".into());
+    }
+    let intervals: Vec<(u64, u64)> =
+        serde_json::from_value(data["rally_intervals"].clone()).map_err(|e| e.to_string())?;
+    if intervals
+        .iter()
+        .any(|&(start, end)| start > end || end >= run.frames)
+        || intervals.windows(2).any(|p| p[0].1 >= p[1].0)
+    {
+        return Err("Invalid saved rally intervals".into());
+    }
+    let serves =
+        crate::cpu_rallies::rally_metadata::parse_initial_serves(&data, &manifest, &intervals)?;
+    for card in cards.iter_mut().filter(|card| {
+        card["method"] == "primary_gpu_rally_mask_v1" && card["metadata"].is_object()
+    }) {
+        let start = card["detected_start_frame"]
+            .as_u64()
+            .ok_or("Invalid rally start")?;
+        let end = card["detected_end_frame"]
+            .as_u64()
+            .ok_or("Invalid rally end")?;
+        if intervals.binary_search(&(start, end)).is_err() {
+            return Err("Rally preview interval differs from initial serve source".into());
+        }
+        let roster: Vec<u64> = serde_json::from_value(card["provisional_track_ids"].clone())
+            .map_err(|e| e.to_string())?;
+        let first_floor = card["surface_event_candidates"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|event| event["surface"] == "floor")
+            .and_then(|event| event["frame_index"].as_u64());
+        crate::cpu_rallies::rally_metadata::include_initial_serve(
+            &mut card["metadata"],
+            &roster,
+            (start, end),
+            first_floor,
+            run.analysis_range.map_or(0.0, |range| range.start_sec),
+            serves.get(&start).copied(),
+        );
+    }
+    Ok(())
+}
+
 pub async fn preview(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PreviewQuery>,
@@ -275,6 +351,9 @@ pub async fn preview(
             page["stable_track_count_status"] = json!("unavailable");
         }
         if fill_legacy_metadata(&state, &run, &mut page).is_err() {
+            page["rally_metadata_status"] = json!("unavailable");
+        }
+        if fill_saved_initial_serves(&run, &mut page).is_err() {
             page["rally_metadata_status"] = json!("unavailable");
         }
         Ok(page)

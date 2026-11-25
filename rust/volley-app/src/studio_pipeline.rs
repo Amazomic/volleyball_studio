@@ -1410,7 +1410,7 @@ fn cpu_lineage_valid(
         && touches["touch_side_attribution_version"] == crate::court_touch::TOUCH_SIDE_ATTRIBUTION_VERSION
         && touches["ground_detector_version"] == volley_core::motion::GROUND_DETECTOR_VERSION
         && rallies["ground_boundary_version"] == volley_core::motion::GROUND_DETECTOR_VERSION
-        && rallies["materialization_version"] == "primary_gpu_intervals_direct_v1"
+        && rallies["materialization_version"] == "primary_gpu_intervals_direct_v2"
         && rallies["rally_score_version"] == volley_core::rally_score::RALLY_SCORE_VERSION
         && touches["ball_tracking_policy"] == crate::cpu_retrack::ball_track::LOCAL_POLICY
         && rallies["ball_tracking_policy"] == crate::cpu_retrack::ball_track::LOCAL_POLICY
@@ -4621,7 +4621,7 @@ mod branching_tests {
                 "schema":"volley-native-cpu-rally-proposals/1","state":"provisional_rally_segments","rally_run_id":rally,
                 "court_contact_context_version":"not_computed_primary_gpu_v1",
                 "ground_boundary_version":volley_core::motion::GROUND_DETECTOR_VERSION,
-                "materialization_version":"primary_gpu_intervals_direct_v1",
+                "materialization_version":"primary_gpu_intervals_direct_v2",
                 "rally_score_version":volley_core::rally_score::RALLY_SCORE_VERSION,
                 "preliminary_rally_scope_version":"primary_gpu_rally_mask_v1",
                 "preliminary_rally_scope_applied":false,

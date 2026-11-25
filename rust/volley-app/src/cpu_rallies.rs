@@ -830,6 +830,7 @@ fn publish_primary_from_touches(
     side_source: Option<(&Path, &str, &crate::video_edits::CourtSnapshot)>,
     offset_sec: f64,
     surface_events: &std::collections::VecDeque<SurfaceEventProposal>,
+    initial_serves: &std::collections::BTreeMap<u64, (u64, u64)>,
     cancel: Option<&AtomicBool>,
 ) -> Result<(String, RallyTotals, OutputCounters), String> {
     if rosters.len() != intervals.len()
@@ -946,7 +947,7 @@ fn publish_primary_from_touches(
         let first_floor = surface_events
             .iter()
             .find(|event| event.surface == "floor" && (start..=end).contains(&event.frame_index));
-        let metadata = rally_metadata::build(
+        let mut metadata = rally_metadata::build(
             start,
             end,
             &sides,
@@ -963,6 +964,14 @@ fn publish_primary_from_touches(
                 )
             }),
             offset_sec,
+        );
+        rally_metadata::include_initial_serve(
+            &mut metadata,
+            roster,
+            (start, end),
+            first_floor.map(|event| event.frame_index),
+            offset_sec,
+            initial_serves.get(&start).copied(),
         );
         write_proposal(
             &mut writer,
@@ -1286,6 +1295,12 @@ fn process_inner(
     }
     let ground_events =
         parse_ground_contacts(&data, &contacts, &intervals).map_err(storage::bad_request)?;
+    let initial_serves = if primary_only {
+        rally_metadata::parse_initial_serves(&data, &contacts, &intervals)
+            .map_err(storage::bad_request)?
+    } else {
+        Default::default()
+    };
     let preliminary_intervals = Some(intervals);
     let replay_sha = sha(&tracked["sha256"]).map_err(storage::bad_request)?;
     let touch_sha = sha(&contacts["sha256"]).map_err(storage::bad_request)?;
@@ -1353,6 +1368,7 @@ fn process_inner(
                     .as_f64()
                     .unwrap_or(0.0),
                 &ground_events,
+                &initial_serves,
                 cancel,
             )?
         } else {
@@ -1417,7 +1433,7 @@ fn process_inner(
                 "trajectory_court_surface_v3"
             },
             "materialization_version": if primary_only {
-                "primary_gpu_intervals_direct_v1"
+                "primary_gpu_intervals_direct_v2"
             } else {
                 "cpu_rally_frame_reconstruction_v1"
             },
@@ -1554,6 +1570,7 @@ mod tests {
             None,
             0.0,
             &surface,
+            &std::collections::BTreeMap::from([(12, (15, 1)), (50, (52, 10))]),
             None,
         )
         .unwrap();
@@ -1577,6 +1594,14 @@ mod tests {
         assert_eq!(rows[0]["stable_track_count"], 4);
         assert_eq!(rows[1]["stable_track_count"], 6);
         assert_eq!(rows[0]["motion_supported_touch_proposals"], 1);
+        assert_eq!(
+            rows[0]["metadata"]["touches"][0],
+            json!({"track_id":1,"kind":"serve","time_sec":0.5})
+        );
+        assert_eq!(
+            rows[1]["metadata"]["touches"][0],
+            json!({"track_id":10,"kind":"serve","time_sec":52.0/30.0})
+        );
         assert_eq!(rows[1]["detected_start_frame"], 50);
         assert_eq!(rows[1]["detected_end_frame"], 78);
         assert_eq!(rows[1]["motion_supported_touch_proposals"], 0);
@@ -1614,6 +1639,7 @@ mod tests {
             None,
             0.0,
             &std::collections::VecDeque::new(),
+            &std::collections::BTreeMap::new(),
             None,
         )
         .is_err());
