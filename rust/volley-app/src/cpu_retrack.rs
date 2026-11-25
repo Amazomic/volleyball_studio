@@ -827,6 +827,7 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
 
 pub(crate) enum TrackingProgress {
     BoxesReady(u64),
+    PoseCached(u64),
     PoseFrames { processed: u64, total: u64 },
     FinalPass,
 }
@@ -1021,8 +1022,11 @@ fn process_inner(
                 return Err("RTMPose crop plan changed; run the primary GPU phase again".into());
             }
             refine_input_sha = Some(digest.clone());
-            (digest, refined_poses) =
+            let (attached_sha, attached_poses, inferred_frames) =
                 pose_refinement::attach(&part, &digest, frames, snapshot, cancel)?;
+            digest = attached_sha;
+            refined_poses = attached_poses;
+            on_pose(TrackingProgress::PoseCached(inferred_frames))?;
             totals.pose_detections = refined_poses;
         }
         if refine_pose {
@@ -1044,6 +1048,7 @@ fn process_inner(
                     frames,
                     decoded_frames,
                     range,
+                    scope: player_scope.as_ref().ok_or("Missing RTMPose rally scope")?,
                 },
                 refinement,
                 cancel.ok_or("RTMPose refinement cancellation unavailable")?,
@@ -1059,8 +1064,10 @@ fn process_inner(
                 folder: directory.clone(),
             };
             on_pose(TrackingProgress::FinalPass)?;
-            (digest, refined_poses) =
+            let (attached_sha, attached_poses, _) =
                 pose_refinement::attach(&part, &digest, frames, &snapshot, cancel)?;
+            digest = attached_sha;
+            refined_poses = attached_poses;
             totals.pose_detections = refined_poses;
             volley_media::preparation::verify_source_provenance(
                 &plan.source,

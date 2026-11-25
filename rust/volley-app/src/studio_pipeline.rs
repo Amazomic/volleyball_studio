@@ -918,8 +918,14 @@ fn tracking_progress(
             status["player_tracking_stats"]["total_track_ids"] = json!(total);
             save(path, status)
         }
+        cpu_retrack::TrackingProgress::PoseCached(total) => {
+            status["pose_frame_progress"] =
+                json!({"processed":total,"total":total,"basis":"stable_crop_frames_v1"});
+            save(path, status)
+        }
         cpu_retrack::TrackingProgress::PoseFrames { processed, total } => {
-            status["pose_frame_progress"] = json!({"processed":processed,"total":total});
+            status["pose_frame_progress"] =
+                json!({"processed":processed,"total":total,"basis":"stable_crop_frames_v1"});
             progress_with_frames(
                 path,
                 status,
@@ -1937,6 +1943,8 @@ async fn pipeline(
         )?;
     } else if let Some(existing) = reusable.full.filter(|v| {
         request.mode == PipelineMode::Full
+            && (v["primary_tracking"]["pose_ready"] != true
+                || v["pose_frame_progress"]["basis"] == "stable_crop_frames_v1")
             && v["automatic_identity"]["decision_policy"] == "track_photo_consensus_v1"
             && v["cpu_runs"]["tracking"]
                 .as_str()
@@ -4193,7 +4201,20 @@ mod tests {
         assert_eq!(saved["stages"][1]["frames_processed"], 40);
         assert_eq!(
             saved["pose_frame_progress"],
-            json!({"processed":40,"total":40})
+            json!({"processed":40,"total":40,"basis":"stable_crop_frames_v1"})
+        );
+        tracking_progress(
+            &path,
+            &mut status,
+            PipelineMode::Full,
+            TrackingProgress::PoseCached(32),
+        )
+        .unwrap();
+        let cached = read(&path).unwrap();
+        assert_eq!(cached["stage_id"], "tracking");
+        assert_eq!(
+            cached["pose_frame_progress"],
+            json!({"processed":32,"total":32,"basis":"stable_crop_frames_v1"})
         );
         fs::remove_dir_all(root).unwrap();
     }

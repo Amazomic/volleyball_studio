@@ -235,6 +235,7 @@ pub(super) struct Source<'a> {
     pub frames: u64,
     pub decoded_frames: u64,
     pub range: Option<AnalysisRange>,
+    pub scope: &'a PlayerFrameScope,
 }
 
 fn proposals(players: &[Value]) -> Vec<(usize, [f64; 4], &'static str)> {
@@ -271,6 +272,57 @@ fn stabilize_pose_crop(current: [f64; 4], previous: Option<[f64; 4]>) -> [f64; 4
     ]
 }
 
+fn read_crop_plan_row(
+    reader: &mut BoundedReader,
+    frame: u64,
+    scope: &PlayerFrameScope,
+) -> Result<Value, String> {
+    let row: Value = serde_json::from_slice(
+        &reader
+            .line()?
+            .ok_or("Tracking replay truncated during RTMPose refinement")?,
+    )
+    .map_err(|e| e.to_string())?;
+    if row["frame_index"].as_u64() != Some(frame) {
+        return Err("Tracking replay frame mismatch during RTMPose refinement".into());
+    }
+    let players = row["tracked_players"]
+        .as_array()
+        .ok_or("Missing tracked players")?;
+    if !scope.contains(frame) && !players.is_empty() {
+        return Err("RTMPose crop plan contains players outside selected rally intervals".into());
+    }
+    Ok(row)
+}
+
+fn pose_frame_total(
+    source: &Source<'_>,
+    stride: usize,
+    cancelled: &AtomicBool,
+) -> Result<u64, String> {
+    if !(1..=30).contains(&stride) {
+        return Err("Invalid RTMPose stride".into());
+    }
+    let mut reader = BoundedReader::open(source.replay)?;
+    let mut total = 0;
+    for frame in 0..source.frames {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        let row = read_crop_plan_row(&mut reader, frame, source.scope)?;
+        let players = row["tracked_players"]
+            .as_array()
+            .ok_or("Missing tracked players")?;
+        if frame.is_multiple_of(stride as u64) && !proposals(players).is_empty() {
+            total += 1;
+        }
+    }
+    if reader.line()?.is_some() || reader.finish() != source.replay_sha {
+        return Err("Tracking crop plan changed before RTMPose refinement".into());
+    }
+    Ok(total)
+}
+
 pub(super) fn refine(
     repository: &Path,
     source: Source<'_>,
@@ -290,7 +342,7 @@ pub(super) fn refine(
     let mut engine = None;
     let mut accepted = 0;
     let mut previous_crops = BTreeMap::<u64, [f64; 4]>::new();
-    let total = source.frames.div_ceil(settings.stride as u64);
+    let total = pose_frame_total(&source, settings.stride, cancelled)?;
     let mut processed = 0;
     on_frames(processed, total)?;
     decode_original_frames_in_range(
@@ -302,13 +354,7 @@ pub(super) fn refine(
             if index >= source.frames {
                 return Ok(());
             }
-            let row = reader
-                .line()?
-                .ok_or("Tracking replay truncated during RTMPose refinement")?;
-            let row: Value = serde_json::from_slice(&row).map_err(|e| e.to_string())?;
-            if row["frame_index"].as_u64() != Some(index) {
-                return Err("Tracking replay frame mismatch during RTMPose refinement".into());
-            }
+            let row = read_crop_plan_row(&mut reader, index, source.scope)?;
             let players = row["tracked_players"]
                 .as_array()
                 .ok_or("Missing tracked players")?;
@@ -371,15 +417,20 @@ pub(super) fn refine(
             }
             writer.write_all(&bytes).map_err(|e| e.to_string())?;
             hash.update(&bytes);
-            processed += 1;
-            if processed == 1 || processed.is_multiple_of(30) || processed == total {
-                on_frames(processed, total)?;
+            if !crops.is_empty() {
+                processed += 1;
+                if processed == 1 || processed.is_multiple_of(30) || processed == total {
+                    on_frames(processed, total)?;
+                }
             }
             Ok(())
         },
     )?;
     if reader.line()?.is_some() || reader.finish() != source.replay_sha {
         return Err("Tracking replay changed during RTMPose refinement".into());
+    }
+    if processed != total {
+        return Err("RTMPose processed frame count differs from verified crop plan".into());
     }
     writer.flush().map_err(|e| e.to_string())?;
     writer.get_ref().sync_all().map_err(|e| e.to_string())?;
@@ -393,7 +444,7 @@ pub(super) fn attach(
     frames: u64,
     snapshot: &super::pose_source::Snapshot,
     cancel: Option<&AtomicBool>,
-) -> Result<(String, u64), String> {
+) -> Result<(String, u64, u64), String> {
     let tmp = source.with_extension("pose-attach");
     let result = (|| {
         let mut reader = BoundedReader::open(source)?;
@@ -407,6 +458,7 @@ pub(super) fn attach(
         );
         let mut sha = Sha256::new();
         let mut accepted = 0;
+        let mut inferred_frames = 0;
         let mut previous = BTreeMap::new();
         for frame in 0..frames {
             if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
@@ -444,6 +496,7 @@ pub(super) fn attach(
                 return Err("Missing sampled RTMPose frame".into());
             }
             if let Some(sample) = sample {
+                inferred_frames += u64::from(!expected.is_empty());
                 for measured in sample["players"]
                     .as_array()
                     .ok_or("Missing measured poses")?
@@ -491,7 +544,7 @@ pub(super) fn attach(
         writer.get_ref().sync_all().map_err(|e| e.to_string())?;
         drop(writer);
         fs::rename(&tmp, source).map_err(|e| e.to_string())?;
-        Ok((format!("{:x}", sha.finalize()), accepted))
+        Ok((format!("{:x}", sha.finalize()), accepted, inferred_frames))
     })();
     if result.is_err() {
         let _ = fs::remove_file(tmp);
@@ -503,6 +556,67 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn pose_progress_counts_only_sampled_frames_with_stable_crops() {
+        let dir = std::env::temp_dir().join(format!("volley-pose-count-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tracked.jsonl");
+        let mut raw = Vec::new();
+        let bbox = [0.2, 0.3, 0.3, 0.7];
+        for frame in 0..10 {
+            let players = match frame {
+                2 | 3 => vec![json!({"track_id": 1, "detection": {"bbox_xyxy_norm": bbox}})],
+                4 => vec![
+                    json!({"track_id": 1, "measurement_source": "interpolated_track_bbox",
+                    "detection": {"bbox_xyxy_norm": bbox}}),
+                ],
+                8 => vec![
+                    json!({"track_id": 1, "detection": {"bbox_xyxy_norm": bbox}}),
+                    json!({"track_id": 2, "detection": {"bbox_xyxy_norm": [0.5, 0.3, 0.6, 0.7]}}),
+                ],
+                _ => vec![],
+            };
+            serde_json::to_writer(
+                &mut raw,
+                &json!({"frame_index": frame, "tracked_players": players}),
+            )
+            .unwrap();
+            raw.push(b'\n');
+        }
+        fs::write(&path, &raw).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&raw));
+        let scope = PlayerFrameScope {
+            selected: vec![(2, 5), (8, 8)],
+            rallies: vec![(2, 5), (8, 8)],
+            ball_job_id: "test".into(),
+            mask_sha256: String::new(),
+        };
+        let source = Source {
+            original: &path,
+            replay: &path,
+            replay_sha: &sha,
+            frames: 10,
+            decoded_frames: 10,
+            range: None,
+            scope: &scope,
+        };
+        let cancelled = AtomicBool::new(false);
+        let actual = pose_frame_total(&source, 2, &cancelled).unwrap();
+        assert_eq!(pose_frame_total(&source, 1, &cancelled).unwrap(), 4);
+        let invalid_scope = PlayerFrameScope {
+            selected: vec![(2, 5)],
+            rallies: vec![(2, 5)],
+            ball_job_id: "test".into(),
+            mask_sha256: String::new(),
+        };
+        let invalid_source = Source {
+            scope: &invalid_scope,
+            ..source
+        };
+        assert!(pose_frame_total(&invalid_source, 2, &cancelled).is_err());
+        fs::remove_dir_all(dir).unwrap();
+        assert_eq!(actual, 3);
+    }
     #[test]
     fn measured_pose_attaches_without_changing_any_track_box_or_id() {
         let dir = std::env::temp_dir().join(format!("volley-attach-{}", uuid::Uuid::new_v4()));
@@ -539,8 +653,9 @@ mod tests {
             folder: dir.clone(),
         };
         let sha = format!("{:x}", Sha256::digest(&raw));
-        let (_, count) = attach(&path, &sha, 1, &snapshot, None).unwrap();
+        let (_, count, frames) = attach(&path, &sha, 1, &snapshot, None).unwrap();
         assert_eq!(count, 1);
+        assert_eq!(frames, 1);
         let row: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         let result = row["tracked_players"].as_array().unwrap();
         assert_eq!(result.len(), 2);
