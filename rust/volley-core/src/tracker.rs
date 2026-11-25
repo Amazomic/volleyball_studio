@@ -5,6 +5,7 @@
 use crate::{bbox_iou, fusion::Candidate};
 use serde::{Deserialize, Serialize};
 mod association;
+pub use association::assign as assign_track_scores;
 pub mod bytetrack;
 mod confirmation;
 mod pose_matching;

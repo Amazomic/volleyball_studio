@@ -461,6 +461,463 @@ fn find_links(
     })
 }
 
+#[derive(Clone, Copy)]
+struct RosterObservation {
+    id: u64,
+    bbox: [f64; 4],
+    score: f64,
+}
+
+#[derive(Clone, Copy)]
+struct RosterSlot {
+    id: u64,
+    source_id: u64,
+    frame: usize,
+    bbox: [f64; 4],
+    velocity: [f64; 2],
+}
+
+impl RosterSlot {
+    fn new(observation: RosterObservation, frame: usize) -> Self {
+        Self {
+            id: observation.id,
+            source_id: observation.id,
+            frame,
+            bbox: observation.bbox,
+            velocity: [0.0; 2],
+        }
+    }
+
+    fn predict(&self, frame: usize) -> [f64; 4] {
+        let dt = (frame as f64 - self.frame as f64).clamp(-12.0, 12.0);
+        std::array::from_fn(|i| self.bbox[i] + self.velocity[i % 2] * dt)
+    }
+
+    fn score(&self, observation: RosterObservation, frame: usize) -> Option<f64> {
+        let gap = self.frame.abs_diff(frame);
+        let same_source = self.source_id == observation.id;
+        if gap > 90 && !same_source {
+            return None;
+        }
+        let a = self.predict(frame);
+        let b = observation.bbox;
+        let [aw, ah] = box_size(a);
+        let [bw, bh] = box_size(b);
+        if aw.min(bw) < 0.003 || ah.min(bh) < 0.015 {
+            return None;
+        }
+        let dx = (box_center_x(a) - box_center_x(b)).abs();
+        let bottom = (a[3] - b[3]).abs();
+        let center_y = ((a[1] + a[3] - b[1] - b[3]) * 0.5).abs();
+        let partial = ah.min(bh) < 0.78 * ah.max(bh);
+        let contained_y = (a[1].max(b[1]) - a[3].min(b[3])).max(0.0);
+        let dy = if partial && dx <= 0.65 * aw.max(bw) {
+            bottom.min(center_y).min(contained_y + 0.18 * ah.min(bh))
+        } else {
+            bottom.min(center_y + 0.01)
+        };
+        let spread = gap.min(90) as f64 * 0.0012;
+        let tx = (0.75 * aw.max(bw) + spread).clamp(0.012, 0.16);
+        let ty = (0.35 * ah.max(bh) + spread).clamp(0.018, 0.16);
+        let distance = (dx / tx).hypot(dy / ty);
+        let size_cost = ((aw / bw).ln().abs() + (ah / bh).ln().abs()) * 0.09;
+        if distance > 1.25 || (!same_source && aw.max(bw) > 2.5 * aw.min(bw)) {
+            return None;
+        }
+        let continuity = if same_source {
+            0.24
+        } else if self.id == observation.id {
+            0.08
+        } else {
+            0.0
+        };
+        let score = 0.95 - 0.55 * distance - size_cost + continuity + 0.06 * observation.score;
+        (score > 0.20).then_some(score.min(1.0))
+    }
+
+    fn update(&mut self, observation: RosterObservation, frame: usize) {
+        let previous = self.bbox;
+        let predicted = self.predict(frame);
+        let mut bbox = observation.bbox;
+        let [pw, ph] = box_size(predicted);
+        let [w, h] = box_size(bbox);
+        if h < 0.75 * ph
+            && w <= 1.3 * pw
+            && (box_center_x(predicted) - box_center_x(bbox)).abs() <= 0.55 * pw
+            && bbox[1] <= predicted[3]
+            && bbox[3] >= predicted[1]
+        {
+            let dx = box_center_x(bbox) - box_center_x(predicted);
+            let top = bbox[1] - predicted[1];
+            let bottom = bbox[3] - predicted[3];
+            let dy = if top.abs() < bottom.abs() {
+                top
+            } else {
+                bottom
+            };
+            bbox = [
+                predicted[0] + dx,
+                predicted[1] + dy,
+                predicted[2] + dx,
+                predicted[3] + dy,
+            ];
+        }
+        let dt = frame as f64 - self.frame as f64;
+        if dt != 0.0 {
+            let vx = ((box_center_x(bbox) - box_center_x(previous)) / dt).clamp(-0.008, 0.008);
+            let vy = ((bbox[3] - previous[3]) / dt).clamp(-0.012, 0.012);
+            self.velocity = [
+                self.velocity[0] * 0.55 + vx * 0.45,
+                self.velocity[1] * 0.55 + vy * 0.45,
+            ];
+        }
+        self.bbox = bbox;
+        self.frame = frame;
+        self.source_id = observation.id;
+    }
+}
+
+fn roster_fragment(a: [f64; 4], b: [f64; 4]) -> bool {
+    let [aw, ah] = box_size(a);
+    let [bw, bh] = box_size(b);
+    let intersection =
+        (a[2].min(b[2]) - a[0].max(b[0])).max(0.0) * (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+    aw.min(bw) >= 0.003
+        && ah.min(bh) >= 0.015
+        && (box_center_x(a) - box_center_x(b)).abs() <= 0.35 * aw.max(bw)
+        && (intersection >= 0.80 * (aw * ah).min(bw * bh)
+            || (a[3].min(b[3]) - a[1].max(b[1])).abs() <= 0.008
+                && (a[2].min(b[2]) - a[0].max(b[0])) >= 0.8 * aw.min(bw))
+}
+
+fn assign_roster_frame(
+    observations: &[RosterObservation],
+    slots: &mut [RosterSlot],
+    frame: usize,
+) -> Vec<Option<u64>> {
+    let scores = observations
+        .iter()
+        .map(|&o| {
+            slots
+                .iter()
+                .map(|slot| slot.score(o, frame))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let assigned = volley_core::tracker::assign_track_scores(&scores);
+    let mut result = vec![None; observations.len()];
+    let mut matched = Vec::new();
+    for (index, slot) in assigned.into_iter().enumerate() {
+        if let Some(slot) = slot {
+            result[index] = Some(slots[slot].id);
+            matched.push((index, slot));
+        }
+    }
+    for (index, o) in observations.iter().enumerate() {
+        if result[index].is_some() {
+            continue;
+        }
+        let mut compatible = matched
+            .iter()
+            .filter(|&&(i, _)| roster_fragment(observations[i].bbox, o.bbox));
+        if let Some(&(_, slot)) = compatible.next() {
+            if compatible.next().is_none() {
+                result[index] = Some(slots[slot].id);
+            }
+        }
+    }
+    for (index, slot) in matched {
+        let mut observation = observations[index];
+        for (i, &owner) in result.iter().enumerate() {
+            if i != index && owner == Some(slots[slot].id) {
+                let b = observations[i].bbox;
+                let a = observation.bbox;
+                observation.bbox = [
+                    a[0].min(b[0]),
+                    a[1].min(b[1]),
+                    a[2].max(b[2]),
+                    a[3].max(b[3]),
+                ];
+            }
+        }
+        slots[slot].update(observation, frame);
+    }
+    result
+}
+
+fn roster_plan(
+    frames: &[Vec<RosterObservation>],
+    start: usize,
+    end: usize,
+) -> Option<Vec<Vec<Option<u64>>>> {
+    let sample = frames.get(start..=end)?;
+    let counts = sample.iter().map(|row| row.len() as u8).collect::<Vec<_>>();
+    let target = volley_core::rally_reconstruction::stable_track_count(&counts) as usize;
+    if target == 0 {
+        return None;
+    }
+    let mut support = BTreeMap::<u64, usize>::new();
+    for row in sample {
+        for observation in row {
+            *support.entry(observation.id).or_default() += 1;
+        }
+    }
+    let mid = (start + end) / 2;
+    let seed = (start..=end)
+        .filter(|&i| frames[i].len() == target)
+        .max_by(|&a, &b| {
+            let quality = |i: usize| {
+                let row = &frames[i];
+                let duplicates = row
+                    .iter()
+                    .enumerate()
+                    .map(|(j, p)| {
+                        row.iter()
+                            .skip(j + 1)
+                            .filter(|q| compatible_boxes(p.bbox, q.bbox))
+                            .count()
+                    })
+                    .sum::<usize>();
+                let stability = row.iter().map(|p| support[&p.id]).sum::<usize>();
+                (
+                    std::cmp::Reverse(duplicates),
+                    stability,
+                    std::cmp::Reverse(i.abs_diff(mid)),
+                )
+            };
+            quality(a).cmp(&quality(b))
+        })?;
+    let seed_slots = frames[seed]
+        .iter()
+        .copied()
+        .map(|o| RosterSlot::new(o, seed))
+        .collect::<Vec<_>>();
+    let mut plan = vec![Vec::new(); frames.len()];
+    plan[seed] = seed_slots.iter().map(|slot| Some(slot.id)).collect();
+    let mut slots = seed_slots.clone();
+    for frame in seed + 1..frames.len() {
+        plan[frame] = assign_roster_frame(&frames[frame], &mut slots, frame);
+    }
+    let mut slots = seed_slots;
+    for frame in (0..seed).rev() {
+        plan[frame] = assign_roster_frame(&frames[frame], &mut slots, frame);
+    }
+    Some(plan)
+}
+
+type RosterPlan = (u64, u64, Vec<Vec<Option<u64>>>);
+
+pub(super) struct RosterResult {
+    pub sha: String,
+    pub tracks: u64,
+    pub merged_boxes: u64,
+    pub unmatched_boxes: u64,
+}
+
+pub(super) fn reconcile_rally_rosters(
+    source: &Path,
+    expected_sha: &str,
+    frames: u64,
+    scope: &PlayerFrameScope,
+    cancel: Option<&AtomicBool>,
+) -> Result<RosterResult, String> {
+    let tmp = source.with_extension("rally-rosters");
+    let result = (|| {
+        let mut compact = BoundedReader::open(source)?;
+        let mut reader = BoundedReader::open(source)?;
+        let mut writer = BufWriter::new(
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .map_err(|e| e.to_string())?,
+        );
+        let mut sha = Sha256::new();
+        let mut tracks = BTreeSet::new();
+        let mut merged_boxes = 0;
+        let mut unmatched_boxes = 0;
+        let mut windows = Vec::new();
+        for &(selected_start, selected_end) in &scope.selected {
+            let first = scope.rallies.partition_point(|&(a, _)| a < selected_start);
+            let last = scope.rallies.partition_point(|&(_, b)| b <= selected_end);
+            let rallies = scope
+                .rallies
+                .get(first..last)
+                .ok_or("Invalid roster rally bounds")?;
+            for (i, &(start, end)) in rallies.iter().enumerate() {
+                let left = if i == 0 {
+                    selected_start
+                } else {
+                    (rallies[i - 1].1 + start) / 2 + 1
+                };
+                let right = if i + 1 == rallies.len() {
+                    selected_end
+                } else {
+                    (end + rallies[i + 1].0) / 2
+                };
+                windows.push((left, right, start, end));
+            }
+        }
+        let mut index = 0;
+        let mut plan: Option<RosterPlan> = None;
+        for frame in 0..frames {
+            if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+                return Err("cancelled".into());
+            }
+            if plan.as_ref().is_some_and(|(_, end, _)| frame > *end) {
+                plan = None;
+            }
+            if windows.get(index).is_some_and(|w| w.0 == frame) {
+                let (left, right, start, end) = windows[index];
+                index += 1;
+                if right - left >= 1_000_000 {
+                    return Err("Rally roster exceeds bounded frame limit".into());
+                }
+                let mut observations = Vec::new();
+                let mut total = 0;
+                for at in left..=right {
+                    if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+                        return Err("cancelled".into());
+                    }
+                    let row = observed_row(&mut compact, at)?;
+                    total += row.tracked_players.len();
+                    if total > 1_000_000 {
+                        return Err("Rally roster exceeds bounded observation limit".into());
+                    }
+                    observations.push(
+                        row.tracked_players
+                            .into_iter()
+                            .map(|o| RosterObservation {
+                                id: o.track_id,
+                                bbox: o.detection.bbox_xyxy_norm,
+                                score: o.detection.score,
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                let owners = roster_plan(
+                    &observations,
+                    (start - left) as usize,
+                    (end - left) as usize,
+                )
+                .unwrap_or_else(|| {
+                    observations
+                        .iter()
+                        .map(|r| r.iter().map(|o| Some(o.id)).collect())
+                        .collect()
+                });
+                plan = Some((left, right, owners));
+            } else if plan.is_none() {
+                observed_row(&mut compact, frame)?;
+            }
+            let mut row: Value =
+                serde_json::from_slice(&reader.line()?.ok_or("Roster replay truncated")?)
+                    .map_err(|e| e.to_string())?;
+            if row["frame_index"].as_u64() != Some(frame) {
+                return Err("Roster frame order mismatch".into());
+            }
+            if let Some((left, _, _)) = plan.as_ref() {
+                row["rally_roster_window"] = json!(left);
+            }
+            let players = row["tracked_players"]
+                .as_array_mut()
+                .ok_or("Missing roster observations")?;
+            if let Some((left, _, ref owners)) = plan {
+                let owners = &owners[(frame - left) as usize];
+                if owners.len() != players.len() {
+                    return Err("Roster observations changed".into());
+                }
+                let mut canonical = BTreeMap::<u64, Value>::new();
+                let mut dropped = 0;
+                let mut rewritten = false;
+                for (mut player, &owner) in std::mem::take(players).into_iter().zip(owners) {
+                    let Some(id) = owner else {
+                        unmatched_boxes += 1;
+                        dropped += 1;
+                        continue;
+                    };
+                    rewritten |= player["track_id"].as_u64() != Some(id);
+                    player["track_id"] = json!(id);
+                    match canonical.get_mut(&id) {
+                        Some(previous) => {
+                            merged_boxes += 1;
+                            let a: [f64; 4] = serde_json::from_value(
+                                previous["detection"]["bbox_xyxy_norm"].clone(),
+                            )
+                            .map_err(|e| e.to_string())?;
+                            let b: [f64; 4] = serde_json::from_value(
+                                player["detection"]["bbox_xyxy_norm"].clone(),
+                            )
+                            .map_err(|e| e.to_string())?;
+                            if player["detection"]["score"].as_f64()
+                                > previous["detection"]["score"].as_f64()
+                            {
+                                *previous = player;
+                            }
+                            previous["detection"]["bbox_xyxy_norm"] = json!([
+                                a[0].min(b[0]),
+                                a[1].min(b[1]),
+                                a[2].max(b[2]),
+                                a[3].max(b[3])
+                            ]);
+                            previous["pose_crop_origin"] = json!("combined_track_box");
+                        }
+                        None => {
+                            canonical.insert(id, player);
+                        }
+                    }
+                }
+                *players = canonical.into_values().collect();
+                for player in players.iter_mut() {
+                    if rewritten {
+                        player
+                            .as_object_mut()
+                            .ok_or("Invalid roster player")?
+                            .remove("occlusion_bridge");
+                    }
+                }
+                tracks.extend(players.iter().filter_map(|p| p["track_id"].as_u64()));
+                if dropped > 0 {
+                    row["unassigned_rally_boxes"] = json!(dropped);
+                }
+                if rewritten || dropped > 0 {
+                    row["new_track_diagnostics"] = json!([]);
+                }
+            } else {
+                tracks.extend(players.iter().filter_map(|p| p["track_id"].as_u64()));
+            }
+            let mut bytes = serde_json::to_vec(&row).map_err(|e| e.to_string())?;
+            bytes.push(b'\n');
+            if bytes.len() > MAX_ROW_BYTES {
+                return Err("Roster row exceeds limit".into());
+            }
+            writer.write_all(&bytes).map_err(|e| e.to_string())?;
+            sha.update(&bytes);
+        }
+        if index != windows.len()
+            || reader.line()?.is_some()
+            || compact.line()?.is_some()
+            || reader.finish() != expected_sha
+            || compact.finish() != expected_sha
+        {
+            return Err("Roster source SHA mismatch".into());
+        }
+        writer.flush().map_err(|e| e.to_string())?;
+        writer.get_ref().sync_all().map_err(|e| e.to_string())?;
+        drop(writer);
+        fs::rename(&tmp, source).map_err(|e| e.to_string())?;
+        Ok(RosterResult {
+            sha: format!("{:x}", sha.finalize()),
+            tracks: tracks.len() as u64,
+            merged_boxes,
+            unmatched_boxes,
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(tmp);
+    }
+    result
+}
 pub(super) fn prune_short(
     source: &Path,
     expected_sha: &str,
@@ -721,6 +1178,111 @@ mod tests {
         })
     }
 
+    #[test]
+    fn rally_roster_does_not_force_an_independent_far_box_into_existing_id() {
+        let frames = (0..70)
+            .map(|frame| {
+                let mut row = vec![
+                    RosterObservation {
+                        id: 1,
+                        bbox: [0.2, 0.3, 0.25, 0.6],
+                        score: 0.9,
+                    },
+                    RosterObservation {
+                        id: 2,
+                        bbox: [0.6, 0.3, 0.65, 0.6],
+                        score: 0.9,
+                    },
+                ];
+                if (30..45).contains(&frame) {
+                    row.push(RosterObservation {
+                        id: 3,
+                        bbox: [0.85, 0.3, 0.90, 0.6],
+                        score: 0.8,
+                    });
+                }
+                row
+            })
+            .collect::<Vec<_>>();
+        let owners = roster_plan(&frames, 0, 69).unwrap();
+        for (frame, assigned) in owners.iter().enumerate() {
+            assert_eq!(assigned[0], Some(1));
+            assert_eq!(assigned[1], Some(2));
+            if (30..45).contains(&frame) {
+                assert_eq!(assigned[2], None);
+            }
+        }
+    }
+
+    #[test]
+    fn roster_window_prevents_interpolation_of_id_across_another_rally() {
+        let path =
+            std::env::temp_dir().join(format!("volley-roster-boundary-{}.jsonl", Uuid::new_v4()));
+        let mut raw = Vec::new();
+        for frame in 0..20_u64 {
+            let window = if frame < 5 {
+                0
+            } else if frame < 15 {
+                5
+            } else {
+                15
+            };
+            let players = if !(5..15).contains(&frame) {
+                vec![json!({"track_id":1,"detection":candidate(frame,[0.2,0.3,0.25,0.6],None)})]
+            } else {
+                vec![json!({"track_id":2,"detection":candidate(frame,[0.6,0.3,0.65,0.6],None)})]
+            };
+            serde_json::to_writer(&mut raw,&json!({"frame_index":frame,"rally_roster_window":window,"tracked_players":players})).unwrap();
+            raw.push(b'\n');
+        }
+        fs::write(&path, &raw).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&raw));
+        let (_, filled) =
+            super::super::fill_confirmed_track_gaps(&path, &sha, 20, None, None).unwrap();
+        assert_eq!(filled, 0);
+        fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn rally_roster_reconnects_fragments_and_keeps_only_two_ids() {
+        let path = std::env::temp_dir().join(format!("volley-roster-{}.jsonl", Uuid::new_v4()));
+        let mut raw = Vec::new();
+        for frame in 0..100_u64 {
+            let x = 0.25 + frame as f64 * 0.0004;
+            let mut players =
+                vec![json!({"track_id":2,"detection":candidate(frame,[0.65,0.3,0.70,0.55],None)})];
+            if !(50..65).contains(&frame) {
+                let id = if frame < 50 { 1 } else { 8 };
+                players.push(json!({"track_id":id,"detection":candidate(frame,[x-0.02,0.30,x+0.02,0.52],None)}));
+            }
+            if (70..85).contains(&frame) {
+                players.push(json!({"track_id":9,"detection":candidate(frame,[x-0.015,0.39,x+0.015,0.52],None)}));
+            }
+            serde_json::to_writer(
+                &mut raw,
+                &json!({"frame_index":frame,"tracked_players":players}),
+            )
+            .unwrap();
+            raw.push(b'\n');
+        }
+        fs::write(&path, &raw).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&raw));
+        let scope = rally_scope(vec![(0, 99)]);
+        let (sha, _, _) = stitch(&path, &sha, 100, Some(&scope), true).unwrap();
+        let result = reconcile_rally_rosters(&path, &sha, 100, &scope, None).unwrap();
+        let sha = result.sha;
+        let (_, _) =
+            super::super::fill_confirmed_track_gaps(&path, &sha, 100, Some(&scope), None).unwrap();
+        let rows = fs::read_to_string(&path).unwrap();
+        let mut ids = BTreeSet::new();
+        for line in rows.lines() {
+            let row: Value = serde_json::from_str(line).unwrap();
+            let players = row["tracked_players"].as_array().unwrap();
+            assert_eq!(players.len(), 2, "frame {}", row["frame_index"]);
+            ids.extend(players.iter().map(|p| p["track_id"].as_u64().unwrap()));
+        }
+        assert_eq!(ids, BTreeSet::from([1, 2]));
+        fs::remove_file(path).unwrap();
+    }
     #[test]
     fn single_frame_partial_pose_handoff_keeps_first_id_across_rally_context() {
         for distinct in [false, true] {

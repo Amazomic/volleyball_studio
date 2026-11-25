@@ -35,7 +35,7 @@ use volley_core::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_bbox_motion_pose_attach_v17";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_roster_motion_v18";
 pub(crate) mod ball_track;
 mod gap_interpolation;
 mod pose_refinement;
@@ -200,6 +200,7 @@ struct ReplayTotals {
     identity_turnover_splits: u64,
     identity_handoff_splits: u64,
     pose_detections: u64,
+    unassigned_rally_boxes: u64,
     combined_pose_crops: u64,
     interpolated_player_boxes: u64,
     processed_player_frames: u64,
@@ -316,6 +317,7 @@ fn fill_confirmed_track_gaps(
     let mut digest = Sha256::new();
     let mut queued: VecDeque<Value> = VecDeque::with_capacity(91);
     let mut anchors: BTreeMap<u64, (u64, Candidate)> = BTreeMap::new();
+    let mut previous_roster = None;
     let mut inferred = 0_u64;
     let write_one =
         |record: Value, writer: &mut BufWriter<File>, hash: &mut Sha256| -> Result<(), String> {
@@ -342,6 +344,11 @@ fn fill_confirmed_track_gaps(
         let row: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         if row["frame_index"].as_u64() != Some(current) {
             return Err("Confirmed tracking frames out of order".into());
+        }
+        let roster = row["rally_roster_window"].as_u64();
+        if roster != previous_roster {
+            anchors.clear();
+            previous_roster = roster;
         }
         let observations: Vec<_> = row["tracked_players"]
             .as_array()
@@ -746,6 +753,25 @@ fn replay_frames_verified(
     } else {
         stitched_sha
     };
+    let mut roster_track_count = None;
+    let stitched_sha = if phase == ReplayPhase::StablePlan {
+        if let Some(scope) = scope.filter(|s| !s.rallies.is_empty()) {
+            let roster =
+                track_stitch::reconcile_rally_rosters(output, &stitched_sha, count, scope, cancel)?;
+            roster_track_count = Some(roster.tracks);
+            totals.unassigned_rally_boxes = roster.unmatched_boxes;
+            totals.combined_pose_crops += roster.merged_boxes;
+            totals.detections = totals
+                .detections
+                .checked_sub(roster.merged_boxes + roster.unmatched_boxes)
+                .ok_or("Roster removed too many boxes")?;
+            roster.sha
+        } else {
+            stitched_sha
+        }
+    } else {
+        stitched_sha
+    };
     let stitched_sha = if phase == ReplayPhase::StablePlan {
         pose_refinement::restore_partial_crops(output, &stitched_sha, count, scope, cancel)?
     } else {
@@ -769,7 +795,11 @@ fn replay_frames_verified(
                 },
         )
         .ok_or("More Track IDs stitched or discarded than confirmed")?;
-    Ok((continuous_sha, totals, track_count))
+    Ok((
+        continuous_sha,
+        totals,
+        roster_track_count.unwrap_or(track_count),
+    ))
 }
 
 fn confirmation_threshold(requested: u64, sample_period: Option<u64>) -> u64 {
@@ -1081,6 +1111,7 @@ fn process_inner(
             "touches_confirmed":false,
             "cpu_processing_complete":false,
         });
+        record["unassigned_rally_boxes"] = json!(totals.unassigned_rally_boxes);
         let has_refined = refine_pose || saved_refined.is_some();
         record["pose_refinement_policy"] = json!(has_refined.then_some(POSE_REFINEMENT_POLICY));
         record["refined_pose_count"] = json!(refined_poses);

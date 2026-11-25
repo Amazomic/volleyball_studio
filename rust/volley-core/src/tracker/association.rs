@@ -4,7 +4,7 @@
 
 /// For each detection, return a distinct matched active track index (if any).
 /// A missing edge is never selected, and unmatched detections may start tracks.
-pub(super) fn assign(scores: &[Vec<Option<f64>>]) -> Vec<Option<usize>> {
+pub fn assign(scores: &[Vec<Option<f64>>]) -> Vec<Option<usize>> {
     let rows = scores.len();
     if rows == 0 {
         return Vec::new();

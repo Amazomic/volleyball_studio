@@ -220,11 +220,15 @@ fn write_proposal(
         serde_json::to_value(&proposal).map_err(|e| format!("Serialize rally candidate: {e}"))?;
     // Physical surface candidates have no athlete Track ID and must remain
     // separate from the player Touch statistics/review contract.
-    value["stable_track_count"] = json!(stable_track_count(
-        track_counts
-            .get(proposal.detected_start_frame as usize..=proposal.detected_end_frame as usize)
-            .ok_or("Rally track-count interval outside source")?
-    ));
+    value["stable_track_count"] = if proposal.method == "primary_gpu_rally_mask_v1" {
+        json!(proposal.provisional_track_ids.len())
+    } else {
+        json!(stable_track_count(
+            track_counts
+                .get(proposal.detected_start_frame as usize..=proposal.detected_end_frame as usize)
+                .ok_or("Rally track-count interval outside source")?
+        ))
+    };
     value["surface_event_candidates"] = json!(surface_events
         .iter()
         .filter(
@@ -812,12 +816,16 @@ fn publish_primary_from_touches(
     output: &Path,
     replay_id: &str,
     touch_id: &str,
-    track_counts: &[u8],
+    rosters: &[Vec<u64>],
     surface_events: &std::collections::VecDeque<SurfaceEventProposal>,
     cancel: Option<&AtomicBool>,
 ) -> Result<(String, RallyTotals, OutputCounters), String> {
-    if track_counts.len() as u64 != frames {
-        return Err("Primary rally track counts differ from replay length".into());
+    if rosters.len() != intervals.len()
+        || rosters.iter().any(|ids| {
+            ids.len() > 128 || ids.windows(2).any(|pair| pair[0] >= pair[1]) || ids.contains(&0)
+        })
+    {
+        return Err("Invalid primary rally rosters".into());
     }
     if intervals
         .iter()
@@ -841,11 +849,10 @@ fn publish_primary_from_touches(
     let history = CourtHistory::default();
     let mut next = next_contact(&mut source)?;
     let mut previous = None;
-    for &(start, end) in intervals {
+    for (&(start, end), roster) in intervals.iter().zip(rosters) {
         let mut first = None;
         let mut last = None;
         let mut maximum: f64 = 0.0;
-        let mut ids = std::collections::BTreeSet::new();
         let mut unidentified = 0;
         let mut count = 0;
         while next.as_ref().is_some_and(|item| item.frame_index <= end) {
@@ -870,7 +877,9 @@ fn publish_primary_from_touches(
             count += 1;
             counters.ingested_touch_candidates += 1;
             if let Some(track_id) = item.provisional_track_id {
-                ids.insert(track_id);
+                if roster.binary_search(&track_id).is_err() {
+                    return Err("Touch Track ID absent from stable rally roster".into());
+                }
             } else {
                 unidentified += 1;
             }
@@ -886,7 +895,7 @@ fn publish_primary_from_touches(
             first_touch_frame: first.unwrap_or(start),
             last_touch_frame: last.unwrap_or(end),
             max_touch_probability: maximum,
-            provisional_track_ids: ids.into_iter().collect(),
+            provisional_track_ids: roster.clone(),
             unidentified_contacts: unidentified,
             classification: "provisional_rally",
             method: "primary_gpu_rally_mask_v1",
@@ -905,7 +914,7 @@ fn publish_primary_from_touches(
             surface_events,
             (replay_id, touch_id),
             &mut counters,
-            track_counts,
+            &[],
         )?;
     }
     if next.is_some()
@@ -1265,10 +1274,13 @@ fn process_inner(
                 &part,
                 &request.replay_id,
                 &request.touch_id,
-                &crate::native_player_tracks::replay_track_counts(
+                &crate::native_player_tracks::replay_rally_track_ids(
                     &tracked_file,
                     &replay_sha,
                     frames,
+                    preliminary_intervals
+                        .as_deref()
+                        .ok_or("No primary intervals")?,
                 )?,
                 &ground_events,
                 cancel,
@@ -1340,7 +1352,7 @@ fn process_inner(
                 "cpu_rally_frame_reconstruction_v1"
             },
             "touch_candidates_ingested":output.ingested_touch_candidates,
-            "stable_track_count_policy":"observed_nonzero_frame_mode_v1",
+            "stable_track_count_policy":if primary_only {"stable_rally_roster_ids_v2"} else {"observed_nonzero_frame_mode_v1"},
             "physical_touch_player_gate":"same_frame_verified_cpu_track",
             "physical_touch_ball_gate":"same_frame_selected_ball",
             "unknown_player_contacts_allowed":true,
@@ -1446,10 +1458,7 @@ mod tests {
         bytes.push(b'\n');
         fs::write(&touches, &bytes).unwrap();
         let touch_sha = format!("{:x}", Sha256::digest(&bytes));
-        let mut counts = vec![4; 90];
-        counts[50..79].fill(6);
-        counts[12] = 8;
-        counts[51] = 0;
+        let rosters = [vec![1, 2, 3, 7], vec![10, 11, 12, 13, 14, 15]];
         let surface = parse_ground_contacts(
             &json!({"ground_contacts":[
                 {"frame":54,"position":[0.3,0.6],"landing":"line_uncertain"},
@@ -1470,7 +1479,7 @@ mod tests {
             &output,
             "replay-primary",
             "touch-primary",
-            &counts,
+            &rosters,
             &surface,
             None,
         )
@@ -1487,7 +1496,11 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["detected_start_frame"], 12);
         assert_eq!(rows[0]["detected_end_frame"], 33);
-        assert_eq!(rows[0]["provisional_track_ids"], json!([7]));
+        assert_eq!(rows[0]["provisional_track_ids"], json!([1, 2, 3, 7]));
+        assert_eq!(
+            rows[1]["provisional_track_ids"],
+            json!([10, 11, 12, 13, 14, 15])
+        );
         assert_eq!(rows[0]["stable_track_count"], 4);
         assert_eq!(rows[1]["stable_track_count"], 6);
         assert_eq!(rows[0]["motion_supported_touch_proposals"], 1);
@@ -1524,7 +1537,7 @@ mod tests {
             &root.join("outside.jsonl"),
             "replay-primary",
             "touch-primary",
-            &counts,
+            &rosters[1..],
             &std::collections::VecDeque::new(),
             None,
         )

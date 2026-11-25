@@ -298,6 +298,65 @@ pub(super) fn index_replay(
     index_with_scope(path, expected_sha, frames, None).map(|(all, _)| all)
 }
 
+pub(crate) fn replay_rally_track_ids(
+    path: &Path,
+    sha: &str,
+    frames: u64,
+    intervals: &[(u64, u64)],
+) -> Result<Vec<Vec<u64>>, String> {
+    if intervals
+        .iter()
+        .any(|&(start, end)| start > end || end >= frames)
+        || intervals.windows(2).any(|pair| pair[0].1 >= pair[1].0)
+    {
+        return Err("Invalid rally roster intervals".into());
+    }
+    let mut reader = BoundedReader::open(path)?;
+    let mut rosters = vec![BTreeSet::new(); intervals.len()];
+    let mut window = 0;
+    for frame_index in 0..frames {
+        let bytes = reader.line()?.ok_or("Rally roster replay truncated")?;
+        let row: Frame = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if row.frame_index != frame_index
+            || row.tracked_players.len() > 128
+            || !row.track_ids_provisional
+            || row.confirmed_athlete_identities
+            || row.touches_confirmed
+        {
+            return Err("Invalid rally roster replay row".into());
+        }
+        while intervals
+            .get(window)
+            .is_some_and(|&(_, end)| end < frame_index)
+        {
+            window += 1;
+        }
+        let mut ids = BTreeSet::new();
+        for player in row.tracked_players {
+            if player.track_id == 0 || player.is_verified_athlete || !ids.insert(player.track_id) {
+                return Err("Invalid or duplicate rally Track ID".into());
+            }
+        }
+        if intervals
+            .get(window)
+            .is_some_and(|&(start, end)| start <= frame_index && frame_index <= end)
+        {
+            rosters[window].extend(ids);
+        }
+    }
+    if reader.line()?.is_some() || reader.finish() != sha {
+        return Err("Rally roster replay SHA mismatch".into());
+    }
+    rosters
+        .into_iter()
+        .map(|ids| {
+            if ids.len() > 128 {
+                return Err("Too many stable Track IDs in one rally".into());
+            }
+            Ok(ids.into_iter().collect())
+        })
+        .collect()
+}
 pub(crate) fn replay_track_counts(path: &Path, sha: &str, frames: u64) -> Result<Vec<u8>, String> {
     let tracks = index_replay(path, sha, frames)?;
     let mut counts = vec![0i32; frames as usize + 1];
