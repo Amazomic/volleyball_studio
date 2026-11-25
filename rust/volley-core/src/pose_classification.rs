@@ -3,7 +3,7 @@
 //! No serving or blocking verdict without verified rally/court context.
 use crate::action_prediction::{ActionKind, ActionPrediction, PredictionMethod};
 
-pub const ACTION_PREDICTION_POLICY_VERSION: &str = "pose_keypoints_motion_v2_or_unknown_touch";
+pub const ACTION_PREDICTION_POLICY_VERSION: &str = "pose_keypoints_motion_v3_or_unknown_touch";
 
 #[derive(Clone, Copy, Debug)]
 pub struct PoseEvidence {
@@ -240,7 +240,36 @@ pub fn refine_with_motion(
     if movement < 0.055 {
         return None;
     }
+    let ball = [
+        e.ball_x_norm * e.video_width,
+        e.ball_y_norm * e.video_height,
+    ];
+    let overhead_rise = prediction.kind == ActionKind::Dig
+        && [(5, 7, 9), (6, 8, 10)]
+            .into_iter()
+            .all(|(shoulder, elbow, wrist)| {
+                let (Some(start), Some(end), Some(current), Some(elbow), Some(wrist)) = (
+                    relative(before, shoulder, wrist),
+                    relative(after, shoulder, wrist),
+                    relative(&e.keypoints, shoulder, wrist),
+                    pixel(e, elbow),
+                    pixel(e, wrist),
+                ) else {
+                    return false;
+                };
+                start[1] >= -0.07
+                    && end[1] <= -0.12
+                    && start[1] - end[1] >= 0.12
+                    && current[1] <= 0.04
+                    && elbow[1] - wrist[1] >= height * 0.04
+                    && distance(wrist, ball) <= height * 0.22
+            });
     Some(ActionPrediction {
+        kind: if overhead_rise {
+            ActionKind::OverheadPass
+        } else {
+            prediction.kind
+        },
         method: PredictionMethod::PoseKeypointsMotionV1,
         ..prediction
     })
@@ -361,6 +390,41 @@ mod tests {
         e.ball_x_norm = 0.64;
         e.ball_y_norm = 0.60;
         assert_eq!(refine(&e, &geom()).unwrap().kind, ActionKind::Dig);
+    }
+
+    #[test]
+    fn shoulder_level_contact_with_two_rising_wrists_is_overhead_pass() {
+        let mut e = data();
+        e.keypoints[7] = [0.41, 0.54, 0.96];
+        e.keypoints[8] = [0.59, 0.54, 0.96];
+        e.keypoints[9] = [0.49, 0.42, 0.96];
+        e.keypoints[10] = [0.52, 0.42, 0.96];
+        e.ball_y_norm = 0.40;
+        let mut before = e.keypoints;
+        let mut after = e.keypoints;
+        before[9][1] = 0.46;
+        before[10][1] = 0.46;
+        after[9][1] = 0.28;
+        after[10][1] = 0.28;
+        assert_eq!(
+            refine_with_motion(&e, &geom(), &before, &after)
+                .unwrap()
+                .kind,
+            ActionKind::OverheadPass
+        );
+        assert_ne!(
+            refine_with_motion(&e, &geom(), &after, &before)
+                .unwrap()
+                .kind,
+            ActionKind::OverheadPass
+        );
+        after[10][2] = 0.0;
+        assert_ne!(
+            refine_with_motion(&e, &geom(), &before, &after)
+                .unwrap()
+                .kind,
+            ActionKind::OverheadPass
+        );
     }
 
     #[test]
