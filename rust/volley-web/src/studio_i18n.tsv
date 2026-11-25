@@ -729,3 +729,5 @@ ReID · сопоставление на CPU	ReID · matching on CPU
 Сохраняет розыгрыши и их события для просмотра.	Saves rallies and their events for review.
 Сравнивает фотографии и связывает треки с известными игроками.	Compares photos and links tracks to known players.
 Буфер ReID (МиБ)	ReID buffer (MiB)
+
+Прогресс видео проекта	Project video progress

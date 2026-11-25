@@ -693,7 +693,7 @@ fn load_primary_ball_trajectory(
         return Err("Invalid primary Ball Stabilizer source ID".into());
     }
     let folder = project.join("native_gpu_runs").join(job);
-    let mask = safe_file(&folder, "rally_mask.json", MAX_MANIFEST_BYTES)?;
+    let mask = safe_file(&folder, "rally_mask.json", PRIMARY_TOUCH_BREAKS_MAX_BYTES)?;
     let bytes = fs::read(mask).map_err(|e| e.to_string())?;
     if replay["player_frame_scope_sha256"] != format!("{:x}", Sha256::digest(&bytes)) {
         return Err("Primary rally mask changed before Ball Stabilizer reuse".into());
@@ -983,6 +983,51 @@ mod ball_stabilizer_postprocessing_tests {
         fs::remove_dir_all(project).unwrap();
     }
 
+    #[test]
+    fn primary_trajectory_accepts_large_verified_rally_mask() {
+        let project =
+            std::env::temp_dir().join(format!("volley-large-primary-ball-{}", Uuid::new_v4()));
+        let job = Uuid::new_v4().simple().to_string();
+        let folder = project.join("native_gpu_runs").join(&job);
+        fs::create_dir_all(&folder).unwrap();
+        let frames = 6000;
+        let motion = volley_core::ball_interpolation::StabilizedBallMotion {
+            points: vec![Some([0.2, 0.5]); frames],
+            interpolated: vec![false; frames],
+            rejected_frames: vec![],
+            confidence_frames: frames,
+            observed_frames: frames,
+        };
+        let checksum = write_ball_trajectory(&folder, &motion, &AtomicBool::new(false)).unwrap();
+        let intervals: Vec<[usize; 2]> =
+            (0..2000).map(|index| [index * 3, index * 3 + 1]).collect();
+        let evidence = serde_json::to_vec(&json!({
+            "ball_job_id": job,
+            "mask": {
+                "source_frame_count": frames,
+                "detected": intervals,
+                "ball_stabilizer": {
+                    "algorithm": volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
+                    "settings": volley_core::ball_interpolation::BallStabilizerSettings::default(),
+                    "trajectory_sha256": checksum,
+                    "confidence_frames": frames,
+                    "observed_frames": frames,
+                }
+            },
+        }))
+        .unwrap();
+        assert!(evidence.len() as u64 > MAX_MANIFEST_BYTES);
+        fs::write(folder.join("rally_mask.json"), &evidence).unwrap();
+        let replay = json!({
+            "player_frame_scope_ball_job_id": job,
+            "player_frame_scope_sha256": format!("{:x}", Sha256::digest(&evidence)),
+        });
+        let (reused, _) = load_primary_ball_trajectory(&project, &replay, frames as u64)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reused.points, motion.points);
+        fs::remove_dir_all(project).unwrap();
+    }
     #[test]
     fn stabilized_cpu_replay_filters_false_ball_interpolates_gap_and_preserves_sha() {
         let root = std::env::temp_dir().join(format!("volley-stabilizer-cpu-{}", Uuid::new_v4()));

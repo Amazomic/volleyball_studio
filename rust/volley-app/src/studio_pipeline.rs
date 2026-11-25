@@ -266,7 +266,7 @@ pub async fn clear_history(
     storage::project_id(&request.project_id)?;
     let scan_state = state.clone();
     let scan_project = request.project_id.clone();
-    let (root, ids) =
+    let (root, mut ids) =
         tokio::task::spawn_blocking(move || collect_history_rows(&scan_state, &scan_project))
             .await
             .map_err(|e| storage::internal(format!("Scan pipeline history worker: {e}")))??;
@@ -276,6 +276,12 @@ pub async fn clear_history(
         .as_ref()
         .filter(|run| run.project_id == request.project_id)
         .map(|run| run.id.as_str());
+    if let Some(run) = slot
+        .as_ref()
+        .filter(|run| run.project_id == request.project_id)
+    {
+        ids.retain(|id| !run.contains_run(&request.project_id, id));
+    }
     let count = persist_hidden_history(&root, ids, active)?;
     Ok(Json(
         json!({"project_id":request.project_id,"hidden":count}),
@@ -425,8 +431,9 @@ pub async fn history(
         for run in runs {
             if ["queued", "running", "cancelling"].contains(&run["status"].as_str().unwrap_or(""))
                 && !slot.as_ref().is_some_and(|active| {
-                    Some(active.id.as_str()) == run["id"].as_str()
-                        && active.project_id == project_id
+                    run["id"]
+                        .as_str()
+                        .is_some_and(|id| active.contains_run(&project_id, id))
                 })
             {
                 run["status"] = json!("interrupted");
@@ -630,6 +637,7 @@ impl TryFrom<StartRequestWire> for StartRequest {
 pub struct StatusQuery {
     project_id: String,
     id: Option<String>,
+    queue_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -641,6 +649,13 @@ struct Running {
     project_id: String,
     id: String,
     cancel: Arc<AtomicBool>,
+    queue_runs: Vec<String>,
+}
+impl Running {
+    fn contains_run(&self, project_id: &str, id: &str) -> bool {
+        self.project_id == project_id
+            && (self.id == id || self.queue_runs.iter().any(|run| run == id))
+    }
 }
 fn manager() -> &'static Mutex<Option<Running>> {
     static MANAGER: OnceLock<Mutex<Option<Running>>> = OnceLock::new();
@@ -1927,6 +1942,21 @@ async fn pipeline(
         crate::video_edits::court_snapshot(app, &request.project_id, &request.video)
             .map_err(reason)?
             .map(|court| court.revision);
+    if !status["queue_id"].is_null()
+        && (status["queued_court_revision"] != json!(court_revision)
+            || {
+                let (bytes, mtime_ns) = crate::inference_stream::source_stamp(&ready.source)?;
+                status["queued_source_identity"] != json!({"bytes":bytes,"mtime_ns":mtime_ns})
+            }
+            || json!(
+                crate::video_edits::analysis_range(app, &request.project_id, &request.video)
+                    .map_err(reason)?
+            ) != status["analysis_range"])
+    {
+        return Err(
+            "Источник, отрезок или разметка видео изменились после постановки в очередь".into(),
+        );
+    }
     status["court_revision"] = json!(court_revision);
     save(path, status)?;
     let current_id = status["id"].as_str().unwrap_or_default();
@@ -2740,6 +2770,7 @@ async fn perform(
     cancel: Arc<AtomicBool>,
     path: PathBuf,
     mut status: Value,
+    retain_slot: bool,
 ) {
     let _ = log_event(
         &path,
@@ -2851,7 +2882,7 @@ async fn perform(
             }
         }
     }
-    if slot.as_ref().is_some_and(|current| current.id == id) {
+    if !retain_slot && slot.as_ref().is_some_and(|current| current.id == id) {
         *slot = None;
     }
 }
@@ -2887,6 +2918,7 @@ async fn supervise_pipeline_worker(
     path: &Path,
     project_id: &str,
     id: &str,
+    retain_slot: bool,
 ) {
     let Err(join_error) = worker.await else {
         return;
@@ -2912,14 +2944,38 @@ async fn supervise_pipeline_worker(
     if let Err(error) = record_pipeline_worker_failure(path, project_id, id, &message) {
         eprintln!("Pipeline worker {id} failed: {message}; status write: {error}");
     }
-    *slot = None;
+    if !retain_slot {
+        *slot = None;
+    }
 }
 pub async fn start(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(mut request): Json<StartRequest>,
+    Json(request): Json<StartRequest>,
+) -> ApiResult<Value> {
+    start_batch(state, headers, request, false).await
+}
+
+pub async fn start_project(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<StartRequest>,
+) -> ApiResult<Value> {
+    start_batch(state, headers, request, true).await
+}
+
+async fn start_batch(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    mut request: StartRequest,
+    all_videos: bool,
 ) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
+    if all_videos && request.mode != PipelineMode::Full {
+        return Err(storage::bad_request(
+            "Очередь проекта требует полного анализа",
+        ));
+    }
     if !state.writes_enabled {
         return Err(storage::conflict(
             "Запуск анализа возможен только в рабочем хранилище",
@@ -3027,7 +3083,11 @@ pub async fn start(
                 if previous["client_request_id"] == token {
                     if previous["schema"] != SCHEMA
                         || previous["project_id"] != request.project_id
-                        || previous["video"] != request.video
+                        || (if all_videos {
+                            previous["queue_start_video"] != request.video
+                        } else {
+                            previous["video"] != request.video || !previous["queue_id"].is_null()
+                        })
                         || previous["mode"] != json!(request.mode)
                         || previous["source_analysis_id"] != json!(request.source_analysis_id)
                         || !decode_profiles(
@@ -3041,7 +3101,7 @@ pub async fn start(
                         return Err(storage::conflict("Идентификатор запроса уже использован"));
                     }
                     return Ok(Json(json!({"schema":SCHEMA,"id":previous_id,
-                        "status":previous["status"],"recovered":true})));
+                        "status":previous["status"],"queue_id":previous["queue_id"],"recovered":true})));
                 }
             }
         }
@@ -3058,66 +3118,233 @@ pub async fn start(
     }
     let _guard = project_guard::write_guard(&state, &request.project_id)?;
     let root = folder(&state, &request.project_id, true)?;
-    let id = Uuid::new_v4().simple().to_string();
-    let dir = root.join(&id);
-    fs::create_dir(&dir).map_err(|e| storage::internal(format!("Создание запуска: {e}")))?;
-    let path = dir.join("status.json");
-    let status = json!({
-        "schema":SCHEMA,"id":id,"project_id":request.project_id,"video":request.video,
-        "status":"queued","stage":"В очереди","progress_percent":0.0,
-        "started_ms":epoch_ms(),"finished_ms":null,"stages":[],"stage_samples":[],
-        "profile":{"gpu":request.gpu,"post":request.post},
-        "mode":request.mode,"source_analysis_id":request.source_analysis_id,
-        "client_request_id":request.client_request_id,
-        "analysis_range":request.analysis_range,
-        "gpu_model_stack":requested_gpu_model_stack(request.gpu.person_detector),
-        "pose_pipeline_policy":cpu_retrack::POSE_REFINEMENT_POLICY,
-        "zero_copy_request":zero_copy_requested(),"zero_copy_active":false,
-        "rally_block_pipeline":rally_pipeline_enabled(&request),
-        "gpu_jobs":{},"cpu_runs":{},"analysis_id":null,
-        "gpu_rally_mask":null,"gpu_rally_mask_sha256":null,
-        "postprocessing_id":null,"current_gpu_job_id":null,
-        "source_identity":null,"gpu_reused":false,"result_reused":false,
-        "reused_from_id":null,"pipeline_complete":false,"completion_quality":null,"error":null
+    let project_id = request.project_id.clone();
+    let start_video = request.video.clone();
+    let videos = if all_videos {
+        queue_video_order(
+            &projects::existing_project(&state, &project_id)?,
+            &start_video,
+        )?
+    } else {
+        vec![start_video.clone()]
+    };
+    let ids: Vec<String> = videos
+        .iter()
+        .map(|_| Uuid::new_v4().simple().to_string())
+        .collect();
+    let id = ids[0].clone();
+    let queue_id = all_videos.then_some(id.clone());
+    let mut jobs = Vec::with_capacity(videos.len());
+    for (index, (video, run_id)) in videos.into_iter().zip(ids.iter()).enumerate() {
+        let mut scoped = request.clone();
+        scoped.video = video;
+        let mut queue_snapshot = Value::Null;
+        if all_videos {
+            storage::video_name(&scoped.video)?;
+            let source = projects::canonical_source(&state, &scoped.video)?;
+            scoped.analysis_range =
+                crate::video_edits::analysis_range(&state, &project_id, &scoped.video)?;
+            let duration = match scoped.analysis_range {
+                Some(range) => range.end_sec - range.start_sec,
+                None => {
+                    volley_media::probe(&source)
+                        .map_err(storage::bad_request)?
+                        .duration_sec
+                }
+            };
+            if !duration.is_finite() || duration <= 0.0 {
+                return Err(storage::bad_request(
+                    "Некорректная длительность видео очереди",
+                ));
+            }
+            let (bytes, mtime_ns) =
+                crate::inference_stream::source_stamp(&source).map_err(storage::bad_request)?;
+            let court = crate::video_edits::court_snapshot(&state, &project_id, &scoped.video)?
+                .map(|court| court.revision);
+            queue_snapshot = json!({"weight":duration,"source":{"bytes":bytes,"mtime_ns":mtime_ns},"court":court});
+        }
+        let status = json!({
+            "schema":SCHEMA,"id":run_id,"project_id":project_id,"video":scoped.video,
+            "status":"queued","stage":"В очереди","progress_percent":0.0,
+            "started_ms":if index == 0 { Some(epoch_ms()) } else { None },
+            "finished_ms":null,"stages":[],"stage_samples":[],
+            "profile":{"gpu":scoped.gpu,"post":scoped.post},
+            "mode":scoped.mode,"source_analysis_id":scoped.source_analysis_id,
+            "client_request_id":scoped.client_request_id,
+            "analysis_range":scoped.analysis_range,
+            "gpu_model_stack":requested_gpu_model_stack(scoped.gpu.person_detector),
+            "pose_pipeline_policy":cpu_retrack::POSE_REFINEMENT_POLICY,
+            "zero_copy_request":zero_copy_requested(),"zero_copy_active":false,
+            "rally_block_pipeline":rally_pipeline_enabled(&scoped),
+            "gpu_jobs":{},"cpu_runs":{},"analysis_id":null,
+            "gpu_rally_mask":null,"gpu_rally_mask_sha256":null,
+            "postprocessing_id":null,"current_gpu_job_id":null,
+            "source_identity":null,"gpu_reused":false,"result_reused":false,
+            "reused_from_id":null,"pipeline_complete":false,"completion_quality":null,"error":null,
+            "queue_id":queue_id,"queue_runs":if all_videos { &ids[..] } else { &[] },
+            "queue_start_video":if all_videos { Some(&start_video) } else { None },
+            "queue_weight_sec":queue_snapshot["weight"],"queued_source_identity":queue_snapshot["source"],
+            "queued_court_revision":queue_snapshot["court"]
+        });
+        jobs.push(QueuedRun {
+            id: run_id.clone(),
+            request: scoped,
+            path: root.join(run_id).join("status.json"),
+            status,
+        });
+    }
+    let mut created = Vec::new();
+    let persisted = (|| -> Result<(), String> {
+        for job in &jobs {
+            let dir = job.path.parent().ok_or("Missing run directory")?;
+            fs::create_dir(dir).map_err(|e| format!("Создание запуска: {e}"))?;
+            created.push(dir.to_owned());
+            save(&job.path, &job.status)?;
+        }
+        log_queued_start(&jobs[0])?;
+        save(&root.join("latest.json"), &json!({"id":id}))
+    })();
+    if let Err(error) = persisted {
+        for dir in created {
+            let _ = fs::remove_dir_all(dir);
+        }
+        return Err(storage::internal(error));
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    *slot = Some(Running {
+        project_id: project_id.clone(),
+        id: id.clone(),
+        cancel: cancelled.clone(),
+        queue_runs: ids,
     });
-    save(&path, &status).map_err(storage::internal)?;
+    drop(_guard);
+    tokio::spawn(run_project_queue(state, root, project_id, jobs, cancelled));
+    Ok(Json(
+        json!({"schema":SCHEMA,"id":id,"status":"queued","queue_id":queue_id}),
+    ))
+}
+
+fn queue_video_order(project: &Value, first: &str) -> Result<Vec<String>, ApiError> {
+    let videos = project["videos"]
+        .as_array()
+        .ok_or_else(|| storage::bad_request("Нет видео проекта"))?;
+    if !videos.iter().any(|video| video.as_str() == Some(first)) {
+        return Err(storage::bad_request("Видео не принадлежит проекту"));
+    }
+    let mut ordered = vec![first.to_owned()];
+    for video in videos {
+        let video = video
+            .as_str()
+            .ok_or_else(|| storage::bad_request("Некорректное видео проекта"))?;
+        if !ordered.iter().any(|item| item == video) {
+            ordered.push(video.to_owned());
+        }
+    }
+    if ordered.len() > 100 {
+        return Err(storage::bad_request("Очередь проекта ограничена 100 видео"));
+    }
+    Ok(ordered)
+}
+
+struct QueuedRun {
+    id: String,
+    request: StartRequest,
+    path: PathBuf,
+    status: Value,
+}
+
+fn log_queued_start(job: &QueuedRun) -> Result<(), String> {
     log_native(
-        &path,
+        &job.path,
         "Запуск",
         "studio_pipeline::start",
         json!({
-            "project_id":request.project_id,"video":request.video,
-            "gpu":request.gpu,"post":request.post,"mode":request.mode,
-            "source_analysis_id":request.source_analysis_id,
-            "client_request_id":request.client_request_id
+            "project_id":job.request.project_id,"video":job.request.video,"gpu":job.request.gpu,
+            "post":job.request.post,"mode":job.request.mode,"source_analysis_id":job.request.source_analysis_id,
+            "client_request_id":job.request.client_request_id,"queue_id":job.status["queue_id"]
         }),
     )
-    .map_err(storage::internal)?;
-    save(&root.join("latest.json"), &json!({"id":id})).map_err(storage::internal)?;
-    let cancelled = Arc::new(AtomicBool::new(false));
-    *slot = Some(Running {
-        project_id: request.project_id.clone(),
-        id: id.clone(),
-        cancel: cancelled.clone(),
-    });
-    drop(_guard);
-    let supervised_project = request.project_id.clone();
-    let supervised_id = id.clone();
-    let worker_id = id.clone();
-    let supervised_path = path.clone();
-    tokio::spawn(async move {
-        let worker = tokio::spawn(perform(state, request, worker_id, cancelled, path, status));
-        supervise_pipeline_worker(
-            worker,
-            manager(),
-            &supervised_path,
-            &supervised_project,
-            &supervised_id,
-        )
-        .await;
-    });
-    Ok(Json(json!({"schema":SCHEMA,"id":id,"status":"queued"})))
 }
+
+fn mark_unstarted(job: &mut QueuedRun, cancelled: bool, error: Option<&str>) {
+    job.status["status"] = json!(if cancelled {
+        "cancelled"
+    } else {
+        "interrupted"
+    });
+    job.status["stage"] = json!(if cancelled {
+        "Очередь отменена"
+    } else {
+        "Не запущен: ошибка предыдущего видео"
+    });
+    job.status["error"] = json!(error);
+    job.status["finished_ms"] = json!(epoch_ms());
+    if let Err(error) = save(&job.path, &job.status) {
+        eprintln!("Queue status {}: {error}", job.id);
+    }
+}
+
+async fn run_project_queue(
+    state: Arc<AppState>,
+    root: PathBuf,
+    project: String,
+    jobs: Vec<QueuedRun>,
+    cancel: Arc<AtomicBool>,
+) {
+    let first = jobs[0].id.clone();
+    let mut previous_ok = true;
+    for (index, mut job) in jobs.into_iter().enumerate() {
+        if !previous_ok || cancel.load(Ordering::Acquire) {
+            let cancelled = cancel.load(Ordering::Acquire);
+            mark_unstarted(
+                &mut job,
+                cancelled,
+                (!cancelled).then_some("Предыдущий анализ не завершился успешно"),
+            );
+            continue;
+        }
+        if index > 0 {
+            let mut slot = manager().lock().await;
+            if cancel.load(Ordering::Acquire) {
+                mark_unstarted(&mut job, true, None);
+                continue;
+            }
+            job.status["started_ms"] = json!(epoch_ms());
+            let activation = save(&job.path, &job.status)
+                .and_then(|()| log_queued_start(&job))
+                .and_then(|()| save(&root.join("latest.json"), &json!({"id":job.id})));
+            if let Err(error) = activation {
+                mark_unstarted(&mut job, false, Some(&error));
+                previous_ok = false;
+                continue;
+            }
+            if let Some(active) = slot.as_mut() {
+                active.id = job.id.clone();
+            }
+        }
+        let id = job.id.clone();
+        let path = job.path.clone();
+        let worker = tokio::spawn(perform(
+            state.clone(),
+            job.request,
+            job.id,
+            cancel.clone(),
+            job.path,
+            job.status,
+            true,
+        ));
+        supervise_pipeline_worker(worker, manager(), &path, &project, &id, true).await;
+        previous_ok = read(&path).is_ok_and(|status| status["status"] == "complete");
+    }
+    let mut slot = manager().lock().await;
+    if slot
+        .as_ref()
+        .is_some_and(|active| active.contains_run(&project, &first))
+    {
+        *slot = None;
+    }
+}
+
 // A pipeline's comparable completed runs cannot change while it is active.
 // Compute these once per run rather than rereading up to 25 log files on every
 // 1.8-second status poll. The key includes the run ID for automatic invalidation.
@@ -3225,11 +3452,107 @@ fn stage_aware_remaining(current: &Value, history: &Value, now: u64) -> Option<u
     (remaining <= 7 * 24 * 3_600_000).then_some(remaining.max(1000))
 }
 
+fn read_queue_rows(root: &Path, project: &str, queue_id: &str) -> Result<Vec<Value>, ApiError> {
+    let first = read(&status_path(root, queue_id)?)?;
+    let ids = first["queue_runs"]
+        .as_array()
+        .ok_or_else(|| storage::bad_request("Нет списка видео очереди"))?;
+    if ids.is_empty() || ids.len() > 100 || ids[0].as_str() != Some(queue_id) {
+        return Err(storage::bad_request("Некорректный список очереди"));
+    }
+    let mut seen = BTreeSet::new();
+    ids.iter()
+        .map(|value| {
+            let id = value
+                .as_str()
+                .filter(|id| valid_id(id))
+                .ok_or_else(|| storage::bad_request("Некорректный ID видео очереди"))?;
+            if !seen.insert(id) {
+                return Err(storage::bad_request("Повтор ID видео очереди"));
+            }
+            let row = read(&status_path(root, id)?)?;
+            if row["schema"] != SCHEMA
+                || row["project_id"] != project
+                || row["id"] != id
+                || row["queue_id"] != queue_id
+                || row["queue_runs"] != first["queue_runs"]
+            {
+                return Err(storage::bad_request("Видео принадлежит другой очереди"));
+            }
+            Ok(row)
+        })
+        .collect()
+}
+
+fn queue_progress(rows: &[Value], active: bool) -> Value {
+    let mut weighted_progress = 0.0;
+    let mut total_weight = 0.0;
+    let mut completed = 0;
+    let videos: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let weight = row["queue_weight_sec"]
+                .as_f64()
+                .filter(|weight| weight.is_finite() && *weight > 0.0)
+                .unwrap_or(1.0);
+            let state = row["status"].as_str().unwrap_or("interrupted");
+            let state = if !active && matches!(state, "queued" | "running" | "cancelling") {
+                "interrupted"
+            } else {
+                state
+            };
+            let percent = if state == "complete" {
+                completed += 1;
+                100.0
+            } else {
+                row["progress_percent"]
+                    .as_f64()
+                    .filter(|value| value.is_finite())
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 100.0)
+            };
+            weighted_progress += weight * percent;
+            total_weight += weight;
+            let rallies = row["rally_stage_progress"]["pose"]["rallies_total"]
+                .as_u64()
+                .or_else(|| row["rally_stage_progress"]["boxes"]["rallies_total"].as_u64())
+                .or_else(|| {
+                    row["gpu_rally_mask"]["merged"]
+                        .as_array()
+                        .map(|rallies| rallies.len() as u64)
+                });
+            json!({"id":row["id"],"video":row["video"],"status":state,"progress_percent":percent,
+            "analysis_range":row["analysis_range"],"duration_sec":weight,
+            "court_revision":row["queued_court_revision"],"rallies_total":rallies,
+            "analysis_id":row["analysis_id"],"postprocessing_id":row["postprocessing_id"],
+            "error":row["error"]})
+        })
+        .collect();
+    json!({"active":active,"completed_videos":completed,"total_videos":rows.len(),
+        "progress_percent":if total_weight > 0.0 {weighted_progress / total_weight} else {0.0},
+        "videos":videos})
+}
+
 fn status_snapshot(
     state: &AppState,
     query: &StatusQuery,
 ) -> Result<Option<(String, Value)>, ApiError> {
     let root = folder(state, &query.project_id, false)?;
+    if let Some(queue_id) = query.queue_id.as_deref() {
+        if query.id.is_some() {
+            return Err(storage::bad_request("Укажите запуск или очередь"));
+        }
+        let rows = read_queue_rows(&root, &query.project_id, queue_id)?;
+        let row = rows
+            .into_iter()
+            .rfind(|row| row["started_ms"].as_u64().is_some())
+            .ok_or_else(|| storage::bad_request("Очередь не запущена"))?;
+        let id = row["id"]
+            .as_str()
+            .ok_or_else(|| storage::bad_request("Нет ID запуска"))?
+            .to_owned();
+        return Ok(Some((id, row)));
+    }
     let id = match query.id.as_deref() {
         Some(id) => id.to_owned(),
         None => {
@@ -3266,13 +3589,28 @@ pub async fn status(
             json!({"schema":SCHEMA,"status":"idle","project_id":project_id}),
         ));
     };
+    let slot = manager().lock().await;
+    if let Some(queue_id) = result["queue_id"].as_str().map(str::to_owned) {
+        let active = slot
+            .as_ref()
+            .is_some_and(|entry| entry.contains_run(&project_id, &queue_id));
+        let root = folder(&state, &project_id, false)?;
+        let queue_project = project_id.clone();
+        let rows =
+            tokio::task::spawn_blocking(move || read_queue_rows(&root, &queue_project, &queue_id))
+                .await
+                .map_err(|e| storage::internal(format!("Read queue worker: {e}")))??;
+        if let Some(current) = rows.iter().find(|row| row["id"] == id) {
+            result = current.clone();
+        }
+        result["project_queue"] = queue_progress(&rows, active);
+    }
     if result["status"] == "running" || result["status"] == "queued" {
-        let slot = manager().lock().await;
         match slot
             .as_ref()
-            .filter(|entry| entry.id == id && entry.project_id == project_id)
+            .filter(|entry| entry.contains_run(&project_id, &id))
         {
-            Some(entry) if entry.cancel.load(Ordering::Acquire) => {
+            Some(entry) if entry.id == id && entry.cancel.load(Ordering::Acquire) => {
                 result["status"] = json!("cancelling");
                 result["stage"] = json!("Отмена запрошена · остановка текущей операции");
                 result["cancel_requested"] = json!(true);
@@ -3285,6 +3623,7 @@ pub async fn status(
             }
         }
     }
+    drop(slot);
     // Presentation fields are computed at read time, never persisted as fake
     // progress. Existing (pre-timeline) runs still retain their log history.
     let now = epoch_ms();
@@ -3322,14 +3661,15 @@ pub async fn cancel(
     let slot = manager().lock().await;
     let running = slot
         .as_ref()
-        .filter(|entry| entry.project_id == request.project_id && entry.id == request.id)
+        .filter(|entry| entry.contains_run(&request.project_id, &request.id))
         .ok_or_else(|| storage::not_found("Нет активного запуска для отмены"))?;
+    let active_id = running.id.clone();
     running.cancel.store(true, Ordering::Release);
     drop(slot);
     // Promptly signal the active GPU job; never wait for the pipeline's next
     // poll cycle before forwarding a user cancellation.
     let path = folder(&_state, &request.project_id, false)?
-        .join(&request.id)
+        .join(&active_id)
         .join("status.json");
     let gpu_job_id = read(&path).ok().and_then(|snapshot| {
         snapshot["current_gpu_job_id"]
@@ -3357,6 +3697,38 @@ pub async fn cancel(
 mod tests {
     use super::*;
 
+    #[test]
+    fn project_queue_orders_selected_video_first_without_duplicates() {
+        let project = json!({"videos":["second.mp4","first.mp4","second.mp4"]});
+        assert_eq!(
+            queue_video_order(&project, "first.mp4").unwrap(),
+            vec!["first.mp4", "second.mp4"]
+        );
+        assert!(queue_video_order(&project, "missing.mp4").is_err());
+    }
+
+    #[test]
+    fn queue_progress_uses_video_duration_and_never_completes_pending_video() {
+        let rows = vec![
+            json!({"id":"first","video":"a.mp4","status":"complete","progress_percent":100.0,
+                "queue_weight_sec":20.0,"gpu_rally_mask":{"merged":[[0,30]]}}),
+            json!({"id":"second","video":"b.mp4","status":"running","progress_percent":25.0,
+                "queue_weight_sec":80.0,"rally_stage_progress":{"pose":{"rallies_total":12}}}),
+            json!({"id":"third","video":"c.mp4","status":"queued","progress_percent":0.0,
+                "queue_weight_sec":100.0}),
+        ];
+        let summary = queue_progress(&rows, true);
+        assert_eq!(summary["progress_percent"], 20.0);
+        assert_eq!(summary["completed_videos"], 1);
+        assert_eq!(summary["total_videos"], 3);
+        assert_eq!(summary["videos"][0]["rallies_total"], 1);
+        assert_eq!(summary["videos"][1]["rallies_total"], 12);
+        assert!(summary["videos"][2]["rallies_total"].is_null());
+        let interrupted = queue_progress(&rows, false);
+        assert_eq!(interrupted["videos"][1]["status"], "interrupted");
+        assert_eq!(interrupted["videos"][2]["status"], "interrupted");
+        assert_eq!(interrupted["progress_percent"], 20.0);
+    }
     #[test]
     fn active_analysis_sources_match_only_the_requested_video_and_artifact() {
         let status = json!({
@@ -3407,11 +3779,12 @@ mod tests {
             id: run_id.into(),
             project_id: project_id.into(),
             cancel: Arc::new(AtomicBool::new(false)),
+            queue_runs: Vec::new(),
         }));
         let worker = tokio::spawn(async { panic!("segment end is observed") });
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            supervise_pipeline_worker(worker, &slot, &path, project_id, run_id),
+            supervise_pipeline_worker(worker, &slot, &path, project_id, run_id, false),
         )
         .await
         .unwrap();
@@ -3436,10 +3809,19 @@ mod tests {
             id: "panic-worker".into(),
             project_id: "isolated-test".into(),
             cancel: Arc::new(AtomicBool::new(false)),
+            queue_runs: Vec::new(),
         }));
         let missing = std::env::temp_dir().join(format!("missing-pipeline-{}", Uuid::new_v4()));
         let worker = tokio::spawn(async { panic!("unrecoverable worker") });
-        supervise_pipeline_worker(worker, &slot, &missing, "isolated-test", "panic-worker").await;
+        supervise_pipeline_worker(
+            worker,
+            &slot,
+            &missing,
+            "isolated-test",
+            "panic-worker",
+            false,
+        )
+        .await;
         assert!(slot.lock().await.is_none());
     }
     #[test]
@@ -5126,6 +5508,7 @@ mod branching_tests {
             &StatusQuery {
                 project_id: "abc123def456".into(),
                 id: Some(format!("{:032x}", 0)),
+                queue_id: None,
             },
         )
         .unwrap()

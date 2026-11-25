@@ -24,7 +24,7 @@
   if(!runtime?.ready)throw Error("Studio UI initialization missing");
   const state={
     tab:"preview",analysisGeneration:0,playerGeneration:0,formProject:"",
-    pipelineId:"",pipelineProject:"",pipelineTimer:null,
+    pipelineId:"",pipelineProject:"",pipelineQueue:"",pipelineTimer:null,
     starting:false,stopRequested:false,polling:false,pollErrors:0,completedId:"",
     logKey:"",logOffset:0,logBusy:false,logLastCall:"",logPending:null,
     historyRows:[],historyFilter:"all",historyEpoch:0,historyOffset:0,historyProject:"",latestPipeline:null,
@@ -88,8 +88,9 @@
   };
   // A lost POST response is ambiguous: the Rust pipeline may already be
   // queued. Check the durable server status before reporting an error.
-  const startWithRecovery=async payload=>{
-    try{return await post("/api/studio/pipeline/start",payload);}
+  const startWithRecovery=async(payload,allVideos=false)=>{
+    const endpoint=allVideos?"/api/studio/pipeline/start-project":"/api/studio/pipeline/start";
+    try{return await post(endpoint,payload);}
     catch(error){
       if(!/failed to fetch|networkerror|network request failed|load failed/i.test(
         String(error?.message||error)))throw error;
@@ -102,16 +103,16 @@
           if(status.schema==="volley-studio-pipeline/1"&&
               status.project_id===payload.project_id&&
               status.client_request_id===payload.client_request_id&&
-              status.video===payload.video&&status.mode===payload.mode&&
+              (allVideos?status.queue_start_video===payload.video:status.video===payload.video)&&status.mode===payload.mode&&
               /^[a-f0-9]{32}$/.test(String(status.id||""))){
-            return {schema:status.schema,id:status.id,status:status.status,recovered:true};
+            return {schema:status.schema,id:status.id,status:status.status,queue_id:status.queue_id,recovered:true};
           }
         }catch{/* WSL port forwarding may briefly disconnect. */}
         if(attempt<4)await new Promise(resolve=>setTimeout(resolve,500));
       }
       // Same client token: the Rust endpoint is idempotent even if the
       // original POST was accepted but its response disappeared.
-      try{return await post("/api/studio/pipeline/start",payload);}
+      try{return await post(endpoint,payload);}
       catch{
         throw Error("Связь с сервером потеряна. Запуск мог продолжиться. "+
           "Обновите страницу, чтобы восстановить задачу, прежде чем запускать её снова.");
@@ -318,7 +319,7 @@
     const running=Boolean(state.pipelineId);
     ui.start.textContent=running?
       (state.stopRequested?"Остановка анализа…":"■ Остановить анализ"):
-      "▶ Полный анализ";
+      Array.from(ui.video.options||[]).filter(option=>option.value).length>1?"▶ Полный анализ проекта":"▶ Полный анализ";
     ui.start.classList.toggle("is-stop",running);
     ui.start.disabled=state.starting||(running?state.stopRequested:
       (!valid||!projectId()||!ui.video.value));
@@ -354,7 +355,7 @@
       const node=$(id);
       node.disabled=button.disabled;
       if(id==="analysis-flow-full-start"){
-        node.textContent=running?ui.start.textContent:"▶ Полный анализ";
+        node.textContent=ui.start.textContent;
         node.classList.toggle("is-stop",running);
       }
     }
@@ -1218,7 +1219,42 @@
       return true;
     }catch(error){output.textContent="Не удалось загрузить журнал: "+String(error.message||error);return false;}
   };
-  const showGraphResult=source=>{
+  const renderProjectQueue=queue=>{
+    const target=$("studio-analysis-project-queue");
+    if(!target)return;
+    clear(target);
+    target.classList.toggle("hidden",!Array.isArray(queue?.videos)||!queue.videos.length);
+    if(!Array.isArray(queue?.videos)||!queue.videos.length)return;
+    const percent=Number(queue.progress_percent);
+    const summary=make("div","analysis-project-queue-summary");
+    summary.append(make("strong","","Проект · "+queue.completed_videos+"/"+queue.total_videos+" видео"),
+      make("span","",Number.isFinite(percent)?percent.toFixed(1)+"%":"—"));
+    const aggregate=make("progress","analysis-project-queue-total");
+    aggregate.max=100;aggregate.value=Number.isFinite(percent)?Math.max(0,Math.min(100,percent)):0;
+    aggregate.setAttribute("aria-label","Оценка общего прогресса по длительности отрезков");
+    target.append(summary,aggregate);
+    const labels={queued:"В очереди",running:"Анализируется",cancelling:"Останавливается",
+      complete:"Завершено",failed:"Ошибка",cancelled:"Отменено",interrupted:"Прервано"};
+    for(const video of queue.videos){
+      const name=Array.from(ui.video.options||[]).find(option=>option.value===video.video)?.textContent||video.video;
+      const row=make("div","analysis-project-queue-row");
+      const info=make("div","analysis-project-queue-summary");
+      const pct=Number(video.progress_percent);
+      const range=video.analysis_range;
+      const segment=range?historyDuration(range.start_sec*1000)+" – "+historyDuration(range.end_sec*1000):"Весь файл";
+      const rallies=Number.isSafeInteger(video.rallies_total)?" · "+video.rallies_total+" розыгр.":"";
+      info.append(make("span","",name+" · "+segment),
+        make("span","",(labels[video.status]||video.status)+rallies+" · "+(Number.isFinite(pct)?pct.toFixed(1)+"%":"—")));
+      const progress=make("progress");progress.max=100;
+      progress.value=Number.isFinite(pct)?Math.max(0,Math.min(100,pct)):0;
+      progress.setAttribute("aria-label",name+" · прогресс");
+      row.append(info,progress);
+      if(video.error)row.append(make("span","analysis-error",String(video.error)));
+      target.append(row);
+    }
+  };
+  const showGraphResult=(source,queue)=>{
+    renderProjectQueue(queue);
     const target=$("analysis-flow-result");
     if(!target)return;
     clear(target);
@@ -1235,7 +1271,8 @@
     const timestamp=Number.isFinite(started)&&started>0?
       " · "+new Date(started).toLocaleString("ru-RU"):"";
     target.append(
-      make("strong","analysis-flow-result-title","Последний запуск · "+mode),
+      make("strong","analysis-flow-result-title","Последний запуск · "+mode+" · "+
+        ([...ui.video.options].find(option=>option.value===source.video)?.textContent||source.video||"—")),
       make("span","analysis-flow-result-status",
         (source.status==="complete"&&source.completion_quality==="identity_failed"?
           "Ошибка автопривязки":
@@ -1254,10 +1291,11 @@
     if(!mainGraph||typeof mainGraph.querySelector!=="function")return;
     const video=state.formProject===projectId()?ui.video.value:"";
     const latest=liveHistory();
-    const source=video?(latest?.video===video?latest:
+    const active=latest&&(latest.project_queue?.active||["queued","running","cancelling"].includes(latest.status));
+    const source=active?latest:video?(latest?.video===video?latest:
       projectHistoryRows().find(row=>row.video===video)||null):null;
     updatePipelineGraph(mainGraph,source);
-    showGraphResult(source);
+    showGraphResult(source,latest?.project_queue);
   };
   const historyVisibleByProject=new Map();
   const visibleHistoryRuns=project=>{
@@ -1502,7 +1540,7 @@
     if(!status||status.schema!=="volley-studio-pipeline/1")return;
     const percent=Number(status.progress_percent);
     ui.progress.value=Number.isFinite(percent)?Math.max(0,Math.min(percent,100)):0;
-    const active=["queued","running","cancelling"].includes(status.status);
+    const active=status.project_queue?.active===true||["queued","running","cancelling"].includes(status.status);
     if(status.status==="cancelling")state.stopRequested=true;
     const stage=concurrentStageLabel(status)||String(status.stage||"Обработка");
     const project=String(status.project_id||"");
@@ -1511,8 +1549,8 @@
       mode==="post"?"2 фаза · CPU":"Полный анализ · GPU/CPU";
     if(active){
       window.dispatchEvent(new CustomEvent("volley:pipeline-status",{detail:status}));
-      window.VolleyballTasks?.set("analysis",{label:runLabel,
-        projectId:project,stage,progress:percent});
+      window.VolleyballTasks?.set("analysis",{label:status.project_queue?"Анализ проекта":runLabel,
+        projectId:project,stage,progress:status.project_queue?.progress_percent??percent});
       saveMessage(status.status==="cancelling"?
         "Отмена запрошена · ожидаем остановки текущего GPU/CPU-вызова":
         stage+" · "+(Number.isFinite(percent)?percent.toFixed(1)+"%":"—"));
@@ -1543,7 +1581,7 @@
     }
     if(notifyCompletion&&["failed","cancelled","interrupted"].includes(status.status))
       window.dispatchEvent(new CustomEvent("volley:pipeline-status",{detail:status}));
-    if(notifyCompletion&&status.status==="complete"&&status.id!==state.completedId&&
+    if(notifyCompletion&&!active&&status.status==="complete"&&status.id!==state.completedId&&
         status.project_id===projectId()){
       state.completedId=status.id;
       window.dispatchEvent(new CustomEvent("volley:pipeline-complete",{
@@ -1555,7 +1593,7 @@
     updateLiveHistory(status);
     if(!active&&status.id===state.pipelineId){
       stopPipelinePolling();
-      state.pipelineId="";state.pipelineProject="";state.stopRequested=false;
+      state.pipelineId="";state.pipelineProject="";state.pipelineQueue="";state.stopRequested=false;
       loadHistory();
       if(status.status==="failed"||status.status==="interrupted")
         announce(runLabel+": "+String(status.error||stage),true);
@@ -1566,18 +1604,23 @@
   const pollPipeline=async()=>{
     if(!state.pipelineId||state.polling)return;
     state.polling=true;
-    const id=state.pipelineId,project=state.pipelineProject;
+    const id=state.pipelineId,project=state.pipelineProject,queue=state.pipelineQueue;
     try{
-      const status=await get("/api/studio/pipeline/status",{project_id:project,id});
-      if(state.pipelineId===id){
+      const status=await get("/api/studio/pipeline/status",queue?{project_id:project,queue_id:queue}:{project_id:project,id});
+      if(state.pipelineId===id&&state.pipelineQueue===queue){
+        if(queue&&status.queue_id!==queue)throw Error("Ответ относится к другой очереди");
+        if(queue&&status.id!==id){
+          state.pipelineId=status.id;
+          recordHistoryRun(project,status.id);
+          resetLog();
+          loadHistory();
+        }
         state.pollErrors=0;
         displayPipeline(status,true);
       }
     }catch(e){
-      if(state.pipelineId===id&&++state.pollErrors>=3){
-        window.VolleyballTasks?.clear("analysis");
-        saveMessage("Не удалось получить состояние анализа: "+String(e.message||e),true);
-        stopPipelinePolling();
+      if(state.pipelineId===id&&++state.pollErrors===3){
+        saveMessage("Связь с анализом временно потеряна, повторяем подключение: "+String(e.message||e),true);
       }
     }finally{state.polling=false;}
   };
@@ -1587,10 +1630,11 @@
     const epoch=state.analysisGeneration;
     const status=await get("/api/studio/pipeline/status",{project_id:project});
     if(project!==projectId()||epoch!==state.analysisGeneration)return;
-    if(["queued","running","cancelling"].includes(status.status)){
+    if(status.project_queue?.active||["queued","running","cancelling"].includes(status.status)){
       recordHistoryRun(project,status.id);
       state.pipelineId=status.id;
       state.pipelineProject=project;
+      state.pipelineQueue=String(status.queue_id||"");
       state.stopRequested=status.status==="cancelling";
       ui.logPanel.open=true;
       saveMessage("Подключение к уже запущенному анализу…");
@@ -1677,12 +1721,13 @@
       if(mode!=="post")payload.gpu=gpuProfile();
       payload.post=postProfile();
       if(mode==="post")payload.source_analysis_id=source;
-      const response=await startWithRecovery(payload);
+      const allVideos=mode==="full"&&Array.from(ui.video.options||[]).filter(option=>option.value).length>1;
+      const response=await startWithRecovery(payload,allVideos);
       if(response.schema!=="volley-studio-pipeline/1"||
           !/^[a-f0-9]{32}$/.test(String(response.id||"")))
         throw Error("Сервер не подтвердил создание анализа");
       recordHistoryRun(project,response.id);
-      state.pipelineId=response.id;state.pipelineProject=project;
+      state.pipelineId=response.id;state.pipelineProject=project;state.pipelineQueue=String(response.queue_id||"");
       if(["queued","running","cancelling"].includes(response.status))
         window.dispatchEvent(new CustomEvent("volley:pipeline-status",{detail:response}));
       resetLog();ui.logPanel.open=true;

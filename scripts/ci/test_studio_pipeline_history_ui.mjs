@@ -153,4 +153,20 @@ assert.equal(restoredUi.historyList.children.length,2,
   "All archived server runs survive browser-session changes");
 assert.equal(restoredUi.historyList.children[0].dataset.runId,id,"Newest server row remains first");
 assert.equal(restoredUi.historyList.children[1].dataset.runId,"b".repeat(32),"Older server row remains visible");
+const graphSources=[];
+const graphState={...restoredState,formProject:"aaaabbbbcccc",latestPipeline:running};
+const graphUi={...restoredUi,video:{value:"older.mp4"}};
+const graph=runInNewContext(registry+source.slice(from,to)+
+  "\n({renderGraphSummary})",{
+    ...helpers,state:graphState,ui:graphUi,
+    projectId:()=>"aaaabbbbcccc",mainGraph:{querySelector(){}},
+    updatePipelineGraph:(_target,value)=>graphSources.push(value)
+  });
+graph.renderGraphSummary();
+assert.equal(graphSources.at(-1).id,running.id,
+  "A running analysis must animate even when another video is selected after reload");
+graphState.latestPipeline={...running,status:"complete"};
+graph.renderGraphSummary();
+assert.equal(graphSources.at(-1).video,"older.mp4",
+  "An inactive graph must follow the selected video");
 console.log("Studio analysis history: session-only runs, compact timing, reload persistence and project isolation");

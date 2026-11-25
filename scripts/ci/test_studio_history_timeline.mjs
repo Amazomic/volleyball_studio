@@ -133,18 +133,19 @@ assert.equal(state.historyRows.length,0);
 assert.equal(graphSource,null);
 const resultPanel=new Node("div");
 const showGraphResult=runInNewContext(source.slice(
-  source.indexOf("  const showGraphResult=source=>{"),
+  source.indexOf("  const renderProjectQueue=queue=>{"),
   source.indexOf("  const liveHistory=()=>{")
 )+"\nshowGraphResult",{
   $:id=>id==="analysis-flow-result"?resultPanel:null,
   clear:node=>node.textContent="",
   make:(tag,klass,text)=>new Node(tag,klass,text),
+  ui:{video:{options:[{value:"game.mp4",textContent:"game.mp4"}]}},
   historyDuration:ms=>Math.floor(ms/1000)+" с"
 });
 showGraphResult({...finished,elapsed_ms:91000});
 assert.match(resultPanel.textContent,/Последний запуск · 1 фаза.*Завершён · 91 с/);
 assert.equal(resultPanel.querySelector(".analysis-flow-result-title").textContent,
-  "Последний запуск · 1 фаза");
+  "Последний запуск · 1 фаза · game.mp4");
 showGraphResult(null);
 assert.match(resultPanel.textContent,/После анализа здесь будет виден последний результат/);
 console.log("History timeline: compact stage durations, latest result outside history and stable live log");

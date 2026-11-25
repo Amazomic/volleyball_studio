@@ -3762,7 +3762,7 @@
     // to the remaining available versions using the normal reset flow.
     await setAnalysis(preferredRun,exact);
   };
-  const pipelineActive=status=>["queued","running","cancelling"].includes(status?.status);
+  const pipelineActive=status=>status?.project_queue?.active===true||["queued","running","cancelling"].includes(status?.status);
   const blockPipelinePreview=status=>{
     const project=status.project_id;
     if(!project||!status.id||s.pipelineCompleted?.get(project)===status.id)return;

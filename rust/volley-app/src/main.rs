@@ -157,6 +157,10 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
             post(analysis_management::change),
         )
         .route("/api/studio/pipeline/start", post(studio_pipeline::start))
+        .route(
+            "/api/studio/pipeline/start-project",
+            post(studio_pipeline::start_project),
+        )
         .route("/api/studio/pipeline/status", get(studio_pipeline::status))
         .route("/api/studio/pipeline/log", get(studio_pipeline::log))
         .route(

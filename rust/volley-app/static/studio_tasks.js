@@ -159,7 +159,7 @@
     const data=await api(query("/api/studio/pipeline/status",{project_id:project}));
     if(data.schema!=="volley-studio-pipeline/1"||data.project_id!==project)return;
     window.dispatchEvent?.(new CustomEvent("volley:pipeline-status",{detail:data}));
-    if(!["queued","running","cancelling"].includes(data.status)){
+    if(!data.project_queue?.active&&!["queued","running","cancelling"].includes(data.status)){
       if(project===trackedAnalysisProject)trackedAnalysisProject="";
       clear("analysis");return;
     }
@@ -170,9 +170,10 @@
       Number.isSafeInteger(done)&&Number.isSafeInteger(total)&&done>=0&&total>0;
     const detail=hasFrames?" · "+done.toLocaleString("ru-RU")+"/"+total.toLocaleString("ru-RU")+
       " кадров ("+(100*done/total).toFixed(1)+"%)":"";
-    set("analysis",{projectId:project,label:"Анализ и постобработка",
-      stage:String(data.stage||"Обработка")+detail,
-      progress:Number.isFinite(data.progress_percent)?data.progress_percent:null});
+    const queue=data.project_queue;
+    set("analysis",{projectId:project,label:queue?"Анализ проекта":"Анализ и постобработка",
+      stage:(queue?queue.completed_videos+"/"+queue.total_videos+" видео · ":"")+String(data.stage||"Обработка")+detail,
+      progress:queue?.progress_percent??(Number.isFinite(data.progress_percent)?data.progress_percent:null)});
   }
   async function readPreparation(){
     const current=$("studio-project")?.value||"";
