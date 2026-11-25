@@ -12,7 +12,7 @@ const rule=selector=>{
 };
 assert.match(rule(".analysis-flow-diagram"),/container-type:inline-size/);
 assert.match(rule(".analysis-flow-node"),/min-height:76px/);
-for(const selector of [".analysis-flow-node-model",".analysis-flow-node-stats"]){
+for(const selector of [".analysis-flow-node-title",".analysis-flow-node-stats"]){
   const style=rule(selector);
   assert.doesNotMatch(style,/white-space:nowrap|text-overflow:ellipsis|overflow:hidden/);
   assert.match(style,/overflow-wrap:anywhere/);

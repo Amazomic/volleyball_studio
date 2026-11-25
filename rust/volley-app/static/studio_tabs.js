@@ -461,16 +461,17 @@
   const pipelineModelMeta=(id,run)=>{
     const known={
       ball:["VballNetV4c","model"],
-      ball_stabilizer:["ball_stabilizer","algorithm"],
+      ball_stabilizer:["Ball Stabilizer","algorithm"],
       players:[(run?run.profile?.gpu?.person_detector:$("studio-gpu-person-detector")?.value)==="rfdetr-large"?"RF-DETR Large":"RF-DETR Medium","model"],
       pose:["RTMPose-M Body7","model"],
-      boxes:["ByteTrack","algorithm"],
-      tracking:["ByteTrack","algorithm"],
+      boxes:["ByteTrack · BBox","algorithm"],
+      tracking:["ByteTrack · Track ID","algorithm"],
       ground_detector:["Ground Detector","algorithm"],
       touch_detector:["Touch Detector","algorithm"],
-      rallies:["Маска игровых интервалов","algorithm"],
-      touch_types:["Геометрия поз","algorithm"],
-    identity:["ReID · сопоставление на CPU","mixed"]
+      rallies:["Rally Detector","algorithm"],
+      touches:["Touch Attribution","algorithm"],
+      touch_types:["Pose Geometry","algorithm"],
+    identity:["ReID","mixed"]
     };
     return known[id]||null;
   };
@@ -682,15 +683,17 @@
     ball:"VBallNetV4c работает с фиксированным окном из 9 кадров. Детекции мяча поступают в ball_stabilizer.",
     ground_detector:"После стабилизации траектории ищет отскоки и остановки мяча у поверхности площадки. Сохраняет координаты и зону, отдельно от касаний игроков. Позы уточняют спорные события позднее.",
     ball_stabilizer:"Отбрасывает ложные точки и интерполирует короткие пропуски. Одна сохранённая траектория используется для поиска розыгрышей, касаний и предпросмотра.",
-    rallies:"Рабочие настройки первичного анализа: длительность траектории, остановка мяча в миллисекундах и объединение без перекрытия удержаний или пропусков детекции от 3 секунд. Эксперименты в «Дебаге» имеют собственные значения и не меняют этот GPU-профиль.",
+    rallies:"Определяет игровые интервалы по стабилизированной траектории, учитывая длительность, остановки мяча и пропуски детекции.",
     players:"RF-DETR ищет игроков только внутри найденных игровых интервалов.",
     boxes:"ByteTrack связывает рамки детектора в игровых интервалах и при включённой интерполяции восстанавливает пропуски. Части тела на этой стадии не распознаются.",
     pose:"RTMPose-M Body7 измеряет точки тела по стабилизированным рамкам в исходных кадрах. Измерения сохраняются отдельно от предварительных ID.",
     fusion:"Сохранение общей версии GPU-наблюдений и повторное использование кэша.",
     tracking:"ByteTrack строит итоговые Track ID по измеренным позам, объединяет фрагменты и отбрасывает неподтверждённые треки. Без RTMPose используется трекинг рамок.",
-    touches:"Touch Detector определяет моменты касаний исключительно по траектории мяча. Контакт с телом и классификация дополняют найденное событие, не изменяя его время.",
+    touch_detector:"Определяет моменты касаний исключительно по траектории мяча.",
+    touches:"Уточняет контакт мяча с телом и привязывает найденное событие к Track ID, не изменяя его время.",
     touch_types:"RTMPose и геометрия тела уточняют тип уже найденного касания. Без достаточных признаков остаётся unknown_touch. Привязка Track ID к конкретному игроку выполняется отдельно, позднее.",
     publish:"Публикует границы первичных розыгрышей с результатом Touch Detector для выбранной версии CPU replay.",
+    photos:"Подготавливает фотографии игроков из исходных кадров для сопоставления внешности.",
     identity:"Автоматическая привязка Track ID к игрокам из библиотеки по фотографиям и наблюдениям внутри опубликованных розыгрышей.",
     cache:"Готовый GPU-анализ переиспользуется при совместимых настройках."
   };
@@ -747,7 +750,7 @@
   const openGraphSettings=id=>{
     closeGraphSettings();
     graphFocus=document.activeElement;
-    $("analysis-flow-dialog-title").textContent=pipelineNames.get(id)||"Стадия";
+    $("analysis-flow-dialog-title").textContent=graphLabel(id,mainGraph?._graphRun);
     $("analysis-flow-dialog-description").textContent=graphDescriptions[id]||"";
     const body=$("analysis-flow-dialog-body");clear(body);
     for(const selector of graphSettings[id]||[]){
@@ -810,10 +813,7 @@
   });
   const graphLabel=(id,run)=>{
     const meta=pipelineModelMeta(id,run);
-    if(!meta)return "";
-    const kind={model:"GPU",algorithm:"Алгоритм"}[meta[1]];
-    return kind?window.VolleyballUi.translate(kind)+" · "+window.VolleyballUi.translate(meta[0]):
-      window.VolleyballUi.translate(meta[0]);
+    return window.VolleyballUi.translate(meta?.[0]||pipelineNames.get(id)||id);
   };
   const graphText=(element,label)=>{
     element.dataset.graphText=label;
@@ -920,18 +920,15 @@
       phases.set(row,cards);
       grid.append(panel);
     }
-    for(const [id,name,kind,row] of pipelineStages){
+    for(const [id,,kind,row] of pipelineStages){
       const cell=make("div","analysis-flow-cell");
       const node=make(id==="photos"?"div":"button","analysis-flow-node");
       if(id!=="photos")node.type="button";
       node.dataset.stageId=id;node.dataset.kind=kind;
-      const heading=make("span","analysis-flow-node-title",window.VolleyballUi.translate(name));
-      const technical=make("span","analysis-flow-node-model");
-      technical.textContent=graphLabel(id,run);
-      technical.classList.toggle("hidden",!technical.textContent);
+      const heading=make("span","analysis-flow-node-title",graphLabel(id,run));
       const headingRow=make("span","analysis-flow-node-heading-row");
       headingRow.append(pipelineIcon(id),heading);
-      node.append(headingRow,technical);
+      node.append(headingRow);
       if(graphDescriptions[id])node.title=graphDescriptions[id];
       if(id!=="photos")node.addEventListener("click",()=>openGraphSettings(id));
       const stats=make("small","analysis-flow-node-stats","—");
@@ -1000,10 +997,9 @@
       const pct=stageProgressPercent(entry,!!running,done);
       node.style.setProperty("--stage-progress",(pct??0)+"%");
       node.classList.toggle("is-progress-unknown",!!running&&pct===null);
-      const technical=node.querySelector(".analysis-flow-node-model");
+      const heading=node.querySelector(".analysis-flow-node-title");
       const label=graphLabel(id,run);
-      technical.textContent=label;
-      technical.classList.toggle("hidden",!label);
+      if(heading.textContent!==label)heading.textContent=label;
       const stats=node.nextElementSibling;
       if(stats?.classList.contains("analysis-flow-node-stats")){
         const statusText=reused&&id!=="pose"?window.VolleyballUi.translate("Из кэша"):
@@ -1025,10 +1021,16 @@
           detail.classList.toggle("hidden",!metrics);
         }
       }
-      const name=pipelineNames.get(id)||id;
-      node.title=name+(label?" · "+label:"")+
+      node.title=graphDescriptions[id]||label;
+      node.title+=
         (entry?.frames_total?" · "+(entry.frames_processed||0)+"/"+entry.frames_total+" кадров":"")+
         (running?" · выполняется":done?" · завершено":reused?" · из кэша":"");
+    }
+    for(const option of target._graphFocusSelect?.options||[]){
+      if(option.value){
+        const label=graphLabel(option.value,run);
+        if(option.textContent!==label)option.textContent=label;
+      }
     }
     paintGraphEdges(target,run);
     target._scheduleGraphDraw?.();
@@ -1073,8 +1075,9 @@
     mainGraph._scheduleGraphDraw=scheduleDraw;
     scheduleDraw();
     const focusSelect=$("analysis-flow-focus");
-    for(const [id,name] of pipelineStages){
-      const option=make("option","",window.VolleyballUi.translate(name));
+    mainGraph._graphFocusSelect=focusSelect;
+    for(const [id] of pipelineStages){
+      const option=make("option","",graphLabel(id,mainGraph._graphRun));
       option.value=id;
       focusSelect.append(option);
     }
@@ -1109,10 +1112,10 @@
         graphText(element,element.dataset.graphText);
       for(const node of mainGraph.querySelectorAll(".analysis-flow-node")){
         const heading=node.querySelector(".analysis-flow-node-title");
-        heading.textContent=window.VolleyballUi.translate(pipelineNames.get(node.dataset.stageId));
+        heading.textContent=graphLabel(node.dataset.stageId,mainGraph._graphRun);
       }
       for(const option of focusSelect.options){
-        if(option.value)option.textContent=window.VolleyballUi.translate(pipelineNames.get(option.value));
+        if(option.value)option.textContent=graphLabel(option.value,mainGraph._graphRun);
       }
       updatePipelineGraph(mainGraph,mainGraph._graphRun);
     });

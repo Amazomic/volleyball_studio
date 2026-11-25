@@ -53,7 +53,7 @@ const context=vm.createContext({});
 context.$=()=>({checked:false});
 vm.runInContext(definitions+"this.stages=pipelineStages;this.id=pipelineId;this.model=pipelineModelMeta;",context);
 assert.equal(context.model("ball")[0],"VballNetV4c");
-assert.equal(context.model("ball_stabilizer")[0],"ball_stabilizer");
+assert.equal(context.model("ball_stabilizer")[0],"Ball Stabilizer");
 assert.equal(context.model("players")[0],"RF-DETR Medium");
 assert.equal(context.model("pose")[0],"RTMPose-M Body7");
 assert.equal(context.model("tracking")[1],"algorithm");
@@ -61,6 +61,12 @@ assert.equal(context.model("touch_detector")[0],"Touch Detector");
 assert.equal(context.model("ground_detector")[0],"Ground Detector");
 assert.equal(context.model("touch_types")[1],"algorithm");
 assert.equal(context.model("rallies")[1],"algorithm");
+const labelContext=vm.createContext({window:{VolleyballUi:{translate:x=>x}},$:context.$});
+vm.runInContext(definitions+extract("const graphLabel=","const graphText=")+"this.label=graphLabel;",labelContext);
+for(const [id,name] of [["ball","VballNetV4c"],["ball_stabilizer","Ball Stabilizer"],["players","RF-DETR Medium"],["ground_detector","Ground Detector"],["touch_detector","Touch Detector"],["boxes","ByteTrack · BBox"],["tracking","ByteTrack · Track ID"],["touches","Touch Attribution"],["touch_types","Pose Geometry"],["rallies","Rally Detector"],["identity","ReID"]])assert.equal(labelContext.label(id),name,id);
+assert.equal(labelContext.label("players",{profile:{gpu:{person_detector:"rfdetr-large"}}}),"RF-DETR Large");
+assert.doesNotMatch(extract("const createPipelineGraph=","const updatePipelineGraph="),/analysis-flow-node-model/);
+assert.match(extract("const updatePipelineGraph=","const paintGraphEdges="),/node\.title=graphDescriptions\[id\]/);
 const stages=context.stages;
 const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
@@ -239,9 +245,11 @@ const graph={
 };
 const stageContext=vm.createContext({graph,window:edgeContext.window,document:{},$:context.$});
 vm.runInContext(definitions+extract("const pipelineEdges=","const graphSettings=")+
+  extract("const graphDescriptions=","let graphMoved=")+
   extract("const graphLabel=",'$("analysis-flow-feedback")')+
   'updatePipelineGraph(graph,{status:"complete",gpu_jobs:{pose:"saved"},stages:[{id:"ball",finished_ms:2000}]});',stageContext);
 assert.equal(ballCard.classList["is-complete"],true);
+assert.match(ballCard.title,/фиксированным окном из 9 кадров/);
 assert.equal(poseCard.classList["is-complete"],true);
 const historyProjection=rust.slice(rust.indexOf('rows.push(json!({"id":id'),rust.indexOf("    rows.sort_by"));
 for(const key of ["gpu_jobs","cpu_runs","analysis_id","profile","gpu_rally_count","automatic_identity_available"])

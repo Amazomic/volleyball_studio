@@ -1996,8 +1996,6 @@ body[data-ui-theme="light"] .analysis-flow-phase-label,body[data-ui-theme="light
 .analysis-flow-node-heading-row{display:flex;align-items:center;justify-content:center;gap:6px;max-width:100%}
 .analysis-flow-node-icon{width:17px;height:17px;flex:0 0 17px;color:#cdefff}
 .analysis-flow-node-title{font:inherit;max-width:100%;white-space:normal;overflow-wrap:anywhere}
-.analysis-flow-node-model{max-width:100%;white-space:normal;overflow-wrap:anywhere;font-size:11px;font-weight:550;color:#d2e1f0}
-.analysis-flow-node-model.hidden{display:none}
 .analysis-flow-node[data-kind="input"]{background:linear-gradient(145deg,#16314a,#142438);border-color:#5485af}
 .analysis-flow-node[data-kind="gpu"]{background:linear-gradient(145deg,#145848,#123c39);border-color:#2aa988}
 .analysis-flow-node[data-kind="cpu"]{background:linear-gradient(145deg,#164f72,#163951);border-color:#21a5d4}
