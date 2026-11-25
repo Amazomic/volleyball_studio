@@ -170,7 +170,7 @@ fn load_player_frame_scope(
     }
     let selected =
         crate::cpu_touches::align_primary_intervals(&selected, source_frames, replay_frames)?;
-    let rallies = match mask.get("merged") {
+    let rallies = match mask.get("rally_intervals").or_else(|| mask.get("merged")) {
         Some(value) => {
             let intervals = serde_json::from_value::<Vec<(u64, u64)>>(value.clone())
                 .map_err(|_| "Invalid confirmed rally intervals for player tracking")?;

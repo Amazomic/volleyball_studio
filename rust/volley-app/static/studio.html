@@ -654,6 +654,16 @@
                     <input id="studio-gpu-rally-stationary-ms" type="number" min="200" max="10000" step="100" value="1000" data-default="1000">
                   </label>
                 </div>
+                <div>
+                  <label class="field-label analysis-setting-help" for="studio-gpu-rally-padding-before-ms" tabindex="0" data-analysis-hint="Добавляет указанное время перед обнаруженным началом розыгрыша, не выходя за границы видео и соседнего розыгрыша." aria-description="Добавляет указанное время перед обнаруженным началом розыгрыша, не выходя за границы видео и соседнего розыгрыша." data-analysis-hint-en="Extends the detected rally start by this duration, without crossing the video or adjacent rally boundaries.">До начала розыгрыша, мс
+                    <input id="studio-gpu-rally-padding-before-ms" type="number" min="0" max="60000" step="1" value="500" data-default="500">
+                  </label>
+                </div>
+                <div>
+                  <label class="field-label analysis-setting-help" for="studio-gpu-rally-padding-after-ms" tabindex="0" data-analysis-hint="Добавляет указанное время после обнаруженного конца розыгрыша, не выходя за границы видео и соседнего розыгрыша." aria-description="Добавляет указанное время после обнаруженного конца розыгрыша, не выходя за границы видео и соседнего розыгрыша." data-analysis-hint-en="Extends the detected rally end by this duration, without crossing the video or adjacent rally boundaries.">После конца розыгрыша, мс
+                    <input id="studio-gpu-rally-padding-after-ms" type="number" min="0" max="60000" step="1" value="500" data-default="500">
+                  </label>
+                </div>
               </div>
               <details class="analysis-profile-advanced">
                 <summary>Дополнительные настройки</summary>

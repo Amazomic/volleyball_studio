@@ -210,7 +210,9 @@
       primary_rallies:{
         min_trajectory_seconds:inputValue("studio-gpu-rally-min-seconds"),
         merge_gap_seconds:inputValue("studio-gpu-rally-merge-seconds"),
-        stationary_ball_ms:inputValue("studio-gpu-rally-stationary-ms")
+        stationary_ball_ms:inputValue("studio-gpu-rally-stationary-ms"),
+        padding_before_ms:inputValue("studio-gpu-rally-padding-before-ms"),
+        padding_after_ms:inputValue("studio-gpu-rally-padding-after-ms")
       }
   });
   // Mirrors volley-core's validated native defaults (no JS-only processing).
@@ -668,7 +670,7 @@
     video:[".analysis-profile-source","#studio-analysis-editor"],
     ball:["#studio-gpu-stride","#studio-gpu-memory","#studio-gpu-threads"],
     ball_stabilizer:["#studio-post-ball-stabilizer-gap","#studio-post-ball-stabilizer-step"],
-    rallies:["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds","#studio-gpu-rally-stationary-ms"],
+    rallies:["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds","#studio-gpu-rally-stationary-ms","#studio-gpu-rally-padding-before-ms","#studio-gpu-rally-padding-after-ms"],
     players:["#studio-gpu-person-detector","#studio-gpu-person-stride"],
     pose:["#studio-gpu-pose-enabled","#studio-gpu-interpolate-pose"],
     boxes:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap","#studio-post-nms"],

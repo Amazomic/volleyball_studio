@@ -1233,8 +1233,13 @@ fn process_inner(
         }
         let evidence: Value = serde_json::from_slice(&primary_bytes)
             .map_err(|_| storage::bad_request("Malformed primary GPU rally evidence"))?;
-        let raw: Vec<(u64, u64)> = serde_json::from_value(evidence["mask"]["merged"].clone())
-            .map_err(|_| storage::bad_request("Invalid primary GPU rally bounds"))?;
+        let raw: Vec<(u64, u64)> = serde_json::from_value(
+            evidence["mask"]
+                .get("rally_intervals")
+                .unwrap_or(&evidence["mask"]["merged"])
+                .clone(),
+        )
+        .map_err(|_| storage::bad_request("Invalid primary GPU rally bounds"))?;
         let source_frames = evidence["mask"]["source_frame_count"]
             .as_u64()
             .ok_or_else(|| storage::bad_request("Primary GPU frame count missing"))?;

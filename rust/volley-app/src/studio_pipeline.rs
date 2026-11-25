@@ -1013,8 +1013,12 @@ fn parse_primary_rally_scope(
         .as_u64()
         .filter(|frames| *frames > 0 && *frames <= 48 * 3600 * 30)
         .ok_or("Некорректная длина первичного анализа розыгрышей")?;
-    let intervals: Vec<(u64, u64)> = serde_json::from_value(mask["merged"].clone())
-        .map_err(|_| "Некорректные границы первичных розыгрышей")?;
+    let intervals: Vec<(u64, u64)> = serde_json::from_value(
+        mask.get("rally_intervals")
+            .unwrap_or(&mask["merged"])
+            .clone(),
+    )
+    .map_err(|_| "Некорректные границы первичных розыгрышей")?;
     if intervals.iter().any(|&(start, end)| {
         start > end
             || end >= frames
@@ -1133,6 +1137,12 @@ fn gpu_lineage_valid(
                 != json!(request.gpu.primary_rallies.merge_gap_seconds)
             || saved["gpu_rally_mask"]["stationary_ball_ms"]
                 != json!(request.gpu.primary_rallies.stationary_ball_ms)
+            || (request.mode.allows_gpu_execution()
+                && (saved["gpu_rally_mask"]["padding_before_ms"]
+                    != json!(request.gpu.primary_rallies.padding_before_ms)
+                    || saved["gpu_rally_mask"]["padding_after_ms"]
+                        != json!(request.gpu.primary_rallies.padding_after_ms)
+                    || !saved["gpu_rally_mask"]["rally_intervals"].is_array()))
             || saved["gpu_rally_mask"]["movement_filter_version"]
                 != "stationary_ball_min_rally_5s_v3"
             || saved["gpu_rally_mask"]["min_rally_seconds"] != 5.0)
@@ -2227,6 +2237,12 @@ async fn pipeline(
     }
 
     let (primary, primary_mask) = load_primary_rally_scope(app, &request.project_id, status)?;
+    if request.mode == PipelineMode::Post {
+        for key in ["padding_before_ms", "padding_after_ms"] {
+            status["profile"]["gpu"]["primary_rallies"][key] =
+                json!(primary_mask[key].as_u64().unwrap_or(0));
+        }
+    }
     status["gpu_rally_mask"] = primary_mask;
     status["gpu_rally_mask_sha256"] = json!(primary.sha256);
     status["primary_rally_source"] =
@@ -3759,6 +3775,15 @@ mod tests {
         assert_eq!(scope.ball_job_id, "ball-job-123");
         assert_eq!(scope.sha256, format!("{:x}", Sha256::digest(&bytes)));
         assert_eq!(mask["merged"], json!([[12, 161], [320, 469]]));
+        let mut padded = evidence.clone();
+        padded["mask"]["rally_intervals"] = json!([[0, 176], [305, 484]]);
+        let (padded_scope, _) = parse_primary_rally_scope(
+            &serde_json::to_vec(&padded).unwrap(),
+            "ball-job-123",
+            &status,
+        )
+        .unwrap();
+        assert_eq!(padded_scope.intervals, vec![(0, 176), (305, 484)]);
         assert!(parse_primary_rally_scope(&bytes, "other-job", &status).is_err());
         let mut altered = evidence.clone();
         altered["mask"]["merged"] = json!([[320, 469], [12, 161]]);
@@ -4020,6 +4045,8 @@ mod tests {
         assert_eq!(request.gpu.primary_rallies.min_trajectory_seconds, 1.5);
         assert_eq!(request.gpu.primary_rallies.merge_gap_seconds, 4.0);
         assert_eq!(request.gpu.primary_rallies.stationary_ball_ms, 1000);
+        assert_eq!(request.gpu.primary_rallies.padding_before_ms, 500);
+        assert_eq!(request.gpu.primary_rallies.padding_after_ms, 500);
         let saved = json!({
             "schema":SCHEMA,
             "gpu_model_stack":requested_gpu_model_stack(request.gpu.person_detector),
@@ -4038,7 +4065,15 @@ mod tests {
         request.gpu.primary_rallies.merge_gap_seconds = 4.0;
         request.gpu.primary_rallies.stationary_ball_ms = 1500;
         assert!(!compatible_version(&saved, &request, &identity));
+        request.gpu.primary_rallies.stationary_ball_ms = 1000;
+        request.gpu.primary_rallies.padding_before_ms = 750;
+        assert!(!compatible_version(&saved, &request, &identity));
+        request.gpu.primary_rallies.padding_before_ms = 500;
+        request.gpu.primary_rallies.padding_after_ms = 0;
+        assert!(!compatible_version(&saved, &request, &identity));
         for invalid in [
+            json!({"padding_before_ms":60001}),
+            json!({"padding_after_ms":-1}),
             json!({"min_trajectory_seconds":0.0,"merge_gap_seconds":4.0}),
             json!({"min_trajectory_seconds":1.5,"merge_gap_seconds":65.0}),
             json!({"min_trajectory_seconds":"x","merge_gap_seconds":4.0}),
@@ -4468,6 +4503,9 @@ mod branching_tests {
                 "min_trajectory_seconds":request.gpu.primary_rallies.min_trajectory_seconds,
                 "merge_gap_seconds":request.gpu.primary_rallies.merge_gap_seconds,
                 "stationary_ball_ms":request.gpu.primary_rallies.stationary_ball_ms,
+                "padding_before_ms":request.gpu.primary_rallies.padding_before_ms,
+                "padding_after_ms":request.gpu.primary_rallies.padding_after_ms,
+                "rally_intervals":[],
                 "movement_filter_version":"stationary_ball_min_rally_5s_v3",
                 "min_rally_seconds":5.0,
                 "ground_boundary_version":"ground_ends_rally_v3",

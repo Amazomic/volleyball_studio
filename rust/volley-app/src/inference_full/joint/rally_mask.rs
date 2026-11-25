@@ -22,6 +22,8 @@ pub(crate) struct PrimaryRallySettings {
     pub min_trajectory_seconds: f64,
     pub merge_gap_seconds: f64,
     pub stationary_ball_ms: u32,
+    pub padding_before_ms: u32,
+    pub padding_after_ms: u32,
 }
 impl Default for PrimaryRallySettings {
     fn default() -> Self {
@@ -29,6 +31,8 @@ impl Default for PrimaryRallySettings {
             min_trajectory_seconds: crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
             merge_gap_seconds: crate::cpu_retrack::ball_track::CONTINUOUS_MERGE_SECONDS,
             stationary_ball_ms: crate::cpu_retrack::ball_track::DEFAULT_STATIONARY_BALL_MS,
+            padding_before_ms: 500,
+            padding_after_ms: 500,
         }
     }
 }
@@ -44,9 +48,45 @@ impl PrimaryRallySettings {
         if !self.merge_gap_seconds.is_finite() || !(0.0..=60.0).contains(&self.merge_gap_seconds) {
             return Err("Объединение розыгрышей должно быть от 0 до 60 секунд".into());
         }
+        if self.padding_before_ms > 60_000 || self.padding_after_ms > 60_000 {
+            return Err("Добавление времени к розыгрышу должно быть от 0 до 60000 мс".into());
+        }
         crate::cpu_retrack::ball_track::stationary_ball_intervals(&[], self.stationary_ball_ms)?;
         Ok(())
     }
+}
+
+fn pad_rally_intervals(
+    intervals: &[(u64, u64)],
+    frames: u64,
+    before_ms: u32,
+    after_ms: u32,
+) -> Vec<(u64, u64)> {
+    let to_frames = |ms: u32| (u64::from(ms) * 30 + 500) / 1000;
+    let before = to_frames(before_ms);
+    let after = to_frames(after_ms);
+    let mut padded: Vec<_> = intervals
+        .iter()
+        .map(|&(start, end)| {
+            (
+                start.saturating_sub(before),
+                end.saturating_add(after).min(frames.saturating_sub(1)),
+            )
+        })
+        .collect();
+    for i in 1..padded.len() {
+        padded[i - 1].1 = padded[i - 1].1.min(intervals[i].0 - 1);
+        padded[i].0 = padded[i].0.max(intervals[i - 1].1 + 1);
+        if padded[i - 1].1 >= padded[i].0 {
+            let left = intervals[i - 1].1;
+            let right = intervals[i].0;
+            let split = (left + (right - left - 1) / 2)
+                .clamp(padded[i].0.max(left), padded[i - 1].1.min(right - 1));
+            padded[i - 1].1 = split;
+            padded[i].0 = split + 1;
+        }
+    }
+    padded
 }
 
 #[cfg(test)]
@@ -63,6 +103,9 @@ pub(super) struct RallyMask {
     merge_gap_seconds: f64,
     min_rally_seconds: f64,
     stationary_ball_ms: u32,
+    padding_before_ms: u32,
+    padding_after_ms: u32,
+    rally_intervals: Vec<(u64, u64)>,
     stationary_intervals: Vec<(u64, u64)>,
     unobserved_intervals: Vec<(u64, u64)>,
     movement_filter_version: &'static str,
@@ -226,13 +269,22 @@ impl RallyMask {
             }
         }
         let merged = crate::cpu_retrack::ball_track::filter_short_rallies(grounded_intervals);
+        let rally_intervals = pad_rally_intervals(
+            &merged,
+            frames,
+            settings.padding_before_ms,
+            settings.padding_after_ms,
+        );
         for &(start, end) in &motion.stationary {
             points[start as usize..=end as usize].fill(None);
         }
         let mut selected = Vec::<(u64, u64)>::new();
-        for &(start, end) in &merged {
-            let start = start.saturating_sub(CONTEXT_FRAMES);
-            let end = end.saturating_add(CONTEXT_FRAMES).min(frames - 1);
+        for (&(start, end), &(padded_start, padded_end)) in merged.iter().zip(&rally_intervals) {
+            let start = start.saturating_sub(CONTEXT_FRAMES).min(padded_start);
+            let end = end
+                .saturating_add(CONTEXT_FRAMES)
+                .min(frames - 1)
+                .max(padded_end);
             if let Some(last) = selected.last_mut() {
                 if start <= last.1.saturating_add(1) {
                     last.1 = last.1.max(end);
@@ -298,6 +350,9 @@ impl RallyMask {
             merge_gap_seconds: settings.merge_gap_seconds,
             min_rally_seconds: crate::cpu_retrack::ball_track::MIN_RALLY_FRAMES as f64 / 30.0,
             stationary_ball_ms: settings.stationary_ball_ms,
+            padding_before_ms: settings.padding_before_ms,
+            padding_after_ms: settings.padding_after_ms,
+            rally_intervals,
             stationary_intervals: motion.stationary,
             unobserved_intervals: motion.unobserved,
             movement_filter_version: "stationary_ball_min_rally_5s_v3",
@@ -355,6 +410,33 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn rally_padding_is_independent_and_clipped_without_merging() {
+        assert_eq!(
+            pad_rally_intervals(&[(80, 240), (500, 710)], 900, 500, 500),
+            vec![(65, 255), (485, 725)]
+        );
+        assert_eq!(
+            pad_rally_intervals(&[(4, 100), (110, 199)], 200, 1000, 500),
+            vec![(0, 104), (105, 199)]
+        );
+        assert_eq!(
+            pad_rally_intervals(&[(4, 100), (110, 199)], 200, 0, 500),
+            vec![(4, 109), (110, 199)]
+        );
+        assert_eq!(pad_rally_intervals(&[(4, 100)], 200, 0, 0), vec![(4, 100)]);
+        let mask = RallyMask::from_ball_samples(
+            &moving_samples(80, 270),
+            900,
+            PrimaryRallySettings::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mask.rally_intervals,
+            pad_rally_intervals(&mask.merged, 900, 500, 500)
+        );
     }
 
     #[test]
