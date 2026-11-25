@@ -1,13 +1,13 @@
 use super::{BallObservation, TrajectoryBreak};
 use crate::court_geometry::CourtTransform;
 
-pub const GROUND_DETECTOR_VERSION: &str = "court_ball_rebound_v2";
+pub const GROUND_DETECTOR_VERSION: &str = "court_ball_rebound_v3";
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroundContact {
     pub frame: u64,
     pub position: [f64; 2],
-    pub landing: &'static str,
+    pub landing: String,
 }
 
 pub fn classify_ground_contact(
@@ -21,8 +21,6 @@ pub fn classify_ground_contact(
     if width == 0
         || height == 0
         || impact.frame < 0
-        // A genuine ground impact ends a rally, unlike a player's hit.
-        || rally_end_frame.saturating_sub(impact.frame as u64) > 45
         || impact.before_frames.len() < 4
         || impact.after_frames.len() < 4
     {
@@ -103,10 +101,23 @@ pub fn classify_ground_contact(
     if has_negative && has_positive && boundary_distance > 0.09 {
         return None;
     }
+    let [x_m, y_m] = court.to_court(position)?;
+    let distance_m = (x_m.abs() - crate::court_geometry::COURT_LENGTH_M / 2.0)
+        .max(y_m.abs() - crate::court_geometry::COURT_WIDTH_M / 2.0);
+    let landing = if distance_m.abs() <= 0.25 {
+        "line_uncertain"
+    } else {
+        court.tentative_landing(position)?
+    };
+    if rally_end_frame.saturating_sub(impact.frame as u64) > 45
+        && (!impact.contact_observed || !matches!(landing, "line_uncertain" | "out"))
+    {
+        return None;
+    }
     Some(GroundContact {
         frame: impact.frame as u64,
         position,
-        landing: court.tentative_landing(position)?,
+        landing: landing.to_owned(),
     })
 }
 
@@ -166,6 +177,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn early_boundary_rebound_and_out_settle_are_floor_candidates() {
+        let (mut points, mut impact) = samples(100.0, true);
+        impact.position[1] = 103.0;
+        assert_eq!(
+            classify_ground_contact(&points, &impact, &court(), 1000, 200, 250)
+                .unwrap()
+                .landing,
+            "line_uncertain"
+        );
+        for p in &mut points {
+            p.x = 50.0;
+            if p.frame >= 5 {
+                p.y = 103.0;
+            }
+        }
+        impact.position[0] = 50.0;
+        assert_eq!(
+            classify_ground_contact(&points, &impact, &court(), 1000, 200, 250)
+                .unwrap()
+                .landing,
+            "out"
+        );
+    }
     #[test]
     fn mid_rally_and_above_surface_impacts_are_not_sand() {
         let (points, mut impact) = samples(300.0, true);

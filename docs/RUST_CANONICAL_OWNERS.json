@@ -206,6 +206,8 @@
                         "status":  "partial",
                         "adapters":  [
                                          "rust/volley-app/src/cpu_touches.rs",
+                                         "rust/volley-app/src/cpu_touches/ground_stage.rs",
+                                         "rust/volley-core/src/motion/ground_detector.rs",
                                          "rust/volley-core/src/ball_interpolation.rs",
                                          "rust/volley-core/src/motion/touch_detector.rs",
                                          "rust/volley-core/src/touch_pipeline/geometry.rs",

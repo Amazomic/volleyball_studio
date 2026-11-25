@@ -144,6 +144,8 @@ pub struct SurfaceEventProposal {
     pub surface: &'static str,
     pub outcome: &'static str,
     pub evidence: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<[f64; 2]>,
     pub provisional: bool,
 }
 

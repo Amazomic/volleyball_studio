@@ -58,14 +58,15 @@ assert.equal(context.model("players")[0],"RF-DETR Medium");
 assert.equal(context.model("pose")[0],"RTMPose-M Body7");
 assert.equal(context.model("tracking")[1],"algorithm");
 assert.equal(context.model("touch_detector")[0],"Touch Detector");
+assert.equal(context.model("ground_detector")[0],"Ground Detector");
 assert.equal(context.model("touch_types")[1],"algorithm");
 assert.equal(context.model("rallies")[1],"algorithm");
 const stages=context.stages;
 const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
-assert.equal(stages.length,15);
+assert.equal(stages.length,16);
 assert.ok(ids.includes("publish")&&!ids.includes("material"));
-for(const [row,count] of [[1,7],[2,8]]){
+for(const [row,count] of [[1,8],[2,8]]){
   const nodes=stages.filter(item=>item[3]===row);
   assert.equal(nodes.length,count);
 }
@@ -120,6 +121,7 @@ const examples=[
   ["Проверка исходного видео","video"],
   ["GPU · VBallNet: траектория мяча и розыгрыши","ball"],
   ["Интерполяция траектории мяча · Ball Stabilizer","ball_stabilizer"],
+  ["Ground Detector","ground_detector"],
   ["Поиск розыгрышей","rallies"],
   ["GPU · RF-DETR + RTMPose: игровые интервалы","players"],
   ["GPU · RTMPose-M: позы игроков","pose"],
@@ -184,8 +186,9 @@ assert.deepEqual(actualInputs("boxes"),["fusion","rallies"]);
 assert.deepEqual(actualInputs("tracking"),["boxes","pose"]);
 assert.equal(dataLinks.state("no_pose",{profile:{gpu:{pose_enabled:false}}}),"available");
 assert.equal(dataLinks.state("no_pose",{gpu_jobs:{pose:"saved"}}),"disabled");
-assert.deepEqual(actualInputs("touch_detector"),["ball_stabilizer"]);
-assert.deepEqual(actualInputs("touches"),["ball_stabilizer","rallies","touch_detector","tracking"]);
+assert.deepEqual(actualInputs("ground_detector"),["ball_stabilizer"]);
+assert.deepEqual(actualInputs("touch_detector"),["ground_detector"]);
+assert.deepEqual(actualInputs("touches"),["ball_stabilizer","ground_detector","rallies","touch_detector","tracking"]);
 assert.deepEqual(actualInputs("publish"),["rallies","touches","tracking"]);
 assert.deepEqual(actualInputs("identity"),["photos","publish","tracking","video"]);
 assert.equal(dataLinks.state("pose",null),"optional");

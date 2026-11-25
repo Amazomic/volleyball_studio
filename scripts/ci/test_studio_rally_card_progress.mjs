@@ -95,6 +95,16 @@ overlay.raw=false;
 refreshRallyCardTouchTicks();
 assert.equal(markers.children.length,4);
 
+timeline.data.surface_contact_candidates=[
+  {frame_index:140,surface:"floor",outcome:"line_uncertain"},
+  {frame_index:145,surface:"floor",outcome:"out"}
+];
+refreshRallyCardTouchTicks();
+assert.equal(markers.children.length,6);
+assert.ok(markers.children.some(x=>x.title.includes("Граница площадки")));
+assert.ok(markers.children.some(x=>x.title.includes("За пределами площадки")));
+delete timeline.data.surface_contact_candidates;
+refreshRallyCardTouchTicks();
 updateRallyCardProgress();
 assert.equal(progress.style["--rally-progress"],"50%");
 video.currentTime=13.9;overlay.presentedTime=12.5;

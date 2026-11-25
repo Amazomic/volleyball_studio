@@ -601,6 +601,7 @@ fn rebuild_from_snapshots_with_scope(
                             surface: "floor",
                             outcome,
                             evidence: "nine_observed_ball_frames_vertical_reversal",
+                            position: None,
                             provisional: true,
                         });
                     }
@@ -635,6 +636,7 @@ fn rebuild_from_snapshots_with_scope(
                             surface: "net",
                             outcome: "possible_deflection",
                             evidence: "trajectory_deflection_inside_projected_net",
+                            position: None,
                             provisional: true,
                         });
                     }
@@ -735,6 +737,68 @@ fn rebuild_from_snapshots_with_scope(
     Ok((format!("{:x}", digest.finalize()), diagnostics, totals))
 }
 
+fn parse_ground_contacts(
+    data: &Value,
+    manifest: &Value,
+    intervals: &[(u64, u64)],
+) -> Result<std::collections::VecDeque<SurfaceEventProposal>, String> {
+    let mut events = std::collections::VecDeque::new();
+    if data["ground_contacts"].is_null()
+        && manifest["ground_contact_count"].is_null()
+        && manifest["ground_detector_version"].is_null()
+    {
+        return Ok(events);
+    }
+    let rows = data["ground_contacts"]
+        .as_array()
+        .ok_or("Invalid ground contacts")?;
+    if rows.len() > 30_000
+        || manifest["ground_contact_count"].as_u64() != Some(rows.len() as u64)
+        || manifest["ground_detector_version"] != volley_core::motion::GROUND_DETECTOR_VERSION
+    {
+        return Err("Invalid ground contact count or version".into());
+    }
+    let mut counts = vec![0usize; intervals.len()];
+    for row in rows {
+        let frame = row["frame"].as_u64().ok_or("Invalid ground frame")?;
+        let position: [f64; 2] = serde_json::from_value(row["position"].clone())
+            .map_err(|_| "Invalid ground position")?;
+        let outcome = match row["landing"].as_str() {
+            Some("near_half") => "near_half",
+            Some("far_half") => "far_half",
+            Some("line_uncertain") => "line_uncertain",
+            Some("out") => "out",
+            _ => return Err("Invalid ground landing".into()),
+        };
+        let i = intervals.partition_point(|&(_, end)| end < frame);
+        if !intervals
+            .get(i)
+            .is_some_and(|&(start, end)| (start..=end).contains(&frame))
+            || position
+                .iter()
+                .any(|v| !v.is_finite() || !(-0.5..=1.5).contains(v))
+            || events
+                .back()
+                .is_some_and(|event: &SurfaceEventProposal| event.frame_index >= frame)
+        {
+            return Err("Untrusted ground contact".into());
+        }
+        counts[i] += 1;
+        if counts[i] > 256 {
+            return Err("Too many ground contacts in a rally".into());
+        }
+        events.push_back(SurfaceEventProposal {
+            frame_index: frame,
+            surface: "floor",
+            outcome,
+            evidence: "trajectory_ground_contact_v3",
+            position: Some(position),
+            provisional: true,
+        });
+    }
+    Ok(events)
+}
+
 #[expect(clippy::too_many_arguments)]
 fn publish_primary_from_touches(
     touch_file: &Path,
@@ -749,6 +813,7 @@ fn publish_primary_from_touches(
     replay_id: &str,
     touch_id: &str,
     track_counts: &[u8],
+    surface_events: &std::collections::VecDeque<SurfaceEventProposal>,
     cancel: Option<&AtomicBool>,
 ) -> Result<(String, RallyTotals, OutputCounters), String> {
     if track_counts.len() as u64 != frames {
@@ -774,7 +839,6 @@ fn publish_primary_from_touches(
     let mut digest = Sha256::new();
     let mut counters = OutputCounters::default();
     let history = CourtHistory::default();
-    let surface_events = std::collections::VecDeque::new();
     let mut next = next_contact(&mut source)?;
     let mut previous = None;
     for &(start, end) in intervals {
@@ -794,6 +858,12 @@ fn publish_primary_from_touches(
             }
             item.verify(frames, width, height)?;
             previous = Some(item.frame_index);
+            if surface_events
+                .binary_search_by_key(&item.frame_index, |event| event.frame_index)
+                .is_ok()
+            {
+                return Err("Ground contact was also published as a player Touch".into());
+            }
             first.get_or_insert(item.frame_index);
             last = Some(item.frame_index);
             maximum = maximum.max(item.probability);
@@ -832,7 +902,7 @@ fn publish_primary_from_touches(
             &mut digest,
             proposal,
             &history,
-            &surface_events,
+            surface_events,
             (replay_id, touch_id),
             &mut counters,
             track_counts,
@@ -1141,6 +1211,8 @@ fn process_inner(
             ));
         }
     }
+    let ground_events =
+        parse_ground_contacts(&data, &contacts, &intervals).map_err(storage::bad_request)?;
     let preliminary_intervals = Some(intervals);
     let replay_sha = sha(&tracked["sha256"]).map_err(storage::bad_request)?;
     let touch_sha = sha(&contacts["sha256"]).map_err(storage::bad_request)?;
@@ -1198,6 +1270,7 @@ fn process_inner(
                     &replay_sha,
                     frames,
                 )?,
+                &ground_events,
                 cancel,
             )?
         } else {
@@ -1257,7 +1330,7 @@ fn process_inner(
                 "python_serve_toss_possession_v2"
             },
             "ground_boundary_version":if primary_only {
-                "not_computed_primary_gpu_v1"
+                contacts["ground_detector_version"].as_str().unwrap_or("not_computed_primary_gpu_v1")
             } else {
                 "trajectory_court_surface_v3"
             },
@@ -1377,6 +1450,14 @@ mod tests {
         counts[50..79].fill(6);
         counts[12] = 8;
         counts[51] = 0;
+        let surface = parse_ground_contacts(
+            &json!({"ground_contacts":[
+                {"frame":54,"position":[0.3,0.6],"landing":"line_uncertain"},
+                {"frame":72,"position":[0.2,0.7],"landing":"out"}
+            ]}),
+            &json!({"ground_contact_count":2,"ground_detector_version":volley_core::motion::GROUND_DETECTOR_VERSION}),
+            &[(12,33),(50,78)],
+        ).unwrap();
         let (sha, stats, output_counts) = publish_primary_from_touches(
             &touches,
             &touch_sha,
@@ -1390,6 +1471,7 @@ mod tests {
             "replay-primary",
             "touch-primary",
             &counts,
+            &surface,
             None,
         )
         .unwrap();
@@ -1414,10 +1496,22 @@ mod tests {
         assert_eq!(rows[1]["motion_supported_touch_proposals"], 0);
         assert_eq!(rows[1]["method"], "primary_gpu_rally_mask_v1");
         assert_eq!(rows[1]["ball_coverage_not_recomputed"], true);
-        assert!(rows[1]["surface_event_candidates"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            rows[1]["surface_event_candidates"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            rows[1]["surface_event_candidates"][0]["outcome"],
+            "line_uncertain"
+        );
+        assert_eq!(rows[1]["surface_event_candidates"][1]["outcome"], "out");
+        assert_eq!(
+            rows[1]["surface_event_candidates"][0]["position"],
+            json!([0.3, 0.6])
+        );
         assert!(publish_primary_from_touches(
             &touches,
             &touch_sha,
@@ -1431,6 +1525,7 @@ mod tests {
             "replay-primary",
             "touch-primary",
             &counts,
+            &std::collections::VecDeque::new(),
             None,
         )
         .is_err());

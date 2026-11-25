@@ -113,12 +113,18 @@ struct NativeSurfaceEvent {
     surface: String,
     outcome: String,
     evidence: String,
+    #[serde(default)]
+    position: Option<[f64; 2]>,
     provisional: bool,
 }
 impl NativeSurfaceEvent {
     fn valid(&self, start: u64, end: u64) -> bool {
         self.provisional
             && (start..=end).contains(&self.frame_index)
+            && self
+                .position
+                .is_none_or(|p| p.iter().all(|v| v.is_finite() && (-0.5..=1.5).contains(v)))
+            && (self.evidence != "trajectory_ground_contact_v3" || self.position.is_some())
             && matches!(
                 (
                     self.surface.as_str(),
@@ -128,7 +134,7 @@ impl NativeSurfaceEvent {
                 (
                     "floor",
                     "near_half" | "far_half" | "out" | "line_uncertain",
-                    "nine_observed_ball_frames_vertical_reversal"
+                    "nine_observed_ball_frames_vertical_reversal" | "trajectory_ground_contact_v3"
                 ) | (
                     "net",
                     "possible_deflection",
@@ -655,6 +661,7 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
                     "surface":event.surface,
                     "outcome":event.outcome,
                     "evidence":event.evidence,
+                    "position":event.position,
                     "provisional":true,
                 }));
             }

@@ -42,6 +42,8 @@ use volley_core::{
 };
 use volley_inference::trajectory_tcn::{TrajectoryTcn, MODEL_FILENAME};
 
+pub(crate) mod ground_stage;
+
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 16384;
 const CHUNK: usize = 240;
@@ -426,21 +428,17 @@ fn read_canonical_ball_motion(
 const PRIMARY_TOUCH_BREAKS_FILE: &str = "touch_detector.json";
 const PRIMARY_TOUCH_BREAKS_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-pub(crate) fn write_primary_touch_breaks(
-    folder: &Path,
+pub(crate) fn primary_touch_breaks(
     motion: &volley_core::ball_interpolation::StabilizedBallMotion,
-    dimensions: &Value,
+    dimensions: (u32, u32),
     cancel: &AtomicBool,
-) -> Result<String, String> {
+) -> Result<Vec<volley_core::motion::TrajectoryBreak>, String> {
     use volley_core::motion::{trajectory_direction_breaks, BallObservation, DirectionBreakConfig};
 
-    let dimension = |key: &str| {
-        dimensions[key]
-            .as_u64()
-            .filter(|size| (64..=16384).contains(size))
-            .ok_or("Invalid primary Touch Detector video dimensions")
-    };
-    let (width, height) = (dimension("width")?, dimension("height")?);
+    let (width, height) = dimensions;
+    if !(64..=16384).contains(&width) || !(64..=16384).contains(&height) {
+        return Err("Invalid primary Touch Detector video dimensions".into());
+    }
     let mut breaks = Vec::new();
     for start in (0..motion.points.len()).step_by(CHUNK) {
         if cancel.load(Ordering::Acquire) {
@@ -467,11 +465,21 @@ pub(crate) fn write_primary_touch_breaks(
                 .filter(|impact| (start as i64..end as i64).contains(&impact.frame)),
         );
     }
+    Ok(breaks)
+}
+
+pub(crate) fn write_primary_touch_breaks(
+    folder: &Path,
+    breaks: &[volley_core::motion::TrajectoryBreak],
+    dimensions: (u32, u32),
+    frames: usize,
+) -> Result<String, String> {
+    let (width, height) = dimensions;
     let file = folder.join(PRIMARY_TOUCH_BREAKS_FILE);
     storage::write_json_atomic(
         &file,
         &json!({
-            "width":width,"height":height,"frames":motion.points.len(),"breaks":breaks
+            "width":width,"height":height,"frames":frames,"breaks":breaks
         }),
     )
     .map_err(|e| format!("Save Touch Detector output: {e:?}"))?;
@@ -1329,6 +1337,25 @@ fn is_launch_departure_echo(
             <= 16.0 + launch.speed_after_px_frame * elapsed as f64 * 1.45
 }
 
+fn separate_ground_contacts(
+    events: &mut Vec<PhysicalTouchCandidate>,
+    ground: &mut Vec<volley_core::motion::GroundContact>,
+) {
+    ground.retain(|contact| {
+        !events.iter().any(|event| {
+            event.frame_index == contact.frame
+                && event.body_contact_supported
+                && event.contact_landmark.is_some()
+                && event.provisional_track_id.is_some()
+        })
+    });
+    events.retain(|event| {
+        !ground
+            .iter()
+            .any(|contact| contact.frame == event.frame_index)
+    });
+}
+
 fn source_frame_contains_track(frames: &[TouchFrame], frame_index: u64, track_id: u64) -> bool {
     let Some(first) = frames.first() else {
         return false;
@@ -1919,7 +1946,7 @@ fn detect_stream_with_pose(
     training: &[training_samples::Example],
     ball_mask: Option<&crate::cpu_retrack::ball_track::BallTrackMask>,
     stabilized: Option<&StabilizedReplay>,
-    primary_breaks: Option<&[volley_core::motion::TrajectoryBreak]>,
+    ground_stage: Option<&ground_stage::GroundStage>,
     rally_starts: &[u64],
     preliminary_intervals: Option<&[(u64, u64)]>,
     mut on_progress: Option<&mut dyn FnMut(u64, u64) -> Result<(), String>>,
@@ -1940,6 +1967,7 @@ fn detect_stream_with_pose(
     if count == 0 || count > 48 * 3600 * 30 {
         return Err("Touch source frame count exceeds limit".into());
     }
+    let primary_breaks = ground_stage.map(|stage| stage.breaks.as_slice());
     let full_range = [(0, count - 1)];
     let windows = preliminary_intervals.unwrap_or(&full_range);
     let scoped_frames: u64 = windows.iter().map(|(start, end)| end - start + 1).sum();
@@ -1960,6 +1988,7 @@ fn detect_stream_with_pose(
     let mut motion_candidates: u64 = 0;
     let mut pending: Option<PhysicalTouchCandidate> = None;
     let mut initial_serves = Vec::<InitialServeProposal>::new();
+    let mut ground_contacts = Vec::<volley_core::motion::GroundContact>::new();
     let separation = (settings.min_interval_sec * 30.0).round().max(1.0) as u64;
     let mut process_block = |start: u64,
                              end: u64,
@@ -2032,6 +2061,13 @@ fn detect_stream_with_pose(
             if start >= end {
                 continue;
             }
+            let mut possible_ground = ground_stage
+                .map(|stage| {
+                    let first = stage.contacts.partition_point(|c| c.frame < start);
+                    let last = stage.contacts.partition_point(|c| c.frame < end);
+                    stage.contacts[first..last].to_vec()
+                })
+                .unwrap_or_default();
             let mut events = detect_ball_trajectory_touches(
                 evidence_frames,
                 width,
@@ -2039,12 +2075,17 @@ fn detect_stream_with_pose(
                 start,
                 end,
                 settings,
-                court.map(|court| (court, window.1)),
+                if ground_stage.is_some() {
+                    None
+                } else {
+                    court.map(|court| (court, window.1))
+                },
                 primary_breaks.map(|events| {
                     let first = events.partition_point(|event| event.frame < start as i64);
                     let last = events.partition_point(|event| event.frame < end as i64);
                     &events[first..last]
                 }),
+                &mut possible_ground,
             )?;
             attach_touch_source_evidence(
                 &mut events,
@@ -2103,7 +2144,7 @@ fn detect_stream_with_pose(
                 }
             }
 
-            for mut event in events {
+            for event in &mut events {
                 if let Some(track_id) = event.provisional_track_id {
                     let (first_slice, second_slice) = input.as_slices();
                     if !source_frame_contains_track(first_slice, event.frame_index, track_id)
@@ -2117,6 +2158,13 @@ fn detect_stream_with_pose(
                         event.court = None;
                     }
                 }
+            }
+            separate_ground_contacts(&mut events, &mut possible_ground);
+            if ground_contacts.len() + possible_ground.len() > 30_000 {
+                return Err("Ground contact count exceeds limit".into());
+            }
+            ground_contacts.extend(possible_ground);
+            for event in events {
                 motion_candidates += 1;
 
                 if let Some(last) = select_pending_touch(&mut pending, event, separation) {
@@ -2237,7 +2285,7 @@ fn detect_stream_with_pose(
         let path = output.with_file_name("initial_serve_proposals.partial.json");
         fs::write(
             &path,
-            serde_json::to_vec(&initial_serves).map_err(|e| e.to_string())?,
+            serde_json::to_vec(&json!({"initial_serve_proposals":initial_serves,"ground_contacts":ground_contacts})).map_err(|e| e.to_string())?,
         )
         .map_err(|e| format!("Save initial serve proposals: {e}"))?;
     }
@@ -2295,15 +2343,18 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
         None,
         None,
         None,
+        None,
     )
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn process_primary_with_progress_cancel(
     state: &AppState,
     req: &TouchRequest,
     rally_settings: volley_core::rally_reconstruction::RallySettings,
     scope: &PrimaryRallyScope,
     stabilized: &StabilizedReplay,
+    ground: &ground_stage::GroundStage,
     report: &mut dyn FnMut(u64, u64) -> Result<(), String>,
     cancel: &AtomicBool,
 ) -> Result<Value, ApiError> {
@@ -2314,6 +2365,7 @@ pub(crate) fn process_primary_with_progress_cancel(
         rally_settings,
         Some(scope),
         Some(stabilized),
+        Some(ground),
         Some(report),
         Some(cancel),
     )
@@ -2327,6 +2379,7 @@ fn process_with_ball_scope_and_rally_settings_report(
     rally_settings: volley_core::rally_reconstruction::RallySettings,
     primary_scope: Option<&PrimaryRallyScope>,
     stabilized: Option<&StabilizedReplay>,
+    ground: Option<&ground_stage::GroundStage>,
     mut report: Option<&mut dyn FnMut(u64, u64) -> Result<(), String>>,
     cancel: Option<&AtomicBool>,
 ) -> Result<Value, ApiError> {
@@ -2583,17 +2636,19 @@ fn process_with_ball_scope_and_rally_settings_report(
         } else {
             None
         };
-        let primary_breaks = if persisted.is_some() {
-            read_primary_touch_breaks(
-                &project_dir,
-                &manifest,
-                dimensions.width,
-                dimensions.height,
-                frames,
-            )?
-        } else {
-            None
-        };
+        if let Some(stage) = ground {
+            if stage.summary["source_trajectory_sha256"]
+                != stabilized
+                    .ok_or("Missing Ground Detector trajectory")?
+                    .trajectory_sha256
+                || stage.summary["court_revision"]
+                    != json!(court_calibration.as_ref().map(|c| c.revision.as_str()))
+                || stage.summary["width"] != dimensions.width
+                || stage.summary["height"] != dimensions.height
+            {
+                return Err("Ground Detector input changed before Touch refinement".into());
+            }
+        }
         let (digest, events, raw) = detect_stream_with_pose(
             tcn.as_mut(),
             &source,
@@ -2616,7 +2671,7 @@ fn process_with_ball_scope_and_rally_settings_report(
             &training_examples,
             ball_mask.as_deref(),
             persisted.as_ref(),
-            primary_breaks.as_deref(),
+            ground,
             rally_starts,
             preliminary_scope_applied.then_some(preliminary.as_slice()),
             Some(&mut checked_progress),
@@ -2687,22 +2742,31 @@ fn process_with_ball_scope_and_rally_settings_report(
             } else { "unknown_touch_no_pose" },
             "cpu_processing_complete":false,
         });
-        record["primary_touch_detector_reused"] = json!(primary_breaks.is_some());
+        record["primary_touch_detector_reused"] =
+            json!(ground.is_some_and(|stage| stage.summary["primary_breaks_reused"] == true));
+        if let Some(stage) = ground {
+            record["ground_detector"] = stage.summary.clone();
+        }
         if let Some(stabilized) = stabilized {
             record["ball_stabilizer"] = stabilized.summary();
         }
         let serve_proposals_file = folder.join("initial_serve_proposals.partial.json");
-        let serve_proposals: Value = serde_json::from_slice(
+        let mut surface_data: Value = serde_json::from_slice(
             &fs::read(&serve_proposals_file)
                 .map_err(|e| format!("Read initial serve proposals: {e}"))?,
         )
         .map_err(|e| format!("Invalid initial serve proposals: {e}"))?;
         fs::remove_file(&serve_proposals_file)
             .map_err(|e| format!("Remove temporary serve proposals: {e}"))?;
+        let serve_proposals = surface_data["initial_serve_proposals"].take();
+        let ground_contacts = surface_data["ground_contacts"].take();
+        record["ground_detector_version"] = json!(volley_core::motion::GROUND_DETECTOR_VERSION);
+        record["ground_contact_count"] = json!(ground_contacts.as_array().map_or(0, Vec::len));
         record["initial_serve_proposal_count"] =
             json!(serve_proposals.as_array().map_or(0, Vec::len));
         let preliminary_data = json!({
             "initial_serve_proposals":serve_proposals,
+            "ground_contacts":ground_contacts,
             "schema":"volley-native-preliminary-continuous-rallies/1",
             "source_replay_id":req.replay_id,
             "source_replay_sha256":sha,
@@ -2949,6 +3013,36 @@ mod tests {
         let normalized = published_touch_settings(Some(optional)).unwrap();
         assert!(!normalized.require_pose);
         assert_eq!(normalized.algorithm, TouchAlgorithm::BallTrajectory);
+    }
+
+    #[test]
+    fn floor_contacts_do_not_remove_body_confirmed_player_contacts() {
+        let [mut player, floor] = recorded_rebound_and_departure(235);
+        player.contact_landmark = Some(volley_core::pose_contact::BodyContact {
+            joint_indices: [9, 9],
+            point_px: [496.25, 350.0],
+            distance_px: 0.0,
+            normalized_distance: 0.0,
+        });
+        let mut touches = vec![player, floor];
+        let mut ground = vec![
+            volley_core::motion::GroundContact {
+                frame: 235,
+                position: [0.3, 0.6],
+                landing: "line_uncertain".into(),
+            },
+            volley_core::motion::GroundContact {
+                frame: 239,
+                position: [0.2, 0.7],
+                landing: "out".into(),
+            },
+        ];
+        separate_ground_contacts(&mut touches, &mut ground);
+        assert_eq!(touches.len(), 1);
+        assert_eq!(touches[0].frame_index, 235);
+        assert_eq!(ground.len(), 1);
+        assert_eq!(ground[0].frame, 239);
+        assert_eq!(ground[0].landing, "out");
     }
 
     #[test]
