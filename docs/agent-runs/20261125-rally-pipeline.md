@@ -1,0 +1,35 @@
+﻿# Rally-level concurrent pose prepass
+
+Base: b542e3eecc7ef8b3f7ff4f0796a79ad63d3f77ed
+Branch: codex/20261125/rally-pipeline
+
+Goal: pass completed primary rally windows from RF-DETR to the canonical ByteTrack stable crop-plan owner and RTMPose while later windows are still being detected.
+
+Decision: preserve whole-video authoritative tracking, including cross-rally merges and pruning. The optional VOLLEY_RALLY_PIPELINE=1 prepass uses the same stable-plan and pose batch helpers. Reuse only identical absolute frame, original RGB SHA-256, dimensions, ordered boxes and visibility masks. No persistent provisional evidence. Bounded queue and in-memory cache; full queue or prepass failure leaves canonical processing intact. GPU session budget divided across three sessions. This is opt-in pending isolated GPU parity and end-to-end benchmark. Duplicate decoding/local tracking and rejected cached groups may outweigh overlap.
+
+Checks: standalone rally_handoff tests 4 passed; WASM build and cargo check -p volley-app --all-targets --offline --locked passed; cargo fmt and workspace Clippy -D warnings passed after correcting one lint. Full check-all gate started, result pending. GPU/real-match parity, performance and deployment NOT TESTED. No user project data used as a fixture. No push/deploy until accepted.
+
+Next: inspect full check-all result; test isolated GPU A/B with approved fixture, compare final pose/track artifacts and timings; then accept or revise opt-in path and integrate through the normal develop/deployment queue.
+
+## Explicit user-requested short-project benchmark (2026-11-25)
+
+Full check-all gate passed (1007 Rust tests, 23 ignored, 111 Node gates, fmt and Clippy). An isolated byte-identical 58.166667 s original copy, same saved profile/court/reference data, fresh output roots, no result/GPU reuse, RTX 5070 Ti Laptop GPU, optimized test binary with release LTO disabled. Both runs finished successfully. Baseline wall 55.197 s; experimental 68.431 s (+13.234 s, +24.0%). RF-DETR stage including early-worker join: 18.208 -> 29.194 s; final RTMPose stage: 19.551 -> 22.147 s. 608 speculative pose groups produced, zero of 623 final groups reused. Same 13 tracks, 1505 measured poses, 5259 interpolated poses, 25 touch candidates, 2 floor contacts, 2 rallies (6 and 5 tracks; 14 and 11 touches), 11 auto-assigned track IDs. Pose and touch file hashes identical; RF-DETR hash identical; normalized rally rows equal after removing generated rally IDs. Ball and complete tracking evidence file hashes differed. One run each, no independent quality labels. Experimental performance acceptance FAILED; not enabled, integrated or deployed. Keep the canonical sequential path. Next technical step: remove duplicate whole-video crop planning/decode or prove stable per-rally plans before measuring poses.
+## Rally-local ByteTrack follow-up
+
+Tracking policy v24 resets ByteTrack prediction, lost-track state and separated-pair history at every confirmed roster-window start and independent selected interval start, retaining the monotonically increasing Track ID allocator. Roster reconciliation, pruning, gap filling and crop restoration therefore cannot use the same provisional ID across rallies. Uncertain selected intervals stay separately scoped and raw evidence remains intact. Early candidate serialization follows the exact persisted RF-DETR JSON value representation. Regression tests for direct tracker reset and adjacent roster windows with no detection gap passed.
+
+Same isolated 58.166667 s project copy and profile, no cache reuse, one run per mode:
+- v24 parallel: 60.418 s, RF-DETR stage including early-worker join 30.228 s, final pose stage 13.743 s, 608 early batches computed, 592/623 accepted (95.02%).
+- v24 sequential: 63.010 s, RF-DETR 23.824 s, final pose stage 20.528 s. Measured wall reduction 2.592 s (4.11%); previous v23 sequential was 55.197 s, so a robust speedup is not established.
+- Both: 16 provisional IDs (previously 13, independent intervals), 1505 measured poses, 5260 interpolated poses, 25 touch candidates, 2 floor contacts, 2 rallies (6 and 5 IDs; 14 and 11 touches; team_1 and team_2), 11 auto-assigned IDs. RF-DETR, pose and touch SHA-256 identical; normalized rally rows identical; complete tracked JSON differs only in ball_candidates and selected_ball on nine frames.
+- Main remaining cost: second original RGB decode/check and GPU competition/worker join. Keep opt-in, do not deploy experimental configuration merely from one A/B pair. Full updated gate in progress.
+
+## Single-pass rally-block assembly, v25
+
+Removed speculative pose cache and second stable-plan inference. Detector sends complete confirmed-rally windows with bounded backpressure; the worker finalizes ByteTrack and uses one original RGB decoding stream for RTMPose, with no pixel-hash comparison or second model invocation. Disk-backed, SHA-verified block evidence is assembled into the existing replay and measured-pose contracts, rebasing frame and Track IDs and verifying raw RF-DETR evidence against the immutable fusion. The final CPU attach/interpolation is scoped by roster/ID; neither repeats detector or pose inference. Uncertain-only intervals are retained as ball metadata but no longer selected for player detection in the experimental mode, with the normal context around confirmed rallies. Saved stable plan and measured poses are reused without rerunning ByteTrack or RTMPose on subsequent CPU-only requests. Stable plan copy regression checks exact bytes and corrupted/truncated input.
+
+Isolated short-project fresh full CUDA runs: 48.714 s and 44.643 s (previous experimental 60.418 s; original sequence 55.197 s). Both processed 1246 selected player frames vs 1446 previously, 585 pose batches exactly once, 11 confirmed-rally IDs, 1367 measured poses, 4969 interpolated poses, 25 contacts, 2 floor contacts, 2 rallies (6 and 5 players; 14 and 11 touches), 11 ReID assignments. The two runs have the same output counts. Final measured-pose counts within published rallies: 782 and 550, vs 800 and 551 before narrowing the context. The comparison is not a scope-controlled A/B or ground-truth accuracy test. Post-only correctness run on saved v25 full result (debug build) completed in 13.433 s with GPU reused, identical crop-plan, tracking, measured-pose and touch SHA-256. Saved plan adds 4.44 MiB for this clip.
+
+Updated full gate initially failed on existing isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track test; rerun in isolation passed. Previous v24 full gate had an intermittent FFmpeg original montage fixture missing-file failure. Serial gate running. Experimental mode remains opt-in; no push or deployment of unaccepted changes.
+
+Serial check-all PASSED (Rust, fmt, Clippy, 111 Node gates). Final checksum hardening and assembly regression: both focused tests PASS; workspace Clippy -D warnings PASS. Two full-run pose/touch hashes agree. Retained experimental mode; broader quality and scope-controlled speed validation remain before rollout.

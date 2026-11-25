@@ -1444,6 +1444,11 @@ fn requested_gpu_model_stack(detector: DetectorVariant) -> &'static str {
     }
 }
 
+fn rally_pipeline_enabled(request: &StartRequest) -> bool {
+    request.gpu.pose_enabled
+        && request.mode.allows_gpu_execution()
+        && std::env::var("VOLLEY_RALLY_PIPELINE").as_deref() == Ok("1")
+}
 fn compatible_version(saved: &Value, request: &StartRequest, identity: &Value) -> bool {
     saved["schema"] == SCHEMA
         && saved["analysis_range"] == json!(request.analysis_range)
@@ -1515,6 +1520,21 @@ fn find_reusable(
             continue;
         };
         let complete_gpu = gpu_lineage_valid(&project, request, identity, &saved);
+        if rally_pipeline_enabled(request)
+            && (!complete_gpu
+                || saved["status"] != "complete"
+                || !decode_profiles(
+                    saved["profile"]["gpu"].clone(),
+                    saved["profile"]["post"].clone(),
+                )
+                .is_ok_and(|(_, post)| {
+                    json!(post.tracking) == json!(request.post.tracking)
+                        && post.interpolate_players == request.post.interpolate_players
+                        && json!(post.ball_stabilizer) == json!(request.post.ball_stabilizer)
+                }))
+        {
+            continue;
+        }
         let recoverable_pose = request.gpu.pose_enabled
             && saved["gpu_jobs"]["pose"].is_null()
             && matches!(
@@ -1527,6 +1547,8 @@ fn find_reusable(
                 gpu_lineage_valid(&project, &without_pose, identity, &saved)
             };
         if saved["id"] != id
+            || (saved["rally_block_pipeline"].as_bool().unwrap_or(false)
+                != rally_pipeline_enabled(request))
             || !compatible_version(&saved, request, identity)
             || !(complete_gpu || recoverable_pose)
             || saved["gpu_rally_mask"]["ground_detector"]["court_revision"] != json!(court_revision)
@@ -1841,6 +1863,7 @@ async fn pipeline(
     }
     #[cfg(any(unix, windows))]
     let mut pending_shared_pose: Option<crate::pose_inference::PendingPose>;
+    let mut early_poses = None;
     log_native(
         path,
         "Проверка исходного видео",
@@ -2125,6 +2148,12 @@ async fn pipeline(
                         request.gpu.cpu_threads,
                         request.gpu.primary_rallies,
                         request.post.ball_stabilizer,
+                        rally_pipeline_enabled(request).then(|| cpu_retrack::EarlyPoseOptions {
+                            tracking: request.post.tracking,
+                            interpolate_players: request.post.interpolate_players,
+                            threads: request.gpu.cpu_threads,
+                            cancelled: cancel.clone(),
+                        }),
                         cancel,
                         |fraction, processed, total, rally_mask| {
                             if let Some((mask, decoded_frames)) = rally_mask {
@@ -2172,6 +2201,18 @@ async fn pipeline(
                 status["gpu_rally_mask"] = result.rally_filter.unwrap_or(Value::Null);
                 save(path, status)?;
                 pending_shared_pose = result.pending_pose;
+                early_poses = result.early_poses;
+                status["early_pose_groups"] =
+                    json!(early_poses.as_ref().map_or(0, |cache| cache.group_count()));
+                if let Some(error) = result.early_pose_error {
+                    log_event(
+                        path,
+                        "RTMPose",
+                        "warning",
+                        &format!("Rally pose prepass: {error}"),
+                    )?;
+                }
+                save(path, status)?;
                 Some((result.ball_job_id, result.player_job_id))
             } else {
                 return Err(
@@ -2269,6 +2310,7 @@ async fn pipeline(
             threads: request.gpu.cpu_threads,
             memory_mb: request.gpu.gpu_memory_limit_mb,
             ball_stabilizer: request.post.ball_stabilizer,
+            early: early_poses,
         },
     );
     let pose_permit = if refine_pose.is_some() {
@@ -2976,6 +3018,7 @@ pub async fn start(
         "gpu_model_stack":requested_gpu_model_stack(request.gpu.person_detector),
         "pose_pipeline_policy":cpu_retrack::POSE_REFINEMENT_POLICY,
         "zero_copy_request":zero_copy_requested(),"zero_copy_active":false,
+        "rally_block_pipeline":rally_pipeline_enabled(&request),
         "gpu_jobs":{},"cpu_runs":{},"analysis_id":null,
         "gpu_rally_mask":null,"gpu_rally_mask_sha256":null,
         "postprocessing_id":null,"current_gpu_job_id":null,
@@ -5040,4 +5083,84 @@ mod branching_tests {
         );
         fs::remove_dir_all(base).unwrap();
     }
+}
+
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit isolated project benchmark with native CUDA models"]
+async fn isolated_project_rally_pipeline_benchmark() {
+    let data_root = PathBuf::from(std::env::var("VOLLEY_BENCH_DATA").unwrap());
+    let repository_root = PathBuf::from(std::env::var("VOLLEY_BENCH_REPO").unwrap());
+    let request: StartRequest =
+        serde_json::from_slice(&fs::read(data_root.join("benchmark_request.json")).unwrap())
+            .unwrap();
+    let project_id = request.project_id.clone();
+    let post_only = request.mode == PipelineMode::Post;
+    let state = Arc::new(AppState {
+        repository_root,
+        data_root: data_root.clone(),
+        writes_enabled: true,
+        montage: crate::montage::MontageManager::new(),
+        preparation: crate::preparation::PreparationManager::new(),
+        preview_limit: tokio::sync::Semaphore::new(1),
+        touch_limit: tokio::sync::Semaphore::new(1),
+        continuity_limit: tokio::sync::Semaphore::new(1),
+        reid_limit: tokio::sync::Semaphore::new(1),
+        identity_limit: tokio::sync::Semaphore::new(1),
+        statistics_limit: tokio::sync::Semaphore::new(1),
+        marks_limit: tokio::sync::Semaphore::new(1),
+        quick_reel: crate::quick_reel::QuickReelManager::new(),
+        inference_limit: tokio::sync::Semaphore::new(1),
+        full_inference: crate::inference_full::FullInferenceManager::new(),
+    });
+    let started = std::time::Instant::now();
+    let Json(queued) = start(State(state), HeaderMap::new(), Json(request))
+        .await
+        .unwrap();
+    let path = data_root
+        .join("projects")
+        .join(&project_id)
+        .join("native_studio_pipelines")
+        .join(queued["id"].as_str().unwrap())
+        .join("status.json");
+    let mut last = Value::Null;
+    let outcome = loop {
+        let status = read(&path).unwrap();
+        if status["stage"] != last {
+            eprintln!(
+                "BENCH_STAGE {:.3}s {}",
+                started.elapsed().as_secs_f64(),
+                status["stage"]
+            );
+            last = status["stage"].clone();
+        }
+        if matches!(
+            status["status"].as_str(),
+            Some("complete" | "failed" | "cancelled")
+        ) {
+            break status;
+        }
+        assert!(
+            started.elapsed().as_secs() < 300,
+            "Benchmark exceeded 300 seconds"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    eprintln!(
+        "BENCH_RESULT {}",
+        json!({
+            "wall_seconds": started.elapsed().as_secs_f64(),
+            "status":outcome["status"], "error":outcome["error"], "path":path,
+            "early_pose_groups":outcome["early_pose_groups"],
+            "player_tracking_stats":outcome["player_tracking_stats"],
+            "cpu_runs":outcome["cpu_runs"], "gpu_jobs":outcome["gpu_jobs"],
+            "stages":outcome["stages"], "automatic_identity_complete":outcome["automatic_identity_complete"],
+            "identity_count":outcome["automatic_identity"]["automatic_count"],
+            "identity_error":outcome["automatic_identity_error"], "zero_copy":outcome["zero_copy_active"],
+            "gpu_reused":outcome["gpu_reused"], "result_reused":outcome["result_reused"]
+        })
+    );
+    assert_eq!(outcome["status"], "complete", "{outcome}");
+    assert_eq!(outcome["gpu_reused"], post_only);
+    assert_ne!(outcome["result_reused"], true);
 }

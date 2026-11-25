@@ -11,6 +11,8 @@ use std::{
 use volley_core::{bbox_iou, fusion::Candidate, tracker::PoseEvidence};
 use volley_inference::{pose::PoseEngine, Device};
 use volley_media::raw_decoder::{decode_original_frames_in_range, AnalysisRange};
+mod early;
+pub(crate) use early::{CompletedRallies, EarlyPoseOptions, EarlyPoseWorker};
 
 pub(crate) const POLICY: &str = "original_rgb_stable_track_pose_attachment_v6";
 pub(crate) const REJECTED_LEADING_POLICY: &str = "original_rgb_stabilized_track_crops_v4";
@@ -226,6 +228,7 @@ pub(crate) struct Refinement {
     pub threads: usize,
     pub memory_mb: u64,
     pub ball_stabilizer: volley_core::ball_interpolation::BallStabilizerSettings,
+    pub early: Option<CompletedRallies>,
 }
 
 pub(super) const SAMPLE_ROW_STRIDE: usize = 1;
@@ -328,47 +331,69 @@ fn touch_pose_schedule(
             return Err("cancelled".into());
         }
         let row = read_crop_plan_row(&mut reader, frame, source.scope)?;
-        let from = frame as i64 - TRACK_LOOKUP_WINDOW;
-        let to = frame as i64 + TRACK_LOOKUP_WINDOW;
-        let nearby = &impacts[impacts.partition_point(|impact| impact.frame < from)
-            ..impacts.partition_point(|impact| impact.frame <= to)];
-        let serve_point = serve_points.get(&frame);
-        if nearby.is_empty() && serve_point.is_none() {
-            continue;
-        }
-        let players = row["tracked_players"]
-            .as_array()
-            .ok_or("Missing tracked players")?;
-        for (player, bbox, _) in proposals(players) {
-            let id = players[player]["track_id"]
-                .as_u64()
-                .ok_or("Missing Track ID")?;
-            let [x1, y1, x2, y2] = [
-                bbox[0] * width,
-                bbox[1] * height,
-                bbox[2] * width,
-                bbox[3] * height,
-            ];
-            if let Some(&[x, y]) = serve_point {
-                let (x, y) = (x * width, y * height);
-                let distance = (x - x.clamp(x1, x2)).hypot(y - y.clamp(y1, y2));
-                if distance <= (y2 - y1) * MAX_BOX_DISTANCE_IN_PLAYER_HEIGHTS {
-                    schedule.select(frame, id, source.frames);
-                }
-            }
-            for impact in nearby {
-                let [x, y] = impact.position;
-                let distance = (x - x.clamp(x1, x2)).hypot(y - y.clamp(y1, y2));
-                if distance <= (y2 - y1) * MAX_BOX_DISTANCE_IN_PLAYER_HEIGHTS {
-                    schedule.select(impact.frame as u64, id, source.frames);
-                }
-            }
-        }
+        schedule_frame(
+            &mut schedule,
+            &row,
+            frame,
+            source.frames,
+            &impacts,
+            &serve_points,
+            (width, height),
+        )?;
     }
     if reader.line()?.is_some() || reader.finish() != source.replay_sha {
         return Err("Tracking crop plan changed during Touch Detector".into());
     }
     Ok(schedule)
+}
+
+fn schedule_frame(
+    schedule: &mut PoseSchedule,
+    row: &Value,
+    frame: u64,
+    frames: u64,
+    impacts: &[volley_core::motion::TrajectoryBreak],
+    serve_points: &BTreeMap<u64, [f64; 2]>,
+    (width, height): (f64, f64),
+) -> Result<(), String> {
+    let from = frame as i64 - TRACK_LOOKUP_WINDOW;
+    let to = frame as i64 + TRACK_LOOKUP_WINDOW;
+    let nearby = &impacts[impacts.partition_point(|impact| impact.frame < from)
+        ..impacts.partition_point(|impact| impact.frame <= to)];
+    let serve_point = serve_points.get(&frame);
+    if nearby.is_empty() && serve_point.is_none() {
+        return Ok(());
+    }
+    let players = row["tracked_players"]
+        .as_array()
+        .ok_or("Missing tracked players")?;
+    for (player, bbox, _) in proposals(players) {
+        let id = players[player]["track_id"]
+            .as_u64()
+            .ok_or("Missing Track ID")?;
+        let [x1, y1, x2, y2] = [
+            bbox[0] * width,
+            bbox[1] * height,
+            bbox[2] * width,
+            bbox[3] * height,
+        ];
+        if let Some(&[x, y]) = serve_point {
+            let (x, y) = (x * width, y * height);
+            let distance = (x - x.clamp(x1, x2)).hypot(y - y.clamp(y1, y2));
+            if distance <= (y2 - y1) * MAX_BOX_DISTANCE_IN_PLAYER_HEIGHTS {
+                schedule.select(frame, id, frames);
+            }
+        }
+        for impact in nearby {
+            let [x, y] = impact.position;
+            let distance = (x - x.clamp(x1, x2)).hypot(y - y.clamp(y1, y2));
+            if distance <= (y2 - y1) * MAX_BOX_DISTANCE_IN_PLAYER_HEIGHTS {
+                schedule.select(impact.frame as u64, id, frames);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub(super) struct Source<'a> {
@@ -500,6 +525,70 @@ fn pose_frame_total(
     Ok(total)
 }
 
+type Crop = (usize, [f64; 4], &'static str);
+type PoseJoints = [[f64; 3]; 17];
+type Visibility = Option<Vec<[f64; 4]>>;
+
+fn frame_crops(
+    players: &[Value],
+    index: u64,
+    previous_crops: &mut BTreeMap<u64, [f64; 4]>,
+    measure: impl Fn(u64, u64) -> bool,
+) -> Result<Vec<Crop>, String> {
+    let mut next_crops = BTreeMap::new();
+    let mut crops = Vec::new();
+    for (player, bbox, origin) in proposals(players) {
+        let id = players[player]["track_id"]
+            .as_u64()
+            .ok_or("Missing Track ID for pose crop")?;
+        if measure(index, id) {
+            crops.push((
+                player,
+                stabilize_pose_crop(bbox, previous_crops.get(&id).copied()),
+                origin,
+            ));
+        }
+        next_crops.insert(id, bbox);
+    }
+    *previous_crops = next_crops;
+    Ok(crops)
+}
+
+fn estimate_group(
+    engine: &mut PoseEngine,
+    pixels: &[u8],
+    (width, height): (usize, usize),
+    boxes: &[[f64; 4]],
+    visibility: &[Visibility],
+) -> Result<Vec<Option<PoseJoints>>, String> {
+    let estimates =
+        engine.infer_batch_original_visible(pixels, width, height, boxes, visibility)?;
+    if estimates.len() != boxes.len() || visibility.len() != boxes.len() {
+        return Err("RTMPose batch length mismatch".into());
+    }
+    Ok(estimates
+        .into_iter()
+        .zip(boxes)
+        .zip(visibility)
+        .map(|((joints, bbox), visible)| {
+            let joints = joints.map(|p| {
+                let (x, y) = (p.x as f64, p.y as f64);
+                let score = if visible.as_ref().is_some_and(|parts| {
+                    !parts
+                        .iter()
+                        .any(|r| x >= r[0] && x < r[2] && y >= r[1] && y < r[3])
+                }) {
+                    0.0
+                } else {
+                    p.score as f64
+                };
+                [x, y, score]
+            });
+            valid_attached_pose(&PoseEvidence { joints }, *bbox, visible.as_deref())
+                .then_some(joints)
+        })
+        .collect())
+}
 pub(super) fn refine(
     repository: &Path,
     source: Source<'_>,
@@ -537,75 +626,42 @@ pub(super) fn refine(
             let players = row["tracked_players"]
                 .as_array()
                 .ok_or("Missing tracked players")?;
-            let mut next_crops = BTreeMap::new();
-            let mut crops = Vec::new();
-            for (player, bbox, origin) in proposals(players) {
-                let id = players[player]["track_id"]
-                    .as_u64()
-                    .ok_or("Missing Track ID for pose crop")?;
-                if measure(index, id) {
-                    crops.push((
-                        player,
-                        stabilize_pose_crop(bbox, previous_crops.get(&id).copied()),
-                        origin,
-                    ));
-                }
-                next_crops.insert(id, bbox);
-            }
-            previous_crops = next_crops;
-            if !crops.is_empty() && engine.is_none() {
-                engine = Some(PoseEngine::load(
-                    repository,
-                    Device::Cuda,
-                    settings.threads,
-                    settings.memory_mb,
-                )?);
-            }
+            let crops = frame_crops(players, index, &mut previous_crops, measure)?;
             let mut measured = Vec::new();
-            if let Some(engine) = &mut engine {
-                for group in crops.chunks(8) {
-                    let boxes = group.iter().map(|(_, bbox, _)| *bbox).collect::<Vec<_>>();
-                    let visibility = group
-                        .iter()
-                        .map(|(player, _, _)| pose_visibility(&players[*player]))
-                        .collect::<Vec<_>>();
-                    let estimates = engine.infer_batch_original_visible(
-                        pixels,
-                        width,
-                        height,
-                        &boxes,
-                        &visibility,
-                    )?;
-                    for (((player, bbox, origin), joints), visible) in
-                        group.iter().zip(estimates).zip(visibility)
-                    {
-                        let joints = joints.map(|p| {
-                            let (x, y) = (p.x as f64, p.y as f64);
-                            let score = if visible.as_ref().is_some_and(|parts| {
-                                !parts
-                                    .iter()
-                                    .any(|r| x >= r[0] && x < r[2] && y >= r[1] && y < r[3])
-                            }) {
-                                0.0
+            for group in crops.chunks(8) {
+                let boxes = group.iter().map(|(_, bbox, _)| *bbox).collect::<Vec<_>>();
+                let visibility = group
+                    .iter()
+                    .map(|(player, _, _)| pose_visibility(&players[*player]))
+                    .collect::<Vec<_>>();
+                if engine.is_none() {
+                    engine = Some(PoseEngine::load(
+                        repository,
+                        Device::Cuda,
+                        settings.threads,
+                        settings.memory_mb,
+                    )?);
+                }
+                let estimates = estimate_group(
+                    engine.as_mut().ok_or("Missing RTMPose engine")?,
+                    pixels,
+                    (width, height),
+                    &boxes,
+                    &visibility,
+                )?;
+                for ((player, bbox, origin), joints) in group.iter().zip(estimates) {
+                    if let Some(joints) = joints {
+                        measured.push(json!({
+                            "track_id": players[*player]["track_id"],
+                            "box": bbox,
+                            "keypoints": joints,
+                            "crop_origin": if *origin == "interpolated_track_box" {
+                                "interpolated_box"
                             } else {
-                                p.score as f64
-                            };
-                            [x, y, score]
-                        });
-                        let evidence = PoseEvidence { joints };
-                        if valid_attached_pose(&evidence, *bbox, visible.as_deref()) {
-                            measured.push(json!({
-                                "track_id": players[*player]["track_id"],
-                                "box": bbox,
-                                "keypoints": joints,
-                                "crop_origin": if *origin == "interpolated_track_box" {
-                                    "interpolated_box"
-                                } else {
-                                    "observed"
-                                },
-                            }));
-                            accepted += 1;
-                        }
+                                "observed"
+                            },
+                        }));
+                        accepted += 1;
                     }
                 }
             }

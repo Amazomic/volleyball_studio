@@ -3,7 +3,9 @@
 use super::*;
 mod rally_mask;
 mod zero_copy;
+use crate::cpu_retrack::{CompletedRallies, EarlyPoseOptions, EarlyPoseWorker};
 use crate::pose_inference::{GpuPoseStage, PendingPose, PoseStream};
+use crate::rally_handoff::{rally_windows, RallyHandoff};
 pub(crate) use rally_mask::PrimaryRallySettings;
 use rally_mask::RallyMask;
 use std::cell::RefCell;
@@ -168,6 +170,8 @@ pub(crate) struct JointPair {
     pub windows: usize,
     pub decoded_frames: u64,
     pub pending_pose: Option<PendingPose>,
+    pub early_poses: Option<CompletedRallies>,
+    pub early_pose_error: Option<String>,
     pub source_provenance: Value,
     pub rally_filter: Option<Value>,
 }
@@ -291,6 +295,7 @@ pub(crate) fn run_joint_pair(
     cpu_threads: usize,
     rally_settings: PrimaryRallySettings,
     stabilizer_settings: volley_core::ball_interpolation::BallStabilizerSettings,
+    early_pose: Option<EarlyPoseOptions>,
     cancelled: &AtomicBool,
     mut report: impl FnMut(f64, u64, u64, Option<(&Value, u64)>) -> Result<(), String>,
 ) -> Result<JointPair, String> {
@@ -301,7 +306,7 @@ pub(crate) fn run_joint_pair(
     if !state.writes_enabled || !(1..=30).contains(&person_stride) {
         return Err("Invalid shared GPU job or person sampling interval".into());
     }
-    let session_count = 2u64 + u64::from(pose_enabled);
+    let session_count = 2u64 + u64::from(pose_enabled || early_pose.is_some());
     if gpu_memory_limit_mb > 0 && gpu_memory_limit_mb < session_count {
         return Err("GPU memory limit too small for shared sessions".into());
     }
@@ -394,6 +399,8 @@ pub(crate) fn run_joint_pair(
         None
     });
     let mut gpu_pose = None;
+    let mut early_worker = None;
+    let early_pose_error = None;
     let rally_filter;
     let player_target;
     ball_writer.ball_samples = Some(Vec::new());
@@ -489,7 +496,7 @@ pub(crate) fn run_joint_pair(
             total_frames,
             None,
         )?;
-        let (mask, contacts) = RallyMask::detect(
+        let (mut mask, contacts) = RallyMask::detect(
             &trajectory,
             rally_settings,
             stabilizer_settings,
@@ -509,6 +516,9 @@ pub(crate) fn run_joint_pair(
             return Err(format!(
                 "Не найдены надёжные розыгрыши ({reason}); поиск игроков и поз не запускался. Проверьте траекторию мяча и настройки розыгрышей"
             ));
+        }
+        if early_pose.is_some() && !pose_enabled {
+            mask.restrict_to_confirmed();
         }
         ball_writer.ball_samples = None;
         let selected_frames = mask.included_frames();
@@ -543,6 +553,51 @@ pub(crate) fn run_joint_pair(
         )?;
         rally_filter = Some(mask_value);
         let mut player_samples = 0u64;
+        if let Some(mut options) = early_pose.filter(|_| !pose_enabled) {
+            options.tracking.min_track_observations = crate::cpu_retrack::confirmation_threshold(
+                options.tracking.min_track_observations,
+                Some(person_stride as u64),
+            );
+            let decoded_frames = ball_scan.decode.decoded_frames;
+            let frames = decoded_frames / 9 * 9;
+            let start = || -> Result<_, String> {
+                let selected = crate::cpu_touches::align_primary_intervals(
+                    &mask.selected,
+                    decoded_frames,
+                    frames,
+                )?;
+                let rallies = crate::cpu_touches::align_primary_intervals(
+                    &mask.rally_intervals,
+                    decoded_frames,
+                    frames,
+                )?;
+                let windows = rally_windows(&selected, &rallies)?;
+                if windows.is_empty() {
+                    return Err("No confirmed rally work windows".into());
+                }
+                let handoff = RallyHandoff::new(windows, frames)?;
+                let (worker, sender) = EarlyPoseWorker::start(
+                    options,
+                    original.to_owned(),
+                    state.repository_root.clone(),
+                    range,
+                    decoded_frames,
+                    trajectory,
+                    rallies,
+                    dimensions,
+                    session_memory,
+                )?;
+                Ok(Some((worker, handoff, sender)))
+            };
+            match start() {
+                Ok(Some((worker, handoff, sender))) => {
+                    person_writer.rally_handoff = Some((handoff, sender));
+                    early_worker = Some(worker);
+                }
+                Ok(None) => {}
+                Err(error) => return Err(error),
+            }
+        }
         if zero_copy && pose_enabled {
             gpu_pose = Some(GpuPoseStage::new(
                 state,
@@ -693,6 +748,10 @@ pub(crate) fn run_joint_pair(
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
+    let early_poses = early_worker.map(EarlyPoseWorker::finish).transpose()?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("cancelled".into());
+    }
     report(1.0, player_target, player_target, None)?;
     pending.committed = true;
     Ok(JointPair {
@@ -704,6 +763,8 @@ pub(crate) fn run_joint_pair(
         windows: summary.decode.windows,
         decoded_frames: summary.decode.decoded_frames,
         pending_pose,
+        early_poses,
+        early_pose_error,
         source_provenance: original_provenance,
         rally_filter,
     })

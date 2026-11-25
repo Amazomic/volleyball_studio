@@ -810,28 +810,7 @@ pub(super) fn reconcile_rally_rosters(
         let mut tracks = BTreeSet::new();
         let mut merged_boxes = 0;
         let mut unmatched_boxes = 0;
-        let mut windows = Vec::new();
-        for &(selected_start, selected_end) in &scope.selected {
-            let first = scope.rallies.partition_point(|&(a, _)| a < selected_start);
-            let last = scope.rallies.partition_point(|&(_, b)| b <= selected_end);
-            let rallies = scope
-                .rallies
-                .get(first..last)
-                .ok_or("Invalid roster rally bounds")?;
-            for (i, &(start, end)) in rallies.iter().enumerate() {
-                let left = if i == 0 {
-                    selected_start
-                } else {
-                    (rallies[i - 1].1 + start) / 2 + 1
-                };
-                let right = if i + 1 == rallies.len() {
-                    selected_end
-                } else {
-                    (end + rallies[i + 1].0) / 2
-                };
-                windows.push((left, right, start, end));
-            }
-        }
+        let windows = crate::rally_handoff::rally_windows(&scope.selected, &scope.rallies)?;
         let mut index = 0;
         let mut plan: Option<RosterPlan> = None;
         for frame in 0..frames {
@@ -841,8 +820,13 @@ pub(super) fn reconcile_rally_rosters(
             if plan.as_ref().is_some_and(|(_, end, _)| frame > *end) {
                 plan = None;
             }
-            if windows.get(index).is_some_and(|w| w.0 == frame) {
-                let (left, right, start, end) = windows[index];
+            if windows.get(index).is_some_and(|w| w.left == frame) {
+                let crate::rally_handoff::RallyWindow {
+                    left,
+                    right,
+                    start,
+                    end,
+                } = windows[index];
                 index += 1;
                 if right - left >= 1_000_000 {
                     return Err("Rally roster exceeds bounded frame limit".into());

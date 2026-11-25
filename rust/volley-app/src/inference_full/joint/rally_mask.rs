@@ -105,7 +105,7 @@ pub(super) struct RallyMask {
     stationary_ball_ms: u32,
     padding_before_ms: u32,
     padding_after_ms: u32,
-    rally_intervals: Vec<(u64, u64)>,
+    pub(super) rally_intervals: Vec<(u64, u64)>,
     stationary_intervals: Vec<(u64, u64)>,
     unobserved_intervals: Vec<(u64, u64)>,
     movement_filter_version: &'static str,
@@ -120,6 +120,26 @@ pub(super) struct RallyMask {
 }
 
 impl RallyMask {
+    pub(super) fn restrict_to_confirmed(&mut self) {
+        let mut selected: Vec<(u64, u64)> = Vec::new();
+        for (&(start, end), &(padded_start, padded_end)) in
+            self.merged.iter().zip(&self.rally_intervals)
+        {
+            let left = start.saturating_sub(CONTEXT_FRAMES).min(padded_start);
+            let right = end
+                .saturating_add(CONTEXT_FRAMES)
+                .min(self.source_frame_count - 1)
+                .max(padded_end);
+            if let Some(last) = selected.last_mut() {
+                if left <= last.1.saturating_add(1) {
+                    last.1 = last.1.max(right);
+                    continue;
+                }
+            }
+            selected.push((left, right));
+        }
+        self.selected = selected;
+    }
     #[cfg(test)]
     pub fn from_ball_samples(
         samples: &[RawDetection],

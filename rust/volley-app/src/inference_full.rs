@@ -227,6 +227,10 @@ struct EvidenceWriter {
     digest: Sha256,
     count: usize,
     ball_samples: Option<Vec<RawDetection>>,
+    rally_handoff: Option<(
+        crate::rally_handoff::RallyHandoff<RawDetection>,
+        std::sync::mpsc::SyncSender<crate::rally_handoff::CompletedRally<RawDetection>>,
+    )>,
 }
 impl EvidenceWriter {
     fn create(folder: &Path) -> Result<Self, String> {
@@ -240,6 +244,7 @@ impl EvidenceWriter {
             digest: Sha256::new(),
             count: 0,
             ball_samples: None,
+            rally_handoff: None,
         })
     }
     fn push(&mut self, frame: u64, records: &[RawDetection]) -> Result<(), String> {
@@ -264,9 +269,20 @@ impl EvidenceWriter {
             .map_err(|e| format!("Write model evidence: {e}"))?;
         self.digest.update(&line);
         self.count += 1;
+        if let Some((mut handoff, sender)) = self.rally_handoff.take() {
+            for rally in handoff.push(frame, records, |row| row.frame_index)? {
+                sender
+                    .send(rally)
+                    .map_err(|_| "Rally processing worker stopped")?;
+            }
+            self.rally_handoff = Some((handoff, sender));
+        }
         Ok(())
     }
     fn finish(mut self) -> Result<(String, usize), String> {
+        if let Some((handoff, _)) = self.rally_handoff.take() {
+            handoff.finish()?;
+        }
         self.writer
             .flush()
             .map_err(|e| format!("Flush model evidence: {e}"))?;

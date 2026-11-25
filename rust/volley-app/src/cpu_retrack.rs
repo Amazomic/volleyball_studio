@@ -35,7 +35,7 @@ use volley_core::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_pose_gap_v23";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_pose_gap_v25";
 pub(crate) mod ball_track;
 mod gap_interpolation;
 mod occlusion;
@@ -43,9 +43,9 @@ mod pose_refinement;
 mod pose_source;
 mod track_stitch;
 pub(crate) use pose_refinement::{
-    sampling_contract as pose_sampling_contract, Refinement as PoseRefinement,
-    LEGACY_POLICY as LEGACY_POSE_REFINEMENT_POLICY, POLICY as POSE_REFINEMENT_POLICY,
-    PREVIOUS_POLICY as PREVIOUS_POSE_REFINEMENT_POLICY,
+    sampling_contract as pose_sampling_contract, CompletedRallies, EarlyPoseOptions,
+    EarlyPoseWorker, Refinement as PoseRefinement, LEGACY_POLICY as LEGACY_POSE_REFINEMENT_POLICY,
+    POLICY as POSE_REFINEMENT_POLICY, PREVIOUS_POLICY as PREVIOUS_POSE_REFINEMENT_POLICY,
     PREVIOUS_TRACKED_CROP_POLICY as PREVIOUS_TRACKED_CROP_REFINEMENT_POLICY,
     PRIOR_CROP_POLICY as PRIOR_CROP_REFINEMENT_POLICY,
     REJECTED_LEADING_POLICY as HISTORICAL_LEADING_CROP_POLICY,
@@ -187,7 +187,7 @@ fn load_player_frame_scope(
     }))
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct ReplayTotals {
     frames: u64,
     detections: u64,
@@ -524,6 +524,17 @@ fn replay_frames_verified(
     let mut writer = BufWriter::new(file);
     let mut tentative_sha = Sha256::new();
     let mut tracker = ByteTracker::new(config)?;
+    let mut rally_starts = std::collections::BTreeSet::new();
+    if phase == ReplayPhase::StablePlan {
+        if let Some(scope) = scope {
+            rally_starts.extend(scope.selected.iter().map(|&(start, _)| start));
+            rally_starts.extend(
+                crate::rally_handoff::rally_windows(&scope.selected, &scope.rallies)?
+                    .into_iter()
+                    .map(|window| window.left),
+            );
+        }
+    }
     let mut confirmations = TrackConfirmation::default();
     let mut totals = ReplayTotals::default();
     for expected_frame in 0..count {
@@ -561,6 +572,9 @@ fn replay_frames_verified(
             }
             (boxes, Vec::new(), 0)
         };
+        if rally_starts.contains(&expected_frame) {
+            tracker.reset_rally();
+        }
         let tracking = if player_frame {
             let tracking = if phase == ReplayPhase::StablePlan {
                 tracker.process_crop_frame(expected_frame, &proposals)?
@@ -814,7 +828,7 @@ fn replay_frames_verified(
     ))
 }
 
-fn confirmation_threshold(requested: u64, sample_period: Option<u64>) -> u64 {
+pub(crate) fn confirmation_threshold(requested: u64, sample_period: Option<u64>) -> u64 {
     // The dense default requires 12 observed frames. At 3 Hz, requiring
     // six independent observations already represents about 1.7 seconds.
     if sample_period == Some(10) && requested == TrackingOptions::default().min_track_observations {
@@ -856,11 +870,61 @@ pub(crate) fn process_with_cancel(
     process_inner(state, req, Some(cancel), refinement, on_pose)
 }
 
+fn copy_stable_plan(
+    source: &Path,
+    destination: &Path,
+    frames: u64,
+    expected_sha: &str,
+    cancel: Option<&AtomicBool>,
+) -> Result<(), String> {
+    let mut reader = BoundedReader::open(source)?;
+    let mut writer = BufWriter::new(
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(destination)
+            .map_err(|e| e.to_string())?,
+    );
+    for frame in 0..frames {
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err("cancelled".into());
+        }
+        let line = reader.line()?.ok_or("Saved rally crop plan truncated")?;
+        let row: Value = serde_json::from_slice(&line).map_err(|e| e.to_string())?;
+        if row["frame_index"] != frame {
+            return Err("Saved rally frame order changed".into());
+        }
+        writer.write_all(&line).map_err(|e| e.to_string())?;
+    }
+    if reader.line()?.is_some() || reader.finish() != expected_sha {
+        return Err("Saved rally crop plan checksum mismatch".into());
+    }
+    writer.flush().map_err(|e| e.to_string())?;
+    writer.get_ref().sync_all().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+#[test]
+fn saved_rally_plan_copy_is_byte_exact_and_rejects_corruption() {
+    let root = std::env::temp_dir().join(format!("rally-plan-copy-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("stable.jsonl");
+    let bytes = b"{\"frame_index\":0}\n{\"frame_index\":1}\n";
+    fs::write(&source, bytes).unwrap();
+    let sha = format!("{:x}", Sha256::digest(bytes));
+    let output = root.join("copy.jsonl");
+    copy_stable_plan(&source, &output, 2, &sha, None).unwrap();
+    assert_eq!(fs::read(output).unwrap(), bytes);
+    assert!(copy_stable_plan(&source, &root.join("bad.jsonl"), 2, &"0".repeat(64), None).is_err());
+    assert!(copy_stable_plan(&source, &root.join("short.jsonl"), 1, &sha, None).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn process_inner(
     state: &AppState,
     req: &ReplayRequest,
     cancel: Option<&AtomicBool>,
-    refinement: Option<PoseRefinement>,
+    mut refinement: Option<PoseRefinement>,
     mut on_pose: impl FnMut(TrackingProgress) -> Result<(), String>,
 ) -> Result<Value, ApiError> {
     if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
@@ -995,24 +1059,108 @@ fn process_inner(
     let result = (|| -> Result<Value, String> {
         let part = directory.join("tracked_frames.jsonl.partial");
         let refine_pose = refinement.is_some() && player_scope.is_some() && saved_refined.is_none();
-        let (mut digest, mut totals, track_count) = replay_frames_with_pose_options(
-            &source,
-            &part,
-            frames,
-            settings,
-            expected,
-            None,
-            ReplayOptions {
-                phase: if player_scope.is_some() {
-                    ReplayPhase::StablePlan
-                } else {
-                    ReplayPhase::Normal
-                },
-                interpolate_players: req.interpolate_players,
-                scope: player_scope.as_ref(),
+        let completed = refinement.as_mut().and_then(|r| r.early.take());
+        let saved_manifest = saved_refined
+            .as_ref()
+            .map(|snapshot| {
+                serde_json::from_slice::<Value>(
+                    &fs::read(safe_file(
+                        &snapshot.folder,
+                        "manifest.json",
+                        MAX_MANIFEST_BYTES,
+                    )?)
+                    .map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())
+            })
+            .transpose()?;
+        let assembled = completed.is_some();
+        let (mut digest, mut totals, track_count, assembled_pose) = if let Some(completed) =
+            completed
+        {
+            if !refine_pose {
+                return Err(
+                    "Completed rally analysis cannot replace an existing pose snapshot".into(),
+                );
+            }
+            let (digest, totals, track_count, pose_sha, sampled) = completed.assemble(
+                &source,
+                expected,
+                &part,
+                frames,
+                player_scope
+                    .as_ref()
+                    .ok_or("Missing completed rally scope")?,
                 cancel,
-            },
-        )?;
+            )?;
+            copy_stable_plan(
+                &part,
+                &directory.join("stable_frames.jsonl"),
+                frames,
+                &digest,
+                cancel,
+            )?;
+            (digest, totals, track_count, Some((pose_sha, sampled)))
+        } else if let Some(record) = saved_manifest
+            .as_ref()
+            .filter(|record| record["stable_plan_file"] == "stable_frames.jsonl")
+        {
+            let snapshot = saved_refined
+                .as_ref()
+                .ok_or("Missing saved rally snapshot")?;
+            let stable = safe_file(&snapshot.folder, "stable_frames.jsonl", MAX_INPUT_BYTES)?;
+            let digest = record["pose_refinement_input_sha256"]
+                .as_str()
+                .ok_or("Missing saved rally plan digest")?
+                .to_owned();
+            let totals: ReplayTotals = serde_json::from_value(record["stable_plan_totals"].clone())
+                .map_err(|e| e.to_string())?;
+            let track_count = record["provisional_track_count"]
+                .as_u64()
+                .ok_or("Missing saved rally track count")?;
+            if totals.frames != frames
+                || player_scope
+                    .as_ref()
+                    .is_none_or(|scope| scope.frame_count() != totals.processed_player_frames)
+            {
+                return Err("Saved rally plan scope changed".into());
+            }
+            let mut fusion_reader = BoundedReader::open(&source)?;
+            for _ in 0..frames {
+                if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+                    return Err("cancelled".into());
+                }
+                fusion_reader
+                    .line()?
+                    .ok_or("Saved rally fusion truncated")?;
+            }
+            if fusion_reader.line()?.is_some() || fusion_reader.finish() != expected {
+                return Err("Saved rally fusion checksum mismatch".into());
+            }
+            copy_stable_plan(&stable, &part, frames, &digest, cancel)?;
+            (digest, totals, track_count, None)
+        } else {
+            let (digest, totals, track_count) = replay_frames_with_pose_options(
+                &source,
+                &part,
+                frames,
+                settings,
+                expected,
+                None,
+                ReplayOptions {
+                    phase: if player_scope.is_some() {
+                        ReplayPhase::StablePlan
+                    } else {
+                        ReplayPhase::Normal
+                    },
+                    interpolate_players: req.interpolate_players,
+                    scope: player_scope.as_ref(),
+                    cancel,
+                },
+            )?;
+            (digest, totals, track_count, None)
+        };
+        let stable_plan_totals = assembled.then(|| json!(totals));
         on_pose(TrackingProgress::BoxesReady(totals.tentative_tracks))?;
         if !refine_pose {
             on_pose(TrackingProgress::FinalPass)?;
@@ -1055,21 +1203,27 @@ fn process_inner(
             let refinement = refinement.ok_or("RTMPose refinement settings unavailable")?;
             let stride = pose_refinement::SAMPLE_ROW_STRIDE;
             on_pose(TrackingProgress::PoseSelection)?;
-            let (pose_sha, _accepted) = pose_refinement::refine(
-                &state.repository_root,
-                pose_refinement::Source {
-                    original: &plan.source,
-                    replay: &part,
-                    replay_sha: &digest,
-                    frames,
-                    decoded_frames,
-                    range,
-                    scope: player_scope.as_ref().ok_or("Missing RTMPose rally scope")?,
-                },
-                refinement,
-                cancel.ok_or("RTMPose refinement cancellation unavailable")?,
-                |processed, total| on_pose(TrackingProgress::PoseFrames { processed, total }),
-            )?;
+            let pose_sha = if let Some((pose_sha, sampled)) = assembled_pose {
+                on_pose(TrackingProgress::PoseCached(sampled))?;
+                pose_sha
+            } else {
+                let (pose_sha, _) = pose_refinement::refine(
+                    &state.repository_root,
+                    pose_refinement::Source {
+                        original: &plan.source,
+                        replay: &part,
+                        replay_sha: &digest,
+                        frames,
+                        decoded_frames,
+                        range,
+                        scope: player_scope.as_ref().ok_or("Missing RTMPose rally scope")?,
+                    },
+                    refinement,
+                    cancel.ok_or("RTMPose refinement cancellation unavailable")?,
+                    |processed, total| on_pose(TrackingProgress::PoseFrames { processed, total }),
+                )?;
+                pose_sha
+            };
             refined_pose_sha = Some(pose_sha.clone());
             refined_pose_stride = Some(stride);
             refined_pose_owner = Some(replay_id.clone());
@@ -1150,6 +1304,10 @@ fn process_inner(
             "touches_confirmed":false,
             "cpu_processing_complete":false,
         });
+        if let Some(stable_plan_totals) = stable_plan_totals {
+            record["stable_plan_file"] = json!("stable_frames.jsonl");
+            record["stable_plan_totals"] = stable_plan_totals;
+        }
         record["interpolated_pose_count"] = json!(interpolated_poses);
         record["discarded_static_track_ids"] = json!(totals.static_tracks);
         record["discarded_static_track_detections"] = json!(totals.static_track_detections);
@@ -1417,6 +1575,70 @@ mod tests {
         assert!(
             matches!(rejected, Err(error) if error.contains("outside the GPU rally selection"))
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stable_plan_starts_new_ids_at_each_roster_boundary_even_without_detection_gap() {
+        let root = std::env::temp_dir().join(format!("rally-reset-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("fusion.jsonl");
+        let output = root.join("tracked.jsonl");
+        let scope = PlayerFrameScope {
+            rallies: vec![(0, 39), (45, 89)],
+            selected: vec![(0, 89)],
+            ball_job_id: "0123456789abcdef0123456789abcdef".into(),
+            mask_sha256: "a".repeat(64),
+        };
+        let mut input = Vec::new();
+        for frame in 0..90_u64 {
+            serde_json::to_writer(
+                &mut input,
+                &json!({
+                    "frame_index": frame,
+                    "player_candidates": [example(frame, 0.2, 0)],
+                    "ball_candidates": [],
+                    "selected_ball": {"source_model":"vballnet","frame_index":frame},
+                    "player_track_ids_confirmed": false,
+                    "touches_confirmed": false,
+                }),
+            )
+            .unwrap();
+            input.push(b'\n');
+        }
+        fs::write(&source, &input).unwrap();
+        let (_, _, count) = replay_frames_with_pose_options(
+            &source,
+            &output,
+            90,
+            TrackingOptions::default(),
+            &format!("{:x}", Sha256::digest(&input)),
+            None,
+            ReplayOptions {
+                phase: ReplayPhase::StablePlan,
+                interpolate_players: true,
+                scope: Some(&scope),
+                cancel: None,
+            },
+        )
+        .unwrap();
+        let rows = fs::read_to_string(&output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let ids = |range: std::ops::Range<usize>| {
+            rows[range]
+                .iter()
+                .flat_map(|row| row["tracked_players"].as_array().unwrap())
+                .map(|p| p["track_id"].as_u64().unwrap())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(count, 2);
+        assert_eq!(ids(0..43).len(), 1);
+        assert_eq!(ids(43..90).len(), 1);
+        assert!(ids(0..43).is_disjoint(&ids(43..90)));
+        assert!(rows.iter().all(|row| !row["selected_ball"].is_null()));
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -774,6 +774,12 @@ impl ByteTracker {
             .collect();
         (matched, pending_det, unmatched_tracks, ambiguous, blocked)
     }
+    pub fn reset_rally(&mut self) {
+        self.tracks.clear();
+        self.previous = None;
+        self.separated_pairs.clear();
+    }
+
     pub fn next_id(&self) -> u64 {
         self.next_id
     }
@@ -1479,5 +1485,33 @@ mod tests {
         t.process_frame_with_poses(0, &[person(0, 0, 0.2, 0.8)], &[])
             .unwrap();
         assert!(t.process_frame_with_poses(0, &[], &[]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod rally_reset_tests {
+    use super::*;
+
+    #[test]
+    fn new_rally_cannot_inherit_previous_player_id() {
+        let mut tracker = ByteTracker::new(TrackingOptions::default()).unwrap();
+        let make = |frame_index| Candidate {
+            frame_index,
+            class_name: "player".into(),
+            score: 0.95,
+            bbox_xyxy_norm: [0.2, 0.2, 0.4, 0.7],
+            query_index: Some(0),
+            touch_probability: None,
+            head_point_norm: None,
+        };
+        let first = tracker.process_crop_frame(0, &[make(0)]).unwrap();
+        let first_id = first.new_track_diagnostics[0].track_id;
+        tracker.reset_rally();
+        let next = tracker.process_crop_frame(1, &[make(1)]).unwrap();
+        assert_eq!(next.new_track_diagnostics[0].track_id, first_id + 1);
+        assert_eq!(
+            next.new_track_diagnostics[0].closest_previous_track_id,
+            None
+        );
     }
 }

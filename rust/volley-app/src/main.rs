@@ -46,6 +46,7 @@ mod projects;
 mod quick_reel;
 mod quick_reel_source;
 mod rallies;
+mod rally_handoff;
 mod rally_marks;
 mod rally_training_comparison;
 mod reid_group_edits;
