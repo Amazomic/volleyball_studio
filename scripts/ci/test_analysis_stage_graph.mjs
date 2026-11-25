@@ -96,12 +96,14 @@ assert.match(extract("const updatePipelineGraph=","const paintGraphEdges="),/nod
 const stages=context.stages;
 const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
-assert.equal(stages.length,13);
+assert.equal(stages.length,12);
+assert.ok(!ids.includes("fusion"));
+assert.match(css,/\.analysis-flow-phase\[data-phase="gpu"\] \.analysis-flow-cards\{grid-template-columns:repeat\(7,minmax\(0,1fr\)\)/);
 assert.ok(!ids.includes("photos"));
 assert.ok(!ids.includes("touch_types"));
 assert.ok(!ids.includes("ground_detector"));
 assert.ok(ids.includes("publish")&&!ids.includes("material"));
-for(const [row,count] of [[1,8],[2,5]]){
+for(const [row,count] of [[1,7],[2,5]]){
   const nodes=stages.filter(item=>item[3]===row);
   assert.equal(nodes.length,count);
 }
@@ -232,8 +234,8 @@ const dataLinks=vm.runInNewContext(extract("const pipelineEdges=","const graphSe
 const actualInputs=target=>Array.from(dataLinks.links.filter(link=>link[1]===target),link=>link[0]).sort();
 assert.deepEqual(actualInputs("ball_stabilizer"),["ball"]);
 assert.deepEqual(actualInputs("rallies"),["ball_stabilizer"]);
-assert.deepEqual(actualInputs("fusion"),["ball","players"]);
-assert.deepEqual(actualInputs("boxes"),["fusion","rallies"]);
+assert.deepEqual(actualInputs("fusion"),[]);
+assert.deepEqual(actualInputs("boxes"),["ball","players","rallies"]);
 assert.deepEqual(actualInputs("tracking"),["boxes","pose"]);
 assert.equal(dataLinks.state("no_pose",{profile:{gpu:{pose_enabled:false}}}),"available");
 assert.equal(dataLinks.state("no_pose",{gpu_jobs:{pose:"saved"}}),"disabled");
@@ -267,26 +269,26 @@ const withClass=(stageId,classes)=>({
   dataset:{stageId},classList:{contains:name=>classes.includes(name)},
   setAttribute(name,value){this[name]=value;},removeAttribute(name){delete this[name];}
 });
-const fusionNode=withClass("fusion",["is-reused"]);
+const playerNode=withClass("players",["is-reused"]);
 const trackingNode=withClass("boxes",["is-active"]);
 const link={
-  dataset:{edgeSource:"fusion",edgeTarget:"boxes",edgeCondition:""},
+  dataset:{edgeSource:"players",edgeTarget:"boxes",edgeCondition:""},
   classList:{toggle(name,enabled){this[name]=enabled;}},
   setAttribute(name,value){this[name]=value;}
 };
 const diagram={querySelectorAll(selector){
   return selector===".analysis-flow-node"?
-    [fusionNode,trackingNode]:[link];
+    [playerNode,trackingNode]:[link];
 }};
 const edgeContext=vm.createContext({diagram,window:{VolleyballUi:{
   locale:"en",
-  translate(value){return this.locale==="en"?{"Данные GPU":"GPU data","Трекинг ID":"Track IDs"}[value]||value:value;}
+  translate(value){return this.locale==="en"?{"Поиск игроков":"Player detection","Трекинг ID":"Track IDs"}[value]||value:value;}
 }}});
 vm.runInContext(definitions+extract("const pipelineEdges=","const graphSettings=")+
   extract("const paintGraphEdges=",'$("analysis-flow-feedback")')+"paintGraphEdges(diagram,{gpu_reused:true});",edgeContext);
 assert.equal(link.dataset.state,"available");
 assert.equal(link.textContent,undefined);
-assert.equal(trackingNode["aria-description"],"GPU data");
+assert.equal(trackingNode["aria-description"],"Player detection");
 assert.equal(link.classList["is-active"],true);
 const card=id=>({
   dataset:{stageId:id},

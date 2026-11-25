@@ -443,7 +443,6 @@
     ["ball_stabilizer","ball_stabilizer","cpu",1],
     ["rallies","Розыгрыши","cpu",1],
     ["players","Поиск игроков","gpu",1],
-    ["fusion","Данные GPU","output",1],
     ["boxes","Стабилизация рамок","cpu",1],
     ["pose","Позы по стабилизированным рамкам","gpu",1],
     ["tracking","Трекинг ID","cpu",2],
@@ -453,6 +452,7 @@
     ["identity","Привязка игроков","mixed",2],
   ];
   const pipelineNames=new Map(pipelineStages.map(item=>[item[0],item[1]]));
+  pipelineNames.set("fusion","Данные GPU");
   pipelineNames.set("cache","Кэш GPU");
   pipelineNames.set("material","Результат");
   const pipelineModelMeta=(id,run)=>{
@@ -477,7 +477,6 @@
     rallies:[["path",{d:"m12 2 10 6-10 6L2 8l10-6Zm-10 11 10 6 10-6M2 18l10 6 10-6"}]],
     players:[["circle",{cx:9,cy:7,r:3}],["path",{d:"M2 21v-2a7 7 0 0 1 14 0v2M17 4a4 4 0 0 1 0 7m4 10v-2a6 6 0 0 0-4-5.7"}]],
     pose:[["circle",{cx:12,cy:3,r:2}],["path",{d:"M12 5v7m0 0-7 9m7-9 7 9M5 8l7 4 7-4M5 8l-2 6m16-6 2 6"}]],
-    fusion:[["rect",{x:5,y:5,width:14,height:14,rx:2}],["path",{d:"M9 1v4m6-4v4M9 19v4m6-4v4M1 9h4m-4 6h4m14-6h4m-4 6h4"}]],
     boxes:[["rect",{x:3,y:3,width:18,height:18,rx:2}],["path",{d:"M7 7h10v10H7z"}]],
     tracking:[["rect",{x:2,y:3,width:20,height:18,rx:3}],["circle",{cx:8,cy:9,r:2}],["path",{d:"M4 17c1-3 7-3 8 0m4-9h4m-4 5h4m-4 5h3"}]],
     touches:[["path",{d:"M8 22V11a2 2 0 0 1 4 0V5a2 2 0 0 1 4 0v6a2 2 0 0 1 4 0v5a7 7 0 0 1-7 7h-2a8 8 0 0 1-6-3l-3-4a2 2 0 0 1 3-3l3 3"}]],
@@ -636,10 +635,9 @@
     ["video","players"],
     ["rallies","players"],
     ["video","pose","pose"],
-    ["ball","fusion"],
-    ["players","fusion"],
-    ["fusion","boxes"],
     ["boxes","pose","pose"],
+    ["ball","boxes"],
+    ["players","boxes"],
     ["rallies","boxes"],
     ["pose","tracking","pose"],
     ["boxes","tracking","no_pose"],
@@ -674,7 +672,6 @@
     rallies:["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds","#studio-gpu-rally-stationary-ms"],
     players:["#studio-gpu-person-detector","#studio-gpu-person-stride"],
     pose:["#studio-gpu-pose-enabled","#studio-gpu-interpolate-pose"],
-    fusion:["#studio-gpu-memory","#studio-gpu-threads"],
     boxes:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap","#studio-post-nms"],
     tracking:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap",
       "#studio-post-lost-low-gap","#studio-post-lost-low-iou","#studio-post-min-track-frames","#studio-post-nms","#studio-post-assignment","#studio-post-margin"],
@@ -695,7 +692,6 @@
     players:"RF-DETR ищет игроков только внутри найденных игровых интервалов.",
     boxes:"ByteTrack связывает рамки детектора по движению в игровых интервалах, объединяет фрагменты одного трека и при включённой интерполяции восстанавливает пропуски между наблюдениями. Суставы на этой стадии не сравниваются.",
     pose:"RTMPose-M Body7 измеряет точки тела по стабилизированным рамкам в исходных кадрах. Измерения прикрепляются к стабильным Track ID без изменения рамок.",
-    fusion:"Сохранение общей версии GPU-наблюдений и повторное использование кэша.",
     tracking:"Сохраняет устойчивые Track ID, определённые по движению рамок до RTMPose. При наличии измеренных поз прикрепляет их к готовым трекам, не меняя ID и рамки.",
     touch_detector:"По стабилизированной траектории находит моменты возможных касаний внутри розыгрышей и отделяет кандидаты касаний пола. Передаёт физические события в Touch Attribution.",
     touches:"По траектории мяча, стабилизированным рамкам и точкам RTMPose уточняет контакт, привязывает событие к Track ID и определяет тип касания. Если признаков недостаточно, тип остаётся unknown_touch. Достоверный контакт тела может опровергнуть кандидата пола. ReID выполняется позднее.",
@@ -885,7 +881,7 @@
       const {edgeSource,edgeTarget,state}=edge.dataset;
       const a=boxes.get(edgeSource),b=boxes.get(edgeTarget);
       const consecutive=Math.abs(ordered.indexOf(a)-ordered.indexOf(b))===1;
-      const handoff=edgeSource==="fusion"&&edgeTarget==="tracking"&&
+      const handoff=(edgeSource==="pose"||edgeSource==="boxes")&&edgeTarget==="tracking"&&
         rowTops.indexOf(b.t)-rowTops.indexOf(a.t)===1;
       const publication=a.t===b.t&&(edgeSource==="touches"&&edgeTarget==="publish"||
         edgeSource==="publish"&&edgeTarget==="identity");
@@ -982,7 +978,7 @@
     const savedGpu={
       ball:run?.gpu_jobs?.ball,rallies:run?.gpu_rally_mask||Number.isSafeInteger(run?.gpu_rally_count),players:run?.gpu_jobs?.players,
       ball_stabilizer:run?.gpu_rally_mask?.ball_stabilizer,
-      fusion:run?.analysis_id,boxes:run?.primary_tracking?.replay_id||run?.cpu_runs?.tracking,
+      boxes:run?.primary_tracking?.replay_id||run?.cpu_runs?.tracking,
       pose:run?.gpu_jobs?.pose||(run?.primary_tracking?.pose_ready?run.primary_tracking.replay_id:Number(run?.player_tracking_stats?.refined_poses)>0?run?.cpu_runs?.tracking:null)
     };
     const savedCpu={
@@ -1066,8 +1062,7 @@
       const state=graphLinkState(edgeCondition,run);
       const ready=state==="available"&&
         (source.classList.contains("is-complete")||source.classList.contains("is-reused"));
-      const running=ready&&destination.classList.contains("is-active")&&
-        !(run?.gpu_reused===true&&edgeTarget==="fusion");
+      const running=ready&&destination.classList.contains("is-active");
       edge.dataset.state=state;
       edge.classList.toggle("is-complete",!!ready);
       edge.classList.toggle("is-active",!!running);
