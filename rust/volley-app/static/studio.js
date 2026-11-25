@@ -4437,8 +4437,6 @@
         if(winner===key)team.append(make("strong","rally-team-point","+1"));
         result.append(team);
       }
-      const resultLabel=winner==="team_1"?"Очко: команда 1":winner==="team_2"?"Очко: команда 2":"Очко: не определено";
-      result.append(make("div","rally-card-result",winner==="team_1"||winner==="team_2"?resultLabel+" (предп.)":resultLabel));
       card.append(top,foot,types,result,progress);ui.list.append(card);
     }
     ui.list.scrollTop=previousScroll;

@@ -62,9 +62,12 @@ assert.equal(teamBlock.children[0].children[1].textContent,"ID 4, ID 9");
 assert.equal(teamBlock.children[1].children[1].textContent,"ID 10, ID 11");
 assert.equal(teamBlock.children[0].children.length,2);
 assert.equal(teamBlock.children[1].children[2].textContent,"+1");
-assert.equal(teamBlock.children[2].textContent,"Очко: команда 2 (предп.)");
+assert.equal(teamBlock.children.length,2,"Only team rows, no duplicate score caption");
 assert.equal(card.klass,"rally-card");
 const progress=card.children.find(node=>node.klass==="rally-card-progress");
+assert.equal(card.children.at(-1),progress,"Timeline is the last card child");
+assert.match(css,/grid-template-areas:"head" "foot" "types" "teams" "progress"/);
+assert.match(css,/\.rally-card-teams\{grid-area:teams;/);
 assert.ok(progress,
   "Each rally reserves a timeline slot without moving the list during selection");
 let bubbling=false;
