@@ -451,7 +451,6 @@
     ["touches","Уточнение касаний","cpu",2],
     ["touch_types","Типы касаний","cpu",2],
     ["publish","Публикация розыгрышей","output",2],
-    ["photos","Фотографии игроков","input",2],
     ["identity","Привязка игроков","mixed",2],
   ];
   const pipelineNames=new Map(pipelineStages.map(item=>[item[0],item[1]]));
@@ -486,7 +485,6 @@
     touches:[["path",{d:"M8 22V11a2 2 0 0 1 4 0V5a2 2 0 0 1 4 0v6a2 2 0 0 1 4 0v5a7 7 0 0 1-7 7h-2a8 8 0 0 1-6-3l-3-4a2 2 0 0 1 3-3l3 3"}]],
     touch_types:[["circle",{cx:11,cy:13,r:8}],["path",{d:"m5 8 6 2 4-4m-7 9 3-5 8 3m-8 2-4 6m4-11 1 11M19 1v4m-2-2h4"}]],
     publish:[["path",{d:"M4 12h16m-6-6 6 6-6 6"}]],
-    photos:[["rect",{x:3,y:4,width:18,height:16,rx:3}],["circle",{cx:9,cy:9,r:2}],["path",{d:"m4 17 5-4 3 3 4-5 4 5"}]],
     identity:[["path",{d:"M10 13a5 5 0 0 0 7 .5l3-3a5 5 0 0 0-7-7l-2 2m3 5a5 5 0 0 0-7-.5l-3 3a5 5 0 0 0 7 7l2-2"}]],
   };
   const pipelineIcon=id=>{
@@ -659,7 +657,6 @@
     ["video","identity"],
     ["tracking","identity"],
     ["publish","identity"],
-    ["photos","identity"],
   ];
   const graphLinkState=(condition,run)=>{
     if(condition==="no_pose"){
@@ -704,8 +701,7 @@
     touches:"Уточняет контакт мяча с телом и привязывает найденное событие к Track ID, не изменяя его время.",
     touch_types:"RTMPose и геометрия тела уточняют тип уже найденного касания. Без достаточных признаков остаётся unknown_touch. Привязка Track ID к конкретному игроку выполняется отдельно, позднее.",
     publish:"Публикует границы первичных розыгрышей с результатом Touch Detector для выбранной версии CPU replay.",
-    photos:"Подготавливает фотографии игроков из исходных кадров для сопоставления внешности.",
-    identity:"Автоматическая привязка Track ID к игрокам из библиотеки по фотографиям и наблюдениям внутри опубликованных розыгрышей.",
+    identity:"Подготавливает фотографии игроков из исходных кадров, сравнивает признаки внешности с библиотекой и автоматически привязывает Track ID к игрокам внутри опубликованных розыгрышей.",
     cache:"Готовый GPU-анализ переиспользуется при совместимых настройках."
   };
   let graphMoved=[],graphFocus=null,graphHintTarget=null;
@@ -917,7 +913,7 @@
   const graphPhaseSummary=nodes=>{
     let ready=0,total=0;
     for(const node of nodes){
-      if(node.dataset.stageId==="photos"||node.classList.contains("is-skipped"))continue;
+      if(node.classList.contains("is-skipped"))continue;
       total++;
       if(!node.classList.contains("is-failed")&&!node.classList.contains("is-active")&&
         (node.classList.contains("is-complete")||node.classList.contains("is-reused")))ready++;
@@ -946,18 +942,17 @@
     }
     for(const [id,,kind,row] of pipelineStages){
       const cell=make("div","analysis-flow-cell");
-      const node=make(id==="photos"?"div":"button","analysis-flow-node");
-      if(id!=="photos")node.type="button";
+      const node=make("button","analysis-flow-node");
+      node.type="button";
       node.dataset.stageId=id;node.dataset.kind=kind;
       const heading=make("span","analysis-flow-node-title",graphLabel(id,run));
       const headingRow=make("span","analysis-flow-node-heading-row");
       headingRow.append(pipelineIcon(id),heading);
       node.append(headingRow);
       if(graphDescriptions[id])node.title=graphDescriptions[id];
-      if(id!=="photos")node.addEventListener("click",()=>openGraphSettings(id));
+      node.addEventListener("click",()=>openGraphSettings(id));
       const stats=make("small","analysis-flow-node-stats","—");
-      if(id==="photos")cell.append(node);
-      else cell.append(node,stats);
+      cell.append(node,stats);
       if(id==="players"||id==="tracking")cell.append(make("small","analysis-flow-node-stage-metrics hidden"));
       phases.get(row).append(cell);
     }
@@ -998,7 +993,6 @@
     };
     for(const node of target.querySelectorAll(".analysis-flow-node")){
       const id=node.dataset.stageId;
-      if(id==="photos")continue;
       const hasPose=!!run?.gpu_jobs?.pose||run?.primary_tracking?.pose_ready===true||Number(run?.player_tracking_stats?.refined_poses)>0;
       const entry=id==="touch_types"?(hasPose?seen.get("touches"):null):seen.get(id);
       const combinedPose=id==="pose"&&currentId==="players"&&

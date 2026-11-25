@@ -88,10 +88,11 @@ assert.match(extract("const updatePipelineGraph=","const paintGraphEdges="),/nod
 const stages=context.stages;
 const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
-assert.equal(stages.length,15);
+assert.equal(stages.length,14);
+assert.ok(!ids.includes("photos"));
 assert.ok(!ids.includes("ground_detector"));
 assert.ok(ids.includes("publish")&&!ids.includes("material"));
-for(const [row,count] of [[1,8],[2,7]]){
+for(const [row,count] of [[1,8],[2,6]]){
   const nodes=stages.filter(item=>item[3]===row);
   assert.equal(nodes.length,count);
 }
@@ -206,13 +207,15 @@ const summarizePhase=vm.runInNewContext(extract("const graphPhaseSummary=","cons
 const phaseNode=(stageId,...classes)=>({dataset:{stageId},classList:{contains:name=>classes.includes(name)}});
 const phaseSummary=summarizePhase([
   phaseNode("video","is-complete"),phaseNode("ball","is-reused"),
-  phaseNode("pose","is-skipped"),phaseNode("photos"),
+  phaseNode("pose","is-skipped"),
   phaseNode("touches","is-active"),phaseNode("tracking","is-complete","is-failed"),
   phaseNode("publish"),phaseNode("identity","is-complete","is-active")
 ]);
 assert.equal(phaseSummary.ready,2);
 assert.equal(phaseSummary.total,6);
 assert.equal(summarizePhase([]).total,0);
+assert.deepEqual({...summarizePhase(stages.filter(item=>item[3]===2).map(item=>phaseNode(item[0],"is-complete")))},{ready:6,total:6});
+assert.match(js,/identity:"[^"]*исходных кадров[^"]*"/);
 const dataLinks=vm.runInNewContext(extract("const pipelineEdges=","const graphSettings=")
   +"({links:pipelineEdges,state:graphLinkState});");
 const actualInputs=target=>Array.from(dataLinks.links.filter(link=>link[1]===target),link=>link[0]).sort();
@@ -239,7 +242,7 @@ assert.equal(stages.find(item=>item[0]==="touch_detector")[3],2);
 assert.deepEqual(actualInputs("touch_detector"),["ball_stabilizer","rallies"]);
 assert.deepEqual(actualInputs("touches"),["ball_stabilizer","rallies","touch_detector","tracking"]);
 assert.deepEqual(actualInputs("publish"),["rallies","touches","tracking"]);
-assert.deepEqual(actualInputs("identity"),["photos","publish","tracking","video"]);
+assert.deepEqual(actualInputs("identity"),["publish","tracking","video"]);
 assert.equal(dataLinks.state("pose",null),"optional");
 assert.equal(dataLinks.state("pose",{profile:{gpu:{pose_enabled:false}}}),"disabled");
 assert.equal(dataLinks.state("pose",{gpu_reused:true,gpu_jobs:{pose:"saved"}}),"available");
