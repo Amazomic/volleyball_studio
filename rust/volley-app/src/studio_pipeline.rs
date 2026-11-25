@@ -4312,7 +4312,7 @@ mod branching_tests {
                     "frames":100,
                     "settings":request.post.ball_stabilizer
                 },
-                "automatic_action_prediction_method":"pose_keypoints_motion_v3_or_unknown_touch",
+                "automatic_action_prediction_method":"pose_keypoints_motion_v4_or_unknown_touch",
                 "initial_serve_attribution_version":crate::cpu_touches::INITIAL_SERVE_ATTRIBUTION_VERSION,
                 "ground_detector_version":volley_core::motion::GROUND_DETECTOR_VERSION,
                 "preliminary_rally_scope_version":"primary_gpu_rally_mask_v1",

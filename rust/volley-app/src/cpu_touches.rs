@@ -1851,7 +1851,11 @@ fn refine_pose_events_policy(
         let center = [(x1 + x2) * 0.5 * w, (y1 + y2) * 0.5 * h];
         let radius = ((x2 - x1) * w + (y2 - y1) * h) * 0.25;
         // A stored event may not borrow a different ball's location.
-        if (event.ball_x_px - center[0]).hypot(event.ball_y_px - center[1]) > radius.max(2.0) {
+        let inside_observed_box = (x1 * w..=x2 * w).contains(&event.ball_x_px)
+            && (y1 * h..=y2 * h).contains(&event.ball_y_px);
+        if !inside_observed_box
+            && (event.ball_x_px - center[0]).hypot(event.ball_y_px - center[1]) > radius.max(2.0)
+        {
             continue;
         }
         let contact = frame
@@ -3527,8 +3531,8 @@ mod tests {
             frame_index: 31,
             provisional_track_id: Some(8),
             probability: 0.94,
-            ball_x_px: 320.0,
-            ball_y_px: 72.0,
+            ball_x_px: 326.0,
+            ball_y_px: 75.0,
             motion_frame_index: 31,
             direction_change_deg: 80.0,
             speed_before_px_frame: 7.0,
