@@ -1102,7 +1102,7 @@ fn gpu_lineage_valid(
             != volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION
             || saved["gpu_rally_mask"]["ball_stabilizer"]["settings"]
                 != json!(request.post.ball_stabilizer)
-            || saved["gpu_rally_mask"]["ground_boundary_version"] != "ground_ends_rally_v2"
+            || saved["gpu_rally_mask"]["ground_boundary_version"] != "ground_ends_rally_v3"
             || saved["gpu_rally_mask"]["ground_detector"]["version"]
                 != volley_core::motion::GROUND_DETECTOR_VERSION
             || !valid_sha(&saved["gpu_rally_mask"]["ground_detector"]["sha256"])
@@ -4330,7 +4330,7 @@ mod branching_tests {
                 "stationary_ball_ms":request.gpu.primary_rallies.stationary_ball_ms,
                 "movement_filter_version":"stationary_ball_min_rally_5s_v3",
                 "min_rally_seconds":5.0,
-                "ground_boundary_version":"ground_ends_rally_v2",
+                "ground_boundary_version":"ground_ends_rally_v3",
                 "ground_detector":{"version":volley_core::motion::GROUND_DETECTOR_VERSION,"sha256":sha},
                 "ball_stabilizer":{
                     "algorithm":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,

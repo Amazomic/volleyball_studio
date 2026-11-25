@@ -1,7 +1,7 @@
 use super::{BallObservation, TrajectoryBreak};
 use crate::court_geometry::CourtTransform;
 
-pub const GROUND_DETECTOR_VERSION: &str = "court_ball_rebound_v3";
+pub const GROUND_DETECTOR_VERSION: &str = "court_ball_rebound_v4";
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroundContact {
@@ -45,7 +45,8 @@ pub fn classify_ground_contact(
     }
     let incoming = (before_end.y - before_start.y) / (before_end.frame - before_start.frame) as f64;
     let outgoing = (after_end.y - after_start.y) / (after_end.frame - after_start.frame) as f64;
-    let rebound_or_settle = outgoing <= -1.0 || (incoming >= 3.0 && outgoing.abs() <= 1.5);
+    let weak_rebound = outgoing <= -1.0 && -outgoing <= incoming * 0.75;
+    let rebound_or_settle = weak_rebound || (incoming >= 3.0 && outgoing.abs() <= 1.5);
     if incoming < 2.0
         || !rebound_or_settle
         || impact.position[1] + 8.0 + incoming * ((impact.frame - before_end.frame) as f64)
@@ -208,6 +209,24 @@ mod tests {
         assert!(classify_ground_contact(&points, &impact, &court(), 1000, 200, 99).is_none());
         impact.position[1] = 35.0;
         assert!(classify_ground_contact(&points, &impact, &court(), 1000, 200, 20).is_none());
+    }
+
+    #[test]
+    fn energetic_reversal_is_not_a_sand_rebound_even_near_a_boundary() {
+        let (mut points, mut impact) = samples(100.0, true);
+        impact.position[1] = 103.0;
+        for p in &mut points {
+            if p.frame >= 5 {
+                p.y = 103.0 - (p.frame - 4) as f64 * 14.0;
+            }
+        }
+        assert!(classify_ground_contact(&points, &impact, &court(), 1000, 200, 250).is_none());
+        for p in &mut points {
+            if p.frame >= 5 {
+                p.y = 103.0 - (p.frame - 4) as f64 * 6.0;
+            }
+        }
+        assert!(classify_ground_contact(&points, &impact, &court(), 1000, 200, 250).is_some());
     }
 
     #[test]

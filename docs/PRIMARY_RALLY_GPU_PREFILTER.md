@@ -258,7 +258,7 @@ Rally Detector consumes the stabilized trajectory and internally computes the gr
 candidates saved in the primary ball job. It exposes one stage and one duration. Before finalizing the boundaries, Ground
 Detector uses the provisional movement-only intervals: in-court rebounds qualify
 only within the last 45 frames; earlier line/OUT events require an observed contact.
-The original ground classifier is unchanged. The first qualifying contact within a moving-ball
+The sand rebound classifier requires an upward rebound speed no greater than 75% of the incoming vertical image speed (or the existing settling criterion). This is a conservative 2D heuristic, not a physical 3D restitution measurement. The first qualifying contact within a moving-ball
 rally closes its unpadded interval at that frame. A rebound within the same
 continuous segment does not start a new rally. A subsequent independently
 detected moving segment is eligible for a separate interval; the existing
@@ -268,7 +268,7 @@ Ground Detector and Touch Detector share the trajectory-break primitive, but
 primary analysis does not publish player-touch candidates or a Touch Detector
 artifact. Touch Detector runs in phase two on the stabilized replay scoped to
 the saved rally intervals; it reuses validated floor evidence where available.
-The primary mask records ground_boundary_version=ground_ends_rally_v2,
+The primary mask records ground_boundary_version=ground_ends_rally_v3,
 Ground Detector version, court revision and the artifact checksum. A new primary
 run does not reuse a mask without this boundary version, or one derived from
 a different court revision. Older immutable masks remain readable for explicit

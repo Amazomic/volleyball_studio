@@ -866,15 +866,15 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
             }
             prior = Some(event.frame_index);
             raw_touch_count += 1;
-            let Some(_) = event.provisional_track_id else {
-                continue;
-            };
             let contextual = timeline_contexts.get(&event.frame_index);
             let rally_index =
                 intervals.partition_point(|interval| interval.end < event.frame_index);
             let in_rally = intervals
                 .get(rally_index)
                 .is_some_and(|interval| interval.start <= event.frame_index);
+            if event.provisional_track_id.is_none() && !in_rally {
+                continue;
+            }
             let mut outside = BTreeMap::new();
             let final_touch = finalize_touch(
                 &event,

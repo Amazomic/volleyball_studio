@@ -381,6 +381,39 @@ fn timeline_exposes_initial_serves_without_adding_physical_contacts() {
 }
 
 #[test]
+fn timeline_keeps_unattributed_motion_inside_rally_without_inventing_player() {
+    let (mut run, root) = fixture();
+    let mut events = fs::read_to_string(&run.touch_file)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    events[0]["provisional_track_id"] = Value::Null;
+    events[0]["body_contact_supported"] = json!(false);
+    events[0]["contact_landmark"] = Value::Null;
+    let mut bytes = Vec::new();
+    for event in &events {
+        bytes.extend(serde_json::to_vec(event).unwrap());
+        bytes.push(b'\n');
+    }
+    fs::write(&run.touch_file, &bytes).unwrap();
+    run.touch_sha = format!("{:x}", Sha256::digest(&bytes));
+    let timeline = generate(&run, Choice::Timeline).unwrap();
+    assert_eq!(
+        timeline.value["touch_frames"],
+        json!([40, 70, 115, 145, 330, 370])
+    );
+    let event = &timeline.value["touch_annotations"][0];
+    assert_eq!(event["frame_index"], 40);
+    assert_eq!(event["kind"], "unknown_touch");
+    assert_eq!(event["provisional_track_id"], Value::Null);
+    assert_eq!(event["touch_attributed"], false);
+    assert_eq!(event["contact_verified"], false);
+    assert_eq!(event["assignment_method"], "candidate");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn timeline_covers_the_whole_video_and_all_verified_touches() {
     let (run, root) = fixture();
     let result = generate(&run, Choice::Timeline).unwrap();

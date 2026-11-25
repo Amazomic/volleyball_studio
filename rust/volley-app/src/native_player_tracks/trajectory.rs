@@ -576,6 +576,15 @@ mod scored_trajectory_tests {
 
     #[test]
     fn canonical_stabilizer_gap_survives_debug_trajectory_scan() {
+        verify_canonical_stabilizer_gap(42.0, false);
+    }
+
+    #[test]
+    fn weak_sand_rebound_with_canonical_gap_stays_floor_event() {
+        verify_canonical_stabilizer_gap(28.0, true);
+    }
+
+    fn verify_canonical_stabilizer_gap(outgoing_speed: f64, expected_ground: bool) {
         let root = std::env::temp_dir().join(format!("volley-debug-gap-{}", uuid::Uuid::new_v4()));
         let replay_id = "a".repeat(24);
         let touch_id = "b".repeat(24);
@@ -597,7 +606,7 @@ mod scored_trajectory_tests {
                 let y = if frame <= 29 {
                     820.0 + 48.0 * t + 0.15 * t * t
                 } else {
-                    790.0 - 42.0 * t + 0.20 * t * t
+                    790.0 - outgoing_speed * t + 0.20 * t * t
                 };
                 Some([(1035.0 + 2.5 * t) / 1920.0, y / 1080.0])
             } else {
@@ -694,20 +703,22 @@ mod scored_trajectory_tests {
             Some(&court),
         )
         .unwrap();
-        assert!(
+        assert_eq!(
             classified
                 .ground_contacts
                 .iter()
                 .any(|contact| (28..=31).contains(&contact.frame)),
-            "Court bounce should not remain a player touch: {:?}",
+            expected_ground,
+            "Sand classification must reflect rebound energy: {:?}",
             classified.ground_contacts
         );
-        assert!(
-            !classified
+        assert_eq!(
+            classified
                 .events
                 .iter()
                 .any(|(frame, _)| (28..=31).contains(frame)),
-            "Ground bounce leaked back into player touches: {:?}",
+            !expected_ground,
+            "Only weak sand rebounds may be removed from player touch candidates: {:?}",
             classified.events
         );
         std::fs::remove_dir_all(root).unwrap();
