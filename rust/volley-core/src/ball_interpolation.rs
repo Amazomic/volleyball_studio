@@ -176,7 +176,7 @@ pub struct StabilizedBallMotion {
     pub observed_frames: usize,
 }
 
-pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v7";
+pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v8";
 
 fn reject_unlinked_motion(
     points: &mut [Option<[f64; 2]>],
@@ -395,10 +395,10 @@ fn reject_recurring_static_hotspots(
                     .max(0.0)
                     .sqrt(),
             ];
-            (spread[0] <= 0.005
-                && spread[1] <= 0.005
-                && cell.max[0] - cell.min[0] <= 0.015
-                && cell.max[1] - cell.min[1] <= 0.021)
+            (spread[0] <= 0.0065
+                && spread[1] <= 0.0065
+                && cell.max[0] - cell.min[0] <= 0.021
+                && cell.max[1] - cell.min[1] <= 0.024)
                 .then_some(center)
         })
         .collect::<Vec<_>>();
@@ -409,7 +409,7 @@ fn reject_recurring_static_hotspots(
             continue;
         };
         for center in &hotspots {
-            if (point[0] - center[0]).hypot(point[1] - center[1]) > 0.018 {
+            if (point[0] - center[0]).hypot(point[1] - center[1]) > 0.025 {
                 continue;
             }
             let moving_neighbor = |neighbor: usize| {
@@ -1280,6 +1280,38 @@ mod tests {
         assert_eq!(result.points[315], Some([0.63, 0.55]));
         assert!(!result.rejected_frames.contains(&315));
         assert!(!result.interpolated[315]);
+    }
+
+    #[test]
+    fn ball_stabilizer_rejects_jittering_recurrent_hotspot_before_flight() {
+        let mut samples = Vec::new();
+        for frame in 0..900 {
+            let point = if frame < 140 || (350..390).contains(&frame) || (700..760).contains(&frame)
+            {
+                [
+                    0.932 + (frame % 3) as f64 * 0.002,
+                    0.57 + (frame % 4) as f64 * 0.0055,
+                ]
+            } else if (140..172).contains(&frame) {
+                [
+                    0.408 + (frame - 140) as f64 * 0.002,
+                    0.94 - (frame - 140) as f64 * 0.018,
+                ]
+            } else {
+                continue;
+            };
+            samples.push(ScoredBallSample {
+                frame,
+                point,
+                confidence: 0.8,
+            });
+        }
+        let result =
+            stabilize_ball_motion(&samples, 900, BallStabilizerSettings::default()).unwrap();
+        assert!(result.points[..140].iter().all(Option::is_none));
+        assert_eq!(result.points[140], Some([0.408, 0.94]));
+        assert!(!result.interpolated[140]);
+        assert!(!result.rejected_frames.contains(&140));
     }
 
     #[test]
