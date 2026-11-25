@@ -35,7 +35,7 @@ use volley_core::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_roster_motion_v18";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_protected_continuity_v19";
 pub(crate) mod ball_track;
 mod gap_interpolation;
 mod pose_refinement;

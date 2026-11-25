@@ -493,6 +493,28 @@ impl RosterSlot {
         std::array::from_fn(|i| self.bbox[i] + self.velocity[i % 2] * dt)
     }
 
+    fn continuation_cost(&self, observation: RosterObservation, frame: usize) -> Option<f64> {
+        if self.frame.abs_diff(frame) > 2 {
+            return None;
+        }
+        let a = self.predict(frame);
+        let b = observation.bbox;
+        let [aw, ah] = box_size(a);
+        let [bw, bh] = box_size(b);
+        if aw.min(bw) < 0.003
+            || ah.min(bh) < 0.015
+            || ah.min(bh) < 0.78 * ah.max(bh)
+            || aw.min(bw) < 0.5 * aw.max(bw)
+        {
+            return None;
+        }
+        let dx = (box_center_x(a) - box_center_x(b)).abs() / aw.max(bw);
+        let dy = (a[3] - b[3]).abs() / ah.max(bh);
+        if dx > 0.45 || dy > 0.16 {
+            return None;
+        }
+        Some(dx + 2.0 * dy + 0.15 * (ah / bh).ln().abs())
+    }
     fn score(&self, observation: RosterObservation, frame: usize) -> Option<f64> {
         let gap = self.frame.abs_diff(frame);
         let same_source = self.source_id == observation.id;
@@ -516,7 +538,7 @@ impl RosterSlot {
         } else {
             bottom.min(center_y + 0.01)
         };
-        let spread = gap.min(90) as f64 * 0.0012;
+        let spread = gap.min(90) as f64 * if gap > 2 { 0.0020 } else { 0.0012 };
         let tx = (0.75 * aw.max(bw) + spread).clamp(0.012, 0.16);
         let ty = (0.35 * ah.max(bh) + spread).clamp(0.018, 0.16);
         let distance = (dx / tx).hypot(dy / ty);
@@ -595,19 +617,71 @@ fn assign_roster_frame(
     slots: &mut [RosterSlot],
     frame: usize,
 ) -> Vec<Option<u64>> {
-    let scores = observations
+    let costs = observations
         .iter()
-        .map(|&o| {
+        .map(|&observation| {
             slots
                 .iter()
-                .map(|slot| slot.score(o, frame))
+                .map(|slot| slot.continuation_cost(observation, frame))
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let assigned = volley_core::tracker::assign_track_scores(&scores);
+    let unique_best = |values: &[(usize, f64)]| {
+        let mut ordered = values.to_vec();
+        ordered.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let &(index, cost) = ordered.first()?;
+        if ordered
+            .get(1)
+            .is_some_and(|&(_, other)| other - cost < 0.15)
+        {
+            return None;
+        }
+        Some(index)
+    };
     let mut result = vec![None; observations.len()];
     let mut matched = Vec::new();
-    for (index, slot) in assigned.into_iter().enumerate() {
+    let mut reserved = vec![false; slots.len()];
+    for (i, row) in costs.iter().enumerate() {
+        let candidates = row
+            .iter()
+            .enumerate()
+            .filter_map(|(j, c)| c.map(|c| (j, c)))
+            .collect::<Vec<_>>();
+        let Some(j) = unique_best(&candidates) else {
+            continue;
+        };
+        let competitors = costs
+            .iter()
+            .enumerate()
+            .filter_map(|(k, r)| r[j].map(|c| (k, c)))
+            .collect::<Vec<_>>();
+        if unique_best(&competitors) == Some(i) {
+            result[i] = Some(slots[j].id);
+            reserved[j] = true;
+            matched.push((i, j));
+        }
+    }
+    let scores = observations
+        .iter()
+        .enumerate()
+        .map(|(i, &o)| {
+            slots
+                .iter()
+                .enumerate()
+                .map(|(j, slot)| {
+                    if result[i].is_some() || reserved[j] {
+                        None
+                    } else {
+                        slot.score(o, frame)
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    for (index, slot) in volley_core::tracker::assign_track_scores(&scores)
+        .into_iter()
+        .enumerate()
+    {
         if let Some(slot) = slot {
             result[index] = Some(slots[slot].id);
             matched.push((index, slot));
@@ -1178,6 +1252,47 @@ mod tests {
         })
     }
 
+    #[test]
+    fn visible_player_keeps_id_when_occluded_neighbor_reappears() {
+        for reverse in [false, true] {
+            let at = if reverse { 40 } else { 60 };
+            let prior = if reverse { 41 } else { 59 };
+            let missing = if reverse { 55 } else { 45 };
+            let near = RosterObservation {
+                id: 4,
+                bbox: [0.44, 0.46, 0.482, 0.615],
+                score: 0.9,
+            };
+            let far = RosterObservation {
+                id: 7,
+                bbox: [0.468, 0.44, 0.49, 0.52],
+                score: 0.8,
+            };
+            let mut slots = [RosterSlot::new(near, prior), RosterSlot::new(far, missing)];
+            slots[1].velocity = [if reverse { -0.001 } else { 0.001 }, 0.0];
+            let observations = [
+                RosterObservation {
+                    id: 7,
+                    bbox: [0.447, 0.465, 0.486, 0.617],
+                    score: 0.88,
+                },
+                RosterObservation {
+                    id: 4,
+                    bbox: [0.423, 0.448, 0.455, 0.536],
+                    score: 0.61,
+                },
+            ];
+            let assigned = assign_roster_frame(&observations, &mut slots, at);
+            assert_eq!(
+                assigned[0],
+                Some(4),
+                "reverse={reverse}, assigned={assigned:?}"
+            );
+            assert_eq!(assigned[1], Some(7));
+            assert_eq!(slots[0].frame, at);
+            assert!(slots[0].bbox[3] > 0.60);
+        }
+    }
     #[test]
     fn rally_roster_does_not_force_an_independent_far_box_into_existing_id() {
         let frames = (0..70)
