@@ -557,14 +557,6 @@
   const playerTrackingSummary=(run,id)=>{
     const stats=run?.player_tracking_stats;
     const fmt=n=>n.toLocaleString("ru-RU");
-    if(id==="players"){
-      const raw=stats?.raw_detections;
-      if(!Number.isSafeInteger(raw)||raw<0)return null;
-      return {
-        text:fmt(raw)+" обнаружений",
-        title:"RF-DETR: "+fmt(raw)+" обнаружений на игровых кадрах."
-      };
-    }
     if(id==="tracking"){
       const total=stats?.total_track_ids,short=stats?.short_track_ids,final=stats?.track_ids;
       if(![total,short,final].every(n=>Number.isSafeInteger(n)&&n>=0)||
@@ -603,9 +595,6 @@
       const noun=count%10===1&&count%100!==11?"розыгрыш":
         count%10>=2&&count%10<=4&&(count%100<12||count%100>14)?"розыгрыша":"розыгрышей";
       result=count.toLocaleString("ru-RU")+" "+noun;
-      const ground=run?.gpu_rally_mask?.ground_detector;
-      if(Number.isSafeInteger(ground?.candidate_count))
-        result+=ground.calibrated?" · "+ground.candidate_count.toLocaleString("ru-RU")+" канд. пола":" · Нет разметки площадки";
     }else if(entry&&Number.isSafeInteger(entry.frames_processed)&&entry.frames_processed>=0&&
         Number.isSafeInteger(entry.frames_total)&&entry.frames_total>0){
       result=entry.frames_processed.toLocaleString("ru-RU")+" / "+
@@ -948,7 +937,7 @@
       node.addEventListener("click",()=>openGraphSettings(id));
       const stats=make("small","analysis-flow-node-stats","—");
       cell.append(node,stats);
-      if(id==="players"||id==="tracking")cell.append(make("small","analysis-flow-node-stage-metrics hidden"));
+      if(id==="tracking")cell.append(make("small","analysis-flow-node-stage-metrics hidden"));
       phases.get(row).append(cell);
     }
     const svg=graphSvg("svg",{class:"analysis-flow-arrows","aria-hidden":"true"});
@@ -1024,7 +1013,7 @@
         stats.title=stats.textContent==="—"?"Нет данных об этапе":
           sharedPose?"RTMPose и RF-DETR использовали общий GPU-проход; время указано совместное. "+stats.textContent:stats.textContent;
       }
-      if(id==="players"||id==="tracking"){
+      if(id==="tracking"){
         const metrics=playerTrackingSummary(run,id);
         const detail=node.parentElement.querySelector(".analysis-flow-node-stage-metrics");
         if(detail){
