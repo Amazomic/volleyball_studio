@@ -252,8 +252,19 @@ fn proposals(players: &[Value]) -> Vec<(usize, [f64; 4], &'static str)> {
             } else {
                 "stabilized_track_box"
             };
-            let bbox =
-                serde_json::from_value(player["detection"]["bbox_xyxy_norm"].clone()).ok()?;
+            if player["visible_regions"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+            {
+                return None;
+            }
+            let bbox = serde_json::from_value(
+                player
+                    .get("full_track_box")
+                    .unwrap_or(&player["detection"]["bbox_xyxy_norm"])
+                    .clone(),
+            )
+            .ok()?;
             Some((index, bbox, origin))
         })
         .collect()
@@ -386,9 +397,38 @@ pub(super) fn refine(
             if let Some(engine) = &mut engine {
                 for group in crops.chunks(8) {
                     let boxes = group.iter().map(|(_, bbox, _)| *bbox).collect::<Vec<_>>();
-                    let estimates = engine.infer_batch_original(pixels, width, height, &boxes)?;
-                    for ((player, bbox, origin), joints) in group.iter().zip(estimates) {
-                        let joints = joints.map(|p| [p.x as f64, p.y as f64, p.score as f64]);
+                    let visibility = group
+                        .iter()
+                        .map(|(player, _, _)| {
+                            serde_json::from_value::<Vec<[f64; 4]>>(
+                                players[*player]["visible_regions"].clone(),
+                            )
+                            .ok()
+                        })
+                        .collect::<Vec<_>>();
+                    let estimates = engine.infer_batch_original_visible(
+                        pixels,
+                        width,
+                        height,
+                        &boxes,
+                        &visibility,
+                    )?;
+                    for (((player, bbox, origin), joints), visible) in
+                        group.iter().zip(estimates).zip(visibility)
+                    {
+                        let joints = joints.map(|p| {
+                            let (x, y) = (p.x as f64, p.y as f64);
+                            let score = if visible.as_ref().is_some_and(|parts| {
+                                !parts
+                                    .iter()
+                                    .any(|r| x >= r[0] && x < r[2] && y >= r[1] && y < r[3])
+                            }) {
+                                0.0
+                            } else {
+                                p.score as f64
+                            };
+                            [x, y, score]
+                        });
                         let evidence = PoseEvidence { joints };
                         if evidence.valid() && evidence.inside_crop(*bbox, 0.02) {
                             measured.push(json!({
@@ -553,6 +593,20 @@ pub(super) fn attach(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn occlusion_pose_proposals_use_full_geometry_only_for_visible_players() {
+        let players = vec![
+            serde_json::json!({"track_id":7,"detection":{"bbox_xyxy_norm":[0.2,0.2,0.3,0.3]},
+                "full_track_box":[0.2,0.2,0.3,0.6],"visible_regions":[]}),
+            serde_json::json!({"track_id":4,"detection":{"bbox_xyxy_norm":[0.4,0.2,0.5,0.3]},
+                "full_track_box":[0.4,0.2,0.5,0.6],"visible_regions":[[0.4,0.2,0.5,0.3]]}),
+        ];
+        let crops = super::proposals(&players);
+        assert_eq!(crops.len(), 1);
+        assert_eq!(crops[0].0, 1);
+        assert_eq!(crops[0].1, [0.4, 0.2, 0.5, 0.6]);
+    }
+
     use super::*;
     use serde_json::json;
 

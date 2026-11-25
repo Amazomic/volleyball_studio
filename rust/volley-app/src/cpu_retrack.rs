@@ -35,9 +35,10 @@ use volley_core::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_protected_continuity_v19";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_occlusion_visibility_v20";
 pub(crate) mod ball_track;
 mod gap_interpolation;
+mod occlusion;
 mod pose_refinement;
 mod pose_source;
 mod track_stitch;
@@ -782,7 +783,13 @@ fn replay_frames_verified(
     } else {
         (stitched_sha, 0)
     };
-    totals.interpolated_player_boxes = inferred_positions;
+    let (continuous_sha, occluded_positions) =
+        if interpolate_players && phase == ReplayPhase::StablePlan {
+            occlusion::apply(output, &continuous_sha, count, cancel)?
+        } else {
+            (continuous_sha, 0)
+        };
+    totals.interpolated_player_boxes = inferred_positions + occluded_positions;
     totals.combined_pose_crops += removed_duplicate_boxes;
     let track_count = summary
         .confirmed_tracks

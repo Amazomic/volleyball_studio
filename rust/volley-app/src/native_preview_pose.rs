@@ -286,6 +286,9 @@ fn attach_frame(
     let mut matched = false;
     let boxes: Vec<_> = tracked.iter().map(|p| valid_box(&p["box"])).collect();
     for (track_index, player) in tracked.iter_mut().enumerate() {
+        if player["visible_regions"].is_array() {
+            continue;
+        }
         if player.get("pose").is_some()
             && (interpolated || reject_ambiguous || player["pose_source"].is_string())
         {

@@ -212,15 +212,32 @@ impl PoseEngine {
         height: usize,
         boxes: &[[f64; 4]],
     ) -> Result<Vec<[Keypoint; KPT_COUNT]>, String> {
+        self.infer_batch_original_visible(rgb, width, height, boxes, &vec![None; boxes.len()])
+    }
+
+    pub fn infer_batch_original_visible(
+        &mut self,
+        rgb: &[u8],
+        width: usize,
+        height: usize,
+        boxes: &[[f64; 4]],
+        visibility: &[Option<Vec<[f64; 4]>>],
+    ) -> Result<Vec<[Keypoint; KPT_COUNT]>, String> {
         if boxes.is_empty() {
             return Ok(Vec::new());
         }
-        if boxes.len() > 8 {
-            return Err("RTMPose batch is limited to eight players".into());
+        if boxes.len() > 8 || boxes.len() != visibility.len() {
+            return Err("RTMPose batch is limited to eight aligned players".into());
         }
         let mut crops = Vec::with_capacity(boxes.len() * 3 * 256 * 192);
-        for &bbox in boxes {
-            crops.extend(crop_and_normalize_at(rgb, width, height, bbox)?);
+        for (&bbox, visible) in boxes.iter().zip(visibility) {
+            crops.extend(crop_and_normalize_visible(
+                rgb,
+                width,
+                height,
+                bbox,
+                visible.as_deref(),
+            )?);
         }
         let tensor = Tensor::from_array((vec![boxes.len() as i64, 3, 256, 192], crops))
             .map_err(|e| e.to_string())?;
@@ -316,6 +333,16 @@ fn crop_and_normalize_at(
     height: usize,
     bbox: [f64; 4],
 ) -> Result<Vec<f32>, String> {
+    crop_and_normalize_visible(rgb, width, height, bbox, None)
+}
+
+fn crop_and_normalize_visible(
+    rgb: &[u8],
+    width: usize,
+    height: usize,
+    bbox: [f64; 4],
+    visible: Option<&[[f64; 4]]>,
+) -> Result<Vec<f32>, String> {
     let (cx, cy, crop_w, crop_h) = crop_geometry_at(bbox, width, height)?;
     if rgb.len() != width * height * 3 {
         return Err("RTMPose RGB input dimensions do not match the source frame".into());
@@ -330,10 +357,21 @@ fn crop_and_normalize_at(
             let x0 = fx.floor() as isize;
             let wx = (fx - x0 as f64) as f32;
             for c in 0..3 {
-                let a = pixel(rgb, width, height, x0, y0, c) * (1.0 - wx)
-                    + pixel(rgb, width, height, x0 + 1, y0, c) * wx;
-                let b = pixel(rgb, width, height, x0, y0 + 1, c) * (1.0 - wx)
-                    + pixel(rgb, width, height, x0 + 1, y0 + 1, c) * wx;
+                let sample = |sx: isize, sy: isize| {
+                    let px = (sx as f64 + 0.5) / width as f64;
+                    let py = (sy as f64 + 0.5) / height as f64;
+                    if visible.is_some_and(|parts| {
+                        !parts
+                            .iter()
+                            .any(|r| px >= r[0] && px < r[2] && py >= r[1] && py < r[3])
+                    }) {
+                        MEAN[c]
+                    } else {
+                        pixel(rgb, width, height, sx, sy, c)
+                    }
+                };
+                let a = sample(x0, y0) * (1.0 - wx) + sample(x0 + 1, y0) * wx;
+                let b = sample(x0, y0 + 1) * (1.0 - wx) + sample(x0 + 1, y0 + 1) * wx;
                 data[c * INPUT_HEIGHT * INPUT_WIDTH + y * INPUT_WIDTH + x] =
                     ((1.0 - wy) * a + wy * b - MEAN[c]) / STD[c];
             }
@@ -394,6 +432,31 @@ fn decode_simcc_at(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn visible_crop_neutralizes_all_pixels_outside_visible_body() {
+        let (width, height) = (100, 100);
+        let bbox = [0.25, 0.20, 0.75, 0.80];
+        let visible = [[0.25, 0.20, 0.75, 0.45]];
+        let mut first = vec![220u8; width * height * 3];
+        let mut second = vec![25u8; width * height * 3];
+        for y in 20..45 {
+            for x in 25..75 {
+                let i = (y * width + x) * 3;
+                first[i..i + 3].fill(100);
+                second[i..i + 3].fill(100);
+            }
+        }
+        let a =
+            super::crop_and_normalize_visible(&first, width, height, bbox, Some(&visible)).unwrap();
+        let b = super::crop_and_normalize_visible(&second, width, height, bbox, Some(&visible))
+            .unwrap();
+        assert_eq!(a, b);
+        assert_ne!(
+            super::crop_and_normalize_at(&first, width, height, bbox).unwrap(),
+            super::crop_and_normalize_at(&second, width, height, bbox).unwrap()
+        );
+    }
+
     #[test]
     #[ignore = "Requires PERSON_PREVIEW_RGB and CUDA runtime"]
     fn pose_batch_matches_individual_inference_with_tolerance() {

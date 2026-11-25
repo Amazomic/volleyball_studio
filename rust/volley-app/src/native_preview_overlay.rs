@@ -466,16 +466,28 @@ fn overlay_players(frame: &Value) -> Vec<Value> {
             if p["is_verified_athlete"] != false {
                 return None;
             }
-            let bb = box_norm(&p["detection"]["bbox_xyxy_norm"])?;
+            let bb = box_norm(
+                p.get("full_track_box")
+                    .unwrap_or(&p["detection"]["bbox_xyxy_norm"]),
+            )?;
             let occluder = p["occluding_track_id"].as_u64();
+            let occluders = p["occluding_track_ids"].as_array();
+            let occluded_by = |other: u64| {
+                Some(other) == occluder
+                    || occluders.is_some_and(|ids| ids.iter().any(|id| id.as_u64() == Some(other)))
+            };
             if inferred.contains(&id)
                 && observed_boxes
                     .iter()
-                    .any(|(other, measured)| Some(*other) != occluder && boxes_clash(bb, *measured))
+                    .any(|(other, measured)| !occluded_by(*other) && boxes_clash(bb, *measured))
             {
                 return None;
             }
             let mut player = json!({"id":id,"box":bb,"interpolated":inferred.contains(&id)});
+            if p["visible_regions"].is_array() {
+                player["visible_regions"] = p["visible_regions"].clone();
+                player["occluding_track_ids"] = p["occluding_track_ids"].clone();
+            }
             if let Some(occluder) = occluder {
                 player["occluding_track_id"] = json!(occluder);
             }

@@ -247,6 +247,9 @@ fn remove_synthetic_duplicates(rows: &mut [Value], support: &BTreeMap<(usize, u6
             if candidate["interpolated"] == true
                 && retained.iter().any(|&kept| {
                     candidate["occluding_track_id"].as_u64() != players[kept]["id"].as_u64()
+                        && !candidate["occluding_track_ids"]
+                            .as_array()
+                            .is_some_and(|ids| ids.iter().any(|id| id == &players[kept]["id"]))
                         && same_synthetic_body(&candidate["box"], &players[kept]["box"])
                 })
             {
@@ -378,7 +381,7 @@ pub(super) fn fill(
                             .iter_mut()
                             .find(|p| key(p, owners, &conflicts).as_ref() == Some(&k))
                     }) {
-                        if p["pose"].is_null() {
+                        if p["pose"].is_null() && !p["visible_regions"].is_array() {
                             p["pose"] = pose;
                             p["pose_interpolated"] = json!(true);
                             p["pose_interpolation_frames"] =

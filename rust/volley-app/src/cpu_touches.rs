@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
@@ -76,11 +76,13 @@ fn pose_frames_policy(
                 "frame":frame.frame_index,
                 "players":frame.players.iter().map(|player| {
                     let mut row = json!({"id":player.track_id,"box":player.bbox_xyxy_norm});
-                    if let Some(pose) = refined.get(&frame.frame_index).and_then(|poses| {
-                        poses.iter().find(|pose| pose.track_id == player.track_id)
-                    }) {
-                        row["pose"] = json!(pose.keypoints);
-                        row["pose_source"] = json!(crate::cpu_retrack::POSE_REFINEMENT_POLICY);
+                    if let Some(poses) = refined.get(&frame.frame_index) {
+                        if let Some(pose) = poses.iter().find(|pose| pose.track_id == player.track_id) {
+                            row["pose"] = json!(pose.keypoints);
+                            row["pose_source"] = json!(crate::cpu_retrack::POSE_REFINEMENT_POLICY);
+                        } else {
+                            row["visible_regions"] = json!([]);
+                        }
                     }
                     row
                 }).collect::<Vec<_>>()
@@ -177,6 +179,7 @@ struct TrackedCandidate {
     is_verified_athlete: bool,
     pose: Option<[[f64; 3]; 17]>,
     pose_source: Option<String>,
+    visible_regions: Option<Vec<[f64; 4]>>,
 }
 #[derive(Deserialize)]
 struct SelectedBall {
@@ -210,15 +213,37 @@ pub(crate) fn transform_frame(item: TrackedFrame, expected: u64) -> Result<Touch
             || sample.frame_index != expected
             || sample.class_name != "player"
             || sample.query_index.is_none()
-            || sample.score <= 0.0
+            || (sample.score <= 0.0 && !player.visible_regions.as_ref().is_some_and(Vec::is_empty))
         {
             return Err("CPU source contains fabricated athlete identity or invalid track".into());
         }
         sample.validate(expected - (expected % 9), "players")?;
+        let bbox = if let Some(regions) = player.visible_regions {
+            if regions.is_empty() {
+                continue;
+            }
+            if regions.len() > 64
+                || regions.iter().any(|r| {
+                    !r.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                        || r[0] >= r[2]
+                        || r[1] >= r[3]
+                })
+            {
+                return Err("Invalid visible track regions".into());
+            }
+            regions
+                .into_iter()
+                .max_by(|a, b| {
+                    ((a[2] - a[0]) * (a[3] - a[1])).total_cmp(&((b[2] - b[0]) * (b[3] - b[1])))
+                })
+                .ok_or("Missing visible track region")?
+        } else {
+            sample.bbox_xyxy_norm
+        };
         players.push(TouchPlayer {
             track_id: player.track_id,
             score: sample.score,
-            bbox_xyxy_norm: sample.bbox_xyxy_norm,
+            bbox_xyxy_norm: bbox,
             touch_probability: sample.touch_probability,
         });
     }
@@ -2155,6 +2180,7 @@ fn detect_stream_with_pose(
     let mut output_hash = Sha256::new();
     let mut buffer: VecDeque<TouchFrame> = VecDeque::new();
     let mut refined = BTreeMap::<u64, Vec<PosePlayer>>::new();
+    let mut hidden = BTreeMap::<u64, BTreeSet<u64>>::new();
     let mut next_emit = windows.first().map(|(start, _)| *start).unwrap_or(count);
     let mut window_index = 0;
     let mut completed_frames = 0;
@@ -2168,6 +2194,7 @@ fn detect_stream_with_pose(
                              end: u64,
                              input: &VecDeque<TouchFrame>,
                              refined: &BTreeMap<u64, Vec<PosePlayer>>,
+                             hidden: &BTreeMap<u64, BTreeSet<u64>>,
                              window: (u64, u64)|
      -> Result<(), String> {
         let region_start = start.saturating_sub(HALO as u64).max(window.0);
@@ -2218,11 +2245,16 @@ fn detect_stream_with_pose(
         }
         // Reconstruct bounded positions of existing tracked skeletons only.
         // The immutable replay and original GPU player detections remain unchanged.
-        let continuous = if interpolate_players {
+        let mut continuous = if interpolate_players {
             reconstruct_track_gaps(&clean)
         } else {
             clean
         };
+        for frame in &mut continuous {
+            if let Some(ids) = hidden.get(&frame.frame_index) {
+                frame.players.retain(|p| !ids.contains(&p.track_id));
+            }
+        }
         let filtered = if let Some(calibration) = court {
             court_touch::filter_on_court(&continuous, calibration)
         } else {
@@ -2496,7 +2528,22 @@ fn detect_stream_with_pose(
                 })
             })
             .collect::<Vec<_>>();
-        if !measured.is_empty() {
+        let has_visibility = raw
+            .tracked_players
+            .iter()
+            .any(|p| p.visible_regions.is_some());
+        if has_visibility {
+            let ids = raw
+                .tracked_players
+                .iter()
+                .filter(|p| p.visible_regions.as_ref().is_some_and(Vec::is_empty))
+                .map(|p| p.track_id)
+                .collect::<BTreeSet<_>>();
+            if !ids.is_empty() {
+                hidden.insert(index, ids);
+            }
+        }
+        if !measured.is_empty() || has_visibility {
             refined.insert(index, measured);
         }
         buffer.push_back(transform_frame(raw, index)?);
@@ -2507,6 +2554,7 @@ fn detect_stream_with_pose(
                 end,
                 &buffer,
                 &refined,
+                &hidden,
                 (window_start, window_end),
             )?;
             completed_frames += end - next_emit;
@@ -2521,6 +2569,7 @@ fn detect_stream_with_pose(
                 buffer.pop_front();
             }
             refined.retain(|frame, _| *frame >= next_emit.saturating_sub(HALO as u64));
+            hidden.retain(|frame, _| *frame >= next_emit.saturating_sub(HALO as u64));
         }
         if index == window_end {
             while next_emit <= window_end {
@@ -2530,6 +2579,7 @@ fn detect_stream_with_pose(
                     end,
                     &buffer,
                     &refined,
+                    &hidden,
                     (window_start, window_end),
                 )?;
                 completed_frames += end - next_emit;
@@ -2546,6 +2596,7 @@ fn detect_stream_with_pose(
             }
             buffer.clear();
             refined.clear();
+            hidden.clear();
             window_index += 1;
             next_emit = windows
                 .get(window_index)
@@ -3154,6 +3205,30 @@ pub async fn status(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn occlusion_visibility_keeps_hidden_tracks_out_of_touch_geometry() {
+        let player = |id, score, regions: serde_json::Value| {
+            serde_json::json!({
+                "track_id":id,"is_verified_athlete":false,
+                "detection":{"frame_index":0,"class_name":"player","query_index":0,
+                    "score":score,"bbox_xyxy_norm":[0.2,0.2,0.4,0.6]},
+                "visible_regions":regions
+            })
+        };
+        let source: super::TrackedFrame = serde_json::from_value(serde_json::json!({
+            "frame_index":0,"tracked_players":[
+                player(7,0.0,serde_json::json!([])),
+                player(4,0.8,serde_json::json!([[0.2,0.2,0.4,0.3]]))
+            ],"track_ids_provisional":true,
+            "confirmed_athlete_identities":false,"touches_confirmed":false
+        }))
+        .unwrap();
+        let frame = super::transform_frame(source, 0).unwrap();
+        assert_eq!(frame.players.len(), 1);
+        assert_eq!(frame.players[0].track_id, 4);
+        assert_eq!(frame.players[0].bbox_xyxy_norm, [0.2, 0.2, 0.4, 0.3]);
+    }
+
     fn serve_entry_fixture(start: u64, delay: u64) -> Vec<TouchFrame> {
         (start..start + 90)
             .map(|frame_index| {

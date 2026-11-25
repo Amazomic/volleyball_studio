@@ -1101,7 +1101,16 @@
         ctx.save();
         ctx.strokeStyle=playerTeamColor(player.team_side,overlay.flags.teams);
         if(player.interpolated===true){ctx.setLineDash([5,4]);ctx.globalAlpha=0.78;}
+        if(Array.isArray(player.visible_regions)){ctx.setLineDash([5,4]);ctx.globalAlpha=0.78;}
         ctx.strokeRect(px,py,rw,rh);
+        if(Array.isArray(player.visible_regions)&&player.visible_regions.length){
+          ctx.beginPath();
+          for(const [a,b,c,d] of player.visible_regions){
+            ctx.rect(x+a*width-1,y+b*height-1,(c-a)*width+2,(d-b)*height+2);
+          }
+          ctx.clip();ctx.setLineDash([]);ctx.globalAlpha=1;
+          ctx.strokeRect(px,py,rw,rh);
+        }
         ctx.restore();
         const labelsKey=playerLabelKey(project,run,video,record.replay_sha256);
         const owner=!player.identity_conflict&&overlayLabels.loaded&&overlayLabels.key===labelsKey?
