@@ -96,6 +96,117 @@ pub(crate) fn limit_stalled_http_connection(
     socket2::SockRef::from(socket).set_tcp_user_timeout(Some(timeout))
 }
 
+pub(crate) struct BoundedHttpListener<L> {
+    inner: L,
+    write_timeout: std::time::Duration,
+}
+
+impl<L> BoundedHttpListener<L> {
+    pub(crate) fn new(inner: L, write_timeout: std::time::Duration) -> Self {
+        Self {
+            inner,
+            write_timeout,
+        }
+    }
+}
+
+impl<L: axum::serve::Listener> axum::serve::Listener for BoundedHttpListener<L> {
+    type Io = BoundedHttpIo<L::Io>;
+    type Addr = L::Addr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let (inner, address) = self.inner.accept().await;
+        (
+            BoundedHttpIo {
+                inner,
+                timeout: self.write_timeout,
+                deadline: None,
+            },
+            address,
+        )
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+pub(crate) struct BoundedHttpIo<T> {
+    inner: T,
+    timeout: std::time::Duration,
+    deadline: Option<Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl<T> BoundedHttpIo<T> {
+    fn write_progress<R>(
+        &mut self,
+        cx: &mut Context<'_>,
+        result: Poll<io::Result<R>>,
+    ) -> Poll<io::Result<R>> {
+        if result.is_ready() {
+            self.deadline = None;
+            return result;
+        }
+        let timer = self
+            .deadline
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(self.timeout)));
+        if timer.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "HTTP response write stalled",
+            )));
+        }
+        Poll::Pending
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for BoundedHttpIo<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buffer)
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for BoundedHttpIo<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut self.inner).poll_write(cx, buffer);
+        self.write_progress(cx, result)
+    }
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffers: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut self.inner).poll_write_vectored(cx, buffers);
+        self.write_progress(cx, result)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let result = Pin::new(&mut self.inner).poll_flush(cx);
+        self.write_progress(cx, result)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let result = Pin::new(&mut self.inner).poll_shutdown(cx);
+        self.write_progress(cx, result)
+    }
+}
+
 pub(crate) fn exclusive_instance(repository: &Path) -> io::Result<InstanceGuard> {
     let path = lock_path(repository)?;
     if let Ok(metadata) = fs::symlink_metadata(&path) {
@@ -546,7 +657,36 @@ mod tests {
         drop(client);
     }
 
-    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn bounded_writer_resets_timeout_on_progress_and_does_not_expire_idle_connection() {
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (stream, mut reader) = tokio::io::duplex(8);
+        let mut stream = BoundedHttpIo {
+            inner: stream,
+            timeout: Duration::from_millis(200),
+            deadline: None,
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        stream.write_all(b"12345678").await.unwrap();
+        let writer = tokio::spawn(async move {
+            stream.write_all(b"abcdefghABCDEFGH87654321").await.unwrap();
+            stream
+        });
+        let mut block = [0; 8];
+        for expected in [b"12345678", b"abcdefgh", b"ABCDEFGH"] {
+            tokio::time::sleep(Duration::from_millis(90)).await;
+            reader.read_exact(&mut block).await.unwrap();
+            assert_eq!(&block, expected);
+        }
+        let mut stream = writer.await.unwrap();
+        let err = stream.write_all(b"x").await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        reader.read_exact(&mut block).await.unwrap();
+        assert_eq!(&block, b"87654321");
+    }
+
     #[tokio::test]
     async fn abandoned_range_response_releases_http_shutdown_hold() {
         use axum::{http::HeaderMap, routing::get, serve::ListenerExt, Router};
@@ -571,10 +711,14 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             axum::serve(
-                listener.tap_io(|stream| {
-                    limit_stalled_http_connection(stream, std::time::Duration::from_millis(1100))
-                        .unwrap();
-                }),
+                BoundedHttpListener::new(
+                    listener.tap_io(|stream| {
+                        socket2::SockRef::from(&*stream)
+                            .set_send_buffer_size(4096)
+                            .unwrap();
+                    }),
+                    std::time::Duration::from_millis(1100),
+                ),
                 app,
             )
             .await

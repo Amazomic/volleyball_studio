@@ -552,16 +552,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }),
     );
     axum::serve(
-        listener.tap_io(|socket| {
-            #[cfg(target_os = "linux")]
-            if let Err(error) =
-                runtime::limit_stalled_http_connection(socket, std::time::Duration::from_secs(120))
-            {
-                eprintln!("Cannot apply bounded TCP stall timeout: {error}");
-            }
-            #[cfg(not(target_os = "linux"))]
-            let _ = socket;
-        }),
+        runtime::BoundedHttpListener::new(
+            listener.tap_io(|socket| {
+                #[cfg(target_os = "linux")]
+                if let Err(error) = runtime::limit_stalled_http_connection(
+                    socket,
+                    std::time::Duration::from_secs(120),
+                ) {
+                    eprintln!("Cannot apply bounded TCP stall timeout: {error}");
+                }
+                #[cfg(not(target_os = "linux"))]
+                let _ = socket;
+            }),
+            std::time::Duration::from_secs(30),
+        ),
         router,
     )
     .with_graceful_shutdown(shutdown_signal(state, gate, shutdown_requested))

@@ -1,0 +1,7 @@
+# Windows HTTP response stall — 2026-11-25
+
+Base c84ef0b7. Live status held http_responses with no compute or write jobs. Navigating away from the Studio tab released the guard immediately. A stalled video Range response was reproduced on native Windows with a synthetic 24 MiB file and a client that stops reading: the prior Windows listener retained the request guard beyond the test deadline (red test). Existing TCP_USER_TIMEOUT was Linux-only.
+
+The listener now wraps accepted asynchronous connections in a portable bounded write transport. Pending writes, vectored writes, flush and shutdown are limited to 30 seconds without progress; normal reads/idle connections are not timed out. Successful writes reset the deadline. Existing Linux socket timeout and HTTP/worker shutdown protection remain unchanged. A stalled connection is dropped by Hyper and its body guard is released. No change to media range semantics, analysis, or persisted data. A paused browser that stops reading for longer than the timeout may need to issue a new Range request.
+
+Native Windows targeted tests: 7 passed, including actual TCP stalled-range regression, progress across several write deadlines, idle connection, stream guard, active worker protection and origin checks. No actual route or packet capture of the original browser response; the reproducer establishes the failure mechanism rather than proving the exact original request URL. Full integrated gate and штатная deployment queue required.
