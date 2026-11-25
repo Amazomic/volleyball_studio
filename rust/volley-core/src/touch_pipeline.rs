@@ -364,6 +364,7 @@ pub fn attach_touch_source_evidence(
     width: u32,
     height: u32,
     reach_ratio: f64,
+    eligible: impl Fn(u64, u64) -> bool,
 ) {
     let Some(first) = frames.first().map(|frame| frame.frame_index) else {
         return;
@@ -383,6 +384,7 @@ pub fn attach_touch_source_evidence(
         let selected = row
             .players
             .iter()
+            .filter(|player| eligible(event.frame_index, player.track_id))
             .filter_map(|player| {
                 let bbox = pixel_bbox(player.bbox_xyxy_norm, w, h);
                 let distance = (bbox[0] - event.ball_x_px)
@@ -801,7 +803,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             baseline_moments,
         );
-        attach_touch_source_evidence(&mut classified, &attributed_frames, 1920, 1080, 0.75);
+        attach_touch_source_evidence(
+            &mut classified,
+            &attributed_frames,
+            1920,
+            1080,
+            0.75,
+            |_, _| true,
+        );
         assert_eq!(
             classified
                 .iter()

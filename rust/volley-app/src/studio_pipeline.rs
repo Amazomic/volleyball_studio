@@ -1386,6 +1386,7 @@ fn cpu_lineage_valid(
         && rallies["state"] == "provisional_rally_segments"
         && rallies["court_contact_context_version"] == "not_computed_primary_gpu_v1"
         && touches["initial_serve_attribution_version"] == crate::cpu_touches::INITIAL_SERVE_ATTRIBUTION_VERSION
+        && touches["touch_side_attribution_version"] == crate::court_touch::TOUCH_SIDE_ATTRIBUTION_VERSION
         && touches["ground_detector_version"] == volley_core::motion::GROUND_DETECTOR_VERSION
         && rallies["ground_boundary_version"] == volley_core::motion::GROUND_DETECTOR_VERSION
         && rallies["materialization_version"] == "primary_gpu_intervals_direct_v1"
@@ -4404,6 +4405,7 @@ mod branching_tests {
                 },
                 "automatic_action_prediction_method":"pose_keypoints_motion_v5_or_unknown_touch",
                 "initial_serve_attribution_version":crate::cpu_touches::INITIAL_SERVE_ATTRIBUTION_VERSION,
+                "touch_side_attribution_version":crate::court_touch::TOUCH_SIDE_ATTRIBUTION_VERSION,
                 "ground_detector_version":volley_core::motion::GROUND_DETECTOR_VERSION,
                 "preliminary_rally_scope_version":"primary_gpu_rally_mask_v1",
                 "preliminary_rally_settings":request.post.rallies,

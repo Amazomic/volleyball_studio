@@ -1467,6 +1467,7 @@ mod source_track_integrity_tests {
             TouchSettings::default(),
             None,
             &refined,
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(events.len(), 1);
@@ -1495,6 +1496,7 @@ mod source_track_integrity_tests {
             TouchSettings::default(),
             None,
             &refined,
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(events[0].provisional_track_id, Some(21));
@@ -1798,6 +1800,7 @@ fn refine_pose_events(
         settings,
         None,
         &BTreeMap::new(),
+        &BTreeMap::new(),
     )
 }
 
@@ -1811,6 +1814,7 @@ fn refine_pose_events_policy(
     settings: TouchSettings,
     interpolation: Option<bool>,
     refined: &BTreeMap<u64, Vec<PosePlayer>>,
+    eligible_tracks: &BTreeMap<u64, Vec<u64>>,
 ) -> Result<(), String> {
     let (video_width, video_height) = dimensions;
     if events.is_empty() || frames.is_empty() {
@@ -1861,6 +1865,11 @@ fn refine_pose_events_policy(
         let contact = frame
             .players
             .iter()
+            .filter(|player| {
+                eligible_tracks
+                    .get(&event.frame_index)
+                    .is_none_or(|ids| ids.contains(&player.track_id))
+            })
             .filter_map(|player| {
                 let id = player.track_id;
                 pose_contact_at_frame(
@@ -2249,12 +2258,40 @@ fn detect_stream_with_pose(
                 }),
                 &mut possible_ground,
             )?;
+            let eligible_tracks = court
+                .zip(
+                    initial_serves
+                        .last()
+                        .filter(|serve| serve.rally_start_frame == window.0),
+                )
+                .and_then(|(court, serve)| {
+                    Some((
+                        court,
+                        serve.trajectory_start_frame?,
+                        serve.provisional_track_id?,
+                    ))
+                })
+                .map(|(court, launch, server)| {
+                    court_touch::pre_crossing_tracks(
+                        &events,
+                        evidence_frames,
+                        court,
+                        launch,
+                        server,
+                    )
+                })
+                .unwrap_or_default();
             attach_touch_source_evidence(
                 &mut events,
                 evidence_frames,
                 width,
                 height,
                 settings.max_reach_ratio,
+                |frame, track| {
+                    eligible_tracks
+                        .get(&frame)
+                        .is_none_or(|ids| ids.contains(&track))
+                },
             );
             if let Some((root, fusion, interpolation)) = pose_source {
                 let mut classification_settings = settings;
@@ -2268,6 +2305,7 @@ fn detect_stream_with_pose(
                     classification_settings,
                     Some(interpolation),
                     refined,
+                    &eligible_tracks,
                 )?;
             }
             apply_training(
@@ -2322,6 +2360,97 @@ fn detect_stream_with_pose(
                 }
             }
             separate_ground_contacts(&mut events, &mut possible_ground);
+            if let Some(calibration) = court {
+                court_touch::attach_occluded_followups(
+                    &mut events,
+                    evidence_frames,
+                    calibration,
+                    (width, height),
+                    pending.as_ref(),
+                );
+                for event in events
+                    .iter_mut()
+                    .filter(|e| e.inferred_body_reach_supported)
+                {
+                    let (first_slice, second_slice) = input.as_slices();
+                    if event.provisional_track_id.is_some_and(|id| {
+                        !source_frame_contains_track(first_slice, event.frame_index, id)
+                            && !source_frame_contains_track(second_slice, event.frame_index, id)
+                    }) {
+                        event.provisional_track_id = None;
+                        event.inferred_body_reach_supported = false;
+                        event.action_prediction = None;
+                        event.court = None;
+                    }
+                }
+                if events
+                    .iter()
+                    .any(|e| e.inferred_body_reach_supported && e.action_prediction.is_some())
+                {
+                    if let Some((root, fusion, interpolation)) = pose_source {
+                        let poses = pose_frames_policy(
+                            root,
+                            fusion,
+                            evidence_frames,
+                            Some(interpolation),
+                            refined,
+                        )?;
+                        for event in events
+                            .iter_mut()
+                            .filter(|e| e.inferred_body_reach_supported)
+                        {
+                            let Some((id, geometry)) = event
+                                .provisional_track_id
+                                .zip(event.action_prediction.as_ref())
+                            else {
+                                continue;
+                            };
+                            let Some(player) = evidence_frames
+                                .iter()
+                                .find(|row| row.frame_index == event.frame_index)
+                                .and_then(|row| row.players.iter().find(|p| p.track_id == id))
+                            else {
+                                continue;
+                            };
+                            let Some(pose) = poses
+                                .iter()
+                                .find(|row| row.frame_index == event.frame_index)
+                                .and_then(|row| {
+                                    row.players
+                                        .iter()
+                                        .find(|p| p.track_id == id && !p.interpolated)
+                                })
+                            else {
+                                continue;
+                            };
+                            let Some((before, after)) =
+                                volley_core::touch_pipeline::observed_pose_motion(
+                                    &poses,
+                                    event.frame_index,
+                                    id,
+                                )
+                            else {
+                                continue;
+                            };
+                            let evidence = volley_core::pose_classification::PoseEvidence {
+                                keypoints: pose.keypoints,
+                                ball_x_norm: event.ball_x_px / f64::from(width),
+                                ball_y_norm: event.ball_y_px / f64::from(height),
+                                video_width: f64::from(width),
+                                video_height: f64::from(height),
+                                player_bbox_norm: player.bbox_xyxy_norm,
+                            };
+                            if let Some(prediction) =
+                                volley_core::pose_classification::refine_with_motion(
+                                    &evidence, geometry, &before, &after,
+                                )
+                            {
+                                event.action_prediction = Some(prediction);
+                            }
+                        }
+                    }
+                }
+            }
             if ground_contacts.len() + possible_ground.len() > 30_000 {
                 return Err("Ground contact count exceeds limit".into());
             }
@@ -2925,6 +3054,8 @@ fn process_with_ball_scope_and_rally_settings_report(
         let serve_proposals = surface_data["initial_serve_proposals"].take();
         let ground_contacts = surface_data["ground_contacts"].take();
         record["initial_serve_attribution_version"] = json!(INITIAL_SERVE_ATTRIBUTION_VERSION);
+        record["touch_side_attribution_version"] =
+            json!(court_touch::TOUCH_SIDE_ATTRIBUTION_VERSION);
         record["ground_detector_version"] = json!(volley_core::motion::GROUND_DETECTOR_VERSION);
         record["ground_contact_count"] = json!(ground_contacts.as_array().map_or(0, Vec::len));
         record["initial_serve_proposal_count"] =
