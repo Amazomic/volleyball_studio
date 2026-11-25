@@ -825,12 +825,18 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
     process_inner(state, req, None, None, |_| Ok(()))
 }
 
+pub(crate) enum TrackingProgress {
+    BoxesReady(u64),
+    PoseFrames { processed: u64, total: u64 },
+    FinalPass,
+}
+
 pub(crate) fn process_with_cancel(
     state: &AppState,
     req: &ReplayRequest,
     cancel: &AtomicBool,
     refinement: Option<PoseRefinement>,
-    on_pose: impl FnMut(bool) -> Result<(), String>,
+    on_pose: impl FnMut(TrackingProgress) -> Result<(), String>,
 ) -> Result<Value, ApiError> {
     process_inner(state, req, Some(cancel), refinement, on_pose)
 }
@@ -840,7 +846,7 @@ fn process_inner(
     req: &ReplayRequest,
     cancel: Option<&AtomicBool>,
     refinement: Option<PoseRefinement>,
-    mut on_pose: impl FnMut(bool) -> Result<(), String>,
+    mut on_pose: impl FnMut(TrackingProgress) -> Result<(), String>,
 ) -> Result<Value, ApiError> {
     if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
         return Err(storage::conflict("cancelled"));
@@ -992,8 +998,9 @@ fn process_inner(
                 cancel,
             },
         )?;
+        on_pose(TrackingProgress::BoxesReady(totals.tentative_tracks))?;
         if !refine_pose {
-            on_pose(true)?;
+            on_pose(TrackingProgress::FinalPass)?;
         }
         let mut refined_poses = 0;
         let mut refined_pose_sha = saved_refined.as_ref().map(|s| s.sha.clone());
@@ -1019,7 +1026,6 @@ fn process_inner(
             totals.pose_detections = refined_poses;
         }
         if refine_pose {
-            on_pose(false)?;
             let decoded_frames = manifest["decoded_frames"]
                 .as_u64()
                 .filter(|n| (frames..=frames + 8).contains(n))
@@ -1041,6 +1047,7 @@ fn process_inner(
                 },
                 refinement,
                 cancel.ok_or("RTMPose refinement cancellation unavailable")?,
+                |processed, total| on_pose(TrackingProgress::PoseFrames { processed, total }),
             )?;
             refined_pose_sha = Some(pose_sha.clone());
             refined_pose_stride = Some(stride);
@@ -1051,7 +1058,7 @@ fn process_inner(
                 stride,
                 folder: directory.clone(),
             };
-            on_pose(true)?;
+            on_pose(TrackingProgress::FinalPass)?;
             (digest, refined_poses) =
                 pose_refinement::attach(&part, &digest, frames, &snapshot, cancel)?;
             totals.pose_detections = refined_poses;

@@ -385,6 +385,7 @@ fn history_rows(state: &AppState, project_id: &str, offset: usize) -> Result<Val
             "primary_tracking":status["primary_tracking"],
             "gpu_rally_count":status["gpu_rally_mask"]["merged"].as_array().map(Vec::len),
             "shared_pose":status["shared_pose"],
+            "pose_frame_progress":status["pose_frame_progress"],
             "player_tracking_stats":status["player_tracking_stats"],
             "ball_stabilizer":status["ball_stabilizer"],
             "completion_quality":status["completion_quality"],
@@ -906,6 +907,37 @@ fn progress_with_frames(
     }
     save(path, status)
 }
+fn tracking_progress(
+    path: &Path,
+    status: &mut Value,
+    mode: PipelineMode,
+    event: cpu_retrack::TrackingProgress,
+) -> Result<(), String> {
+    match event {
+        cpu_retrack::TrackingProgress::BoxesReady(total) => {
+            status["player_tracking_stats"]["total_track_ids"] = json!(total);
+            save(path, status)
+        }
+        cpu_retrack::TrackingProgress::PoseFrames { processed, total } => {
+            status["pose_frame_progress"] = json!({"processed":processed,"total":total});
+            progress_with_frames(
+                path,
+                status,
+                "GPU · RTMPose по стабилизированным рамкам",
+                88.0 + 0.9 * processed as f64 / total.max(1) as f64,
+                Some((processed, total)),
+            )
+        }
+        cpu_retrack::TrackingProgress::FinalPass => {
+            if mode == PipelineMode::Full {
+                progress(path, status, "CPU · Track ID", 89.0)
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
 fn shared_pose_metrics(status: &Value, pose: &Value) -> Value {
     let player = status["stages"]
         .as_array()
@@ -1884,6 +1916,7 @@ async fn pipeline(
         status["analysis_range"] = source["analysis_range"].clone();
         status["gpu_jobs"] = source["gpu_jobs"].clone();
         status["shared_pose"] = source["shared_pose"].clone();
+        status["pose_frame_progress"] = source["pose_frame_progress"].clone();
         status["profile"]["gpu"] = json!(gpu);
         status["gpu_model_stack"] = source["gpu_model_stack"].clone();
         status["gpu_reused"] = json!(true);
@@ -1921,6 +1954,7 @@ async fn pipeline(
         status["analysis_id"] = existing["analysis_id"].clone();
         status["gpu_jobs"] = existing["gpu_jobs"].clone();
         status["shared_pose"] = existing["shared_pose"].clone();
+        status["pose_frame_progress"] = existing["pose_frame_progress"].clone();
         status["gpu_rally_mask"] = existing["gpu_rally_mask"].clone();
         status["gpu_rally_mask_sha256"] = existing["gpu_rally_mask_sha256"].clone();
         status["cpu_runs"] = existing["cpu_runs"].clone();
@@ -1957,6 +1991,7 @@ async fn pipeline(
             status["analysis_id"] = existing["analysis_id"].clone();
             status["gpu_jobs"] = existing["gpu_jobs"].clone();
             status["shared_pose"] = existing["shared_pose"].clone();
+            status["pose_frame_progress"] = existing["pose_frame_progress"].clone();
             status["gpu_rally_mask"] = existing["gpu_rally_mask"].clone();
             status["gpu_rally_mask_sha256"] = existing["gpu_rally_mask_sha256"].clone();
             status["gpu_reused"] = json!(true);
@@ -2234,21 +2269,8 @@ async fn pipeline(
         interpolate_players: request.post.interpolate_players,
     };
     let replay = tokio::task::block_in_place(|| {
-        cpu_retrack::process_with_cancel(app, &replay_request, cancel, refine_pose, |final_pass| {
-            if final_pass {
-                if request.mode == PipelineMode::Full {
-                    progress(path, status, "CPU · Track ID", 89.0)
-                } else {
-                    Ok(())
-                }
-            } else {
-                progress(
-                    path,
-                    status,
-                    "GPU · RTMPose по стабилизированным рамкам",
-                    88.0,
-                )
-            }
+        cpu_retrack::process_with_cancel(app, &replay_request, cancel, refine_pose, |event| {
+            tracking_progress(path, status, request.mode, event)
         })
     })
     .map_err(reason)?;
@@ -4104,6 +4126,74 @@ mod tests {
         assert_eq!(status["stages"][1]["frames_total"], 20);
         assert_eq!(status["stages"][1]["progress_percent"], 15.0);
         assert_eq!(read(&path).unwrap()["stages"], status["stages"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tracking_progress_publishes_boxes_and_pose_before_final_track_stage() {
+        use cpu_retrack::TrackingProgress;
+        let root = std::env::temp_dir().join(format!("volley-track-progress-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("status.json");
+        let mut status = json!({"stage":"В очереди","stages":[]});
+        progress(&path, &mut status, "CPU · Связывание рамок игроков", 86.0).unwrap();
+        tracking_progress(
+            &path,
+            &mut status,
+            PipelineMode::Full,
+            TrackingProgress::BoxesReady(12),
+        )
+        .unwrap();
+        tracking_progress(
+            &path,
+            &mut status,
+            PipelineMode::Full,
+            TrackingProgress::PoseFrames {
+                processed: 0,
+                total: 40,
+            },
+        )
+        .unwrap();
+        assert_eq!(status["stage_id"], "pose");
+        assert_eq!(status["player_tracking_stats"]["total_track_ids"], 12);
+        assert!(status["player_tracking_stats"]["track_ids"].is_null());
+        assert!(status["stages"][0]["finished_ms"].is_number());
+        tracking_progress(
+            &path,
+            &mut status,
+            PipelineMode::Full,
+            TrackingProgress::PoseFrames {
+                processed: 30,
+                total: 40,
+            },
+        )
+        .unwrap();
+        assert_eq!(status["stages"][1]["frames_processed"], 30);
+        assert_eq!(status["stages"][1]["progress_percent"], 75.0);
+        tracking_progress(
+            &path,
+            &mut status,
+            PipelineMode::Full,
+            TrackingProgress::PoseFrames {
+                processed: 40,
+                total: 40,
+            },
+        )
+        .unwrap();
+        tracking_progress(
+            &path,
+            &mut status,
+            PipelineMode::Full,
+            TrackingProgress::FinalPass,
+        )
+        .unwrap();
+        let saved = read(&path).unwrap();
+        assert_eq!(saved["stage_id"], "tracking");
+        assert_eq!(saved["stages"][1]["frames_processed"], 40);
+        assert_eq!(
+            saved["pose_frame_progress"],
+            json!({"processed":40,"total":40})
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

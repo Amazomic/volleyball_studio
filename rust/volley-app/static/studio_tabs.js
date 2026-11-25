@@ -557,6 +557,11 @@
   const playerTrackingSummary=(run,id)=>{
     const stats=run?.player_tracking_stats;
     const fmt=n=>n.toLocaleString("ru-RU");
+    if(id==="boxes"){
+      const total=stats?.total_track_ids;
+      if(!Number.isSafeInteger(total)||total<0)return null;
+      return {text:fmt(total)+" Track ID",title:"ByteTrack создал "+fmt(total)+" предварительных Track ID до фильтрации."};
+    }
     if(id==="tracking"){
       const total=stats?.total_track_ids,short=stats?.short_track_ids,final=stats?.track_ids;
       if(![total,short,final].every(n=>Number.isSafeInteger(n)&&n>=0)||
@@ -571,6 +576,11 @@
     return null;
   };
   const stageResultText=(id,entry,run,now,done,running)=>{
+    if(id==="pose"&&!entry&&!running&&done){
+      const {processed,total}=run?.pose_frame_progress||{};
+      if(Number.isSafeInteger(processed)&&processed>=0&&Number.isSafeInteger(total)&&total>0&&processed===total)
+        return processed.toLocaleString("ru-RU")+" / "+total.toLocaleString("ru-RU")+" кадров · Из кэша";
+    }
     if(id==="pose"&&!entry&&(run?.gpu_jobs?.pose||run?.primary_tracking?.pose_ready||running)){
       const shared=run?.shared_pose;
       const player=run?.stages?.find(stage=>stage.id==="players");
@@ -937,7 +947,7 @@
       node.addEventListener("click",()=>openGraphSettings(id));
       const stats=make("small","analysis-flow-node-stats","—");
       cell.append(node,stats);
-      if(id==="tracking")cell.append(make("small","analysis-flow-node-stage-metrics hidden"));
+      if(id==="boxes"||id==="tracking")cell.append(make("small","analysis-flow-node-stage-metrics hidden"));
       phases.get(row).append(cell);
     }
     const svg=graphSvg("svg",{class:"analysis-flow-arrows","aria-hidden":"true"});
@@ -1005,7 +1015,7 @@
       if(stats?.classList.contains("analysis-flow-node-stats")){
         const statusText=reused&&id!=="pose"?window.VolleyballUi.translate("Из кэша"):
           node.classList.contains("is-skipped")?window.VolleyballUi.translate("Пропущено"):
-          stageResultText(id,entry,run,Date.now(),done,running);
+          stageResultText(id,entry,run,Date.now(),done||reused,running);
         stats.textContent=running&&pct!==null?Math.round(pct)+"% · "+statusText:statusText;
         const sharedPose=id==="pose"&&!entry&&
           (run?.shared_pose?.source_stage_id==="players"||
@@ -1013,8 +1023,8 @@
         stats.title=stats.textContent==="—"?"Нет данных об этапе":
           sharedPose?"RTMPose и RF-DETR использовали общий GPU-проход; время указано совместное. "+stats.textContent:stats.textContent;
       }
-      if(id==="tracking"){
-        const metrics=playerTrackingSummary(run,id);
+      if(id==="boxes"||id==="tracking"){
+        const metrics=done||reused?playerTrackingSummary(run,id):null;
         const detail=node.parentElement.querySelector(".analysis-flow-node-stage-metrics");
         if(detail){
           detail.textContent=metrics?.text||"";

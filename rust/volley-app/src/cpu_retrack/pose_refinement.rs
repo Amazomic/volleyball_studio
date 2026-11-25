@@ -276,6 +276,7 @@ pub(super) fn refine(
     source: Source<'_>,
     settings: Refinement,
     cancelled: &AtomicBool,
+    mut on_frames: impl FnMut(u64, u64) -> Result<(), String>,
 ) -> Result<(String, u64), String> {
     let mut reader = BoundedReader::open(source.replay)?;
     let output = source.replay.with_file_name("poses.jsonl");
@@ -289,6 +290,9 @@ pub(super) fn refine(
     let mut engine = None;
     let mut accepted = 0;
     let mut previous_crops = BTreeMap::<u64, [f64; 4]>::new();
+    let total = source.frames.div_ceil(settings.stride as u64);
+    let mut processed = 0;
+    on_frames(processed, total)?;
     decode_original_frames_in_range(
         source.original,
         source.decoded_frames,
@@ -367,6 +371,10 @@ pub(super) fn refine(
             }
             writer.write_all(&bytes).map_err(|e| e.to_string())?;
             hash.update(&bytes);
+            processed += 1;
+            if processed == 1 || processed.is_multiple_of(30) || processed == total {
+                on_frames(processed, total)?;
+            }
             Ok(())
         },
     )?;

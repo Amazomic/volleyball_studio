@@ -28,6 +28,9 @@ assert.equal(format("rallies",{duration_ms:2000,finished_ms:3000},{gpu_rally_cou
 assert.equal(format("rallies",null,{status:"complete",gpu_rally_mask:{merged:[]}},0,false,false),"—");
 assert.equal(format("video",{duration_ms:423000,finished_ms:500000},{status:"complete"},0,true,false),"Готово · 00:07:03");
 assert.equal(format("touches",null,null,0,false,false),"—");
+assert.equal(format("pose",{started_ms:1000,frames_processed:30,frames_total:120},run,3000,false,true),"30 / 120 кадров · 00:00:02");
+assert.equal(format("pose",{duration_ms:4000,finished_ms:5000,frames_processed:120,frames_total:120},run,5000,true,false),"120 / 120 кадров · 00:00:04");
+assert.equal(format("pose",null,{primary_tracking:{pose_ready:true},pose_frame_progress:{processed:120,total:120}},0,true,false),"120 / 120 кадров · Из кэша");
 const sharedPose={gpu_jobs:{pose:"pose-run"},stages:[{id:"players",duration_ms:36000}],
   shared_pose:{source_stage_id:"players",sampled_frames:175,player_poses:612,duration_ms:36000}};
 const scopedPose={gpu_jobs:{pose:"pose-run"},stages:[{id:"players",duration_ms:36000}],
@@ -47,6 +50,8 @@ for(const kind of ["input","gpu","cpu","mixed","output"]){
 }
 assert.match(css,/\.analysis-flow-node\.is-complete\{[^}]*border-color:var\(--flow-complete\)/);
 assert.match(css,/\.analysis-flow-node\.is-active\{[^}]*border-color:var\(--flow-active\)/);
+assert.doesNotMatch(css,/\.analysis-flow-node[^{}]*(?:hover|focus)[^{}]*\{[^}]*outline:[^;}]*var\(--flow-active\)/);
+assert.match(css,/\.analysis-flow-diagram:not\(:has\(\.analysis-flow-node\.is-active\)\) \.analysis-flow-node\.is-linked-focus\{[^}]*outline:1px dashed var\(--flow-muted\)/);
 assert.match(css,/body\[data-ui-theme="light"\] \.analysis-flow\{/);
 assert.match(html,/class="analysis-flow-legend"/);
 assert.ok(html.indexOf('id="analysis-flow-result"')<html.indexOf('id="analysis-flow-diagram"'));
@@ -314,6 +319,11 @@ vm.runInContext(definitions+extract("const pipelineEdges=","const graphSettings=
 assert.equal(ballCard.classList["is-complete"],true);
 assert.match(ballCard.title,/фиксированным окном из 9 кадров/);
 assert.equal(poseCard.classList["is-complete"],true);
+ballCard.classList.toggle("is-linked-focus",true);
+vm.runInContext('updatePipelineGraph(graph,{status:"running",stage_id:"pose",stages:[{id:"ball",finished_ms:2000},{id:"pose",started_ms:2000}]});',stageContext);
+assert.equal(ballCard.classList["is-active"],false);
+assert.equal(ballCard.classList["is-complete"],true);
+assert.equal(poseCard.classList["is-active"],true);
 vm.runInContext('updatePipelineGraph(graph,{status:"running",stage_id:"touches",profile:{gpu:{pose_enabled:false}},stages:[{id:"touch_detector",finished_ms:1000},{id:"touches",started_ms:1000}]});',stageContext);
 assert.equal(touchCard.classList["is-active"],true);
 assert.equal(touchCard.classList["is-skipped"],false);

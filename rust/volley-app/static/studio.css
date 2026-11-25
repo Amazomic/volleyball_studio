@@ -2004,11 +2004,12 @@ body[data-ui-theme="light"] .analysis-flow{--flow-shell:#f7f9fc;--flow-phase:#ed
 .analysis-flow-node[data-kind="cpu"] .analysis-flow-node-icon{color:var(--flow-cpu)}
 .analysis-flow-node[data-kind="mixed"] .analysis-flow-node-icon{color:var(--flow-mixed)}
 .analysis-flow-node[data-kind="output"] .analysis-flow-node-icon{color:var(--flow-output)}
-.analysis-flow-node:hover,.analysis-flow-node:focus-visible{filter:brightness(1.07);outline:2px solid var(--flow-active);outline-offset:2px}
+.analysis-flow-node:hover{filter:brightness(1.07)}
+.analysis-flow-node:focus-visible{outline:1px dashed var(--flow-muted);outline-offset:2px}
 .analysis-flow-node.is-complete{border-color:var(--flow-complete)}
 .analysis-flow-node.is-active{border-color:var(--flow-active);box-shadow:0 0 0 1px var(--flow-active)}
 .analysis-flow-node.is-complete:not(.is-active)::before,.analysis-flow-node.is-complete:not(.is-active)::after{opacity:0}
-.analysis-flow-node.is-linked-focus{outline:2px solid var(--flow-active);outline-offset:2px}
+.analysis-flow-diagram:not(:has(.analysis-flow-node.is-active)) .analysis-flow-node.is-linked-focus{outline:1px dashed var(--flow-muted);outline-offset:2px}
 .analysis-flow-node.is-reused{border-color:var(--flow-reused);border-style:dashed}
 .analysis-flow-node.is-skipped{border-color:var(--flow-skipped);border-style:dotted;color:var(--flow-muted)}
 .analysis-flow-node.is-failed{border-color:var(--flow-failed);border-style:solid;box-shadow:0 0 0 1px var(--flow-failed)}
