@@ -578,6 +578,10 @@
     }
     return null;
   };
+  const rallyBlockStages=["boxes","touch_detector","pose"];
+  const touchStageDuration=(entry,now)=>Number.isFinite(entry?.active_duration_ms)?
+    entry.active_duration_ms+(entry.state==="running"&&Number.isFinite(entry.block_started_ms)?
+      Math.max(0,now-entry.block_started_ms):0):null;
   const rallyStageEntry=(id,entry,run)=>{
     const blocks=run?.rally_stage_progress;
     if(!blocks)return entry;
@@ -586,35 +590,37 @@
         duration_ms:Math.max(0,blocks.detector_finished_ms-entry.started_ms)};
     }
     const block=blocks[id];
-    if((id!=="boxes"&&id!=="pose")||!block?.rallies_total)return entry;
-    return {...block,duration_ms:Number.isFinite(block.finished_ms)&&Number.isFinite(block.started_ms)?
+    if(!rallyBlockStages.includes(id)||!block?.rallies_total)return entry;
+    return {...block,duration_ms:id==="touch_detector"?touchStageDuration(block,Date.now()):Number.isFinite(block.finished_ms)&&Number.isFinite(block.started_ms)?
       Math.max(0,block.finished_ms-block.started_ms):null};
   };
   const rallyStageState=(id,entry,run)=>{
     const blocks=run?.rally_stage_progress;
     if(!blocks)return null;
     if(id==="players"&&Number.isFinite(blocks.detector_finished_ms))return "complete";
-    if((id==="boxes"||id==="pose")&&blocks[id]?.rallies_total)return entry?.state||null;
+    if(rallyBlockStages.includes(id)&&blocks[id]?.rallies_total)return entry?.state||null;
     return null;
   };
   const rallyStageHistory=(stages,run)=>{
     if(!run?.rally_stage_progress)return stages;
-    const entries=stages.filter(entry=>!["boxes","pose"].includes(entry.id))
+    const entries=stages.filter(entry=>!["boxes","pose"].includes(entry.id)&&
+      !(entry.id==="touch_detector"&&run.rally_stage_progress.touch_detector?.rallies_total))
       .map(entry=>rallyStageEntry(entry.id,entry,run));
-    for(const id of ["boxes","pose"]){
+    for(const id of rallyBlockStages){
       const entry=rallyStageEntry(id,null,run);
       if(entry?.started_ms!=null)entries.push({...entry,id,name:id});
     }
     return entries.sort((a,b)=>(a.started_ms??0)-(b.started_ms??0));
   };
   const stageResultText=(id,entry,run,now,done,running)=>{
-    if(entry?.rallies_total&&run?.rally_stage_progress&&(id==="boxes"||id==="pose")){
-      const duration=Number.isFinite(entry.finished_ms)?Math.max(0,entry.finished_ms-entry.started_ms):
+    if(entry?.rallies_total&&run?.rally_stage_progress&&rallyBlockStages.includes(id)){
+      const duration=id==="touch_detector"?touchStageDuration(entry,now):Number.isFinite(entry.finished_ms)?Math.max(0,entry.finished_ms-entry.started_ms):
         Number.isFinite(entry.started_ms)?Math.max(0,now-entry.started_ms):null;
       const count=id==="pose"?entry.sampled_frames.toLocaleString("ru-RU")+" кадров":
+        id==="touch_detector"?entry.frames_processed.toLocaleString("ru-RU")+" / "+entry.frames_total.toLocaleString("ru-RU")+" кадров":
         entry.tracks.toLocaleString("ru-RU")+" Track ID";
       return count+" · "+entry.rallies_completed+"/"+entry.rallies_total+" розыгр. · "+
-        (entry.state==="waiting"?"Ожидание · ":"")+stageTime(duration);
+        (entry.state==="waiting"?"Ожидание · ":"")+(id==="touch_detector"&&Number.isFinite(duration)&&duration<1000?Math.round(duration)+" мс":stageTime(duration));
     }
     if(id==="pose"&&!entry&&!running&&done){
       const {processed,total}=run?.pose_frame_progress||{};
@@ -1090,7 +1096,8 @@
       const state=graphLinkState(edgeCondition,run);
       const block=run?.rally_stage_progress;
       const partial=block&&((edgeSource==="players"&&edgeTarget==="boxes"&&block.detector_rallies_ready>0)||
-        (edgeSource==="boxes"&&block.boxes?.rallies_completed>0));
+        (edgeSource==="boxes"&&block.boxes?.rallies_completed>0)||
+        (edgeSource==="touch_detector"&&edgeTarget==="pose"&&block.touch_detector?.rallies_completed>0));
       const ready=state==="available"&&
         (partial||source.classList.contains("is-complete")||source.classList.contains("is-reused"));
       const running=ready&&destination.classList.contains("is-active");
@@ -1257,7 +1264,7 @@
     if(status?.stage_id!=="players"||!block)return null;
     const ids=[];
     if(!Number.isFinite(block.detector_finished_ms))ids.push("players");
-    for(const id of ["boxes","pose"])if(block[id]?.state==="running")ids.push(id);
+    for(const id of ["boxes","touch_detector","pose"])if(block[id]?.state==="running")ids.push(id);
     return ids.length?ids.map(id=>graphLabel(id,status)).join(" + "):null;
   };
   const liveHistoryLine=status=>{
@@ -1308,12 +1315,13 @@
       const live=!!current&&["running","cancelling"].includes(current.status)&&
         entry.started_ms!=null&&entry.finished_ms==null&&entry.state!=="waiting";
       const started=entry.started_ms==null?NaN:Number(entry.started_ms);
-      const elapsed=(live||entry.state==="waiting"&&current?.status==="running")&&Number.isFinite(started)?Math.max(0,now-started):
+      const elapsed=entry.id==="touch_detector"&&Number.isFinite(entry.active_duration_ms)?
+        touchStageDuration(entry,now):(live||entry.state==="waiting"&&current?.status==="running")&&Number.isFinite(started)?Math.max(0,now-started):
         entry.duration_ms==null?null:Number(entry.duration_ms);
       const line=make("div","analysis-history-stage"+(live?" is-running":""));
       line.append(
         make("span","analysis-history-stage-name",pipelineLabel(entry)),
-        make("span","analysis-history-stage-duration",historyDuration(elapsed))
+        make("span","analysis-history-stage-duration",entry.id==="touch_detector"&&Number.isFinite(elapsed)&&elapsed<1000?Math.round(elapsed)+" мс":historyDuration(elapsed))
       );
       target.append(line);
     }

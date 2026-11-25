@@ -38,6 +38,17 @@ assert.equal(blockHistory[0].finished_ms,3000);
 assert.equal(blockHistory[1].started_ms,1000);
 assert.equal(blockHistory[2].started_ms,2000);
 assert.match(format("pose",blockRun.rally_stage_progress.pose,blockRun,4000,false,true),/20 кадров.*1\/2 розыгр\./);
+const touchRun={status:"running",stage_id:"players",rally_stage_progress:{
+  ...blockRun.rally_stage_progress,
+  touch_detector:{state:"running",started_ms:1500,finished_ms:null,frames_processed:45,frames_total:100,rallies_completed:1,rallies_total:2,active_duration_ms:30,block_started_ms:3500}
+}};
+const touchEntry=blockContext.block("touch_detector",null,touchRun);
+assert.equal(blockContext.state("touch_detector",touchEntry,touchRun),"running");
+assert.equal(touchEntry.frames_processed,45);
+assert.match(format("touch_detector",touchEntry,touchRun,4000,false,true),/45 \/ 100 кадров.*1\/2 розыгр\./);
+assert.equal(blockContext.history([{id:"touch_detector",started_ms:9000}],touchRun).filter(e=>e.id==="touch_detector").length,1);
+assert.equal(blockContext.history([{id:"touch_detector",started_ms:9000}],touchRun).find(e=>e.id==="touch_detector").started_ms,1500);
+assert.equal(blockContext.history([{id:"touch_detector",started_ms:9000}],blockRun).find(e=>e.id==="touch_detector").started_ms,9000);
 const run={status:"running",gpu_rally_mask:{merged:[[0,30],[90,130]]}};
 const entry={started_ms:1000,finished_ms:null,frames_processed:1450,frames_total:1450};
 assert.equal(format("players",entry,run,3662000,true,true),"1 450 / 1 450 кадров · 01:01:01");

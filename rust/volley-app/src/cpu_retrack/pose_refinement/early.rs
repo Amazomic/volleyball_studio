@@ -231,6 +231,10 @@ fn build_local_plan(
             cancel: Some(stop),
         },
     )?;
+    update_progress(&options.progress, |p| {
+        p.boxes_finished(frames, totals.tentative_tracks);
+        p.touch_started();
+    })?;
     let mut reader = BoundedReader::open(&tracked)?;
     let mut schedule = PoseSchedule::default();
     for frame in 0..frames {
@@ -247,10 +251,12 @@ fn build_local_plan(
             serve_points,
             (f64::from(dimensions.0), f64::from(dimensions.1)),
         )?;
+        update_progress(&options.progress, RallyStageProgress::touch_frame)?;
     }
     if reader.line()?.is_some() || reader.finish() != digest {
         return Err("Early crop plan changed before pose inference".into());
     }
+    update_progress(&options.progress, RallyStageProgress::touch_finished)?;
     Ok(LocalPlan {
         window,
         scope,
@@ -372,11 +378,15 @@ fn run(
     stop: &AtomicBool,
 ) -> Result<CompletedRallies, String> {
     let global_frames = input.decoded_frames / 9 * 9;
+    let touch_start = std::time::Instant::now();
     let impacts = crate::cpu_touches::trajectory_breaks(&input.motion, input.dimensions, stop)?;
     let serve_points = initial_serve_pose_points(&input.motion, &input.rallies);
+    update_progress(&input.options.progress, |p| {
+        p.touch_trajectory_finished(touch_start.elapsed().as_millis().min(u64::MAX as u128) as u64);
+    })?;
     let make_plan = |packet| {
         update_progress(&input.options.progress, RallyStageProgress::boxes_started)?;
-        let plan = build_local_plan(
+        build_local_plan(
             packet,
             &input.options,
             stop,
@@ -384,14 +394,7 @@ fn run(
             &impacts,
             &serve_points,
             input.dimensions,
-        )?;
-        update_progress(&input.options.progress, |p| {
-            p.boxes_finished(
-                plan.window.right - plan.window.left + 1,
-                plan.totals.tentative_tracks,
-            );
-        })?;
-        Ok::<_, String>(plan)
+        )
     };
     let mut plan = Some(make_plan(
         receive(&receiver, stop, &input.options.cancelled)?.ok_or("Missing first rally packet")?,

@@ -1202,11 +1202,11 @@ fn process_inner(
             refine_input_sha = Some(digest.clone());
             let refinement = refinement.ok_or("RTMPose refinement settings unavailable")?;
             let stride = pose_refinement::SAMPLE_ROW_STRIDE;
-            on_pose(TrackingProgress::PoseSelection)?;
             let pose_sha = if let Some((pose_sha, sampled)) = assembled_pose {
                 on_pose(TrackingProgress::PoseCached(sampled))?;
                 pose_sha
             } else {
+                on_pose(TrackingProgress::PoseSelection)?;
                 let (pose_sha, _) = pose_refinement::refine(
                     &state.repository_root,
                     pose_refinement::Source {

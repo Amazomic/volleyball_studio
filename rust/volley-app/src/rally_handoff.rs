@@ -16,6 +16,8 @@ pub(crate) struct BlockStage {
     rallies_total: u64,
     sampled_frames: u64,
     tracks: u64,
+    active_duration_ms: u64,
+    block_started_ms: Option<u64>,
 }
 
 impl BlockStage {
@@ -47,6 +49,7 @@ fn epoch_ms() -> u64 {
 pub(crate) struct RallyStageProgress {
     boxes: BlockStage,
     pose: BlockStage,
+    touch_detector: BlockStage,
     detector_finished_ms: Option<u64>,
     detector_rallies_ready: u64,
 }
@@ -57,7 +60,7 @@ impl RallyStageProgress {
             .iter()
             .map(|window| window.right - window.left + 1)
             .sum();
-        for stage in [&mut self.boxes, &mut self.pose] {
+        for stage in [&mut self.boxes, &mut self.touch_detector, &mut self.pose] {
             stage.state = "waiting";
             stage.rallies_total = windows.len() as u64;
             stage.frames_total = total;
@@ -74,6 +77,22 @@ impl RallyStageProgress {
         self.boxes.frames_processed += frames;
         self.boxes.tracks += tracks;
         self.boxes.complete_rally();
+    }
+    pub(crate) fn touch_trajectory_finished(&mut self, elapsed_ms: u64) {
+        self.touch_detector.active_duration_ms += elapsed_ms;
+    }
+    pub(crate) fn touch_started(&mut self) {
+        self.touch_detector.begin();
+        self.touch_detector.block_started_ms = Some(epoch_ms());
+    }
+    pub(crate) fn touch_frame(&mut self) {
+        self.touch_detector.frames_processed += 1;
+    }
+    pub(crate) fn touch_finished(&mut self) {
+        if let Some(start) = self.touch_detector.block_started_ms.take() {
+            self.touch_detector.active_duration_ms += epoch_ms().saturating_sub(start);
+        }
+        self.touch_detector.complete_rally();
     }
     pub(crate) fn pose_started(&mut self) {
         self.pose.begin();
@@ -356,6 +375,20 @@ fn concurrent_rally_progress_tracks_real_boundaries_and_pose_samples() {
     assert_eq!(progress.boxes.state, "running");
     assert!(progress.detector_finished_ms.is_none());
     progress.boxes_finished(3, 6);
+    progress.touch_trajectory_finished(7);
+    progress.touch_started();
+    assert_eq!(progress.touch_detector.state, "running");
+    assert_eq!(progress.touch_detector.frames_total, 5);
+    assert_eq!(progress.touch_detector.rallies_completed, 0);
+    for _ in 0..3 {
+        progress.touch_frame();
+    }
+    progress.touch_finished();
+    assert_eq!(progress.touch_detector.state, "waiting");
+    assert_eq!(progress.touch_detector.frames_processed, 3);
+    assert_eq!(progress.touch_detector.rallies_completed, 1);
+    assert!(progress.touch_detector.active_duration_ms >= 7);
+    assert!(progress.touch_detector.block_started_ms.is_none());
     progress.pose_started();
     progress.pose_frame(true);
     progress.pose_frame(false);
@@ -372,6 +405,14 @@ fn concurrent_rally_progress_tracks_real_boundaries_and_pose_samples() {
     assert_eq!(progress.pose.state, "waiting");
     progress.boxes_started();
     progress.boxes_finished(2, 5);
+    progress.touch_started();
+    progress.touch_frame();
+    progress.touch_frame();
+    progress.touch_finished();
+    assert_eq!(progress.touch_detector.state, "complete");
+    assert_eq!(progress.touch_detector.frames_processed, 5);
+    assert_eq!(progress.touch_detector.rallies_completed, 2);
+    assert!(progress.touch_detector.finished_ms.is_some());
     assert_eq!(progress.boxes.state, "complete");
     assert_eq!(progress.boxes.tracks, 11);
     progress.pose_started();
