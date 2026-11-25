@@ -1340,7 +1340,7 @@ fn cpu_lineage_valid(
             TouchAlgorithm::TrajectoryTcn => tcn_sha.is_some()
                 && touches["method"] == "vballnet_volley3d_tcn_v1"
                 && touches["tcn_model_sha256"] == serde_json::json!(tcn_sha),
-            TouchAlgorithm::BallTrajectory => touches["method"] == "vballnet_touch_detector_v4",
+            TouchAlgorithm::BallTrajectory => touches["method"] == "vballnet_touch_detector_v5",
         })
         && rallies["schema"] == "volley-native-cpu-rally-proposals/1"
         && rallies["state"] == "provisional_rally_segments"

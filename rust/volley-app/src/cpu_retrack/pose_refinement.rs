@@ -12,7 +12,8 @@ use volley_core::{bbox_iou, fusion::Candidate, tracker::PoseEvidence};
 use volley_inference::{pose::PoseEngine, Device};
 use volley_media::raw_decoder::{decode_original_frames_in_range, AnalysisRange};
 
-pub(crate) const POLICY: &str = "original_rgb_stabilized_track_crops_v3";
+pub(crate) const POLICY: &str = "original_rgb_stabilized_track_crops_v4";
+pub(crate) const PRIOR_CROP_POLICY: &str = "original_rgb_stabilized_track_crops_v3";
 pub(crate) const LEGACY_POLICY: &str = "original_rgb_stabilized_track_crops_v1";
 pub(crate) const PREVIOUS_POLICY: &str = "original_rgb_stabilized_track_crops_v2";
 
@@ -74,6 +75,62 @@ pub(super) fn stabilize_crops(tracked: &mut [Value], raw: &[Candidate]) -> u64 {
     combined
 }
 
+fn recover_leading_crop(row: &mut Value, id: u64, anchor: [f64; 4]) {
+    let w = anchor[2] - anchor[0];
+    let h = anchor[3] - anchor[1];
+    if w < 0.008 || h < 0.06 {
+        return;
+    }
+    let Some(players) = row["tracked_players"].as_array() else {
+        return;
+    };
+    if players.len() >= 128 || players.iter().any(|p| p["track_id"] == id) {
+        return;
+    }
+    let Some(raw) = row["raw_player_candidates"].as_array() else {
+        return;
+    };
+    let mut matching = raw.iter().filter_map(|entry| {
+        let candidate: Candidate = serde_json::from_value(entry.clone()).ok()?;
+        let b = candidate.bbox_xyxy_norm;
+        let bw = b[2] - b[0];
+        let bh = b[3] - b[1];
+        if candidate.score < 0.20
+            || !(0.55 * w..=1.5 * w).contains(&bw)
+            || !(0.35 * h..=0.85 * h).contains(&bh)
+            || ((b[0] + b[2] - anchor[0] - anchor[2]) * 0.5).abs() > 0.35 * w
+            || (b[1] - anchor[1]).abs() > 0.40 * h
+            || b[3] > anchor[3] + 0.10 * h
+        {
+            return None;
+        }
+        if players.iter().any(|p| {
+            serde_json::from_value::<[f64; 4]>(p["detection"]["bbox_xyxy_norm"].clone())
+                .is_ok_and(|other| bbox_iou(other, b) > 0.25 || bbox_iou(other, anchor) > 0.25)
+        }) {
+            return None;
+        }
+        Some(candidate)
+    });
+    let Some(mut candidate) = matching.next() else {
+        return;
+    };
+    if matching.next().is_some() {
+        return;
+    }
+    let b = candidate.bbox_xyxy_norm;
+    candidate.bbox_xyxy_norm = [
+        b[0].min(anchor[0]),
+        b[1].min(anchor[1]),
+        b[2].max(anchor[2]),
+        b[3].max(anchor[3]),
+    ];
+    if let Some(players) = row["tracked_players"].as_array_mut() {
+        players.push(json!({"track_id":id,"detection":candidate,
+            "measurement_source":"interpolated_track_bbox",
+            "pose_crop_origin":"restored_partial_track_box","is_verified_athlete":false}));
+    }
+}
 pub(super) fn restore_partial_crops(
     source: &Path,
     expected_sha: &str,
@@ -128,6 +185,23 @@ pub(super) fn restore_partial_crops(
                         .map_err(|e| e.to_string())?;
                 if player["detection"]["score"].as_f64().unwrap_or(0.0) < 0.35 {
                     continue;
+                }
+                if player["detection"]["score"].as_f64().unwrap_or(0.0) >= 0.50
+                    && anchors
+                        .get(&id)
+                        .is_none_or(|(_, prior)| height(*prior) < height(current) * 0.80)
+                {
+                    for pending in queue.iter_mut().rev() {
+                        let Some(at) = pending["frame_index"].as_u64() else {
+                            continue;
+                        };
+                        if frame.saturating_sub(at) > 12
+                            || scope.is_some_and(|s| !s.same_interval(at, frame))
+                        {
+                            break;
+                        }
+                        recover_leading_crop(pending, id, current);
+                    }
                 }
                 if let Some(&(left, prior)) = anchors.get(&id) {
                     if height(current) < height(prior) * 0.72 {
@@ -421,6 +495,52 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
+    #[test]
+    fn crop_plan_recovers_unassigned_partial_detection_before_full_track() {
+        let path =
+            std::env::temp_dir().join(format!("volley-crop-start-{}.jsonl", uuid::Uuid::new_v4()));
+        let mut raw = Vec::new();
+        for frame in 0..=9 {
+            let detection = |bbox: [f64; 4], score| {
+                json!({
+                    "frame_index":frame,"class_name":"player","score":score,
+                    "query_index":0,"bbox_xyxy_norm":bbox,"head_point_norm":null
+                })
+            };
+            let mut players =
+                vec![json!({"track_id":18,"detection":detection([0.50,0.48,0.54,0.67],0.9)})];
+            if frame == 9 {
+                players.push(
+                    json!({"track_id":21,"detection":detection([0.485,0.435,0.509,0.553],0.8)}),
+                );
+            }
+            let candidates = if frame == 1 {
+                vec![detection([0.489, 0.419, 0.511, 0.504], 0.24)]
+            } else {
+                vec![]
+            };
+            serde_json::to_writer(&mut raw,&json!({"frame_index":frame,"tracked_players":players,"raw_player_candidates":candidates})).unwrap();
+            raw.push(b'\n');
+        }
+        fs::write(&path, &raw).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&raw));
+        restore_partial_crops(&path, &sha, 10, None, None).unwrap();
+        let rows: Vec<Value> = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let players = rows[1]["tracked_players"].as_array().unwrap();
+        let recovered = players
+            .iter()
+            .find(|p| p["track_id"] == 21)
+            .expect("raw supported crop");
+        assert_eq!(recovered["pose_crop_origin"], "restored_partial_track_box");
+        assert_eq!(recovered["detection"]["bbox_xyxy_norm"][1], 0.419);
+        assert_eq!(recovered["detection"]["bbox_xyxy_norm"][3], 0.553);
+        assert_eq!(rows[0]["tracked_players"].as_array().unwrap().len(), 1);
+        fs::remove_file(path).unwrap();
+    }
     #[test]
     fn crop_alignment_preserves_current_bounds_and_rejects_a_large_jump() {
         let current = [0.21, 0.26, 0.30, 0.66];

@@ -44,6 +44,7 @@ mod track_stitch;
 pub(crate) use pose_refinement::{
     Refinement as PoseRefinement, LEGACY_POLICY as LEGACY_POSE_REFINEMENT_POLICY,
     POLICY as POSE_REFINEMENT_POLICY, PREVIOUS_POLICY as PREVIOUS_POSE_REFINEMENT_POLICY,
+    PRIOR_CROP_POLICY as PRIOR_CROP_REFINEMENT_POLICY,
 };
 
 pub(crate) use volley_core::contracts::job_id as opaque_id;
