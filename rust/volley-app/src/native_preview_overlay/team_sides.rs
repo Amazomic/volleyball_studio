@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
-use volley_core::court_geometry::{CourtSide, CourtTransform, TeamSideVotes};
+use volley_core::court_geometry::{resolve_team_sides, CourtSide, CourtTransform, TeamSideVotes};
 
 type Sides = BTreeMap<u64, CourtSide>;
 type CacheKey = (PathBuf, String, String, (u64, u64));
@@ -55,12 +55,7 @@ fn rally_sides(
         }
         Ok(())
     })?;
-    let sides = Arc::new(
-        votes
-            .into_iter()
-            .filter_map(|(id, vote)| Some((id, vote.side()?)))
-            .collect(),
-    );
+    let sides = Arc::new(resolve_team_sides(votes));
     let mut entries = cache.lock().map_err(|_| "Team side cache lock")?;
     if entries.len() >= 128 {
         entries.pop_front();
@@ -106,6 +101,58 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
     use std::fs;
+
+    #[test]
+    fn balanced_sides_use_the_full_rally_and_keep_confirmed_players() {
+        let root =
+            std::env::temp_dir().join(format!("volley-balanced-sides-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("tracked_frames.jsonl");
+        let mut bytes = Vec::new();
+        for frame in 0..10 {
+            let (near, far) = if frame < 5 {
+                (0.25, 0.75)
+            } else {
+                (0.75, 0.25)
+            };
+            let p = |id, x: f64| {
+                json!({"track_id":id,"is_verified_athlete":false,
+                "detection":{"bbox_xyxy_norm":[x-0.02,0.3,x+0.02,0.6]}})
+            };
+            let ambiguous = [near, far, near, far, 0.5][frame % 5];
+            let row = json!({
+                "frame_index":frame,"track_ids_provisional":true,
+                "confirmed_athlete_identities":false,"touches_confirmed":false,
+                "interpolated_track_ids":[8],
+                "tracked_players":[p(1,near),p(2,near),p(3,near),p(4,far),p(5,far),p(6,ambiguous),p(8,near)]
+            });
+            bytes.extend(serde_json::to_vec(&row).unwrap());
+            bytes.push(b'\n');
+        }
+        fs::write(&path, &bytes).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let court = CourtTransform::new([[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]]).unwrap();
+        let mut frames = vec![
+            json!({"frame":0,"players":[{"id":1},{"id":6},{"id":8}]}),
+            json!({"frame":4,"players":[{"id":1},{"id":6},{"id":8}]}),
+            json!({"frame":5,"players":[{"id":1},{"id":6},{"id":8}]}),
+        ];
+        annotate(
+            &mut frames,
+            (&path, &sha, 10),
+            &[(0, 4), (5, 9)],
+            &court,
+            "test",
+        )
+        .unwrap();
+        assert_eq!(frames[0]["players"][0]["team_side"], "near");
+        assert_eq!(frames[0]["players"][1]["team_side"], "far");
+        assert_eq!(frames[1]["players"][1]["team_side"], "far");
+        assert_eq!(frames[2]["players"][0]["team_side"], "far");
+        assert_eq!(frames[2]["players"][1]["team_side"], "near");
+        assert!(frames[0]["players"][2]["team_side"].is_null());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn team_sides_are_constant_within_each_rally_and_ignore_interpolation() {

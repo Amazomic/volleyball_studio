@@ -6,6 +6,7 @@
 //! two corners in clockwise/counter-clockwise perimeter order.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const COURT_LENGTH_M: f64 = 18.0;
 pub const COURT_WIDTH_M: f64 = 9.0;
@@ -309,11 +310,13 @@ impl CourtTransform {
 pub struct TeamSideVotes {
     near: u64,
     far: u64,
+    observed: u64,
 }
 
 impl TeamSideVotes {
     pub fn observe(&mut self, court: &CourtTransform, bbox: [f64; 4]) {
         if let Some(evidence) = court.player_evidence(bbox) {
+            self.observed += 1;
             if evidence.x_m.abs() >= 0.25 {
                 match evidence.side {
                     CourtSide::Near => self.near += 1,
@@ -338,11 +341,120 @@ impl TeamSideVotes {
     }
 }
 
+pub fn resolve_team_sides(votes: BTreeMap<u64, TeamSideVotes>) -> BTreeMap<u64, CourtSide> {
+    let mut sides = BTreeMap::new();
+    let mut ambiguous = Vec::new();
+    let mut fixed_near = 0usize;
+    let mut fixed_far = 0usize;
+    for (id, vote) in votes {
+        match vote.side() {
+            Some(side) => {
+                sides.insert(id, side);
+                match side {
+                    CourtSide::Near => fixed_near += 1,
+                    CourtSide::Far => fixed_far += 1,
+                }
+            }
+            None if vote.observed >= 3 => {
+                let preference = (vote.near as f64 - vote.far as f64) / vote.observed as f64;
+                ambiguous.push((id, preference));
+            }
+            None => {}
+        }
+    }
+    ambiguous.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut best_count = 0;
+    let mut best_imbalance = fixed_near.abs_diff(fixed_far + ambiguous.len());
+    let mut best_score = 0.0;
+    let mut score = 0.0;
+    for (index, (_, preference)) in ambiguous.iter().enumerate() {
+        let count = index + 1;
+        score += preference;
+        let imbalance = (fixed_near + count).abs_diff(fixed_far + ambiguous.len() - count);
+        if imbalance < best_imbalance || (imbalance == best_imbalance && score > best_score) {
+            best_count = count;
+            best_imbalance = imbalance;
+            best_score = score;
+        }
+    }
+    for (index, (id, _)) in ambiguous.into_iter().enumerate() {
+        sides.insert(
+            id,
+            if index < best_count {
+                CourtSide::Near
+            } else {
+                CourtSide::Far
+            },
+        );
+    }
+    sides
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const QUAD: [[f64; 2]; 4] = [[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]];
+    fn vote(near: u64, far: u64, observed: u64) -> TeamSideVotes {
+        TeamSideVotes {
+            near,
+            far,
+            observed,
+        }
+    }
+
+    #[test]
+    fn team_balance_only_changes_ambiguous_players() {
+        let sides = resolve_team_sides(BTreeMap::from([
+            (1, vote(5, 0, 5)),
+            (2, vote(5, 0, 5)),
+            (3, vote(5, 0, 5)),
+            (4, vote(0, 5, 5)),
+            (5, vote(0, 5, 5)),
+            (6, vote(3, 2, 5)),
+            (7, vote(1, 0, 1)),
+        ]));
+        assert_eq!(sides.len(), 6);
+        assert_eq!(sides[&6], CourtSide::Far);
+        assert_eq!(sides[&3], CourtSide::Near);
+        assert!(!sides.contains_key(&7));
+
+        let sides = resolve_team_sides(BTreeMap::from([
+            (1, vote(5, 0, 5)),
+            (2, vote(5, 0, 5)),
+            (3, vote(5, 0, 5)),
+            (4, vote(5, 0, 5)),
+            (5, vote(0, 5, 5)),
+            (6, vote(2, 2, 5)),
+        ]));
+        assert_eq!(sides.values().filter(|&&s| s == CourtSide::Near).count(), 4);
+        assert_eq!(sides[&6], CourtSide::Far);
+    }
+
+    #[test]
+    fn team_balance_resolves_multiple_disputed_tracks_by_geometry() {
+        let sides = resolve_team_sides(BTreeMap::from([
+            (1, vote(5, 0, 5)),
+            (2, vote(5, 0, 5)),
+            (3, vote(0, 5, 5)),
+            (4, vote(0, 5, 5)),
+            (5, vote(2, 3, 5)),
+            (6, vote(3, 2, 5)),
+        ]));
+        assert_eq!(sides[&5], CourtSide::Far);
+        assert_eq!(sides[&6], CourtSide::Near);
+
+        let sides = resolve_team_sides(BTreeMap::from([
+            (1, vote(5, 0, 5)),
+            (2, vote(0, 5, 5)),
+            (3, vote(3, 2, 5)),
+        ]));
+        assert_eq!(sides[&3], CourtSide::Near);
+
+        let sides = resolve_team_sides(BTreeMap::from([(1, vote(5, 0, 5)), (2, vote(0, 0, 5))]));
+        assert_eq!(sides[&2], CourtSide::Far);
+    }
+
     #[test]
     fn team_side_uses_reliable_ground_observations() {
         let court = CourtTransform::new(QUAD).unwrap();
