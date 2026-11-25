@@ -41,6 +41,7 @@
 Это объяснения отдельных версий, а не обещание совпадения всех чисел и настроек с текущим кодом.
 
 - [Геометрия площадки](RUST_COURT_GEOMETRY.md)
+- [Проект контракта метаданных розыгрыша](RALLY_METADATA.md)
 - [Цепочка анализа в интерфейсе](RUST_HEADER_CHAIN.md)
 - [Диагностика касаний Quick Reel](RUST_QUICK_REEL_TOUCH_DIAGNOSTICS.md)
 - [Пилотная разметка](RUST_PILOT_ANNOTATION.md)
