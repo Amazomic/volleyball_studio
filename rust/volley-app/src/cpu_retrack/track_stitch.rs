@@ -992,21 +992,79 @@ pub(super) fn reconcile_rally_rosters(
     }
     result
 }
-pub(super) fn prune_short(
+struct TrackShape {
+    first: u64,
+    last: u64,
+    count: u64,
+    min_edges: [f64; 4],
+    max_edges: [f64; 4],
+    max_aspect: f64,
+}
+
+impl TrackShape {
+    fn new(frame: u64, bbox: [f64; 4]) -> Self {
+        Self {
+            first: frame,
+            last: frame,
+            count: 0,
+            min_edges: bbox,
+            max_edges: bbox,
+            max_aspect: 0.0,
+        }
+    }
+
+    fn observe(&mut self, frame: u64, bbox: [f64; 4]) {
+        self.last = frame;
+        self.count += 1;
+        for (i, edge) in bbox.into_iter().enumerate() {
+            self.min_edges[i] = self.min_edges[i].min(edge);
+            self.max_edges[i] = self.max_edges[i].max(edge);
+        }
+        let [width, height] = box_size(bbox);
+        self.max_aspect = self.max_aspect.max(width / height);
+    }
+
+    fn stationary_post(&self) -> bool {
+        let span = self.last - self.first + 1;
+        span >= 90
+            && self.count >= 60
+            && self.count * 3 >= span * 2
+            && self.max_aspect <= 0.17
+            && self
+                .min_edges
+                .iter()
+                .zip(self.max_edges)
+                .all(|(min, max)| max - min <= 0.004)
+    }
+}
+
+pub(super) struct PrunedTracks {
+    pub sha: String,
+    pub short_tracks: u64,
+    pub short_detections: u64,
+    pub static_tracks: u64,
+    pub static_detections: u64,
+}
+
+pub(super) fn prune_unreliable(
     source: &Path,
     expected_sha: &str,
     frames: u64,
     minimum: u64,
     cancel: Option<&AtomicBool>,
-) -> Result<(String, u64, u64), String> {
-    let mut counts = BTreeMap::<u64, u64>::new();
+) -> Result<PrunedTracks, String> {
+    let mut counts = BTreeMap::<u64, TrackShape>::new();
     let mut reader = BoundedReader::open(source)?;
     for frame in 0..frames {
         if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             return Err("cancelled".into());
         }
         for player in observed_row(&mut reader, frame)?.tracked_players {
-            *counts.entry(player.track_id).or_default() += 1;
+            let bbox = player.detection.bbox_xyxy_norm;
+            counts
+                .entry(player.track_id)
+                .or_insert_with(|| TrackShape::new(frame, bbox))
+                .observe(frame, bbox);
         }
     }
     if reader.line()?.is_some() || reader.finish() != expected_sha {
@@ -1014,11 +1072,24 @@ pub(super) fn prune_short(
     }
     let short = counts
         .iter()
-        .filter(|(_, n)| **n < minimum)
+        .filter(|(_, shape)| shape.count < minimum)
         .map(|(&id, _)| id)
         .collect::<BTreeSet<_>>();
-    if short.is_empty() {
-        return Ok((expected_sha.to_owned(), 0, 0));
+    let stationary = counts
+        .iter()
+        .filter(|(id, shape)| !short.contains(id) && shape.stationary_post())
+        .map(|(&id, _)| id)
+        .collect::<BTreeSet<_>>();
+    let mut pruned = PrunedTracks {
+        sha: expected_sha.to_owned(),
+        short_tracks: short.len() as u64,
+        short_detections: short.iter().map(|id| counts[id].count).sum(),
+        static_tracks: stationary.len() as u64,
+        static_detections: stationary.iter().map(|id| counts[id].count).sum(),
+    };
+    let rejected = short.union(&stationary).copied().collect::<BTreeSet<_>>();
+    if rejected.is_empty() {
+        return Ok(pruned);
     }
     let tmp = source.with_extension("short-tracks");
     let result = (|| {
@@ -1049,12 +1120,15 @@ pub(super) fn prune_short(
             players.retain(|p| {
                 p["track_id"]
                     .as_u64()
-                    .is_some_and(|id| !short.contains(&id))
+                    .is_some_and(|id| !rejected.contains(&id))
             });
             removed += (before - players.len()) as u64;
             if let Some(diagnostics) = row["new_track_diagnostics"].as_array_mut() {
-                diagnostics
-                    .retain(|p| p["track_id"].as_u64().is_none_or(|id| !short.contains(&id)));
+                diagnostics.retain(|p| {
+                    p["track_id"]
+                        .as_u64()
+                        .is_none_or(|id| !rejected.contains(&id))
+                });
             }
             let mut bytes = serde_json::to_vec(&row).map_err(|e| e.to_string())?;
             bytes.push(b'\n');
@@ -1070,8 +1144,12 @@ pub(super) fn prune_short(
         writer.flush().map_err(|e| e.to_string())?;
         writer.get_ref().sync_all().map_err(|e| e.to_string())?;
         drop(writer);
+        if removed != pruned.short_detections + pruned.static_detections {
+            return Err("Pruned Track ID counts changed".into());
+        }
         fs::rename(&tmp, source).map_err(|e| e.to_string())?;
-        Ok((format!("{:x}", sha.finalize()), short.len() as u64, removed))
+        pruned.sha = format!("{:x}", sha.finalize());
+        Ok(pruned)
     })();
     if result.is_err() {
         let _ = fs::remove_file(tmp);
@@ -1250,6 +1328,67 @@ mod tests {
             "bbox_xyxy_norm":bbox,
             "head_point_norm":head
         })
+    }
+
+    #[test]
+    fn prune_stationary_net_posts_but_keep_stationary_players() {
+        let root = std::env::temp_dir().join(format!("volley-posts-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("tracks.jsonl");
+        let mut bytes = Vec::new();
+        for frame in 0..180 {
+            let jitter = (frame % 5) as f64 * 0.0004;
+            let movement = (frame % 30) as f64 * 0.001;
+            let players = [
+                (
+                    4,
+                    [0.80 - movement * 0.4, 0.47, 0.84 + movement * 0.3, 0.66],
+                ),
+                (5, [0.283, 0.451 + jitter, 0.302 + jitter, 0.595]),
+                (6, [0.661, 0.444 + jitter, 0.676, 0.581 + jitter]),
+                (7, [0.50 + movement, 0.44, 0.515 + movement, 0.58]),
+                (8, [0.10, 0.30, 0.15, 0.50]),
+            ]
+            .into_iter()
+            .map(|(id, bbox)| {
+                json!({
+                    "track_id":id, "detection":candidate(frame,bbox,None)
+                })
+            })
+            .collect::<Vec<_>>();
+            serde_json::to_writer(
+                &mut bytes,
+                &json!({
+                    "frame_index":frame,"tracked_players":players
+                }),
+            )
+            .unwrap();
+            bytes.push(b'\n');
+        }
+        fs::write(&source, &bytes).unwrap();
+        let pruned = prune_unreliable(
+            &source,
+            &format!("{:x}", Sha256::digest(&bytes)),
+            180,
+            12,
+            None,
+        )
+        .unwrap();
+        assert_eq!(pruned.static_tracks, 2);
+        assert_eq!(pruned.static_detections, 360);
+        assert_eq!(pruned.short_tracks, 0);
+        let result = fs::read_to_string(&source).unwrap();
+        for line in result.lines() {
+            let row: Value = serde_json::from_str(line).unwrap();
+            let ids = row["tracked_players"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["track_id"].as_u64().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(ids, vec![4, 7, 8]);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
