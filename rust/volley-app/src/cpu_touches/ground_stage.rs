@@ -3,7 +3,7 @@ use super::*;
 pub(crate) const FILE: &str = "ground_detector.json";
 const LIMIT: usize = 30_000;
 
-pub(crate) struct GroundStage {
+pub(crate) struct PrimaryTouchDetection {
     pub(crate) breaks: Vec<volley_core::motion::TrajectoryBreak>,
     pub(crate) contacts: Vec<volley_core::motion::GroundContact>,
     pub(crate) summary: Value,
@@ -93,13 +93,13 @@ pub(crate) fn publish(
     Ok(summary)
 }
 
-pub(crate) fn prepare(
+pub(crate) fn prepare_touch_detection(
     state: &AppState,
     req: &TouchRequest,
     stabilized: &StabilizedReplay,
     scope: &PrimaryRallyScope,
     cancel: &AtomicBool,
-) -> Result<GroundStage, String> {
+) -> Result<PrimaryTouchDetection, String> {
     let plan = preparation::plan_for_run(
         state,
         &req.project_id,
@@ -262,7 +262,14 @@ pub(crate) fn prepare(
                     .is_ok_and(|i| breaks[i].contact_observed))
     });
     summary["scoped_candidate_count"] = json!(contacts.len());
-    Ok(GroundStage {
+    breaks.retain(|impact| {
+        let frame = impact.frame as u64;
+        let index = intervals.partition_point(|&(_, end)| end < frame);
+        intervals
+            .get(index)
+            .is_some_and(|&(start, _)| frame >= start)
+    });
+    Ok(PrimaryTouchDetection {
         breaks,
         contacts,
         summary,

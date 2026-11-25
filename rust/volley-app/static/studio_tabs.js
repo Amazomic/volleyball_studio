@@ -448,8 +448,7 @@
     ["pose","Позы по стабилизированным рамкам","gpu",1],
     ["tracking","Трекинг ID","cpu",2],
     ["touch_detector","Touch Detector","cpu",2],
-    ["touches","Уточнение касаний","cpu",2],
-    ["touch_types","Типы касаний","cpu",2],
+    ["touches","Touch Attribution","cpu",2],
     ["publish","Публикация розыгрышей","output",2],
     ["photos","Фотографии игроков","input",2],
     ["identity","Привязка игроков","mixed",2],
@@ -468,7 +467,6 @@
       touch_detector:["Touch Detector","algorithm"],
       rallies:["Rally Detector","algorithm"],
       touches:["Touch Attribution","algorithm"],
-      touch_types:["Pose Geometry","algorithm"],
     identity:["ReID","mixed"]
     };
     return known[id]||null;
@@ -484,7 +482,6 @@
     boxes:[["rect",{x:3,y:3,width:18,height:18,rx:2}],["path",{d:"M7 7h10v10H7z"}]],
     tracking:[["rect",{x:2,y:3,width:20,height:18,rx:3}],["circle",{cx:8,cy:9,r:2}],["path",{d:"M4 17c1-3 7-3 8 0m4-9h4m-4 5h4m-4 5h3"}]],
     touches:[["path",{d:"M8 22V11a2 2 0 0 1 4 0V5a2 2 0 0 1 4 0v6a2 2 0 0 1 4 0v5a7 7 0 0 1-7 7h-2a8 8 0 0 1-6-3l-3-4a2 2 0 0 1 3-3l3 3"}]],
-    touch_types:[["circle",{cx:11,cy:13,r:8}],["path",{d:"m5 8 6 2 4-4m-7 9 3-5 8 3m-8 2-4 6m4-11 1 11M19 1v4m-2-2h4"}]],
     publish:[["path",{d:"M4 12h16m-6-6 6 6-6 6"}]],
     photos:[["rect",{x:3,y:4,width:18,height:16,rx:3}],["circle",{cx:9,cy:9,r:2}],["path",{d:"m4 17 5-4 3 3 4-5 4 5"}]],
     identity:[["path",{d:"M10 13a5 5 0 0 0 7 .5l3-3a5 5 0 0 0-7-7l-2 2m3 5a5 5 0 0 0-7-.5l-3 3a5 5 0 0 0 7 7l2-2"}]],
@@ -508,12 +505,14 @@
   };
   const pipelineId=entry=>{
     if(entry?.id==="ground_detector")return "rallies";
+    if(entry?.id==="touch_types")return "touches";
     if(entry?.id&&pipelineNames.has(entry.id))return entry.id;
     const name=String(typeof entry==="string"?entry:entry?.name||"");
     if(/Проверка исходного видео|Подготовка исходного видео/.test(name))return "video";
     if(/ball_stabilizer|Ball Stabilizer|Интерполяция траектории мяча/.test(name))return "ball_stabilizer";
     if(name==="Ground Detector"||name==="ground_detector"||name==="Rally Detector")return "rallies";
     if(name==="Touch Detector")return "touch_detector";
+    if(name==="Touch Attribution"||name==="Pose Geometry")return "touches";
     if(/Поиск розыгрышей/.test(name))return "rallies";
     if(/Связывание рамок игроков/.test(name))return "boxes";
     if(/GPU.*V[Bb]allNet/.test(name))return "ball";
@@ -539,6 +538,13 @@
           started_ms:prev.started_ms??item.started_ms,
           duration_ms:Number.isFinite(prev.duration_ms)&&Number.isFinite(item.duration_ms)?
             prev.duration_ms+item.duration_ms:item.duration_ms};
+      }else if(prev&&pipelineId(prev)==="touches"&&pipelineId(item)==="touches"&&
+        (item.id==="touch_types"||item.name==="Pose Geometry"||prev.id==="touch_types"||prev.name==="Pose Geometry")){
+        const start=prev.started_ms??item.started_ms;
+        const finish=item.finished_ms;
+        const duration=Number.isFinite(start)&&Number.isFinite(finish)?Math.max(0,finish-start):
+          Number.isFinite(prev.duration_ms)&&Number.isFinite(item.duration_ms)?prev.duration_ms+item.duration_ms:item.duration_ms;
+        result[result.length-1]={...item,id:"touches",name:"Touch Attribution",started_ms:start,duration_ms:duration};
       }else result.push(item);
     }
     return result;
@@ -590,11 +596,6 @@
         return count.toLocaleString("ru-RU")+(scoped?" игровых кадр. · ":" выборок · ")+poses.toLocaleString("ru-RU")+
           " поз · "+stageTime(duration)+" (общ.)";
       return "С RF-DETR · "+stageTime(duration);
-    }
-    if(id==="touch_types"&&entry&&(run?.gpu_jobs?.pose||run?.primary_tracking?.pose_ready||Number(run?.player_tracking_stats?.refined_poses)>0)){
-      const duration=running&&Number.isFinite(entry.started_ms)&&entry.finished_ms==null?
-        Math.max(0,now-entry.started_ms):entry.duration_ms;
-      return "В составе касаний · "+stageTime(duration);
     }
     let result="";
     if(id==="ball_stabilizer"&&entry&&run?.ball_stabilizer){
@@ -651,8 +652,7 @@
     ["ball_stabilizer","touches"],
     ["tracking","touches"],
     ["rallies","touches"],
-    ["pose","touch_types","pose"],
-    ["touches","touch_types","pose"],
+    ["pose","touches","pose"],
     ["rallies","publish"],
     ["tracking","publish"],
     ["touches","publish"],
@@ -681,13 +681,13 @@
     boxes:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap","#studio-post-nms"],
     tracking:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap",
       "#studio-post-lost-low-gap","#studio-post-lost-low-iou","#studio-post-min-track-frames","#studio-post-nms","#studio-post-assignment","#studio-post-margin"],
-    touches:["#studio-post-touch-threshold","#studio-post-occluded-turn","#studio-post-touch-gap",
-      "#studio-post-reach","#studio-post-smooth","#studio-post-interval",
+    touch_detector:["#studio-post-touch-threshold","#studio-post-occluded-turn","#studio-post-touch-gap",
+      "#studio-post-smooth","#studio-post-interval"],
+    touches:["#studio-post-reach","#studio-post-pose-confidence","#studio-post-pose-distance",
       "#studio-post-ball-score","#studio-post-ball-gap",
       "#studio-post-idle","#studio-post-stationary","#studio-post-rally-min",
       "#studio-post-coverage","#studio-post-samples","#studio-post-min-touches",
       "#studio-post-no-touch","#studio-post-context"],
-    touch_types:["#studio-post-pose-confidence","#studio-post-pose-distance"],
     identity:["#studio-post-auto-assign-threshold"]
   };
   const graphDescriptions={
@@ -700,10 +700,9 @@
     pose:"RTMPose-M Body7 измеряет точки тела по стабилизированным рамкам в исходных кадрах. Измерения прикрепляются к стабильным Track ID без изменения рамок.",
     fusion:"Сохранение общей версии GPU-наблюдений и повторное использование кэша.",
     tracking:"Сохраняет устойчивые Track ID, определённые по движению рамок до RTMPose. При наличии измеренных поз прикрепляет их к готовым трекам, не меняя ID и рамки.",
-    touch_detector:"Во второй фазе определяет моменты касаний игроков по стабилизированной траектории внутри розыгрышей, исключая события пола.",
-    touches:"Уточняет контакт мяча с телом и привязывает найденное событие к Track ID, не изменяя его время.",
-    touch_types:"RTMPose и геометрия тела уточняют тип уже найденного касания. Без достаточных признаков остаётся unknown_touch. Привязка Track ID к конкретному игроку выполняется отдельно, позднее.",
-    publish:"Публикует границы первичных розыгрышей с результатом Touch Detector для выбранной версии CPU replay.",
+    touch_detector:"По стабилизированной траектории находит моменты возможных касаний внутри розыгрышей и отделяет кандидаты касаний пола. Передаёт физические события в Touch Attribution.",
+    touches:"По траектории мяча, стабилизированным рамкам и точкам RTMPose уточняет контакт, привязывает событие к Track ID и определяет тип касания. Если признаков недостаточно, тип остаётся unknown_touch. Достоверный контакт тела может опровергнуть кандидата пола. ReID выполняется позднее.",
+    publish:"Публикует границы первичных розыгрышей и касания с Track ID и типами из Touch Attribution для выбранной версии CPU replay.",
     photos:"Подготавливает фотографии игроков из исходных кадров для сопоставления внешности.",
     identity:"Автоматическая привязка Track ID к игрокам из библиотеки по фотографиям и наблюдениям внутри опубликованных розыгрышей.",
     cache:"Готовый GPU-анализ переиспользуется при совместимых настройках."
@@ -993,19 +992,18 @@
     };
     const savedCpu={
       boxes:run?.cpu_runs?.tracking,tracking:run?.cpu_runs?.tracking,ball_stabilizer:run?.ball_stabilizer,
-      touch_detector:run?.cpu_runs?.touches,touches:run?.cpu_runs?.touches,touch_types:run?.cpu_runs?.touches&&(run?.gpu_jobs?.pose||run?.primary_tracking?.pose_ready||Number(run?.player_tracking_stats?.refined_poses)>0),
+      touch_detector:run?.cpu_runs?.touches,touches:run?.cpu_runs?.touches,
       publish:run?.cpu_runs?.rallies,identity:run?.automatic_identity||run?.automatic_identity_available
     };
     for(const node of target.querySelectorAll(".analysis-flow-node")){
       const id=node.dataset.stageId;
       if(id==="photos")continue;
       const hasPose=!!run?.gpu_jobs?.pose||run?.primary_tracking?.pose_ready===true||Number(run?.player_tracking_stats?.refined_poses)>0;
-      const entry=id==="touch_types"?(hasPose?seen.get("touches"):null):seen.get(id);
+      const entry=seen.get(id);
       const combinedPose=id==="pose"&&currentId==="players"&&
         /RTMPose/.test(String(run?.stage||""));
-      const concurrentTypes=id==="touch_types"&&currentId==="touches"&&hasPose;
-      const running=active&&(id===currentId||combinedPose||concurrentTypes||
-        id!=="touch_types"&&!!entry&&entry.finished_ms==null&&entry===stages.at(-1));
+      const running=active&&(id===currentId||combinedPose||
+        !!entry&&entry.finished_ms==null&&entry===stages.at(-1));
       const done=!!entry&&(entry.finished_ms!=null||complete&&!running)||
         (id==="boxes"&&!!run?.primary_tracking?.replay_id&&!running&&!cached)||
         (id==="pose"&&hasPose&&!running);
@@ -1014,8 +1012,7 @@
       node.classList.toggle("is-complete",done);
       node.classList.toggle("is-reused",reused);
       node.classList.toggle("is-skipped",
-        id==="pose"&&graphLinkState("pose",run)==="disabled"||
-        id==="touch_types"&&graphLinkState("pose",run)==="disabled");
+        id==="pose"&&graphLinkState("pose",run)==="disabled");
       node.classList.toggle("is-failed",
         run?.status==="failed"&&id===currentId||
         id==="identity"&&run?.completion_quality==="identity_failed");

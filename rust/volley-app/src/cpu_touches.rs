@@ -2104,7 +2104,7 @@ fn detect_stream_with_pose(
     training: &[training_samples::Example],
     ball_mask: Option<&crate::cpu_retrack::ball_track::BallTrackMask>,
     stabilized: Option<&StabilizedReplay>,
-    ground_stage: Option<&ground_stage::GroundStage>,
+    ground_stage: Option<&ground_stage::PrimaryTouchDetection>,
     rally_starts: &[u64],
     preliminary_intervals: Option<&[(u64, u64)]>,
     mut on_progress: Option<&mut dyn FnMut(u64, u64) -> Result<(), String>>,
@@ -2508,13 +2508,13 @@ pub(crate) fn process_with_ball_scope_and_rally_settings(
 }
 
 #[expect(clippy::too_many_arguments)]
-pub(crate) fn process_primary_with_progress_cancel(
+pub(crate) fn attribute_primary_with_progress_cancel(
     state: &AppState,
     req: &TouchRequest,
     rally_settings: volley_core::rally_reconstruction::RallySettings,
     scope: &PrimaryRallyScope,
     stabilized: &StabilizedReplay,
-    ground: &ground_stage::GroundStage,
+    ground: &ground_stage::PrimaryTouchDetection,
     report: &mut dyn FnMut(u64, u64) -> Result<(), String>,
     cancel: &AtomicBool,
 ) -> Result<Value, ApiError> {
@@ -2539,7 +2539,7 @@ fn process_with_ball_scope_and_rally_settings_report(
     rally_settings: volley_core::rally_reconstruction::RallySettings,
     primary_scope: Option<&PrimaryRallyScope>,
     stabilized: Option<&StabilizedReplay>,
-    ground: Option<&ground_stage::GroundStage>,
+    ground: Option<&ground_stage::PrimaryTouchDetection>,
     mut report: Option<&mut dyn FnMut(u64, u64) -> Result<(), String>>,
     cancel: Option<&AtomicBool>,
 ) -> Result<Value, ApiError> {
