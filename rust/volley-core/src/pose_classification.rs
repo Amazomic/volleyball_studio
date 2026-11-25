@@ -3,7 +3,7 @@
 //! No serving or blocking verdict without verified rally/court context.
 use crate::action_prediction::{ActionKind, ActionPrediction, PredictionMethod};
 
-pub const ACTION_PREDICTION_POLICY_VERSION: &str = "pose_keypoints_motion_v4_or_unknown_touch";
+pub const ACTION_PREDICTION_POLICY_VERSION: &str = "pose_keypoints_motion_v5_or_unknown_touch";
 
 #[derive(Clone, Copy, Debug)]
 pub struct PoseEvidence {
@@ -244,6 +244,36 @@ pub fn refine_with_motion(
         e.ball_x_norm * e.video_width,
         e.ball_y_norm * e.video_height,
     ];
+    let rising_forearms = [(5, 7, 9), (6, 8, 10)]
+        .into_iter()
+        .filter(|&(shoulder, elbow, wrist)| {
+            let (Some(start), Some(end), Some(current), Some(s), Some(el), Some(w)) = (
+                relative(before, shoulder, wrist),
+                relative(after, shoulder, wrist),
+                relative(&e.keypoints, shoulder, wrist),
+                pixel(e, shoulder),
+                pixel(e, elbow),
+                pixel(e, wrist),
+            ) else {
+                return false;
+            };
+            let arm_length = distance(s, el) + distance(el, w);
+            arm_length >= height * 0.16
+                && distance(s, w) >= arm_length * 0.95
+                && current[0].abs() >= (current[1].abs() * 1.35).max(0.16)
+                && current[1] >= -0.24
+                && start[1] >= -0.12
+                && start[1] - current[1] >= 0.02
+                && current[1] - end[1] >= 0.02
+                && start[1] - end[1] >= 0.07
+                && segment_distance(ball, el, w) <= height * 0.18
+        })
+        .count();
+    let forearm_rise = match prediction.kind {
+        ActionKind::Attack => rising_forearms >= 1,
+        ActionKind::OverheadPass | ActionKind::Dig => rising_forearms == 2,
+        _ => false,
+    };
     let overhead_rise = prediction.kind == ActionKind::Dig
         && [(5, 7, 9), (6, 8, 10)]
             .into_iter()
@@ -265,7 +295,9 @@ pub fn refine_with_motion(
                     && distance(wrist, ball) <= height * 0.22
             });
     Some(ActionPrediction {
-        kind: if overhead_rise {
+        kind: if forearm_rise {
+            ActionKind::Dig
+        } else if overhead_rise {
             ActionKind::OverheadPass
         } else {
             prediction.kind
@@ -424,6 +456,55 @@ mod tests {
                 .unwrap()
                 .kind,
             ActionKind::OverheadPass
+        );
+    }
+
+    #[test]
+    fn rising_extended_forearm_of_crouched_player_is_dig_not_attack() {
+        let mut e = data();
+        e.player_bbox_norm = [0.24, 0.40, 0.76, 0.95];
+        e.keypoints[5] = [0.60, 0.53, 0.92];
+        e.keypoints[6] = [0.66, 0.53, 0.91];
+        e.keypoints[7] = [0.52, 0.49, 0.94];
+        e.keypoints[9] = [0.44, 0.46, 0.95];
+        e.keypoints[8][2] = 0.0;
+        e.keypoints[10][2] = 0.0;
+        e.keypoints[0] = [0.62, 0.44, 0.95];
+        e.ball_x_norm = 0.43;
+        e.ball_y_norm = 0.45;
+        let mut before = e.keypoints;
+        let mut after = e.keypoints;
+        before[7][1] = 0.55;
+        before[9][1] = 0.57;
+        after[7][1] = 0.47;
+        after[9][1] = 0.41;
+        assert_eq!(refine(&e, &geom()).unwrap().kind, ActionKind::Attack);
+        assert_eq!(
+            refine_with_motion(&e, &geom(), &before, &after)
+                .unwrap()
+                .kind,
+            ActionKind::Dig
+        );
+        assert_ne!(
+            refine_with_motion(&e, &geom(), &after, &before).map(|p| p.kind),
+            Some(ActionKind::Dig)
+        );
+    }
+
+    #[test]
+    fn overhead_single_arm_swing_remains_attack() {
+        let mut e = data();
+        e.keypoints[10][2] = 0.0;
+        e.keypoints[0] = [0.50, 0.33, 0.95];
+        let mut before = e.keypoints;
+        let mut after = e.keypoints;
+        before[9][1] = 0.16;
+        after[9][1] = 0.32;
+        assert_eq!(
+            refine_with_motion(&e, &geom(), &before, &after)
+                .unwrap()
+                .kind,
+            ActionKind::Attack
         );
     }
 
