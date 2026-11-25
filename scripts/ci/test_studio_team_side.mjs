@@ -1,0 +1,16 @@
+import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
+import {runInNewContext} from "node:vm";
+const root=new URL("../../rust/volley-app/static/",import.meta.url);
+const source=readFileSync(new URL("studio.js",root),"utf8");
+const html=readFileSync(new URL("studio.html",root),"utf8");
+assert.match(html,/id="studio-overlay-teams"[^>]*aria-pressed="false"/);
+const start=source.indexOf("  const playerTeamColor=");
+assert.ok(start>=0);
+const end=source.indexOf(";",start)+1;
+const color=runInNewContext(source.slice(start,end)+"\nplayerTeamColor");
+assert.equal(color("near",true),"#71acff");
+assert.equal(color("far",true),"#ff626e");
+assert.equal(color(null,true),"#b8c2ce");
+assert.equal(color("far",false),"#71acff");
+console.log("Team side preview colors: OK");
