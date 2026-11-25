@@ -2,7 +2,7 @@ use super::{BoundedReader, PlayerFrameScope, MAX_ROW_BYTES};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, OpenOptions},
     io::{BufWriter, Write},
     path::Path,
@@ -225,7 +225,110 @@ pub(super) fn restore_partial_crops(
 pub(crate) struct Refinement {
     pub threads: usize,
     pub memory_mb: u64,
-    pub stride: usize,
+    pub ball_stabilizer: volley_core::ball_interpolation::BallStabilizerSettings,
+}
+
+pub(super) const SAMPLE_ROW_STRIDE: usize = 1;
+const BACKGROUND_PERIOD: u64 = 10;
+const TOUCH_WINDOW: u64 = 8;
+const TRACK_LOOKUP_WINDOW: i64 = 2;
+const MAX_BOX_DISTANCE_IN_PLAYER_HEIGHTS: f64 = 0.5;
+
+pub(crate) fn sampling_contract(
+    settings: volley_core::ball_interpolation::BallStabilizerSettings,
+) -> Value {
+    json!({
+        "version":"touch_guided_pose_sampling_v1",
+        "ball_stabilizer":settings,
+        "ball_stabilizer_version":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
+        "trajectory_detector_version":volley_core::touch_pipeline::TRAJECTORY_DETECTOR_VERSION,
+        "background_period_frames":BACKGROUND_PERIOD,
+        "touch_window_frames":TOUCH_WINDOW,
+        "track_lookup_window_frames":TRACK_LOOKUP_WINDOW,
+        "max_box_distance_in_player_heights":MAX_BOX_DISTANCE_IN_PLAYER_HEIGHTS,
+    })
+}
+
+#[derive(Default)]
+struct PoseSchedule(BTreeMap<u64, BTreeSet<u64>>);
+
+impl PoseSchedule {
+    fn measure(&self, frame: u64, track_id: u64) -> bool {
+        frame.is_multiple_of(BACKGROUND_PERIOD)
+            || self
+                .0
+                .get(&frame)
+                .is_some_and(|ids| ids.contains(&track_id))
+    }
+
+    fn select(&mut self, center: u64, track_id: u64, frames: u64) {
+        for frame in center.saturating_sub(TOUCH_WINDOW)..=(center + TOUCH_WINDOW).min(frames - 1) {
+            self.0.entry(frame).or_default().insert(track_id);
+        }
+    }
+}
+
+fn touch_pose_schedule(
+    source: &Source<'_>,
+    settings: volley_core::ball_interpolation::BallStabilizerSettings,
+    cancelled: &AtomicBool,
+) -> Result<PoseSchedule, String> {
+    let dimensions = volley_media::probe(source.original)?;
+    let motion = crate::cpu_touches::stabilize_replay_rows(
+        source.replay,
+        source.replay_sha,
+        source.frames,
+        settings,
+        cancelled,
+        |_, _| Ok(()),
+    )?;
+    let impacts = crate::cpu_touches::trajectory_breaks(
+        &motion,
+        (dimensions.width, dimensions.height),
+        cancelled,
+    )?;
+    let width = f64::from(dimensions.width);
+    let height = f64::from(dimensions.height);
+    let mut reader = BoundedReader::open(source.replay)?;
+    let mut schedule = PoseSchedule::default();
+    for frame in 0..source.frames {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        let row = read_crop_plan_row(&mut reader, frame, source.scope)?;
+        let from = frame as i64 - TRACK_LOOKUP_WINDOW;
+        let to = frame as i64 + TRACK_LOOKUP_WINDOW;
+        let nearby = &impacts[impacts.partition_point(|impact| impact.frame < from)
+            ..impacts.partition_point(|impact| impact.frame <= to)];
+        if nearby.is_empty() {
+            continue;
+        }
+        let players = row["tracked_players"]
+            .as_array()
+            .ok_or("Missing tracked players")?;
+        for (player, bbox, _) in proposals(players) {
+            let id = players[player]["track_id"]
+                .as_u64()
+                .ok_or("Missing Track ID")?;
+            let [x1, y1, x2, y2] = [
+                bbox[0] * width,
+                bbox[1] * height,
+                bbox[2] * width,
+                bbox[3] * height,
+            ];
+            for impact in nearby {
+                let [x, y] = impact.position;
+                let distance = (x - x.clamp(x1, x2)).hypot(y - y.clamp(y1, y2));
+                if distance <= (y2 - y1) * MAX_BOX_DISTANCE_IN_PLAYER_HEIGHTS {
+                    schedule.select(impact.frame as u64, id, source.frames);
+                }
+            }
+        }
+    }
+    if reader.line()?.is_some() || reader.finish() != source.replay_sha {
+        return Err("Tracking crop plan changed during Touch Detector".into());
+    }
+    Ok(schedule)
 }
 
 pub(super) struct Source<'a> {
@@ -330,12 +433,9 @@ fn read_crop_plan_row(
 
 fn pose_frame_total(
     source: &Source<'_>,
-    stride: usize,
+    measure: impl Fn(u64, u64) -> bool,
     cancelled: &AtomicBool,
 ) -> Result<u64, String> {
-    if !(1..=30).contains(&stride) {
-        return Err("Invalid RTMPose stride".into());
-    }
     let mut reader = BoundedReader::open(source.replay)?;
     let mut total = 0;
     for frame in 0..source.frames {
@@ -346,7 +446,11 @@ fn pose_frame_total(
         let players = row["tracked_players"]
             .as_array()
             .ok_or("Missing tracked players")?;
-        if frame.is_multiple_of(stride as u64) && !proposals(players).is_empty() {
+        if proposals(players).iter().any(|(player, _, _)| {
+            players[*player]["track_id"]
+                .as_u64()
+                .is_some_and(|id| measure(frame, id))
+        }) {
             total += 1;
         }
     }
@@ -375,7 +479,9 @@ pub(super) fn refine(
     let mut engine = None;
     let mut accepted = 0;
     let mut previous_crops = BTreeMap::<u64, [f64; 4]>::new();
-    let total = pose_frame_total(&source, settings.stride, cancelled)?;
+    let schedule = touch_pose_schedule(&source, settings.ball_stabilizer, cancelled)?;
+    let measure = |frame, track_id| schedule.measure(frame, track_id);
+    let total = pose_frame_total(&source, measure, cancelled)?;
     let mut processed = 0;
     on_frames(processed, total)?;
     decode_original_frames_in_range(
@@ -397,7 +503,7 @@ pub(super) fn refine(
                 let id = players[player]["track_id"]
                     .as_u64()
                     .ok_or("Missing Track ID for pose crop")?;
-                if (index as usize).is_multiple_of(settings.stride) {
+                if measure(index, id) {
                     crops.push((
                         player,
                         stabilize_pose_crop(bbox, previous_crops.get(&id).copied()),
@@ -462,9 +568,6 @@ pub(super) fn refine(
                         }
                     }
                 }
-            }
-            if !(index as usize).is_multiple_of(settings.stride) {
-                return Ok(());
             }
             let mut bytes = serde_json::to_vec(&json!({"frame":index,"players":measured}))
                 .map_err(|e| e.to_string())?;
@@ -833,6 +936,23 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn touch_guided_pose_schedule_keeps_dense_frames_only_for_selected_tracks() {
+        let mut schedule = PoseSchedule::default();
+        schedule.select(31, 7, 60);
+        schedule.select(2, 8, 60);
+        schedule.select(58, 9, 60);
+        assert!(schedule.measure(23, 7));
+        assert!(schedule.measure(39, 7));
+        assert!(!schedule.measure(22, 7));
+        assert!(!schedule.measure(41, 7));
+        assert!(!schedule.measure(31, 8));
+        assert!(schedule.measure(30, 8));
+        assert!(schedule.measure(1, 8));
+        assert!(schedule.measure(59, 9));
+        assert!(!schedule.0.contains_key(&60));
+    }
     use serde_json::json;
 
     #[test]
@@ -928,8 +1048,12 @@ mod tests {
             scope: &scope,
         };
         let cancelled = AtomicBool::new(false);
-        let actual = pose_frame_total(&source, 2, &cancelled).unwrap();
-        assert_eq!(pose_frame_total(&source, 1, &cancelled).unwrap(), 4);
+        let actual =
+            pose_frame_total(&source, |frame, _| frame.is_multiple_of(2), &cancelled).unwrap();
+        assert_eq!(
+            pose_frame_total(&source, |_, _| true, &cancelled).unwrap(),
+            4
+        );
         let invalid_scope = PlayerFrameScope {
             selected: vec![(2, 5)],
             rallies: vec![(2, 5)],
@@ -940,7 +1064,12 @@ mod tests {
             scope: &invalid_scope,
             ..source
         };
-        assert!(pose_frame_total(&invalid_source, 2, &cancelled).is_err());
+        assert!(pose_frame_total(
+            &invalid_source,
+            |frame, _| frame.is_multiple_of(2),
+            &cancelled
+        )
+        .is_err());
         fs::remove_dir_all(dir).unwrap();
         assert_eq!(actual, 3);
     }
@@ -978,6 +1107,7 @@ mod tests {
             sha: format!("{:x}", Sha256::digest(&bytes)),
             stride: 1,
             folder: dir.clone(),
+            sampling: Value::Null,
         };
         let sha = format!("{:x}", Sha256::digest(&raw));
         let (_, count, frames) = attach(&path, &sha, 1, &snapshot, None).unwrap();

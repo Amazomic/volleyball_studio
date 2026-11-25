@@ -104,12 +104,12 @@ const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
 assert.equal(stages.length,12);
 assert.ok(!ids.includes("fusion"));
-assert.match(css,/\.analysis-flow-phase\[data-phase="gpu"\] \.analysis-flow-cards\{grid-template-columns:repeat\(7,minmax\(0,1fr\)\)/);
+assert.match(css,/\.analysis-flow-phase\[data-phase="gpu"\] \.analysis-flow-cards\{grid-template-columns:repeat\(8,minmax\(0,1fr\)\)/);
 assert.ok(!ids.includes("photos"));
 assert.ok(!ids.includes("touch_types"));
 assert.ok(!ids.includes("ground_detector"));
 assert.ok(ids.includes("publish")&&!ids.includes("material"));
-for(const [row,count] of [[1,7],[2,5]]){
+for(const [row,count] of [[1,8],[2,4]]){
   const nodes=stages.filter(item=>item[3]===row);
   assert.equal(nodes.length,count);
 }
@@ -233,7 +233,7 @@ const phaseSummary=summarizePhase([
 assert.equal(phaseSummary.ready,2);
 assert.equal(phaseSummary.total,6);
 assert.equal(summarizePhase([]).total,0);
-assert.deepEqual({...summarizePhase(stages.filter(item=>item[3]===2).map(item=>phaseNode(item[0],"is-complete")))},{ready:5,total:5});
+assert.deepEqual({...summarizePhase(stages.filter(item=>item[3]===2).map(item=>phaseNode(item[0],"is-complete")))},{ready:4,total:4});
 assert.match(js,/identity:"[^"]*исходных кадров[^"]*"/);
 const dataLinks=vm.runInNewContext(extract("const pipelineEdges=","const graphSettings=")
   +"({links:pipelineEdges,state:graphLinkState});");
@@ -260,15 +260,15 @@ assert.match(pipelineBody,/progress\(path, status, "Touch Attribution", 91\.5\)/
 assert.match(pipelineBody,/request\.mode\.allows_gpu_execution\(\) && request\.gpu\.pose_enabled/);
 assert.match(js,/payload\.post=postProfile\(\);/);
 assert.doesNotMatch(js,/if\(mode!=="gpu"\)payload\.post/);
-assert.equal(stages.find(item=>item[0]==="touch_detector")[3],2);
-assert.deepEqual(actualInputs("touch_detector"),["ball_stabilizer","rallies"]);
-assert.deepEqual(actualInputs("touches"),["ball_stabilizer","pose","rallies","touch_detector","tracking"]);
+assert.equal(stages.find(item=>item[0]==="touch_detector")[3],1);
+assert.deepEqual(actualInputs("touch_detector"),["ball_stabilizer","boxes","rallies"]);
+assert.deepEqual(actualInputs("touches"),["ball_stabilizer","pose","rallies","tracking"]);
 assert.deepEqual(actualInputs("publish"),["rallies","touches","tracking"]);
 assert.deepEqual(actualInputs("identity"),["publish","tracking","video"]);
 assert.equal(dataLinks.state("pose",null),"optional");
 assert.equal(dataLinks.state("pose",{profile:{gpu:{pose_enabled:false}}}),"disabled");
 assert.equal(dataLinks.state("pose",{gpu_reused:true,gpu_jobs:{pose:"saved"}}),"available");
-assert.deepEqual(actualInputs("pose"),["boxes","video"]);
+assert.deepEqual(actualInputs("pose"),["touch_detector","video"]);
 assert.deepEqual(actualInputs("touch_types"),[]);
 assert.equal(dataLinks.state("pose",{profile:{post:{pose_classification:false}},gpu_jobs:{pose:"saved"}}),"available");
 const withClass=(stageId,classes)=>({
@@ -306,10 +306,10 @@ const card=id=>({
   removeAttribute(){},
   querySelector(){return {classList:{toggle(){}}};}
 });
-const ballCard=card("ball"),poseCard=card("pose"),touchCard=card("touches");
+const ballCard=card("ball"),poseCard=card("pose"),detectorCard=card("touch_detector"),touchCard=card("touches");
 const graph={
   querySelector:()=>true,
-  querySelectorAll:selector=>selector===".analysis-flow-node"?[ballCard,poseCard,touchCard]:[]
+  querySelectorAll:selector=>selector===".analysis-flow-node"?[ballCard,poseCard,detectorCard,touchCard]:[]
 };
 const stageContext=vm.createContext({graph,window:edgeContext.window,document:{},$:context.$});
 vm.runInContext(definitions+extract("const pipelineEdges=","const graphSettings=")+
@@ -328,8 +328,11 @@ vm.runInContext('updatePipelineGraph(graph,{status:"running",stage_id:"touches",
 assert.equal(touchCard.classList["is-active"],true);
 assert.equal(touchCard.classList["is-skipped"],false);
 vm.runInContext('updatePipelineGraph(graph,{status:"complete",profile:{gpu:{pose_enabled:false}},stages:[{id:"touches",finished_ms:3000}]});',stageContext);
+assert.equal(detectorCard.classList["is-skipped"],true);
 assert.equal(touchCard.classList["is-complete"],true);
 assert.equal(touchCard.classList["is-skipped"],false);
+vm.runInContext('updatePipelineGraph(graph,{status:"complete",gpu_reused:true,primary_tracking:{pose_ready:true,pose_sampling:{version:"touch_guided_pose_sampling_v1"}}});',stageContext);
+assert.equal(detectorCard.classList["is-reused"],true);
 const historyProjection=rust.slice(rust.indexOf('rows.push(json!({"id":id'),rust.indexOf("    rows.sort_by"));
 for(const key of ["gpu_jobs","cpu_runs","analysis_id","profile","gpu_rally_count","automatic_identity_available"])
   assert.ok(historyProjection.includes('"'+key+'":'),"Saved graph needs "+key);

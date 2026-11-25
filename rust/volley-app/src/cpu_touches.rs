@@ -818,7 +818,7 @@ pub(crate) fn stabilize_primary_replay(
     })
 }
 
-fn stabilize_replay_rows(
+pub(crate) fn stabilize_replay_rows(
     path: &Path,
     sha: &str,
     frames: u64,

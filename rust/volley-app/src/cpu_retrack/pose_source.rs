@@ -22,6 +22,7 @@ pub(super) struct Snapshot {
     pub sha: String,
     pub stride: usize,
     pub folder: PathBuf,
+    pub sampling: Value,
 }
 
 pub(super) fn locate_refined(
@@ -29,7 +30,8 @@ pub(super) fn locate_refined(
     fusion_id: &str,
     fusion_sha: &str,
     mask_sha: Option<&str>,
-    crop_profile: Option<(&volley_core::tracker::TrackingOptions, Option<usize>, bool)>,
+    crop_profile: Option<(&volley_core::tracker::TrackingOptions, bool)>,
+    requested_sampling: Option<&Value>,
 ) -> Result<Option<Snapshot>, String> {
     let parent = root.join("native_cpu_replays");
     match fs::symlink_metadata(&parent) {
@@ -92,28 +94,31 @@ pub(super) fn locate_refined(
             continue;
         }
         let stride = stride as usize;
-        if let Some((settings, requested_stride, interpolate)) = crop_profile {
+        let sampling = record["pose_sampling"].clone();
+        if requested_sampling.is_some_and(|requested| sampling != *requested) {
+            continue;
+        }
+        if let Some((settings, interpolate)) = crop_profile {
             let Ok(stored) = serde_json::from_value::<volley_core::tracker::TrackingOptions>(
                 record["settings"].clone(),
             ) else {
                 continue;
             };
-            if requested_stride.is_some_and(|requested| stride != requested)
-                || record["interpolate_players"] != interpolate
+            if record["interpolate_players"] != interpolate
                 || serde_json::to_value(stored).ok() != serde_json::to_value(settings).ok()
             {
                 continue;
             }
         }
-        if best
-            .as_ref()
-            .is_none_or(|old| (stride, &id) < (old.stride, &old.id))
-        {
+        if best.as_ref().is_none_or(|old| {
+            (sampling.is_null(), stride, &id) < (old.sampling.is_null(), old.stride, &old.id)
+        }) {
             best = Some(Snapshot {
                 id,
                 sha: sha.to_owned(),
                 stride,
                 folder,
+                sampling,
             });
         }
     }
@@ -341,6 +346,48 @@ fn joint_bbox(pose: &PoseEvidence) -> Option<[f64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_pose_sampling_rejects_legacy_evidence_but_cpu_replay_can_read_it() {
+        let root =
+            std::env::temp_dir().join(format!("volley-pose-sampling-{}", uuid::Uuid::new_v4()));
+        let replay_id = "a".repeat(32);
+        let folder = root.join("native_cpu_replays").join(&replay_id);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("poses.jsonl"), b"{}\n").unwrap();
+        let sha = "b".repeat(64);
+        let mut manifest = serde_json::json!({
+            "schema":"volley-native-cpu-tracking/1",
+            "replay_id":replay_id,
+            "source_fusion_id":"fusion",
+            "source_fusion_sha256":sha,
+            "track_association_version":TRACK_ASSOCIATION_VERSION,
+            "pose_refinement_policy":POSE_REFINEMENT_POLICY,
+            "refined_pose_model_sha256":volley_inference::pose::MODEL_SHA256,
+            "refined_pose_source_replay_id":replay_id,
+            "pose_refinement_input_sha256":sha,
+            "refined_pose_sha256":sha,
+            "refined_pose_stride":1,
+        });
+        let path = folder.join("manifest.json");
+        let requested = super::super::pose_sampling_contract(Default::default());
+        fs::write(&path, manifest.to_string()).unwrap();
+        assert!(locate_refined(&root, "fusion", &sha, None, None, None)
+            .unwrap()
+            .is_some());
+        assert!(
+            locate_refined(&root, "fusion", &sha, None, None, Some(&requested))
+                .unwrap()
+                .is_none()
+        );
+        manifest["pose_sampling"] = requested.clone();
+        fs::write(&path, manifest.to_string()).unwrap();
+        let actual = locate_refined(&root, "fusion", &sha, None, None, Some(&requested))
+            .unwrap()
+            .unwrap();
+        assert_eq!(actual.sampling, requested);
+        fs::remove_dir_all(root).unwrap();
+    }
     use serde_json::json;
     fn pose(x: f64, crop: &str) -> Value {
         let joints = (0..17)
@@ -368,6 +415,7 @@ mod tests {
             sha: format!("{:x}", Sha256::digest(&bytes)),
             stride: 3,
             folder: dir.clone(),
+            sampling: Value::Null,
         };
         let mut input = PoseRows::open(&snapshot).unwrap();
         let unrelated = Candidate {
@@ -404,6 +452,7 @@ mod tests {
             sha: format!("{:x}", Sha256::digest(&bytes)),
             stride: 3,
             folder: dir.clone(),
+            sampling: Value::Null,
         };
         let mut input = PoseRows::open(&snapshot).unwrap();
         let (candidates, _, n) = input.frame(0, &[]).unwrap();

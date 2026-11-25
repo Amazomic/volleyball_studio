@@ -446,9 +446,9 @@
     ["rallies","Розыгрыши","cpu",1],
     ["players","Поиск игроков","gpu",1],
     ["boxes","Стабилизация рамок","cpu",1],
+    ["touch_detector","Touch Detector","cpu",1],
     ["pose","Позы по стабилизированным рамкам","gpu",1],
     ["tracking","Трекинг ID","cpu",2],
-    ["touch_detector","Touch Detector","cpu",2],
     ["touches","Touch Attribution","cpu",2],
     ["publish","Публикация розыгрышей","output",2],
     ["identity","Привязка игроков","mixed",2],
@@ -636,16 +636,16 @@
     ["video","players"],
     ["rallies","players"],
     ["video","pose","pose"],
-    ["boxes","pose","pose"],
+    ["touch_detector","pose","pose"],
     ["ball","boxes"],
     ["players","boxes"],
     ["rallies","boxes"],
     ["pose","tracking","pose"],
     ["boxes","tracking","no_pose"],
     ["ball_stabilizer","rallies"],
-    ["ball_stabilizer","touch_detector"],
-    ["rallies","touch_detector"],
-    ["touch_detector","touches"],
+    ["ball_stabilizer","touch_detector","pose"],
+    ["boxes","touch_detector","pose"],
+    ["rallies","touch_detector","pose"],
     ["ball_stabilizer","touches"],
     ["tracking","touches"],
     ["rallies","touches"],
@@ -676,9 +676,8 @@
     boxes:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap","#studio-post-nms"],
     tracking:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap",
       "#studio-post-lost-low-gap","#studio-post-lost-low-iou","#studio-post-min-track-frames","#studio-post-nms","#studio-post-assignment","#studio-post-margin"],
-    touch_detector:["#studio-post-touch-threshold","#studio-post-occluded-turn","#studio-post-touch-gap",
-      "#studio-post-smooth","#studio-post-interval"],
-    touches:["#studio-post-reach","#studio-post-pose-confidence","#studio-post-pose-distance",
+    touches:["#studio-post-touch-threshold","#studio-post-occluded-turn","#studio-post-touch-gap",
+      "#studio-post-smooth","#studio-post-interval","#studio-post-reach","#studio-post-pose-confidence","#studio-post-pose-distance",
       "#studio-post-ball-score","#studio-post-ball-gap",
       "#studio-post-idle","#studio-post-stationary","#studio-post-rally-min",
       "#studio-post-coverage","#studio-post-samples","#studio-post-min-touches",
@@ -689,12 +688,12 @@
     video:"Выбор видео, интервалов анализа и разметки площадки.",
     ball:"VBallNetV4c работает с фиксированным окном из 9 кадров. Детекции мяча поступают в ball_stabilizer.",
     ball_stabilizer:"Отбрасывает ложные точки и интерполирует короткие пропуски. Одна сохранённая траектория используется для поиска розыгрышей, касаний и предпросмотра.",
-    rallies:"Определяет предварительные интервалы по стабилизированной траектории. Внутренний Ground Detector проверяет касания пола и уточняет конец розыгрыша. Кандидаты пола передаются в Touch Detector.",
+    rallies:"Определяет предварительные интервалы по стабилизированной траектории. Внутренний Ground Detector проверяет касания пола и уточняет конец розыгрыша. Кандидаты пола передаются в Touch Attribution.",
     players:"RF-DETR ищет игроков только внутри найденных игровых интервалов.",
     boxes:"ByteTrack связывает рамки детектора по движению в игровых интервалах, объединяет фрагменты одного трека и при включённой интерполяции восстанавливает пропуски между наблюдениями. Суставы на этой стадии не сравниваются.",
-    pose:"RTMPose-M Body7 измеряет точки тела по стабилизированным рамкам в исходных кадрах. Измерения прикрепляются к стабильным Track ID без изменения рамок.",
+    pose:"RTMPose-M Body7 измеряет точки тела в исходных кадрах. Рядом с кандидатом касания позы измеряются в каждом кадре окна ±8 кадров. Между измерениями позы одного Track ID интерполируются, если включена интерполяция.",
     tracking:"Сохраняет устойчивые Track ID, определённые по движению рамок до RTMPose. При наличии измеренных поз прикрепляет их к готовым трекам, не меняя ID и рамки.",
-    touch_detector:"По стабилизированной траектории находит моменты возможных касаний внутри розыгрышей и отделяет кандидаты касаний пола. Передаёт физические события в Touch Attribution.",
+    touch_detector:"По траектории мяча находит кандидаты касаний и выбирает ближайшие Track ID для покадрового RTMPose. Остальные игроки получают три измерения позы в секунду.",
     touches:"По траектории мяча, стабилизированным рамкам и точкам RTMPose уточняет контакт, привязывает событие к Track ID и определяет тип касания. Если признаков недостаточно, тип остаётся unknown_touch. Достоверный контакт тела может опровергнуть кандидата пола. ReID выполняется позднее.",
     publish:"Публикует границы первичных розыгрышей и касания с Track ID и типами из Touch Attribution для выбранной версии CPU replay.",
     identity:"Подготавливает фотографии игроков из исходных кадров, сравнивает признаки внешности с библиотекой и автоматически привязывает Track ID к игрокам внутри опубликованных розыгрышей.",
@@ -980,11 +979,12 @@
       ball:run?.gpu_jobs?.ball,rallies:run?.gpu_rally_mask||Number.isSafeInteger(run?.gpu_rally_count),players:run?.gpu_jobs?.players,
       ball_stabilizer:run?.gpu_rally_mask?.ball_stabilizer,
       boxes:run?.primary_tracking?.replay_id||run?.cpu_runs?.tracking,
+      touch_detector:run?.primary_tracking?.pose_sampling?.version,
       pose:run?.gpu_jobs?.pose||(run?.primary_tracking?.pose_ready?run.primary_tracking.replay_id:Number(run?.player_tracking_stats?.refined_poses)>0?run?.cpu_runs?.tracking:null)
     };
     const savedCpu={
       boxes:run?.cpu_runs?.tracking,tracking:run?.cpu_runs?.tracking,ball_stabilizer:run?.ball_stabilizer,
-      touch_detector:run?.cpu_runs?.touches,touches:run?.cpu_runs?.touches,
+      touches:run?.cpu_runs?.touches,
       publish:run?.cpu_runs?.rallies,identity:run?.automatic_identity||run?.automatic_identity_available
     };
     for(const node of target.querySelectorAll(".analysis-flow-node")){
@@ -997,13 +997,14 @@
         !!entry&&entry.finished_ms==null&&entry===stages.at(-1));
       const done=!!entry&&(entry.finished_ms!=null||complete&&!running)||
         (id==="boxes"&&!!run?.primary_tracking?.replay_id&&!running&&!cached)||
-        (id==="pose"&&hasPose&&!running);
+        (id==="pose"&&hasPose&&!running)||
+        (id==="touch_detector"&&!!savedGpu.touch_detector&&!running&&!cached);
       const reused=!entry&&((cached&&!!savedGpu[id])||(run?.result_reused===true&&!!savedCpu[id]));
       node.classList.toggle("is-active",!!running);
       node.classList.toggle("is-complete",done);
       node.classList.toggle("is-reused",reused);
       node.classList.toggle("is-skipped",
-        id==="pose"&&graphLinkState("pose",run)==="disabled");
+        (id==="pose"||id==="touch_detector")&&graphLinkState("pose",run)==="disabled");
       node.classList.toggle("is-failed",
         run?.status==="failed"&&id===currentId||
         id==="identity"&&run?.completion_quality==="identity_failed");
@@ -1628,7 +1629,7 @@
       renderHistory();
       loadHistory();
       ui.progress.value=0;state.stopRequested=false;
-      saveMessage(mode==="gpu"?"Запущена 1 фаза: VBallNet → детектор игроков → ByteTrack BBox → RTMPose.":
+      saveMessage(mode==="gpu"?"Запущена 1 фаза: VBallNet → детектор игроков → ByteTrack BBox → Touch Detector → RTMPose.":
         mode==="post"?"Запущена 2 фаза для выбранного результата 1 фазы.":
         "Запущен полный анализ: VBallNet → "+(window.VolleyballPersonDetector?.label||"детектор игроков + RTMPose")+" → CPU.");
       stopPipelinePolling();

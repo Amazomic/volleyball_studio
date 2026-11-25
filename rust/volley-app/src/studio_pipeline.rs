@@ -918,6 +918,9 @@ fn tracking_progress(
             status["player_tracking_stats"]["total_track_ids"] = json!(total);
             save(path, status)
         }
+        cpu_retrack::TrackingProgress::PoseSelection => {
+            progress(path, status, "Touch Detector", 87.9)
+        }
         cpu_retrack::TrackingProgress::PoseCached(total) => {
             status["pose_frame_progress"] =
                 json!({"processed":total,"total":total,"basis":"stable_crop_frames_v1"});
@@ -1351,7 +1354,8 @@ fn cpu_lineage_valid(
         // silently reused when ByteTrack is now the default.
         && track["track_association_version"] == cpu_retrack::TRACK_ASSOCIATION_VERSION
         && (!request.gpu.pose_enabled
-            || track["pose_refinement_policy"] == cpu_retrack::POSE_REFINEMENT_POLICY)
+            || (track["pose_refinement_policy"] == cpu_retrack::POSE_REFINEMENT_POLICY
+                && track["pose_sampling"] == cpu_retrack::pose_sampling_contract(request.post.ball_stabilizer)))
         && track["replay_id"] == replay
         && track["interpolate_pose"].as_bool().unwrap_or(true) == request.post.interpolate_pose
         && track["source_fusion_id"] == fusion
@@ -2264,10 +2268,7 @@ async fn pipeline(
         cpu_retrack::PoseRefinement {
             threads: request.gpu.cpu_threads,
             memory_mb: request.gpu.gpu_memory_limit_mb,
-            stride: request
-                .gpu
-                .pose_mode
-                .effective_stride(request.gpu.pose_stride),
+            ball_stabilizer: request.post.ball_stabilizer,
         },
     );
     let pose_permit = if refine_pose.is_some() {
@@ -2318,7 +2319,9 @@ async fn pipeline(
                 .into(),
         );
     }
-    status["primary_tracking"] = json!({"replay_id":replay_id,"pose_ready":pose_ready});
+    status["primary_tracking"] = json!({
+        "replay_id":replay_id,"pose_ready":pose_ready,"pose_sampling":replay["pose_sampling"],
+    });
     if request.mode != PipelineMode::Gpu {
         status["cpu_runs"]["tracking"] = json!(replay_id);
     }
@@ -2425,7 +2428,7 @@ async fn pipeline(
         settings: Some(request.post.touches),
         pose_classification: request.post.pose_classification,
     };
-    progress(path, status, "Touch Detector", 91.0)?;
+    progress(path, status, "Touch Attribution", 91.0)?;
     let ground = tokio::task::block_in_place(|| {
         cpu_touches::ground_stage::prepare_touch_detection(
             app,
@@ -2442,7 +2445,7 @@ async fn pipeline(
     save(path, status)?;
     log_event(
         path,
-        "Touch Detector",
+        "Touch Attribution",
         "success",
         &format!(
             "Изломы траектории: {}; кандидаты пола в розыгрышах: {}",
@@ -3498,6 +3501,80 @@ mod tests {
         assert_eq!(
             cancelled_outcome(Err("cpu error".into()), false),
             Err("cpu error".into())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires an isolated video, model root and local CUDA"]
+    async fn real_touch_guided_pose_full_analysis() {
+        let base = PathBuf::from(std::env::var("VOLLEY_AB_DATA_ROOT").unwrap());
+        let source = PathBuf::from(std::env::var("VOLLEY_AB_SOURCE").unwrap());
+        assert!(!base.exists(), "A/B requires a fresh data root");
+        let project_id = "abc123def456";
+        let video = "experiment.mp4";
+        let uploads = base.join("uploads/project_sources");
+        fs::create_dir_all(&uploads).unwrap();
+        fs::copy(source, uploads.join(video)).unwrap();
+        fs::create_dir_all(base.join("projects").join(project_id)).unwrap();
+        storage::write_json_atomic(
+            &base.join("projects/projects.json"),
+            &json!({"schema":1,"projects":[{"id":project_id,"videos":[video]}]}),
+        )
+        .unwrap();
+        let state = Arc::new(AppState {
+            repository_root: PathBuf::from(std::env::var("VOLLEY_AB_MODEL_ROOT").unwrap()),
+            data_root: base.clone(),
+            writes_enabled: true,
+            montage: crate::montage::MontageManager::new(),
+            preparation: crate::preparation::PreparationManager::new(),
+            preview_limit: tokio::sync::Semaphore::new(1),
+            touch_limit: tokio::sync::Semaphore::new(1),
+            continuity_limit: tokio::sync::Semaphore::new(1),
+            reid_limit: tokio::sync::Semaphore::new(1),
+            identity_limit: tokio::sync::Semaphore::new(1),
+            statistics_limit: tokio::sync::Semaphore::new(1),
+            marks_limit: tokio::sync::Semaphore::new(1),
+            quick_reel: crate::quick_reel::QuickReelManager::new(),
+            inference_limit: tokio::sync::Semaphore::new(1),
+            full_inference: crate::inference_full::FullInferenceManager::new(),
+        });
+        let request = serde_json::from_value::<StartRequest>(json!({
+            "project_id":project_id,"video":video,"mode":"full",
+            "gpu":{"pose_stride":1,"pose_mode":"photo","person_detector":"rfdetr-medium"}
+        }))
+        .unwrap();
+        let started = std::time::Instant::now();
+        let Json(queued) = start(State(state), HeaderMap::new(), Json(request))
+            .await
+            .unwrap();
+        let path = base
+            .join("projects")
+            .join(project_id)
+            .join("native_studio_pipelines")
+            .join(queued["id"].as_str().unwrap())
+            .join("status.json");
+        tokio::time::timeout(std::time::Duration::from_secs(900), async {
+            while has_active().await {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let result = read(&path).unwrap();
+        println!(
+            "POSE_AB full_ms={} status_path={}",
+            started.elapsed().as_millis(),
+            path.display()
+        );
+        assert_eq!(result["status"], "complete", "{result}");
+        let stages = result["stages"].as_array().unwrap();
+        let position = |id| stages.iter().position(|stage| stage["id"] == id).unwrap();
+        assert!(position("boxes") < position("touch_detector"));
+        assert!(position("touch_detector") < position("pose"));
+        assert!(position("pose") < position("touches"));
+        assert_eq!(
+            result["primary_tracking"]["pose_sampling"],
+            cpu_retrack::pose_sampling_contract(Default::default()),
         );
     }
 

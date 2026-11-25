@@ -43,8 +43,9 @@ mod pose_refinement;
 mod pose_source;
 mod track_stitch;
 pub(crate) use pose_refinement::{
-    Refinement as PoseRefinement, LEGACY_POLICY as LEGACY_POSE_REFINEMENT_POLICY,
-    POLICY as POSE_REFINEMENT_POLICY, PREVIOUS_POLICY as PREVIOUS_POSE_REFINEMENT_POLICY,
+    sampling_contract as pose_sampling_contract, Refinement as PoseRefinement,
+    LEGACY_POLICY as LEGACY_POSE_REFINEMENT_POLICY, POLICY as POSE_REFINEMENT_POLICY,
+    PREVIOUS_POLICY as PREVIOUS_POSE_REFINEMENT_POLICY,
     PREVIOUS_TRACKED_CROP_POLICY as PREVIOUS_TRACKED_CROP_REFINEMENT_POLICY,
     PRIOR_CROP_POLICY as PRIOR_CROP_REFINEMENT_POLICY,
     REJECTED_LEADING_POLICY as HISTORICAL_LEADING_CROP_POLICY,
@@ -829,7 +830,8 @@ pub(crate) fn has_refined_pose(
     fusion_sha: &str,
     mask_sha: Option<&str>,
 ) -> Result<bool, String> {
-    pose_source::locate_refined(project, fusion_id, fusion_sha, mask_sha, None).map(|s| s.is_some())
+    pose_source::locate_refined(project, fusion_id, fusion_sha, mask_sha, None, None)
+        .map(|s| s.is_some())
 }
 
 pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, ApiError> {
@@ -838,6 +840,7 @@ pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, Ap
 
 pub(crate) enum TrackingProgress {
     BoxesReady(u64),
+    PoseSelection,
     PoseCached(u64),
     PoseFrames { processed: u64, total: u64 },
     FinalPass,
@@ -962,6 +965,9 @@ fn process_inner(
         load_player_frame_scope(&project_root, &manifest, frames).map_err(storage::bad_request)?;
     // Pose evidence was measured on actual GPU RGB frames and bound to the
     // selected fusion SHA. Legacy fusions without RTMPose remain readable.
+    let requested_sampling = refinement
+        .as_ref()
+        .map(|r| pose_sampling_contract(r.ball_stabilizer));
     let saved_refined = pose_source::locate_refined(
         &project_root,
         &req.fusion_id,
@@ -969,11 +975,8 @@ fn process_inner(
         player_scope
             .as_ref()
             .map(|scope| scope.mask_sha256.as_str()),
-        Some((
-            &settings,
-            refinement.as_ref().map(|r| r.stride),
-            req.interpolate_players,
-        )),
+        Some((&settings, req.interpolate_players)),
+        requested_sampling.as_ref(),
     )
     .map_err(storage::bad_request)?;
     let root = project_root.join("native_cpu_replays");
@@ -1017,6 +1020,7 @@ fn process_inner(
         let mut refined_poses = 0;
         let mut refined_pose_sha = saved_refined.as_ref().map(|s| s.sha.clone());
         let mut refined_pose_stride = saved_refined.as_ref().map(|s| s.stride);
+        let mut pose_sampling = saved_refined.as_ref().map(|s| s.sampling.clone());
         let mut refined_pose_owner = saved_refined.as_ref().map(|s| s.id.clone());
         let mut refine_input_sha = None;
         if let Some(snapshot) = &saved_refined {
@@ -1049,7 +1053,8 @@ fn process_inner(
                 .map_err(|e| format!("Invalid RTMPose refinement range: {e}"))?;
             refine_input_sha = Some(digest.clone());
             let refinement = refinement.ok_or("RTMPose refinement settings unavailable")?;
-            let stride = refinement.stride;
+            let stride = pose_refinement::SAMPLE_ROW_STRIDE;
+            on_pose(TrackingProgress::PoseSelection)?;
             let (pose_sha, _accepted) = pose_refinement::refine(
                 &state.repository_root,
                 pose_refinement::Source {
@@ -1068,11 +1073,13 @@ fn process_inner(
             refined_pose_sha = Some(pose_sha.clone());
             refined_pose_stride = Some(stride);
             refined_pose_owner = Some(replay_id.clone());
+            pose_sampling = requested_sampling.clone();
             let snapshot = pose_source::Snapshot {
                 id: replay_id.clone(),
                 sha: pose_sha,
                 stride,
                 folder: directory.clone(),
+                sampling: pose_sampling.clone().unwrap_or(Value::Null),
             };
             on_pose(TrackingProgress::FinalPass)?;
             let (attached_sha, attached_poses, _) =
@@ -1152,6 +1159,7 @@ fn process_inner(
         record["refined_pose_count"] = json!(refined_poses);
         record["refined_pose_sha256"] = json!(refined_pose_sha);
         record["refined_pose_stride"] = json!(refined_pose_stride);
+        record["pose_sampling"] = json!(pose_sampling);
         record["refined_pose_source_replay_id"] = json!(refined_pose_owner);
         record["refined_pose_model_sha256"] =
             json!(has_refined.then_some(volley_inference::pose::MODEL_SHA256));
@@ -2107,6 +2115,7 @@ mod tests {
             folder: pose_dir.clone(),
             stride: 3,
             sha: format!("{:x}", Sha256::digest(&pose_bytes)),
+            sampling: Value::Null,
         };
         let output = root.join("tracked.jsonl");
         let fusion_sha = format!("{:x}", Sha256::digest(&fusion_bytes));
