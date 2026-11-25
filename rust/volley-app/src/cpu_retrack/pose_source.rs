@@ -12,7 +12,7 @@ use std::{
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
-use volley_core::{bbox_iou, fusion::Candidate, tracker::PoseEvidence};
+use volley_core::{fusion::Candidate, tracker::PoseEvidence};
 
 const MAX_ROW: usize = 512 * 1024;
 const MAX_POSES: usize = 128;
@@ -243,42 +243,12 @@ impl PoseRows {
             let Some(estimated) = joint_bbox(&evidence) else {
                 continue;
             };
-            let torso = evidence
-                .torso()
-                .ok_or("RTMPose has no valid torso anchor")?;
-            if torso[0] < bbox[0] - 0.04
-                || torso[0] > bbox[2] + 0.04
-                || torso[1] < bbox[1] - 0.04
-                || torso[1] > bbox[3] + 0.04
-            {
+            if !evidence.inside_crop(bbox, 0.04) {
                 continue; // Bad crop did not actually detect its own person.
             }
             // Two crop proposals can produce the same skeleton; these are one
             // person, not independent confirmation observations.
-            if candidates.iter().zip(&landmarks).any(
-                |(c, previous): (&Candidate, &Option<PoseEvidence>)| {
-                    previous
-                        .as_ref()
-                        .and_then(PoseEvidence::torso)
-                        .zip(evidence.torso())
-                        .is_some_and(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1]) < 0.012)
-                        && previous.as_ref().is_some_and(|prior| {
-                            let mut mean = 0.0;
-                            let mut n = 0;
-                            for i in [5, 6, 7, 8, 11, 12, 13, 14] {
-                                let (p, q) = (prior.joints[i], evidence.joints[i]);
-                                if p[2] >= 0.5 && q[2] >= 0.5 {
-                                    mean += (p[0] - q[0]).hypot(p[1] - q[1]);
-                                    n += 1;
-                                }
-                            }
-                            n >= 4 && mean / (n as f64) < 0.012
-                        })
-                        && bbox_iou(c.bbox_xyxy_norm, estimated) > 0.35
-                },
-            ) {
-                continue;
-            }
+
             let quality = points
                 .iter()
                 .filter(|p| p[2] >= 0.32)
@@ -354,7 +324,7 @@ fn joint_bbox(pose: &PoseEvidence) -> Option<[f64; 4]> {
         .iter()
         .filter(|p| p[2] >= 0.32)
         .collect::<Vec<_>>();
-    if valid.len() < 6 {
+    if valid.len() < 3 {
         return None;
     }
     let min_x = valid.iter().map(|p| p[0]).fold(1.0, f64::min);
@@ -363,7 +333,7 @@ fn joint_bbox(pose: &PoseEvidence) -> Option<[f64; 4]> {
     let max_y = valid.iter().map(|p| p[1]).fold(0.0, f64::max);
     let w = max_x - min_x;
     let h = max_y - min_y;
-    if w < 0.012 || h < 0.055 {
+    if w < 0.003 || h < 0.008 {
         return None;
     }
     Some([

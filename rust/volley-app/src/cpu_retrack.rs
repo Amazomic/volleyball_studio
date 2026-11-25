@@ -35,7 +35,7 @@ use volley_core::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_pose_final_v14";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_partial_pose_v15";
 pub(crate) mod ball_track;
 mod gap_interpolation;
 mod pose_refinement;
@@ -43,7 +43,7 @@ mod pose_source;
 mod track_stitch;
 pub(crate) use pose_refinement::{
     Refinement as PoseRefinement, LEGACY_POLICY as LEGACY_POSE_REFINEMENT_POLICY,
-    POLICY as POSE_REFINEMENT_POLICY,
+    POLICY as POSE_REFINEMENT_POLICY, PREVIOUS_POLICY as PREVIOUS_POSE_REFINEMENT_POLICY,
 };
 
 pub(crate) use volley_core::contracts::job_id as opaque_id;
@@ -547,7 +547,11 @@ fn replay_frames_verified(
             (boxes, Vec::new(), 0)
         };
         let tracking = if player_frame {
-            let tracking = tracker.process_frame_with_poses(expected_frame, &proposals, &joints)?;
+            let tracking = if phase == ReplayPhase::CropPlan {
+                tracker.process_crop_frame(expected_frame, &proposals)?
+            } else {
+                tracker.process_frame_with_poses(expected_frame, &proposals, &joints)?
+            };
             confirmations.observe(expected_frame, &tracking.tracks)?;
             totals.processed_player_frames += 1;
             totals.rejected += tracking.rejected_boxes as u64;
@@ -719,11 +723,17 @@ fn replay_frames_verified(
         .ok_or("More duplicate detections removed than confirmed")?;
     totals.identity_turnover_splits = 0;
     totals.identity_handoff_splits = 0;
-    let (continuous_sha, inferred_positions) = if interpolate_players {
-        fill_confirmed_track_gaps(output, &stitched_sha, count, scope, cancel)?
+    let stitched_sha = if phase == ReplayPhase::CropPlan {
+        pose_refinement::restore_partial_crops(output, &stitched_sha, count, scope, cancel)?
     } else {
-        (stitched_sha, 0)
+        stitched_sha
     };
+    let (continuous_sha, inferred_positions) =
+        if interpolate_players || phase == ReplayPhase::CropPlan {
+            fill_confirmed_track_gaps(output, &stitched_sha, count, scope, cancel)?
+        } else {
+            (stitched_sha, 0)
+        };
     totals.interpolated_player_boxes = inferred_positions;
     totals.combined_pose_crops += removed_duplicate_boxes;
     let track_count = summary

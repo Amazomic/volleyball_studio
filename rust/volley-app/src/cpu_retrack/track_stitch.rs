@@ -44,6 +44,10 @@ struct Track {
 struct Simultaneous {
     total: u32,
     complementary: u32,
+    same_pose: u32,
+    distinct_pose: u32,
+    switched_forward: u32,
+    switched_backward: u32,
 }
 
 fn complementary_parts(a: &Candidate, b: &Candidate) -> bool {
@@ -155,6 +159,7 @@ fn find_links(
     let mut tracks = BTreeMap::<u64, Track>::new();
     let mut pairs = BTreeMap::<(u64, u64), Simultaneous>::new();
     let mut reader = BoundedReader::open(source)?;
+    let mut previous: Option<Frame> = None;
     for frame in 0..frames {
         let row = observed_row(&mut reader, frame)?;
         let mut in_frame = BTreeSet::new();
@@ -206,6 +211,11 @@ fn find_links(
                 }
                 let evidence = pairs.entry(pair).or_default();
                 evidence.total += 1;
+                if let (Some(a), Some(b)) = (a.pose, b.pose) {
+                    let (a, b) = (PoseEvidence { joints: a }, PoseEvidence { joints: b });
+                    evidence.same_pose += u32::from(a.same_observation(&b));
+                    evidence.distinct_pose += u32::from(a.distinct_observation(&b));
+                }
                 let distinct_heads =
                     match (a.detection.head_point_norm, b.detection.head_point_norm) {
                         (Some(ha), Some(hb)) => (ha[0] - hb[0]).hypot(ha[1] - hb[1]) > 0.018,
@@ -216,6 +226,45 @@ fn find_links(
                 }
             }
         }
+        if let Some(prev) = previous.as_ref().filter(|prev| {
+            frame == prev.frame_index + 1
+                && scope.is_some_and(|mask| mask.same_confirmed_rally(prev.frame_index, frame))
+        }) {
+            for a in &prev.tracked_players {
+                if in_frame.contains(&a.track_id) {
+                    continue;
+                }
+                for b in &row.tracked_players {
+                    if prev
+                        .tracked_players
+                        .iter()
+                        .any(|p| p.track_id == b.track_id)
+                    {
+                        continue;
+                    }
+                    if bbox_iou(a.detection.bbox_xyxy_norm, b.detection.bbox_xyxy_norm) < 0.45 {
+                        continue;
+                    }
+                    if let (Some(a_pose), Some(b_pose)) = (a.pose, b.pose) {
+                        if (PoseEvidence { joints: a_pose })
+                            .same_observation(&PoseEvidence { joints: b_pose })
+                        {
+                            let key = (a.track_id.min(b.track_id), a.track_id.max(b.track_id));
+                            if !pairs.contains_key(&key) && pairs.len() >= 200_000 {
+                                return Err("Too many Track ID pairs".into());
+                            }
+                            let evidence = pairs.entry(key).or_default();
+                            if a.track_id < b.track_id {
+                                evidence.switched_forward += 1;
+                            } else {
+                                evidence.switched_backward += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        previous = Some(row);
     }
     if reader.line()?.is_some() || reader.finish() != expected_sha {
         return Err("Confirmed tracking source SHA-256 mismatch before Track ID stitching".into());
@@ -275,6 +324,66 @@ fn find_links(
             }
         }
     }
+    let mut pose_links = pairs
+        .iter()
+        .filter_map(|(&(a, b), evidence)| {
+            let first = tracks.get(&a)?;
+            let second = tracks.get(&b)?;
+            let start = first.start?.min(second.start?);
+            let end = first.end.max(second.end);
+            if !scope.is_some_and(|mask| mask.same_interval(start, end))
+                || evidence.distinct_pose > 0
+            {
+                return None;
+            }
+            let overlap = evidence.same_pose >= 2 && evidence.same_pose * 2 >= evidence.total;
+            let alternating = evidence.switched_forward >= 2
+                && evidence.switched_backward >= 2
+                && evidence.same_pose == evidence.total;
+            (overlap || alternating).then_some((
+                a,
+                b,
+                evidence.same_pose + evidence.switched_forward + evidence.switched_backward,
+            ))
+        })
+        .collect::<Vec<_>>();
+    pose_links.sort_by_key(|&(a, b, n)| (std::cmp::Reverse(n), a, b));
+    for (a, b, _) in pose_links {
+        let root_a = aliases.get(&a).copied().unwrap_or(a);
+        let root_b = aliases.get(&b).copied().unwrap_or(b);
+        if root_a == root_b {
+            continue;
+        }
+        let left = tracks
+            .keys()
+            .copied()
+            .filter(|id| aliases.get(id).copied().unwrap_or(*id) == root_a)
+            .collect::<Vec<_>>();
+        let right = tracks
+            .keys()
+            .copied()
+            .filter(|id| aliases.get(id).copied().unwrap_or(*id) == root_b)
+            .collect::<Vec<_>>();
+        let conflict = left.iter().any(|&x| {
+            right.iter().any(|&y| {
+                pairs.get(&(x.min(y), x.max(y))).is_some_and(|e| {
+                    e.distinct_pose > 0 || (e.total > 0 && e.same_pose * 2 < e.total)
+                })
+            })
+        });
+        if conflict {
+            continue;
+        }
+        let root = root_a.min(root_b);
+        for id in left.into_iter().chain(right) {
+            used.insert(id);
+            if id != root {
+                aliases.insert(id, root);
+            } else {
+                aliases.remove(&id);
+            }
+        }
+    }
     let mut gap_candidates = Vec::new();
     for (&old_id, old) in &tracks {
         if used.contains(&old_id) || old.observed < 12 {
@@ -297,8 +406,7 @@ fn find_links(
                 (old.last_pose, new.first_pose)
             {
                 if old.end - old_at <= 3 && new_at - start <= 3 {
-                    if let Some((a, b)) = old_pose.torso().zip(new_pose.torso()) {
-                        let distance = (a[0] - b[0]).hypot(a[1] - b[1]);
+                    if let Some(distance) = old_pose.shared_joint_distance(&new_pose) {
                         if distance <= (0.012 + (start - old.end) as f64 * 0.0006).min(0.035)
                             && old_pose
                                 .similarity(&new_pose, new_at - old_at)
@@ -560,6 +668,58 @@ mod tests {
             "bbox_xyxy_norm":bbox,
             "head_point_norm":head
         })
+    }
+
+    #[test]
+    fn repeated_shared_joints_merge_full_tracks_with_long_overlap() {
+        for distinct in [false, true] {
+            let path =
+                std::env::temp_dir().join(format!("volley-shared-joints-{}.jsonl", Uuid::new_v4()));
+            let mut raw = Vec::new();
+            for frame in 0..80_u64 {
+                let mut players = Vec::new();
+                for (id, start, end) in [(2, 0, 49), (10, 20, 79)] {
+                    if !(start..=end).contains(&frame) {
+                        continue;
+                    }
+                    let mut joints = [[0.0; 3]; 17];
+                    for (i, joint) in joints.iter_mut().enumerate().skip(7) {
+                        let shift = if id == 10 && distinct { 0.07 } else { 0.0 };
+                        *joint = [
+                            0.55 + shift + (i % 2) as f64 * 0.018,
+                            0.46 + (i / 2) as f64 * 0.012,
+                            0.9,
+                        ];
+                    }
+                    if id == 2 {
+                        joints[11][2] = 0.0;
+                        joints[12][2] = 0.0;
+                    }
+                    players.push(json!({"track_id":id,"pose":joints,"measurement_source":"rtmpose_rgb",
+                        "detection":candidate(frame, if id == 2 {[0.53,0.48,0.58,0.59]} else {[0.52,0.40,0.62,0.63]}, None)}));
+                }
+                serde_json::to_writer(
+                    &mut raw,
+                    &json!({"frame_index":frame,"tracked_players":players}),
+                )
+                .unwrap();
+                raw.push(b'\n');
+            }
+            fs::write(&path, &raw).unwrap();
+            let sha = format!("{:x}", Sha256::digest(&raw));
+            let rally = rally_scope(vec![(0, 79)]);
+            let (_, merged, dropped) = stitch(&path, &sha, 80, Some(&rally), true).unwrap();
+            assert_eq!((merged, dropped), if distinct { (0, 0) } else { (1, 30) });
+            if !distinct {
+                for line in fs::read_to_string(&path).unwrap().lines() {
+                    let row: Value = serde_json::from_str(line).unwrap();
+                    let players = row["tracked_players"].as_array().unwrap();
+                    assert_eq!(players.len(), 1);
+                    assert_eq!(players[0]["track_id"], 2);
+                }
+            }
+            fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]

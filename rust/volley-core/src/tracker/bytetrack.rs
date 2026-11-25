@@ -330,11 +330,29 @@ impl ByteTracker {
             frame.saturating_sub(*last) <= 60 && active.contains(&a) && active.contains(&b)
         });
     }
+    pub fn process_crop_frame(
+        &mut self,
+        frame: u64,
+        raw: &[Candidate],
+    ) -> Result<TrackedFrame, String> {
+        self.process_frame(frame, raw, &[], true)
+    }
+
     pub fn process_frame_with_poses(
         &mut self,
         frame: u64,
         raw: &[Candidate],
         pose: &[Option<PoseEvidence>],
+    ) -> Result<TrackedFrame, String> {
+        self.process_frame(frame, raw, pose, false)
+    }
+
+    fn process_frame(
+        &mut self,
+        frame: u64,
+        raw: &[Candidate],
+        pose: &[Option<PoseEvidence>],
+        crop_plan: bool,
     ) -> Result<TrackedFrame, String> {
         if self.previous.is_some_and(|last| frame <= last) {
             return Err("ByteTrack input frame index must strictly increase".into());
@@ -381,21 +399,36 @@ impl ByteTracker {
                 .total_cmp(&a.box_.score)
                 .then_with(|| a.box_.query_index.cmp(&b.box_.query_index))
         });
+        if crop_plan {
+            self.merge_crop_fragments(frame, &mut sorted);
+        }
         let mut retained: Vec<Observation> = Vec::new();
         for item in sorted {
             if retained.iter().all(|other| {
                 let duplicate = bbox_iou(other.box_.bbox_xyxy_norm, item.box_.bbox_xyxy_norm)
                     >= self.config.nms_iou
                     || same_head_body_duplicate(&other.box_, &item.box_);
-                let torso_distance = other
-                    .pose
-                    .and_then(|pose| pose.torso())
-                    .zip(item.pose.and_then(|pose| pose.torso()))
-                    .map(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1]));
-                let same_torso = torso_distance.is_some_and(|distance| distance <= 0.008);
-                let separate_poses = torso_distance.is_some_and(|distance| distance > 0.020);
-                !(duplicate || same_torso)
-                    || separate_poses
+                if let (Some(a), Some(b)) = (other.pose, item.pose) {
+                    if a.same_observation(&b) {
+                        return false;
+                    }
+                    if a.distinct_observation(&b) {
+                        return true;
+                    }
+                }
+                let a = other.box_.bbox_xyxy_norm;
+                let b = item.box_.bbox_xyxy_norm;
+                let intersection = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0)
+                    * (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+                let area = (b[2] - b[0]) * (b[3] - b[1]);
+                let full_area = (a[2] - a[0]) * (a[3] - a[1]);
+                let contained_fragment = other.pose.is_none()
+                    && item.pose.is_none()
+                    && other.box_.score - item.box_.score >= 0.12
+                    && full_area >= 1.4 * area
+                    && intersection >= 0.88 * area
+                    && ((a[0] + a[2]) - (b[0] + b[2])).abs() <= 0.6 * (a[2] - a[0]);
+                !(duplicate || contained_fragment)
                     || self.independently_tracked_bodies(frame, &other.box_, &item.box_)
             }) {
                 retained.push(item);
@@ -543,6 +576,84 @@ impl ByteTracker {
             tracks: emitted,
         })
     }
+    fn merge_crop_fragments(&self, frame: u64, observations: &mut Vec<Observation>) {
+        let area = |b: [f64; 4]| (b[2] - b[0]) * (b[3] - b[1]);
+        let intersection = |a: [f64; 4], b: [f64; 4]| {
+            (a[2].min(b[2]) - a[0].max(b[0])).max(0.0) * (a[3].min(b[3]) - a[1].max(b[1])).max(0.0)
+        };
+        let union = |a: [f64; 4], b: [f64; 4]| {
+            [
+                a[0].min(b[0]),
+                a[1].min(b[1]),
+                a[2].max(b[2]),
+                a[3].max(b[3]),
+            ]
+        };
+        let mut removed = vec![false; observations.len()];
+        for i in 0..observations.len() {
+            if removed[i] {
+                continue;
+            }
+            for j in i + 1..observations.len() {
+                if removed[j] {
+                    continue;
+                }
+                let a = observations[i].box_.bbox_xyxy_norm;
+                let b = observations[j].box_.bbox_xyxy_norm;
+                if self.independently_tracked_bodies(
+                    frame,
+                    &observations[i].box_,
+                    &observations[j].box_,
+                ) {
+                    continue;
+                }
+                let shared_width = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
+                let horizontal = shared_width / (a[2] - a[0]).min(b[2] - b[0]);
+                let joined = union(a, b);
+                let fragment = area(a) >= 1.4 * area(b)
+                    && intersection(a, b) >= 0.80 * area(b)
+                    && horizontal >= 0.80
+                    && observations[i].box_.score - observations[j].box_.score >= 0.12;
+                let mut owners = self.tracks.iter().filter(|t| {
+                    frame.saturating_sub(t.last_frame) <= 15
+                        && t.observations >= 2
+                        && valid_bbox_inferred(t.kalman.bbox())
+                        && intersection(t.kalman.bbox(), a) >= 0.65 * area(a)
+                        && intersection(t.kalman.bbox(), b) >= 0.65 * area(b)
+                        && bbox_iou(t.kalman.bbox(), joined) >= 0.45
+                });
+                let known_body = owners.next().is_some() && owners.next().is_none();
+                let complementary = known_body
+                    && horizontal >= 0.70
+                    && (a[1].max(b[1]) - a[3].min(b[3])).max(0.0) <= 0.02
+                    && intersection(a, b) <= 0.40 * area(a).min(area(b));
+                if !(fragment || complementary) {
+                    continue;
+                }
+                let competing = observations.iter().enumerate().any(|(k, o)| {
+                    k != i
+                        && k != j
+                        && !removed[k]
+                        && o.box_.score >= HIGH_DETECTION_SCORE
+                        && intersection(o.box_.bbox_xyxy_norm, b) >= 0.65 * area(b)
+                        && area(o.box_.bbox_xyxy_norm) >= 1.4 * area(b)
+                        && bbox_iou(o.box_.bbox_xyxy_norm, a) < 0.55
+                });
+                if competing {
+                    continue;
+                }
+                observations[i].box_.bbox_xyxy_norm = joined;
+                removed[j] = true;
+            }
+        }
+        let mut index = 0;
+        observations.retain(|_| {
+            let keep = !removed[index];
+            index += 1;
+            keep
+        });
+    }
+
     fn observe(
         &mut self,
         frame: u64,
@@ -746,6 +857,72 @@ mod tests {
         assert_eq!(swapped.tracks[0].detection.query_index, Some(1));
         assert_eq!(swapped.tracks[1].track_id, id_b);
         assert_eq!(swapped.tracks[1].detection.query_index, Some(0));
+    }
+
+    #[test]
+    fn crop_frame_unions_protruding_and_complementary_fragments() {
+        let mut tracker = tracker();
+        let full = [0.30, 0.20, 0.40, 0.80];
+        for frame in 0..4 {
+            let body = Candidate {
+                bbox_xyxy_norm: full,
+                ..person(frame, 0, 0.30, 0.9)
+            };
+            let row = tracker.process_crop_frame(frame, &[body]).unwrap();
+            assert_eq!(row.tracks[0].track_id, 1);
+        }
+        let body = Candidate {
+            bbox_xyxy_norm: full,
+            ..person(4, 0, 0.30, 0.9)
+        };
+        let protruding = Candidate {
+            bbox_xyxy_norm: [0.32, 0.17, 0.38, 0.42],
+            ..person(4, 1, 0.32, 0.5)
+        };
+        let row = tracker.process_crop_frame(4, &[body, protruding]).unwrap();
+        assert_eq!(row.tracks.len(), 1);
+        assert_eq!(
+            row.tracks[0].detection.bbox_xyxy_norm,
+            [0.30, 0.17, 0.40, 0.80]
+        );
+        let upper = Candidate {
+            bbox_xyxy_norm: [0.31, 0.20, 0.39, 0.49],
+            ..person(5, 0, 0.31, 0.8)
+        };
+        let lower = Candidate {
+            bbox_xyxy_norm: [0.30, 0.50, 0.40, 0.80],
+            ..person(5, 1, 0.30, 0.7)
+        };
+        let row = tracker.process_crop_frame(5, &[upper, lower]).unwrap();
+        assert_eq!(row.tracks.len(), 1);
+        assert_eq!(row.tracks[0].track_id, 1);
+        assert_eq!(row.tracks[0].detection.bbox_xyxy_norm, full);
+        assert_eq!(tracker.next_id(), 2);
+    }
+
+    #[test]
+    fn full_detector_box_suppresses_contained_weak_fragments_without_pose() {
+        let mut tracker = tracker();
+        for frame in 0..30 {
+            let full = Candidate {
+                bbox_xyxy_norm: [0.544, 0.443, 0.5752, 0.5665],
+                ..person(frame, 0, 0.544, 0.73)
+            };
+            let upper = Candidate {
+                bbox_xyxy_norm: [0.5484, 0.4423, 0.5676, 0.5014],
+                ..person(frame, 1, 0.5484, 0.34)
+            };
+            let lower = Candidate {
+                bbox_xyxy_norm: [0.5449, 0.507, 0.5749, 0.5659],
+                ..person(frame, 2, 0.5449, 0.39)
+            };
+            let result = tracker
+                .process_frame_with_poses(frame, &[full, upper, lower], &[])
+                .unwrap();
+            assert_eq!(result.tracks.len(), 1);
+            assert_eq!(result.tracks[0].track_id, 1);
+        }
+        assert_eq!(tracker.next_id(), 2);
     }
 
     #[test]
