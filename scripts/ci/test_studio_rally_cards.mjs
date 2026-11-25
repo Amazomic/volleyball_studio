@@ -21,7 +21,7 @@ const element=(tag,klass,text)=>({
   replaceChildren(...parts){this.children=parts;},
   addEventListener(name,fn){this.listeners[name]=fn;},
   getBoundingClientRect(){return {left:100,width:200};},
-  setAttribute(){},
+  style:{setProperty(){}},attrs:{},setAttribute(name,value){this.attrs[name]=value;},
 });
 const list=element("div","rally-grid");
 const ui={list,video:{currentTime:0},caption:{textContent:""},previous:{disabled:false},next:{disabled:false}};
@@ -53,13 +53,21 @@ const context={fps:()=>30,ui,s,wasmReady:true,
   document:{createTextNode:s=>({textContent:s})},
   view:(...args)=>playbackCalls.push(args),toggleGold(){},toggleSelected(){}};
 runInNewContext(helpers+"\n"+estimates+"\n"+renderer+"\nthis.render=cards;",context);
-s.items[0].metadata={team_1:[4,9],team_2:[10,11],winning_team:"team_2"};
+s.items[0].metadata={team_1:[4,9],team_2:[10,11],touches:[{kind:"serve",track_id:9},{kind:"attack",track_id:10}],winning_team:"team_2"};
 context.render();
 const card=list.children[0];
 const teamBlock=card.children.find(node=>node.klass==="rally-card-teams");
 assert.ok(teamBlock,"Rally card displays team rosters");
-assert.equal(teamBlock.children[0].children[1].textContent,"ID 4, ID 9");
-assert.equal(teamBlock.children[1].children[1].textContent,"ID 10, ID 11");
+assert.equal(teamBlock.children[0].children[0].klass,"rally-team-label");
+assert.equal(teamBlock.children[0].children[0].attrs.role,"img");
+assert.equal(teamBlock.children[0].children[0].textContent,"");
+const firstMembers=teamBlock.children[0].children[1];
+assert.equal(firstMembers.children[0].textContent,"ID 4");
+assert.equal(firstMembers.children[2].children[0].klass,"rally-serve-icon");
+assert.equal(firstMembers.children[2].children[1].textContent,"ID 9");
+assert.equal(teamBlock.children[1].children[1].children[0].textContent,"ID 10");
+assert.equal(teamBlock.children[1].children[1].children[2].textContent,"ID 11");
+assert.equal(teamBlock.children[1].children[0].attrs.role,"img");
 assert.equal(teamBlock.children[0].children.length,2);
 assert.equal(teamBlock.children[1].children[2].textContent,"+1");
 assert.equal(teamBlock.children.length,2,"Only team rows, no duplicate score caption");
@@ -70,6 +78,10 @@ assert.match(css,/\.rally-card-duration\{[^}]*flex-basis:auto;/,"Duration must n
 assert.match(css,/\.rally-card \.card-stats\{[^}]*align-items:baseline;justify-content:space-between;/,"Metrics share a baseline and use the available width");
 const progress=card.children.find(node=>node.klass==="rally-card-progress");
 assert.equal(card.children.at(-1),progress,"Timeline is the last card child");
+assert.equal(progress.tabIndex,0,"Every timeline is keyboard accessible");
+const progressRule=css.match(/#studio-preview-view \.rally-card-progress\{([^}]+)\}/)[1];
+assert.doesNotMatch(progressRule,/opacity:\s*0|pointer-events:\s*none/);
+assert.doesNotMatch(css,/#studio-preview-view \.rally-card\.active \.rally-card-progress\s*\{/);
 assert.match(css,/grid-template-areas:"head" "foot" "types" "teams" "progress"/);
 assert.match(css,/\.rally-card-teams\{grid-area:teams;/);
 assert.ok(progress,
@@ -109,10 +121,19 @@ assert.match(css,/#studio-preview-view \.rally-card-time-value\{/,
 assert.match(css,/#studio-preview-view \.rally-card \.pick\{[\s\S]*?font-size:10px/,
   "Montage label must stay readable");
 assert.match(text,/☆/,"Favorite toggle marks rallies for montage");
-assert.match(css,/#studio-preview-view \.rally-card\.active\{[\s\S]*?inset 3px 0 #70aaff/,
-  "Selected rally uses a restrained left rail, not a neon outline");
+assert.match(css,/#studio-preview-view \.rally-card\.active\{[^}]*box-shadow:0 0 0 2px #70aaff/);
 assert.match(css,/#studio-preview-view \.rally-card \.card-bottom\{[\s\S]*?display:flex/);
 assert.match(css,/#studio-preview-view \.rally-card-time-range/);
+s.seekAt=1263/30;
+s.current=s.items[0].candidate_id;
+context.render();
+assert.equal(list.children[0].klass,"rally-card active");
+assert.equal(list.children[0].children.at(-1).tabIndex,0);
+s.current="";
+s.items[0].metadata.touches=[{kind:"serve",track_id:null},{kind:"attack",track_id:4}];
+context.render();
+assert.ok(!list.children[0].children.find(node=>node.klass==="rally-card-teams")
+  .children.some(team=>team.children[1].children.some(member=>member.klass==="rally-serving-member")));
 s.items[0].stable_track_count=undefined;
 context.render();
 assert.match(values(list.children[0]).join(" "),/Игроков —/,
