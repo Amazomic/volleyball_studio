@@ -256,6 +256,7 @@ fn initial_rally_serve_proposals(
         .map(|&(start, end)| (start, end.min(start.saturating_add(89))))
         .collect::<Vec<_>>();
     let mut collected = Vec::new();
+    let mut poses = Vec::new();
     let mut proposals = Vec::with_capacity(scope.len());
     let mut position = 0usize;
     crate::native_preview_overlay::for_each_verified_scoped_frame(
@@ -267,13 +268,27 @@ fn initial_rally_serve_proposals(
             if let Some((frame, bytes)) = row {
                 let item: crate::cpu_touches::TrackedFrame = serde_json::from_slice(bytes)
                     .map_err(|e| format!("Invalid serve frame source: {e}"))?;
+                let players = crate::cpu_touches::measured_track_poses(&item);
+                if !players.is_empty() {
+                    poses.push(volley_core::touch_pipeline::PoseFrame {
+                        frame_index: frame,
+                        players,
+                    });
+                }
                 collected.push(crate::cpu_touches::transform_frame(item, frame)?);
             } else {
                 proposals.push(crate::cpu_touches::initial_serve_proposal(
                     &collected,
+                    &poses,
                     intervals[position].0,
+                    (run.width, run.height),
+                    volley_core::touch_pipeline::TouchSettings {
+                        min_ball_score: run.min_ball_score,
+                        ..Default::default()
+                    },
                 ));
                 collected.clear();
+                poses.clear();
                 position += 1;
             }
             Ok(())

@@ -238,12 +238,14 @@ pub(crate) fn sampling_contract(
     settings: volley_core::ball_interpolation::BallStabilizerSettings,
 ) -> Value {
     json!({
-        "version":"touch_guided_pose_sampling_v1",
+        "version":"touch_guided_pose_sampling_v2",
         "ball_stabilizer":settings,
         "ball_stabilizer_version":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
         "trajectory_detector_version":volley_core::touch_pipeline::TRAJECTORY_DETECTOR_VERSION,
         "background_period_frames":BACKGROUND_PERIOD,
         "touch_window_frames":TOUCH_WINDOW,
+        "serve_search_frames":crate::cpu_touches::INITIAL_SERVE_SEARCH_FRAMES,
+        "serve_contact_frames":crate::cpu_touches::INITIAL_SERVE_CONTACT_FRAMES,
         "track_lookup_window_frames":TRACK_LOOKUP_WINDOW,
         "max_box_distance_in_player_heights":MAX_BOX_DISTANCE_IN_PLAYER_HEIGHTS,
     })
@@ -268,6 +270,35 @@ impl PoseSchedule {
     }
 }
 
+fn initial_serve_pose_points(
+    motion: &volley_core::ball_interpolation::StabilizedBallMotion,
+    rallies: &[(u64, u64)],
+) -> BTreeMap<u64, [f64; 2]> {
+    let mut result = BTreeMap::new();
+    let observed = |frame: u64| {
+        let i = frame as usize;
+        if motion.interpolated.get(i).copied()? {
+            return None;
+        }
+        motion.points.get(i).copied().flatten()
+    };
+    for &(start, end) in rallies {
+        let limit =
+            end.min(start.saturating_add(crate::cpu_touches::INITIAL_SERVE_SEARCH_FRAMES - 1));
+        let Some(launch) = (start..=limit).find(|&frame| observed(frame).is_some()) else {
+            continue;
+        };
+        for frame in launch
+            ..=end.min(launch.saturating_add(crate::cpu_touches::INITIAL_SERVE_CONTACT_FRAMES - 1))
+        {
+            if let Some(point) = observed(frame) {
+                result.insert(frame, point);
+            }
+        }
+    }
+    result
+}
+
 fn touch_pose_schedule(
     source: &Source<'_>,
     settings: volley_core::ball_interpolation::BallStabilizerSettings,
@@ -287,6 +318,7 @@ fn touch_pose_schedule(
         (dimensions.width, dimensions.height),
         cancelled,
     )?;
+    let serve_points = initial_serve_pose_points(&motion, &source.scope.rallies);
     let width = f64::from(dimensions.width);
     let height = f64::from(dimensions.height);
     let mut reader = BoundedReader::open(source.replay)?;
@@ -300,7 +332,8 @@ fn touch_pose_schedule(
         let to = frame as i64 + TRACK_LOOKUP_WINDOW;
         let nearby = &impacts[impacts.partition_point(|impact| impact.frame < from)
             ..impacts.partition_point(|impact| impact.frame <= to)];
-        if nearby.is_empty() {
+        let serve_point = serve_points.get(&frame);
+        if nearby.is_empty() && serve_point.is_none() {
             continue;
         }
         let players = row["tracked_players"]
@@ -316,6 +349,13 @@ fn touch_pose_schedule(
                 bbox[2] * width,
                 bbox[3] * height,
             ];
+            if let Some(&[x, y]) = serve_point {
+                let (x, y) = (x * width, y * height);
+                let distance = (x - x.clamp(x1, x2)).hypot(y - y.clamp(y1, y2));
+                if distance <= (y2 - y1) * MAX_BOX_DISTANCE_IN_PLAYER_HEIGHTS {
+                    schedule.select(frame, id, source.frames);
+                }
+            }
             for impact in nearby {
                 let [x, y] = impact.position;
                 let distance = (x - x.clamp(x1, x2)).hypot(y - y.clamp(y1, y2));
@@ -936,6 +976,26 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn serve_launch_pose_points_use_observed_ball_at_each_rally_start() {
+        let mut motion = volley_core::ball_interpolation::StabilizedBallMotion {
+            points: vec![None; 100],
+            interpolated: vec![false; 100],
+            rejected_frames: vec![],
+            confidence_frames: 0,
+            observed_frames: 0,
+        };
+        for i in [10, 12, 13, 16, 17, 65, 68] {
+            motion.points[i] = Some([0.4, 0.5]);
+        }
+        motion.interpolated[10] = true;
+        let points = initial_serve_pose_points(&motion, &[(10, 40), (60, 90)]);
+        assert_eq!(
+            points.keys().copied().collect::<Vec<_>>(),
+            vec![12, 13, 16, 65, 68]
+        );
+    }
 
     #[test]
     fn touch_guided_pose_schedule_keeps_dense_frames_only_for_selected_tracks() {
