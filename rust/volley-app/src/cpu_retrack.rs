@@ -35,7 +35,7 @@ use volley_core::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_motion_handoff_v16";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_bbox_motion_pose_attach_v17";
 pub(crate) mod ball_track;
 mod gap_interpolation;
 mod pose_refinement;
@@ -44,6 +44,7 @@ mod track_stitch;
 pub(crate) use pose_refinement::{
     Refinement as PoseRefinement, LEGACY_POLICY as LEGACY_POSE_REFINEMENT_POLICY,
     POLICY as POSE_REFINEMENT_POLICY, PREVIOUS_POLICY as PREVIOUS_POSE_REFINEMENT_POLICY,
+    PREVIOUS_TRACKED_CROP_POLICY as PREVIOUS_TRACKED_CROP_REFINEMENT_POLICY,
     PRIOR_CROP_POLICY as PRIOR_CROP_REFINEMENT_POLICY,
     REJECTED_LEADING_POLICY as HISTORICAL_LEADING_CROP_POLICY,
 };
@@ -251,7 +252,8 @@ fn replay_frames_with_pose(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReplayPhase {
     Normal,
-    CropPlan,
+    StablePlan,
+    #[cfg(test)]
     Refined,
 }
 
@@ -492,7 +494,7 @@ fn replay_frames_verified(
         cancel,
         phase,
     } = options;
-    let minimum = if phase == ReplayPhase::CropPlan {
+    let minimum = if phase == ReplayPhase::StablePlan {
         1
     } else {
         config.min_track_observations
@@ -541,7 +543,7 @@ fn replay_frames_verified(
             }
         } else {
             let mut boxes = frame.player_candidates.clone();
-            if phase == ReplayPhase::CropPlan {
+            if phase == ReplayPhase::StablePlan {
                 for candidate in &mut boxes {
                     candidate.head_point_norm = None;
                 }
@@ -549,7 +551,7 @@ fn replay_frames_verified(
             (boxes, Vec::new(), 0)
         };
         let tracking = if player_frame {
-            let tracking = if phase == ReplayPhase::CropPlan {
+            let tracking = if phase == ReplayPhase::StablePlan {
                 tracker.process_crop_frame(expected_frame, &proposals)?
             } else {
                 tracker.process_frame_with_poses(expected_frame, &proposals, &joints)?
@@ -582,6 +584,7 @@ fn replay_frames_verified(
                 if let Some(Some(pose)) = joints.get(index) {
                     row["pose"] = json!(pose.joints);
                     row["pose_interpolated"] = json!(false);
+                    #[cfg(test)]
                     if phase == ReplayPhase::Refined {
                         row["pose_source"] = json!(POSE_REFINEMENT_POLICY);
                     }
@@ -725,23 +728,47 @@ fn replay_frames_verified(
         .ok_or("More duplicate detections removed than confirmed")?;
     totals.identity_turnover_splits = 0;
     totals.identity_handoff_splits = 0;
-    let stitched_sha = if phase == ReplayPhase::CropPlan {
+    let stitched_sha = if phase == ReplayPhase::StablePlan {
+        let (sha, tracks, detections) = track_stitch::prune_short(
+            output,
+            &stitched_sha,
+            count,
+            config.min_track_observations,
+            cancel,
+        )?;
+        totals.unconfirmed_tracks += tracks;
+        totals.short_track_detections += detections;
+        totals.detections = totals
+            .detections
+            .checked_sub(detections)
+            .ok_or("Too many short detections")?;
+        sha
+    } else {
+        stitched_sha
+    };
+    let stitched_sha = if phase == ReplayPhase::StablePlan {
         pose_refinement::restore_partial_crops(output, &stitched_sha, count, scope, cancel)?
     } else {
         stitched_sha
     };
-    let (continuous_sha, inferred_positions) =
-        if interpolate_players || phase == ReplayPhase::CropPlan {
-            fill_confirmed_track_gaps(output, &stitched_sha, count, scope, cancel)?
-        } else {
-            (stitched_sha, 0)
-        };
+    let (continuous_sha, inferred_positions) = if interpolate_players {
+        fill_confirmed_track_gaps(output, &stitched_sha, count, scope, cancel)?
+    } else {
+        (stitched_sha, 0)
+    };
     totals.interpolated_player_boxes = inferred_positions;
     totals.combined_pose_crops += removed_duplicate_boxes;
     let track_count = summary
         .confirmed_tracks
-        .checked_sub(merged)
-        .ok_or("More Track IDs stitched than confirmed")?;
+        .checked_sub(
+            merged
+                + if phase == ReplayPhase::StablePlan {
+                    totals.unconfirmed_tracks
+                } else {
+                    0
+                },
+        )
+        .ok_or("More Track IDs stitched or discarded than confirmed")?;
     Ok((continuous_sha, totals, track_count))
 }
 
@@ -894,16 +921,13 @@ fn process_inner(
         player_scope
             .as_ref()
             .map(|scope| scope.mask_sha256.as_str()),
-        refinement
-            .as_ref()
-            .map(|r| (&settings, r.stride, req.interpolate_players)),
+        Some((
+            &settings,
+            refinement.as_ref().map(|r| r.stride),
+            req.interpolate_players,
+        )),
     )
     .map_err(storage::bad_request)?;
-    let pose_source = if refinement.is_none() && saved_refined.is_none() {
-        pose_source::locate(&project_root, &req.fusion_id).map_err(storage::bad_request)?
-    } else {
-        None
-    };
     let root = project_root.join("native_cpu_replays");
     match fs::symlink_metadata(&root) {
         Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
@@ -920,25 +944,19 @@ fn process_inner(
     let result = (|| -> Result<Value, String> {
         let part = directory.join("tracked_frames.jsonl.partial");
         let refine_pose = refinement.is_some() && player_scope.is_some() && saved_refined.is_none();
-        if let Some(snapshot) = &saved_refined {
-            settings.min_track_observations =
-                confirmation_threshold(requested_min, Some(snapshot.stride as u64));
-        }
         if !refine_pose {
             on_pose(true)?;
         }
-        let (mut digest, mut totals, mut track_count) = replay_frames_with_pose_options(
+        let (mut digest, mut totals, track_count) = replay_frames_with_pose_options(
             &source,
             &part,
             frames,
             settings,
             expected,
-            saved_refined.as_ref().or(pose_source.as_ref()),
+            None,
             ReplayOptions {
-                phase: if refine_pose {
-                    ReplayPhase::CropPlan
-                } else if saved_refined.is_some() {
-                    ReplayPhase::Refined
+                phase: if player_scope.is_some() {
+                    ReplayPhase::StablePlan
                 } else {
                     ReplayPhase::Normal
                 },
@@ -947,15 +965,29 @@ fn process_inner(
                 cancel,
             },
         )?;
-        let mut refined_poses = if saved_refined.is_some() {
-            totals.pose_detections
-        } else {
-            0
-        };
+        let mut refined_poses = 0;
         let mut refined_pose_sha = saved_refined.as_ref().map(|s| s.sha.clone());
         let mut refined_pose_stride = saved_refined.as_ref().map(|s| s.stride);
         let mut refined_pose_owner = saved_refined.as_ref().map(|s| s.id.clone());
         let mut refine_input_sha = None;
+        if let Some(snapshot) = &saved_refined {
+            let manifest: Value = serde_json::from_slice(
+                &fs::read(safe_file(
+                    &snapshot.folder,
+                    "manifest.json",
+                    MAX_MANIFEST_BYTES,
+                )?)
+                .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            if manifest["pose_refinement_input_sha256"] != digest {
+                return Err("RTMPose crop plan changed; run the primary GPU phase again".into());
+            }
+            refine_input_sha = Some(digest.clone());
+            (digest, refined_poses) =
+                pose_refinement::attach(&part, &digest, frames, snapshot, cancel)?;
+            totals.pose_detections = refined_poses;
+        }
         if refine_pose {
             on_pose(false)?;
             let decoded_frames = manifest["decoded_frames"]
@@ -983,31 +1015,16 @@ fn process_inner(
             refined_pose_sha = Some(pose_sha.clone());
             refined_pose_stride = Some(stride);
             refined_pose_owner = Some(replay_id.clone());
-            fs::remove_file(&part).map_err(|e| format!("Remove provisional crop plan: {e}"))?;
             let snapshot = pose_source::Snapshot {
                 id: replay_id.clone(),
                 sha: pose_sha,
                 stride,
                 folder: directory.clone(),
             };
-            settings.min_track_observations =
-                confirmation_threshold(requested_min, Some(stride as u64));
             on_pose(true)?;
-            (digest, totals, track_count) = replay_frames_with_pose_options(
-                &source,
-                &part,
-                frames,
-                settings,
-                expected,
-                Some(&snapshot),
-                ReplayOptions {
-                    phase: ReplayPhase::Refined,
-                    interpolate_players: req.interpolate_players,
-                    scope: player_scope.as_ref(),
-                    cancel,
-                },
-            )?;
-            refined_poses = totals.pose_detections;
+            (digest, refined_poses) =
+                pose_refinement::attach(&part, &digest, frames, &snapshot, cancel)?;
+            totals.pose_detections = refined_poses;
             volley_media::preparation::verify_source_provenance(
                 &plan.source,
                 &manifest["original_source"],
@@ -1034,8 +1051,8 @@ fn process_inner(
             "source_fusion_id":req.fusion_id,
             "source_fusion_sha256":expected,
              "track_association_version":TRACK_ASSOCIATION_VERSION,
-            "source_pose_run_id":pose_source.as_ref().map(|s| s.id.as_str()),
-            "source_pose_sha256":pose_source.as_ref().map(|s| s.sha.as_str()),
+            "source_pose_run_id":null,
+            "source_pose_sha256":null,
             "pose_measured_track_proposals":totals.pose_detections,
             "ball_selection_policy":"vballnet_only_v1",
             "source_identity":{"bytes":size,"mtime_ns":mtime},
@@ -1095,8 +1112,8 @@ fn process_inner(
         record["bytetrack_low_confidence_matches"] = json!(totals.bytetrack_low_confidence_matches);
         record["bytetrack_lost_low_confidence_matches"] =
             json!(totals.bytetrack_lost_low_confidence_matches);
-        record["pose_proposal_role"] = json!(if has_refined || pose_source.is_some() {
-            "measured_rgb_pose_crops_only"
+        record["pose_proposal_role"] = json!(if has_refined {
+            "measured_pose_attached_to_stable_track_id"
         } else {
             "detector_boxes_only"
         });
@@ -1171,14 +1188,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provisional_boxes_keep_short_tracks_until_pose_is_measured() {
+    fn stable_crop_plan_uses_detector_observations_and_interpolates_before_pose() {
         let root = std::env::temp_dir().join(format!("volley-preliminary-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let source = root.join("fusion.jsonl");
         let output = root.join("preliminary.jsonl");
         let mut bytes = Vec::new();
         for frame in 0..18_u64 {
-            let players = if frame == 0 || frame == 5 || frame == 10 {
+            let players = if frame % 3 == 0 {
                 vec![example(frame, 0.2, 0)]
             } else {
                 Vec::new()
@@ -1199,14 +1216,17 @@ mod tests {
             &source,
             &output,
             18,
-            TrackingOptions::default(),
+            TrackingOptions {
+                min_track_observations: 6,
+                ..TrackingOptions::default()
+            },
             &format!("{:x}", Sha256::digest(&bytes)),
             None,
             ReplayOptions {
                 interpolate_players: true,
                 scope: None,
                 cancel: None,
-                phase: ReplayPhase::CropPlan,
+                phase: ReplayPhase::StablePlan,
             },
         )
         .unwrap();

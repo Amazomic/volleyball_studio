@@ -209,14 +209,11 @@ struct Track {
     predicted_at: u64,
     status: Status,
     observations: u64,
-    pose: Option<PoseEvidence>,
-    pose_frame: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
 struct Observation {
     box_: Candidate,
-    pose: Option<PoseEvidence>,
 }
 
 type AssociationOutcome = (Vec<(usize, usize)>, Vec<usize>, Vec<usize>, u64, Vec<usize>);
@@ -386,12 +383,8 @@ impl ByteTracker {
         }
         let mut sorted = raw
             .iter()
-            .enumerate()
-            .filter(|(_, c)| c.score >= LOW_DETECTION_SCORE)
-            .map(|(i, c)| Observation {
-                box_: c.clone(),
-                pose: pose.get(i).copied().flatten(),
-            })
+            .filter(|c| c.score >= LOW_DETECTION_SCORE)
+            .map(|c| Observation { box_: c.clone() })
             .collect::<Vec<_>>();
         sorted.sort_by(|a, b| {
             b.box_
@@ -408,23 +401,13 @@ impl ByteTracker {
                 let duplicate = bbox_iou(other.box_.bbox_xyxy_norm, item.box_.bbox_xyxy_norm)
                     >= self.config.nms_iou
                     || same_head_body_duplicate(&other.box_, &item.box_);
-                if let (Some(a), Some(b)) = (other.pose, item.pose) {
-                    if a.same_observation(&b) {
-                        return false;
-                    }
-                    if a.distinct_observation(&b) {
-                        return true;
-                    }
-                }
                 let a = other.box_.bbox_xyxy_norm;
                 let b = item.box_.bbox_xyxy_norm;
                 let intersection = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0)
                     * (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
                 let area = (b[2] - b[0]) * (b[3] - b[1]);
                 let full_area = (a[2] - a[0]) * (a[3] - a[1]);
-                let contained_fragment = other.pose.is_none()
-                    && item.pose.is_none()
-                    && other.box_.score - item.box_.score >= 0.12
+                let contained_fragment = other.box_.score - item.box_.score >= 0.12
                     && full_area >= 1.4 * area
                     && intersection >= 0.88 * area
                     && ((a[0] + a[2]) - (b[0] + b[2])).abs() <= 0.6 * (a[2] - a[0]);
@@ -550,8 +533,6 @@ impl ByteTracker {
                 predicted_at: frame,
                 status: Status::Tentative,
                 observations: 1,
-                pose: high[d].pose,
-                pose_frame: high[d].pose.map(|_| frame),
             });
             emitted.push(TrackedPlayer {
                 track_id: id,
@@ -627,7 +608,10 @@ impl ByteTracker {
                     && horizontal >= 0.70
                     && (a[1].max(b[1]) - a[3].min(b[3])).max(0.0) <= 0.02
                     && intersection(a, b) <= 0.40 * area(a).min(area(b));
-                if !(fragment || complementary) {
+                let nested = known_body
+                    && horizontal >= 0.85
+                    && intersection(a, b) >= 0.85 * area(a).min(area(b));
+                if !(fragment || complementary || nested) {
                     continue;
                 }
                 let competing = observations.iter().enumerate().any(|(k, o)| {
@@ -662,14 +646,39 @@ impl ByteTracker {
         out: &mut Vec<TrackedPlayer>,
     ) {
         let track = &mut self.tracks[index];
-        track.kalman.update(input.box_.bbox_xyxy_norm);
+        let measured = input.box_.bbox_xyxy_norm;
+        let predicted = track.kalman.bbox();
+        let h = predicted[3] - predicted[1];
+        let w = predicted[2] - predicted[0];
+        let mh = measured[3] - measured[1];
+        let mw = measured[2] - measured[0];
+        let intersection = (predicted[2].min(measured[2]) - predicted[0].max(measured[0])).max(0.0)
+            * (predicted[3].min(measured[3]) - predicted[1].max(measured[1])).max(0.0);
+        let stable = track.observations >= 3
+            && mh < 0.72 * h
+            && mw <= 1.2 * w
+            && intersection >= 0.75 * mw * mh;
+        if stable {
+            let dx = (measured[0] + measured[2] - predicted[0] - predicted[2]) * 0.5;
+            let top = measured[1] - predicted[1];
+            let bottom = measured[3] - predicted[3];
+            let dy = if top.abs() <= bottom.abs() {
+                top
+            } else {
+                bottom
+            };
+            track.kalman.update([
+                predicted[0] + dx,
+                predicted[1] + dy,
+                predicted[2] + dx,
+                predicted[3] + dy,
+            ]);
+        } else {
+            track.kalman.update(measured);
+        }
         track.last_frame = frame;
         track.status = Status::Tracked;
         track.observations += 1;
-        if let Some(pose) = input.pose {
-            track.pose = Some(pose);
-            track.pose_frame = Some(frame);
-        }
         out.push(TrackedPlayer {
             track_id: track.id,
             detection: input.box_.clone(),
@@ -708,16 +717,25 @@ impl ByteTracker {
                         min_iou
                     };
                     let threshold = (baseline + strictness).clamp(0.03, 0.90);
-                    match (track.pose, observation.pose, track.pose_frame) {
-                        (Some(previous), Some(measured), Some(pose_frame))
-                            if frame.saturating_sub(pose_frame) <= 30 =>
-                        {
-                            let similarity =
-                                previous.similarity(&measured, frame.saturating_sub(pose_frame))?;
-                            (similarity >= 0.50).then_some(0.90 * similarity + 0.10 * overlap)
-                        }
-                        _ => (overlap >= threshold && travel <= travel_limit).then_some(overlap),
+                    if overlap >= threshold && travel <= travel_limit {
+                        return Some(overlap);
                     }
+                    let b = observation.box_.bbox_xyxy_norm;
+                    let [aw, ah] = [predicted[2] - predicted[0], predicted[3] - predicted[1]];
+                    let [bw, bh] = [b[2] - b[0], b[3] - b[1]];
+                    let w = aw.min(bw);
+                    let h = ah.min(bh);
+                    let intersection = (predicted[2].min(b[2]) - predicted[0].max(b[0])).max(0.0)
+                        * (predicted[3].min(b[3]) - predicted[1].max(b[1])).max(0.0);
+                    let dx = ((predicted[0] + predicted[2] - b[0] - b[2]) * 0.5).abs();
+                    let dy = (predicted[1] - b[1]).abs().min((predicted[3] - b[3]).abs());
+                    (gap <= 10
+                        && w >= 0.008
+                        && h >= 0.02
+                        && intersection >= 0.80 * (aw * ah).min(bw * bh)
+                        && dx <= 0.35 * w
+                        && (dy <= (0.15 * h).max(0.008) || overlap >= 0.10))
+                        .then_some(0.45 + 0.35 * overlap)
                 })
                 .collect::<Vec<_>>();
             let mut available = scores.iter().filter_map(|v| *v).collect::<Vec<_>>();
@@ -833,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn measured_pose_keeps_id_when_detector_boxes_swap_between_players() {
+    fn swapped_pose_measurements_do_not_change_geometric_track_ids() {
         let mut tracker = tracker();
         let initial = tracker
             .process_frame_with_poses(
@@ -854,9 +872,9 @@ mod tests {
             .unwrap();
         assert_eq!(swapped.tracks.len(), 2);
         assert_eq!(swapped.tracks[0].track_id, id_a);
-        assert_eq!(swapped.tracks[0].detection.query_index, Some(1));
+        assert_eq!(swapped.tracks[0].detection.query_index, Some(0));
         assert_eq!(swapped.tracks[1].track_id, id_b);
-        assert_eq!(swapped.tracks[1].detection.query_index, Some(0));
+        assert_eq!(swapped.tracks[1].detection.query_index, Some(1));
     }
 
     #[test]

@@ -1861,15 +1861,13 @@ async fn pipeline(
             let mut scope_source = source.clone();
             scope_source["original_source"] = original_source.clone();
             let (primary, _) = load_primary_rally_scope(app, &request.project_id, &scope_source)?;
-            if crate::native_preview_pose::source_info(&project, source_id)?.is_none()
-                && !cpu_retrack::has_refined_pose(
-                    &project,
-                    source_id,
-                    fusion["sha256"].as_str().ok_or("Нет SHA-256 Fusion")?,
-                    Some(&primary.sha256),
-                )?
-            {
-                return Err("Для пересчёта нужны сохранённые позы RTMPose. Выполните полный анализ один раз.".into());
+            if !cpu_retrack::has_refined_pose(
+                &project,
+                source_id,
+                fusion["sha256"].as_str().ok_or("Нет SHA-256 Fusion")?,
+                Some(&primary.sha256),
+            )? {
+                return Err("Для пересчёта нужны позы RTMPose, измеренные по стабильным рамкам. Выполните полный анализ один раз.".into());
             }
         }
         status["analysis_id"] = source["analysis_id"].clone();
@@ -2248,6 +2246,14 @@ async fn pipeline(
         || replay["player_frame_scope_ball_job_id"] != status["gpu_jobs"]["ball"]
     {
         return Err("Трекинг CPU вышел за границы проверенной GPU-маски розыгрышей".into());
+    }
+    if (request.gpu.pose_enabled || request.post.touches.require_pose)
+        && replay["pose_refinement_policy"] != cpu_retrack::POSE_REFINEMENT_POLICY
+    {
+        return Err(
+            "Для выбранных настроек трекинга нет совместимых поз RTMPose. Выполните полный анализ."
+                .into(),
+        );
     }
     status["cpu_runs"]["tracking"] = json!(replay_id);
     if replay["pose_refinement_policy"] == cpu_retrack::POSE_REFINEMENT_POLICY {

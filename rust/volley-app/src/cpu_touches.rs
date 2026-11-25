@@ -2323,6 +2323,7 @@ fn detect_stream_with_pose(
                             | crate::cpu_retrack::LEGACY_POSE_REFINEMENT_POLICY
                             | crate::cpu_retrack::PREVIOUS_POSE_REFINEMENT_POLICY
                             | crate::cpu_retrack::PRIOR_CROP_REFINEMENT_POLICY
+                            | crate::cpu_retrack::PREVIOUS_TRACKED_CROP_REFINEMENT_POLICY
                     )
                 )
                 .then_some(PosePlayer {

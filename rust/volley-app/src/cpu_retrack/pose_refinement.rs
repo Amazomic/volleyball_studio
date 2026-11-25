@@ -12,8 +12,9 @@ use volley_core::{bbox_iou, fusion::Candidate, tracker::PoseEvidence};
 use volley_inference::{pose::PoseEngine, Device};
 use volley_media::raw_decoder::{decode_original_frames_in_range, AnalysisRange};
 
-pub(crate) const POLICY: &str = "original_rgb_stabilized_track_crops_v5";
+pub(crate) const POLICY: &str = "original_rgb_stable_track_pose_attachment_v6";
 pub(crate) const REJECTED_LEADING_POLICY: &str = "original_rgb_stabilized_track_crops_v4";
+pub(crate) const PREVIOUS_TRACKED_CROP_POLICY: &str = "original_rgb_stabilized_track_crops_v5";
 pub(crate) const PRIOR_CROP_POLICY: &str = "original_rgb_stabilized_track_crops_v3";
 pub(crate) const LEGACY_POLICY: &str = "original_rgb_stabilized_track_crops_v1";
 pub(crate) const PREVIOUS_POLICY: &str = "original_rgb_stabilized_track_crops_v2";
@@ -336,11 +337,12 @@ pub(super) fn refine(
                 for group in crops.chunks(8) {
                     let boxes = group.iter().map(|(_, bbox, _)| *bbox).collect::<Vec<_>>();
                     let estimates = engine.infer_batch_original(pixels, width, height, &boxes)?;
-                    for ((_player, bbox, origin), joints) in group.iter().zip(estimates) {
+                    for ((player, bbox, origin), joints) in group.iter().zip(estimates) {
                         let joints = joints.map(|p| [p.x as f64, p.y as f64, p.score as f64]);
                         let evidence = PoseEvidence { joints };
                         if evidence.valid() && evidence.inside_crop(*bbox, 0.02) {
                             measured.push(json!({
+                                "track_id": players[*player]["track_id"],
                                 "box": bbox,
                                 "keypoints": joints,
                                 "crop_origin": if *origin == "interpolated_track_box" {
@@ -377,11 +379,172 @@ pub(super) fn refine(
     Ok((format!("{:x}", hash.finalize()), accepted))
 }
 
+pub(super) fn attach(
+    source: &Path,
+    expected_sha: &str,
+    frames: u64,
+    snapshot: &super::pose_source::Snapshot,
+    cancel: Option<&AtomicBool>,
+) -> Result<(String, u64), String> {
+    let tmp = source.with_extension("pose-attach");
+    let result = (|| {
+        let mut reader = BoundedReader::open(source)?;
+        let mut poses = super::pose_source::PoseRows::open(snapshot)?;
+        let mut writer = BufWriter::new(
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .map_err(|e| e.to_string())?,
+        );
+        let mut sha = Sha256::new();
+        let mut accepted = 0;
+        let mut previous = BTreeMap::new();
+        for frame in 0..frames {
+            if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+                return Err("cancelled".into());
+            }
+            let mut row: Value =
+                serde_json::from_slice(&reader.line()?.ok_or("Stable crop plan truncated")?)
+                    .map_err(|e| e.to_string())?;
+            if row["frame_index"].as_u64() != Some(frame) {
+                return Err("Stable crop plan frame mismatch".into());
+            }
+            let players = row["tracked_players"]
+                .as_array_mut()
+                .ok_or("Missing stable Track IDs")?;
+            let mut expected = BTreeMap::new();
+            let mut next = BTreeMap::new();
+            for (index, bbox, _) in proposals(players) {
+                let id = players[index]["track_id"]
+                    .as_u64()
+                    .ok_or("Missing stable Track ID")?;
+                if expected
+                    .insert(
+                        id,
+                        (index, stabilize_pose_crop(bbox, previous.get(&id).copied())),
+                    )
+                    .is_some()
+                {
+                    return Err("Duplicate stable Track ID".into());
+                }
+                next.insert(id, bbox);
+            }
+            previous = next;
+            let sample = poses.take_sample(frame)?;
+            if frame.is_multiple_of(snapshot.stride as u64) && sample.is_none() {
+                return Err("Missing sampled RTMPose frame".into());
+            }
+            if let Some(sample) = sample {
+                for measured in sample["players"]
+                    .as_array()
+                    .ok_or("Missing measured poses")?
+                {
+                    let id = measured["track_id"]
+                        .as_u64()
+                        .ok_or("Missing measured crop Track ID")?;
+                    let (index, bbox) = expected
+                        .remove(&id)
+                        .ok_or("Pose does not belong to a unique stable Track ID")?;
+                    let actual: [f64; 4] = serde_json::from_value(measured["box"].clone())
+                        .map_err(|e| e.to_string())?;
+                    if actual
+                        .iter()
+                        .zip(bbox)
+                        .any(|(a, b)| !a.is_finite() || (a - b).abs() > 1e-9)
+                    {
+                        return Err("Measured RTMPose crop differs from stable Track box".into());
+                    }
+                    let joints = serde_json::from_value(measured["keypoints"].clone())
+                        .map_err(|e| e.to_string())?;
+                    let pose = PoseEvidence { joints };
+                    if !pose.valid() || !pose.inside_crop(bbox, 0.02) {
+                        return Err("Invalid measured RTMPose evidence".into());
+                    }
+                    players[index]["pose"] = measured["keypoints"].clone();
+                    players[index]["pose_interpolated"] = json!(false);
+                    players[index]["pose_source"] = json!(POLICY);
+                    accepted += 1;
+                }
+            }
+            let mut bytes = serde_json::to_vec(&row).map_err(|e| e.to_string())?;
+            bytes.push(b'\n');
+            if bytes.len() > MAX_ROW_BYTES {
+                return Err("Stable tracking row exceeds the replay limit".into());
+            }
+            writer.write_all(&bytes).map_err(|e| e.to_string())?;
+            sha.update(&bytes);
+        }
+        poses.finish(frames)?;
+        if reader.line()?.is_some() || reader.finish() != expected_sha {
+            return Err("Stable crop plan SHA mismatch".into());
+        }
+        writer.flush().map_err(|e| e.to_string())?;
+        writer.get_ref().sync_all().map_err(|e| e.to_string())?;
+        drop(writer);
+        fs::rename(&tmp, source).map_err(|e| e.to_string())?;
+        Ok((format!("{:x}", sha.finalize()), accepted))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(tmp);
+    }
+    result
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn measured_pose_attaches_without_changing_any_track_box_or_id() {
+        let dir = std::env::temp_dir().join(format!("volley-attach-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tracked.jsonl");
+        let bbox = [0.20, 0.20, 0.30, 0.70];
+        let players = vec![
+            json!({"track_id":15,"measurement_source":"interpolated_track_bbox",
+            "detection":{"bbox_xyxy_norm":bbox}}),
+            json!({"track_id":16,
+            "measurement_source":"detector_bbox","detection":{"bbox_xyxy_norm":[0.5,0.2,0.6,0.7]}}),
+        ];
+        let mut raw =
+            serde_json::to_vec(&json!({"frame_index":0,"tracked_players":players})).unwrap();
+        raw.push(b'\n');
+        fs::write(&path, &raw).unwrap();
+        let joints: [[f64; 3]; 17] = std::array::from_fn(|i| {
+            [
+                0.23 + (i % 2) as f64 * 0.02,
+                0.25 + (i / 2) as f64 * 0.04,
+                0.9,
+            ]
+        });
+        let mut bytes = serde_json::to_vec(
+            &json!({"frame":0,"players":[{"track_id":15,"box":bbox,"keypoints":joints}]}),
+        )
+        .unwrap();
+        bytes.push(b'\n');
+        fs::write(dir.join("poses.jsonl"), &bytes).unwrap();
+        let snapshot = super::super::pose_source::Snapshot {
+            id: "test".into(),
+            sha: format!("{:x}", Sha256::digest(&bytes)),
+            stride: 1,
+            folder: dir.clone(),
+        };
+        let sha = format!("{:x}", Sha256::digest(&raw));
+        let (_, count) = attach(&path, &sha, 1, &snapshot, None).unwrap();
+        assert_eq!(count, 1);
+        let row: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let result = row["tracked_players"].as_array().unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["track_id"], 15);
+        assert_eq!(result[0]["detection"], players[0]["detection"]);
+        assert_eq!(result[0]["measurement_source"], "interpolated_track_bbox");
+        assert_eq!(result[0]["pose_interpolated"], false);
+        let saved: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result[0]["pose"], saved["players"][0]["keypoints"]);
+        assert_eq!(result[1], players[1]);
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn crop_plan_reconstructs_partial_box_before_pose_inference() {
         let path =

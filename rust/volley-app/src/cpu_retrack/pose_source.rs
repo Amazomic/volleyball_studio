@@ -24,24 +24,12 @@ pub(super) struct Snapshot {
     pub folder: PathBuf,
 }
 
-pub(super) fn locate(root: &std::path::Path, fusion_id: &str) -> Result<Option<Snapshot>, String> {
-    let Some((id, sha, stride)) = crate::native_preview_pose::source_info(root, fusion_id)? else {
-        return Ok(None);
-    };
-    Ok(Some(Snapshot {
-        folder: root.join("native_gpu_pose_runs").join(&id),
-        id,
-        sha,
-        stride,
-    }))
-}
-
 pub(super) fn locate_refined(
     root: &Path,
     fusion_id: &str,
     fusion_sha: &str,
     mask_sha: Option<&str>,
-    crop_profile: Option<(&volley_core::tracker::TrackingOptions, usize, bool)>,
+    crop_profile: Option<(&volley_core::tracker::TrackingOptions, Option<usize>, bool)>,
 ) -> Result<Option<Snapshot>, String> {
     let parent = root.join("native_cpu_replays");
     match fs::symlink_metadata(&parent) {
@@ -78,11 +66,13 @@ pub(super) fn locate_refined(
             || record["source_fusion_id"] != fusion_id
             || record["source_fusion_sha256"] != fusion_sha
             || record["player_frame_scope_sha256"].as_str() != mask_sha
-            || (record["track_association_version"] != TRACK_ASSOCIATION_VERSION
-                && record["track_association_version"] != "bytetrack_rally_partial_pose_v15")
+            || record["track_association_version"] != TRACK_ASSOCIATION_VERSION
             || record["pose_refinement_policy"] != POSE_REFINEMENT_POLICY
             || record["refined_pose_model_sha256"] != volley_inference::pose::MODEL_SHA256
             || record["refined_pose_source_replay_id"] != id
+            || !record["pose_refinement_input_sha256"]
+                .as_str()
+                .is_some_and(volley_core::contracts::sha256)
         {
             continue;
         }
@@ -103,13 +93,12 @@ pub(super) fn locate_refined(
         }
         let stride = stride as usize;
         if let Some((settings, requested_stride, interpolate)) = crop_profile {
-            let Ok(mut stored) = serde_json::from_value::<volley_core::tracker::TrackingOptions>(
+            let Ok(stored) = serde_json::from_value::<volley_core::tracker::TrackingOptions>(
                 record["settings"].clone(),
             ) else {
                 continue;
             };
-            stored.min_track_observations = settings.min_track_observations;
-            if stride != requested_stride
+            if requested_stride.is_some_and(|requested| stride != requested)
                 || record["interpolate_players"] != interpolate
                 || serde_json::to_value(stored).ok() != serde_json::to_value(settings).ok()
             {
@@ -193,17 +182,7 @@ impl PoseRows {
         frame: u64,
         _detector: &[Candidate],
     ) -> Result<PoseFrameProjection, String> {
-        let sample = match self.next.as_ref().and_then(|row| row["frame"].as_u64()) {
-            Some(at) if at < frame => {
-                return Err("Pose source stream fell behind CPU replay".into())
-            }
-            Some(at) if at == frame => {
-                let row = self.next.take().ok_or("Missing indexed pose source")?;
-                self.next = self.read_one()?;
-                Some(row)
-            }
-            _ => None,
-        };
+        let sample = self.take_sample(frame)?;
         let Some(sample) = sample else {
             return Ok((Vec::new(), Vec::new(), 0));
         };
@@ -273,6 +252,20 @@ impl PoseRows {
         Ok((candidates, landmarks, pose_count))
     }
 
+    pub(super) fn take_sample(&mut self, frame: u64) -> Result<Option<Value>, String> {
+        let sample = match self.next.as_ref().and_then(|row| row["frame"].as_u64()) {
+            Some(at) if at < frame => {
+                return Err("Pose source stream fell behind CPU replay".into())
+            }
+            Some(at) if at == frame => {
+                let row = self.next.take().ok_or("Missing indexed pose source")?;
+                self.next = self.read_one()?;
+                Some(row)
+            }
+            _ => None,
+        };
+        Ok(sample)
+    }
     pub fn skip_frame(&mut self, frame: u64) -> Result<(), String> {
         match self.next.as_ref().and_then(|row| row["frame"].as_u64()) {
             Some(at) if at < frame => {

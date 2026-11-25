@@ -158,6 +158,7 @@ pub(super) fn append_poses(frames: &mut [Value]) {
                         | crate::cpu_retrack::PREVIOUS_POSE_REFINEMENT_POLICY
                         | crate::cpu_retrack::PRIOR_CROP_REFINEMENT_POLICY
                         | crate::cpu_retrack::HISTORICAL_LEADING_CROP_POLICY
+                        | crate::cpu_retrack::PREVIOUS_TRACKED_CROP_REFINEMENT_POLICY
                 )
             )
         });
