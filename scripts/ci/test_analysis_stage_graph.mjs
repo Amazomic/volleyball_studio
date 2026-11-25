@@ -91,7 +91,7 @@ assert.equal(new Set(ids).size,ids.length);
 assert.equal(stages.length,15);
 assert.ok(!ids.includes("ground_detector"));
 assert.ok(ids.includes("publish")&&!ids.includes("material"));
-for(const [row,count] of [[1,6],[2,9]]){
+for(const [row,count] of [[1,8],[2,7]]){
   const nodes=stages.filter(item=>item[3]===row);
   assert.equal(nodes.length,count);
 }
@@ -225,6 +225,16 @@ assert.equal(dataLinks.state("no_pose",{profile:{gpu:{pose_enabled:false}}}),"av
 assert.equal(dataLinks.state("no_pose",{gpu_jobs:{pose:"saved"}}),"disabled");
 assert.deepEqual(actualInputs("ground_detector"),[]);
 assert.equal(context.id({id:"ground_detector"}),"rallies");
+assert.equal(stages.find(item=>item[0]==="boxes")[3],1);
+assert.equal(stages.find(item=>item[0]==="pose")[3],1);
+const pipelineBody=rust.slice(rust.indexOf("async fn pipeline("),rust.indexOf("enum CompletionQuality"));
+const replayStart=pipelineBody.indexOf("cpu_retrack::process_with_cancel");
+const primaryEnd=pipelineBody.indexOf("if request.mode == PipelineMode::Gpu {");
+assert.ok(replayStart>=0&&primaryEnd>replayStart,"standalone primary analysis must save boxes and pose before returning");
+assert.ok(primaryEnd<pipelineBody.indexOf("cpu_touches::stabilize_primary_replay"));
+assert.match(pipelineBody,/request\.mode\.allows_gpu_execution\(\) && request\.gpu\.pose_enabled/);
+assert.match(js,/payload\.post=postProfile\(\);/);
+assert.doesNotMatch(js,/if\(mode!=="gpu"\)payload\.post/);
 assert.equal(stages.find(item=>item[0]==="touch_detector")[3],2);
 assert.deepEqual(actualInputs("touch_detector"),["ball_stabilizer","rallies"]);
 assert.deepEqual(actualInputs("touches"),["ball_stabilizer","rallies","touch_detector","tracking"]);

@@ -308,7 +308,7 @@
       const changed=allProfileFields().filter(item=>fieldValue(item)!==item.dataset.default);
       ui.profileDelta.textContent=changed.length?
         "Изменено параметров: "+changed.length+
-        ". При изменении GPU создаётся новая 1 фаза; при изменении только CPU — новая 2 фаза.":
+        ". Изменения детекции, стабилизации рамок и поз требуют 1 фазы; остальные — 2 фазы.":
         "Эталонный профиль активен. Совпадающие готовые версии используются повторно.";
     }
     const running=Boolean(state.pipelineId);
@@ -341,9 +341,9 @@
         (measured===null?"":" · "+measured.toFixed(1)+"% всего");
     }else{
       ui.gpuOnly.textContent="▶ Начать анализ";
-      ui.gpuOnly.title="Запустить 1 фазу (GPU) и создать отдельную версию";
+      ui.gpuOnly.title="Запустить 1 фазу: детекция, рамки и позы";
     }
-    ui.gpuOnly.disabled=blocked||!gpuValid;
+    ui.gpuOnly.disabled=blocked||!valid;
     ui.postOnly.disabled=blocked||!postValid||!selectedGpuSource();
     for(const [id,button] of [["analysis-flow-gpu-start",ui.gpuOnly],
       ["analysis-flow-cpu-start",ui.postOnly],["analysis-flow-full-start",ui.start]]){
@@ -444,8 +444,8 @@
     ["rallies","Розыгрыши","cpu",1],
     ["players","Поиск игроков","gpu",1],
     ["fusion","Данные GPU","output",1],
-    ["boxes","Стабилизация рамок","cpu",2],
-    ["pose","Позы по стабилизированным рамкам","gpu",2],
+    ["boxes","Стабилизация рамок","cpu",1],
+    ["pose","Позы по стабилизированным рамкам","gpu",1],
     ["tracking","Трекинг ID","cpu",2],
     ["touch_detector","Touch Detector","cpu",2],
     ["touches","Уточнение касаний","cpu",2],
@@ -576,7 +576,7 @@
     return null;
   };
   const stageResultText=(id,entry,run,now,done,running)=>{
-    if(id==="pose"&&!entry&&(run?.gpu_jobs?.pose||running)){
+    if(id==="pose"&&!entry&&(run?.gpu_jobs?.pose||run?.primary_tracking?.pose_ready||running)){
       const shared=run?.shared_pose;
       const player=run?.stages?.find(stage=>stage.id==="players");
       const joint=shared?.source_stage_id==="players"||/RF-DETR.*RTMPose/.test(String(player?.name||""));
@@ -591,7 +591,7 @@
           " поз · "+stageTime(duration)+" (общ.)";
       return "С RF-DETR · "+stageTime(duration);
     }
-    if(id==="touch_types"&&entry&&(run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0)){
+    if(id==="touch_types"&&entry&&(run?.gpu_jobs?.pose||run?.primary_tracking?.pose_ready||Number(run?.player_tracking_stats?.refined_poses)>0)){
       const duration=running&&Number.isFinite(entry.started_ms)&&entry.finished_ms==null?
         Math.max(0,now-entry.started_ms):entry.duration_ms;
       return "В составе касаний · "+stageTime(duration);
@@ -663,11 +663,11 @@
   ];
   const graphLinkState=(condition,run)=>{
     if(condition==="no_pose"){
-      if(run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0)return "disabled";
+      if(run?.gpu_jobs?.pose||run?.primary_tracking?.pose_ready||Number(run?.player_tracking_stats?.refined_poses)>0)return "disabled";
       return run?.profile?.gpu?.pose_enabled===false?"available":run?"disabled":"optional";
     }
     if(condition!=="pose")return "available";
-    if(run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0)return "available";
+    if(run?.gpu_jobs?.pose||run?.primary_tracking?.pose_ready||Number(run?.player_tracking_stats?.refined_poses)>0)return "available";
     return run?.profile?.gpu?.pose_enabled===false?"disabled":"optional";
   };
   const graphSettings={
@@ -988,17 +988,18 @@
     const savedGpu={
       ball:run?.gpu_jobs?.ball,rallies:run?.gpu_rally_mask||Number.isSafeInteger(run?.gpu_rally_count),players:run?.gpu_jobs?.players,
       ball_stabilizer:run?.gpu_rally_mask?.ball_stabilizer,
-      fusion:run?.analysis_id,pose:run?.gpu_jobs?.pose||(Number(run?.player_tracking_stats?.refined_poses)>0?run?.cpu_runs?.tracking:null)
+      fusion:run?.analysis_id,boxes:run?.primary_tracking?.replay_id||run?.cpu_runs?.tracking,
+      pose:run?.gpu_jobs?.pose||(run?.primary_tracking?.pose_ready?run.primary_tracking.replay_id:Number(run?.player_tracking_stats?.refined_poses)>0?run?.cpu_runs?.tracking:null)
     };
     const savedCpu={
       boxes:run?.cpu_runs?.tracking,tracking:run?.cpu_runs?.tracking,ball_stabilizer:run?.ball_stabilizer,
-      touch_detector:run?.cpu_runs?.touches,touches:run?.cpu_runs?.touches,touch_types:run?.cpu_runs?.touches&&(run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0),
+      touch_detector:run?.cpu_runs?.touches,touches:run?.cpu_runs?.touches,touch_types:run?.cpu_runs?.touches&&(run?.gpu_jobs?.pose||run?.primary_tracking?.pose_ready||Number(run?.player_tracking_stats?.refined_poses)>0),
       publish:run?.cpu_runs?.rallies,identity:run?.automatic_identity||run?.automatic_identity_available
     };
     for(const node of target.querySelectorAll(".analysis-flow-node")){
       const id=node.dataset.stageId;
       if(id==="photos")continue;
-      const hasPose=!!run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0;
+      const hasPose=!!run?.gpu_jobs?.pose||run?.primary_tracking?.pose_ready===true||Number(run?.player_tracking_stats?.refined_poses)>0;
       const entry=id==="touch_types"?(hasPose?seen.get("touches"):null):seen.get(id);
       const combinedPose=id==="pose"&&currentId==="players"&&
         /RTMPose/.test(String(run?.stage||""));
@@ -1006,6 +1007,7 @@
       const running=active&&(id===currentId||combinedPose||concurrentTypes||
         id!=="touch_types"&&!!entry&&entry.finished_ms==null&&entry===stages.at(-1));
       const done=!!entry&&(entry.finished_ms!=null||complete&&!running)||
+        (id==="boxes"&&!!run?.primary_tracking?.replay_id&&!running&&!cached)||
         (id==="pose"&&hasPose&&!running);
       const reused=!entry&&((cached&&!!savedGpu[id])||(run?.result_reused===true&&!!savedCpu[id]));
       node.classList.toggle("is-active",!!running);
@@ -1475,7 +1477,7 @@
             ". Проверьте вкладку «Игроки» и повторите обновление признаков.":
          identityReview?
           "Анализ сохранён. Остались непривязанные Track ID — проверьте вкладку «Игроки».":
-         mode==="gpu"?"Новый GPU-анализ сохранён. Версия доступна в шапке.":
+         mode==="gpu"?"Первая фаза сохранена. Версия доступна в шапке.":
          mode==="post"?"Создан новый вариант CPU-постобработки для выбранного GPU.":
          status.result_reused===true?
           "Настройки совпали: выбраны готовые версии GPU и CPU.":
@@ -1621,7 +1623,7 @@
     try{
       const payload={project_id:project,video,mode,client_request_id:requestId()};
       if(mode!=="post")payload.gpu=gpuProfile();
-      if(mode!=="gpu")payload.post=postProfile();
+      payload.post=postProfile();
       if(mode==="post")payload.source_analysis_id=source;
       const response=await startWithRecovery(payload);
       if(response.schema!=="volley-studio-pipeline/1"||
@@ -1634,7 +1636,7 @@
       renderHistory();
       loadHistory();
       ui.progress.value=0;state.stopRequested=false;
-      saveMessage(mode==="gpu"?"Запущен отдельный анализ: VballNet → "+(window.VolleyballPersonDetector?.label||"детектор игроков + RTMPose")+" → объединение.":
+      saveMessage(mode==="gpu"?"Запущена 1 фаза: VBallNet → детектор игроков → ByteTrack BBox → RTMPose.":
         mode==="post"?"Запущена 2 фаза для выбранного результата 1 фазы.":
         "Запущен полный анализ: VBallNet → "+(window.VolleyballPersonDetector?.label||"детектор игроков + RTMPose")+" → CPU.");
       stopPipelinePolling();

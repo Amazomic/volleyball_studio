@@ -974,9 +974,6 @@ fn process_inner(
     let result = (|| -> Result<Value, String> {
         let part = directory.join("tracked_frames.jsonl.partial");
         let refine_pose = refinement.is_some() && player_scope.is_some() && saved_refined.is_none();
-        if !refine_pose {
-            on_pose(true)?;
-        }
         let (mut digest, mut totals, track_count) = replay_frames_with_pose_options(
             &source,
             &part,
@@ -995,6 +992,9 @@ fn process_inner(
                 cancel,
             },
         )?;
+        if !refine_pose {
+            on_pose(true)?;
+        }
         let mut refined_poses = 0;
         let mut refined_pose_sha = saved_refined.as_ref().map(|s| s.sha.clone());
         let mut refined_pose_stride = saved_refined.as_ref().map(|s| s.stride);

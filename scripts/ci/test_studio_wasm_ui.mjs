@@ -344,12 +344,15 @@ assert.ok(a.nodes.get("studio-analysis-profile-delta").textContent.includes("Ð­Ñ
 // the explicitly selected header fusion and no implied GPU rerun.
 assert.equal(a.nodes.get("studio-analysis-post-only").disabled,true,
   "CPU-only cannot start without a selected fusion");
+a.nodes.get("studio-post-player-score").value="0.35";
+a.nodes.get("studio-gpu-interpolate-players").checked=false;
 a.nodes.get("studio-analysis-gpu-only").dispatch("click");
 await tick();
 assert.equal(pipelineStarts().length,3,"GPU-only button must launch the pipeline");
 const gpuOnly=JSON.parse(pipelineStarts()[2].options.body);
 assert.equal(gpuOnly.mode,"gpu");
-assert.equal(gpuOnly.post,undefined,"GPU-only must not include CPU settings");
+assert.deepEqual(gpuOnly.post,{...golden.post,interpolate_players:false,tracking:{...golden.post.tracking,min_player_score:0.35}},"Primary phase must receive the actual box and pose settings");
+a.nodes.get("studio-post-player-score").value="0.28";
 assert.deepEqual(gpuOnly.gpu,{stride:9,person_detector:"rfdetr-medium",gpu_memory_limit_mb:0,cpu_threads:0,pose_enabled:true,pose_mode:"photo",pose_stride:1,primary_rallies:{min_trajectory_seconds:1.5,merge_gap_seconds:4,stationary_ball_ms:1000}});
 a.nodes.get("studio-inference").value=JSON.stringify([
   "rally.mp4","fusion","b".repeat(32)]);

@@ -382,6 +382,7 @@ fn history_rows(state: &AppState, project_id: &str, offset: usize) -> Result<Val
             "gpu_reused":status["gpu_reused"],"result_reused":status["result_reused"],
             "stage_id":status["stage_id"],"analysis_id":status["analysis_id"],
             "gpu_jobs":status["gpu_jobs"],"cpu_runs":status["cpu_runs"],
+            "primary_tracking":status["primary_tracking"],
             "gpu_rally_count":status["gpu_rally_mask"]["merged"].as_array().map(Vec::len),
             "shared_pose":status["shared_pose"],
             "player_tracking_stats":status["player_tracking_stats"],
@@ -657,9 +658,10 @@ fn status_uses_analysis(status: &Value, video: &str, artifact_id: &str) -> bool 
     if status["video"] != video {
         return false;
     }
-    ["source_analysis_id", "analysis_id", "reused_from_id"]
-        .iter()
-        .any(|key| status[*key].as_str() == Some(artifact_id))
+    status["primary_tracking"]["replay_id"].as_str() == Some(artifact_id)
+        || ["source_analysis_id", "analysis_id", "reused_from_id"]
+            .iter()
+            .any(|key| status[*key].as_str() == Some(artifact_id))
         || ["gpu_jobs", "cpu_runs"]
             .iter()
             .filter_map(|key| status[*key].as_object())
@@ -1872,7 +1874,7 @@ async fn pipeline(
                 fusion["sha256"].as_str().ok_or("Нет SHA-256 Fusion")?,
                 Some(&primary.sha256),
             )? {
-                return Err("Для пересчёта нужны позы RTMPose, измеренные по стабильным рамкам. Выполните полный анализ один раз.".into());
+                return Err("Для пересчёта нужны позы RTMPose, измеренные по стабильным рамкам. Выполните первую фазу анализа.".into());
             }
         }
         status["analysis_id"] = source["analysis_id"].clone();
@@ -1919,6 +1921,7 @@ async fn pipeline(
         status["gpu_rally_mask"] = existing["gpu_rally_mask"].clone();
         status["gpu_rally_mask_sha256"] = existing["gpu_rally_mask_sha256"].clone();
         status["cpu_runs"] = existing["cpu_runs"].clone();
+        status["primary_tracking"] = existing["primary_tracking"].clone();
         status["player_tracking_stats"] = existing["player_tracking_stats"].clone();
         status["postprocessing_id"] = existing["postprocessing_id"].clone();
         status["gpu_reused"] = json!(true);
@@ -2175,10 +2178,6 @@ async fn pipeline(
         }
     }
 
-    if request.mode == PipelineMode::Gpu {
-        progress(path, status, "Первичный GPU-анализ завершён", 99.9)?;
-        return Ok(());
-    }
     let (primary, primary_mask) = load_primary_rally_scope(app, &request.project_id, status)?;
     status["gpu_rally_mask"] = primary_mask;
     status["gpu_rally_mask_sha256"] = json!(primary.sha256);
@@ -2186,14 +2185,18 @@ async fn pipeline(
         json!({"ball_job_id":primary.ball_job_id,"sha256":primary.sha256});
     save(path, status)?;
     let fusion_id = require_id(status, "analysis_id")?;
-    progress(path, status, "CPU · Связывание рамок игроков", 86.0)?;
+    if request.mode == PipelineMode::Post {
+        progress(path, status, "CPU · Track ID", 86.0)?;
+    } else {
+        progress(path, status, "CPU · Связывание рамок игроков", 86.0)?;
+    }
     log_native(
         path,
         "Track ID",
         "cpu_retrack::process",
         json!({"project_id":request.project_id,"video":request.video,"fusion_id":fusion_id,"settings":request.post.tracking}),
     )?;
-    let refine_pose = (request.mode == PipelineMode::Full && request.gpu.pose_enabled).then_some(
+    let refine_pose = (request.mode.allows_gpu_execution() && request.gpu.pose_enabled).then_some(
         cpu_retrack::PoseRefinement {
             threads: request.gpu.cpu_threads,
             memory_mb: request.gpu.gpu_memory_limit_mb,
@@ -2230,7 +2233,11 @@ async fn pipeline(
     let replay = tokio::task::block_in_place(|| {
         cpu_retrack::process_with_cancel(app, &replay_request, cancel, refine_pose, |final_pass| {
             if final_pass {
-                progress(path, status, "CPU · Track ID", 89.0)
+                if request.mode == PipelineMode::Full {
+                    progress(path, status, "CPU · Track ID", 89.0)
+                } else {
+                    Ok(())
+                }
             } else {
                 progress(
                     path,
@@ -2250,16 +2257,21 @@ async fn pipeline(
     {
         return Err("Трекинг CPU вышел за границы проверенной GPU-маски розыгрышей".into());
     }
-    if (request.gpu.pose_enabled || request.post.touches.require_pose)
-        && replay["pose_refinement_policy"] != cpu_retrack::POSE_REFINEMENT_POLICY
+    let pose_ready = replay["pose_refinement_policy"] == cpu_retrack::POSE_REFINEMENT_POLICY;
+    if (status["profile"]["gpu"]["pose_enabled"] == true
+        || (request.mode != PipelineMode::Gpu && request.post.touches.require_pose))
+        && !pose_ready
     {
         return Err(
-            "Для выбранных настроек трекинга нет совместимых поз RTMPose. Выполните полный анализ."
+            "Для выбранных настроек трекинга нет совместимых поз RTMPose. Выполните первую фазу анализа."
                 .into(),
         );
     }
-    status["cpu_runs"]["tracking"] = json!(replay_id);
-    if replay["pose_refinement_policy"] == cpu_retrack::POSE_REFINEMENT_POLICY {
+    status["primary_tracking"] = json!({"replay_id":replay_id,"pose_ready":pose_ready});
+    if request.mode != PipelineMode::Gpu {
+        status["cpu_runs"]["tracking"] = json!(replay_id);
+    }
+    if pose_ready {
         log_event(
             path,
             "RTMPose",
@@ -2309,6 +2321,9 @@ async fn pipeline(
         return Err("cancelled".into());
     }
 
+    if request.mode == PipelineMode::Gpu {
+        return Ok(());
+    }
     if status["gpu_rally_mask"]["ball_stabilizer"]["trajectory_sha256"].is_null() {
         progress(path, status, "ball_stabilizer", 90.0)?;
     }
@@ -2651,7 +2666,9 @@ async fn perform(
                 } else {
                     match request.mode {
                         PipelineMode::Full => "Все стадии полного анализа успешно завершены",
-                        PipelineMode::Gpu => "Новый GPU-анализ и слияние сохранены",
+                        PipelineMode::Gpu => {
+                            "Первичный анализ, стабильные рамки и выбранные позы сохранены"
+                        }
                         PipelineMode::Post => "Новая CPU-версия сохранена без запуска GPU",
                     }
                 },
