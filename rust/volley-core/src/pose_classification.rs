@@ -3,7 +3,7 @@
 //! No serving or blocking verdict without verified rally/court context.
 use crate::action_prediction::{ActionKind, ActionPrediction, PredictionMethod};
 
-pub const ACTION_PREDICTION_POLICY_VERSION: &str = "pose_keypoints_motion_v7_or_unknown_touch";
+pub const ACTION_PREDICTION_POLICY_VERSION: &str = "pose_keypoints_motion_v8_or_unknown_touch";
 
 #[derive(Clone, Copy, Debug)]
 pub struct PoseEvidence {
@@ -275,6 +275,84 @@ pub(crate) fn refine_waist_rise(
         ..geometry.clone()
     })
 }
+pub(crate) fn refine_overhead_peak(
+    e: &PoseEvidence,
+    geometry: &ActionPrediction,
+    before: &[[f64; 3]; 17],
+    after: &[[f64; 3]; 17],
+) -> Option<ActionPrediction> {
+    if !geometry.valid() || matches!(geometry.kind, ActionKind::Serve | ActionKind::Block) {
+        return None;
+    }
+    let height = (e.player_bbox_norm[3] - e.player_bbox_norm[1]) * e.video_height;
+    let ball = [
+        e.ball_x_norm * e.video_width,
+        e.ball_y_norm * e.video_height,
+    ];
+    if !height.is_finite()
+        || height < 26.0
+        || ball.iter().any(|v| !v.is_finite())
+        || !e.video_width.is_finite()
+        || !e.video_height.is_finite()
+        || e.video_width < 64.0
+        || e.video_height < 64.0
+    {
+        return None;
+    }
+    let point = |p: &[[f64; 3]; 17], i: usize, min: f64| {
+        let [x, y, c] = p[i];
+        (p[i]
+            .iter()
+            .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            && c >= min)
+            .then_some([x * e.video_width, y * e.video_height])
+    };
+    let cur = &e.keypoints;
+    let head = point(cur, 0, 0.28)?;
+    let left = point(cur, 9, 0.25)?;
+    let right = point(cur, 10, 0.25)?;
+    let near = distance(left, ball).min(distance(right, ball)) / height;
+    if near > 0.20
+        || distance(left, right) > 0.30 * height
+        || ball[1] > head[1] + 0.08 * height
+        || cur[9][2].max(cur[10][2]) < 0.35
+        || (distance(left, ball) > 0.22 * height && cur[10][2] < 0.35)
+        || (distance(right, ball) > 0.22 * height && cur[9][2] < 0.35)
+    {
+        return None;
+    }
+    let mut movement = 0.0_f64;
+    for (s, el, w) in [(5, 7, 9), (6, 8, 10)] {
+        let shoulder = point(cur, s, 0.28)?;
+        let elbow = point(cur, el, 0.28)?;
+        let wrist = point(cur, w, 0.25)?;
+        if shoulder[1] - elbow[1] < 0.04 * height
+            || shoulder[1] - wrist[1] < 0.12 * height
+            || elbow[1] - wrist[1] < 0.035 * height
+        {
+            return None;
+        }
+        let relative = (elbow[1] - shoulder[1]) / height;
+        let prior = (point(before, el, 0.28)?[1] - point(before, s, 0.28)?[1]) / height;
+        let next = (point(after, el, 0.28)?[1] - point(after, s, 0.28)?[1]) / height;
+        let change = (prior - relative).abs().max((next - relative).abs());
+        if change < 0.035 {
+            return None;
+        }
+        movement = movement.max(change);
+    }
+    if movement < 0.065 {
+        return None;
+    }
+    Some(ActionPrediction {
+        kind: ActionKind::OverheadPass,
+        method: PredictionMethod::PoseKeypointsMotionV1,
+        evidence_score: (geometry.evidence_score * cur[9][2].min(cur[10][2]) * (1.0 - near))
+            .clamp(0.0, 1.0),
+        ..geometry.clone()
+    })
+}
+
 #[must_use]
 pub fn refine_with_motion(
     e: &PoseEvidence,
@@ -283,6 +361,9 @@ pub fn refine_with_motion(
     after: &[[f64; 3]; 17],
 ) -> Option<ActionPrediction> {
     if let Some(prediction) = refine_waist_rise(e, geometry, before, after) {
+        return Some(prediction);
+    }
+    if let Some(prediction) = refine_overhead_peak(e, geometry, before, after) {
         return Some(prediction);
     }
     let prediction = refine(e, geometry)?;
@@ -390,6 +471,40 @@ pub fn refine_with_motion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bilateral_elbow_lift_accepts_one_partly_uncertain_wrist_without_calling_attack() {
+        let mut current = [[0.0; 3]; 17];
+        current[0] = [0.50, 0.42, 0.7];
+        current[5] = [0.49, 0.45, 0.7];
+        current[6] = [0.51, 0.45, 0.7];
+        current[7] = [0.48, 0.42, 0.4];
+        current[8] = [0.52, 0.42, 0.31];
+        current[9] = [0.498, 0.39, 0.5];
+        current[10] = [0.502, 0.39, 0.27];
+        let mut before = current;
+        let mut after = current;
+        before[7][1] = 0.46;
+        before[8][1] = 0.46;
+        after[7][1] = 0.46;
+        after[8][1] = 0.46;
+        let mut evidence = PoseEvidence {
+            keypoints: current,
+            ball_x_norm: 0.5,
+            ball_y_norm: 0.39,
+            video_width: 1000.0,
+            video_height: 1000.0,
+            player_bbox_norm: [0.46, 0.37, 0.54, 0.57],
+        };
+        assert_eq!(
+            refine_overhead_peak(&evidence, &geom(), &before, &after)
+                .unwrap()
+                .kind,
+            ActionKind::OverheadPass
+        );
+        evidence.keypoints[8][1] = 0.47;
+        assert!(refine_overhead_peak(&evidence, &geom(), &before, &after).is_none());
+    }
+
     fn geom() -> ActionPrediction {
         ActionPrediction {
             kind: ActionKind::Attack,

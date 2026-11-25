@@ -35,7 +35,7 @@ use volley_core::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_stationary_posts_v22";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_pose_gap_v23";
 pub(crate) mod ball_track;
 mod gap_interpolation;
 mod occlusion;
@@ -1085,6 +1085,13 @@ fn process_inner(
                 &manifest["original_source"],
             )?;
         }
+        let mut interpolated_poses = 0;
+        if req.interpolate_pose && refined_pose_sha.is_some() {
+            let (interpolated_sha, count) =
+                pose_refinement::interpolate_gaps(&part, &digest, frames, cancel)?;
+            digest = interpolated_sha;
+            interpolated_poses = count;
+        }
         if inference_stream::source_stamp(prepared)? != (size, mtime) {
             return Err("Prepared video changed during CPU replay".into());
         }
@@ -1097,7 +1104,7 @@ fn process_inner(
             "schema":"volley-native-cpu-tracking/1",
             "state":"provisional_tracklets_rebuilt",
             "interpolated_positions_version":if req.interpolate_players {"bounded_same_track_3s_v2"} else {"disabled_v1"},
-            "pose_storage_version":"measured_coco17_v1",
+            "pose_storage_version":"measured_and_bounded_interpolated_coco17_v2",
             "interpolate_players":req.interpolate_players,
             "interpolate_pose":req.interpolate_pose,
             "project_id":req.project_id,
@@ -1136,6 +1143,7 @@ fn process_inner(
             "touches_confirmed":false,
             "cpu_processing_complete":false,
         });
+        record["interpolated_pose_count"] = json!(interpolated_poses);
         record["discarded_static_track_ids"] = json!(totals.static_tracks);
         record["discarded_static_track_detections"] = json!(totals.static_track_detections);
         record["unassigned_rally_boxes"] = json!(totals.unassigned_rally_boxes);

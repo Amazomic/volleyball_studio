@@ -35,8 +35,8 @@ use volley_core::{
     touch_pipeline::{
         attach_touch_source_evidence, detect_ball_trajectory_touches, exclude_ball_teleports,
         pose_contact_at_frame, pose_contact_from_nearby_sample, reconstruct_track_gaps,
-        refine_observed_pose_motion, PhysicalTouchCandidate, PoseFrame, PosePlayer, TouchAlgorithm,
-        TouchBall, TouchFrame, TouchPlayer, TouchSettings,
+        refine_observed_overhead_motion, refine_observed_pose_motion, PhysicalTouchCandidate,
+        PoseFrame, PosePlayer, TouchAlgorithm, TouchBall, TouchFrame, TouchPlayer, TouchSettings,
     },
 };
 use volley_inference::trajectory_tcn::{TrajectoryTcn, MODEL_FILENAME};
@@ -222,7 +222,7 @@ pub(crate) fn transform_frame(item: TrackedFrame, expected: u64) -> Result<Touch
         }
         sample.validate(expected - (expected % 9), "players")?;
         let bbox = if let Some(regions) = player.visible_regions {
-            if regions.is_empty() {
+            if regions.is_empty() && player.pose.is_none() {
                 continue;
             }
             if regions.len() > 64
@@ -1961,6 +1961,33 @@ fn visible_rear_contact(
     candidates.next().is_none().then_some(selected)
 }
 
+fn nearby_event_ball_radius(
+    event: &PhysicalTouchCandidate,
+    frames: &[TouchFrame],
+    dimensions: (u32, u32),
+    settings: TouchSettings,
+) -> Option<f64> {
+    let (w, h) = (f64::from(dimensions.0), f64::from(dimensions.1));
+    frames
+        .iter()
+        .filter(|f| f.frame_index.abs_diff(event.frame_index) <= 2)
+        .filter_map(|f| {
+            let b = f
+                .selected_ball
+                .as_ref()
+                .filter(|b| b.source_model == "vballnet" && b.score >= settings.min_ball_score)?;
+            let [x1, y1, x2, y2] = b.bbox_xyxy_norm;
+            let radius = ((x2 - x1) * w + (y2 - y1) * h) * 0.25;
+            let d = ((x1 + x2) * w * 0.5 - event.ball_x_px)
+                .hypot((y1 + y2) * h * 0.5 - event.ball_y_px);
+            (radius > 0.0
+                && d <= radius + 2.0 * event.speed_before_px_frame.max(event.speed_after_px_frame))
+            .then_some((d, radius))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|v| v.1)
+}
+
 fn resolve_overhead_occlusion(
     events: &mut [PhysicalTouchCandidate],
     frames: &[TouchFrame],
@@ -1970,7 +1997,7 @@ fn resolve_overhead_occlusion(
     settings: TouchSettings,
     eligible: &BTreeMap<u64, Vec<u64>>,
 ) {
-    let (w, h) = (f64::from(dimensions.0), f64::from(dimensions.1));
+    let h = f64::from(dimensions.1);
     for event in events {
         if !event.physical_motion_supported
             || event.body_contact_supported
@@ -1994,25 +2021,7 @@ fn resolve_overhead_occlusion(
         else {
             continue;
         };
-        let radius = frames
-            .iter()
-            .filter(|f| f.frame_index.abs_diff(event.frame_index) <= 2)
-            .filter_map(|f| {
-                let b = f.selected_ball.as_ref().filter(|b| {
-                    b.source_model == "vballnet" && b.score >= settings.min_ball_score
-                })?;
-                let [x1, y1, x2, y2] = b.bbox_xyxy_norm;
-                let radius = ((x2 - x1) * w + (y2 - y1) * h) * 0.25;
-                let d = ((x1 + x2) * w * 0.5 - event.ball_x_px)
-                    .hypot((y1 + y2) * h * 0.5 - event.ball_y_px);
-                (radius > 0.0
-                    && d <= radius
-                        + 2.0 * event.speed_before_px_frame.max(event.speed_after_px_frame))
-                .then_some((d, radius))
-            })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|v| v.1);
-        let Some(radius) = radius else {
+        let Some(radius) = nearby_event_ball_radius(event, frames, dimensions, settings) else {
             continue;
         };
         if !overhead_contact_contradicted(
@@ -2035,6 +2044,205 @@ fn resolve_overhead_occlusion(
             eligible.get(&event.frame_index).map(Vec::as_slice),
         );
         event.provisional_track_id = selected;
+        event.action_prediction = None;
+        event.court = None;
+        event.contact_landmark = None;
+        event.contact_pose_sample_frame = None;
+    }
+}
+
+fn refine_motion_linked_overhead(
+    events: &mut [PhysicalTouchCandidate],
+    frames: &[TouchFrame],
+    refined: &BTreeMap<u64, Vec<PosePlayer>>,
+    dimensions: (u32, u32),
+    settings: TouchSettings,
+) {
+    let (w, h) = (f64::from(dimensions.0), f64::from(dimensions.1));
+    let poses = refined
+        .iter()
+        .map(|(&frame_index, players)| PoseFrame {
+            frame_index,
+            players: players.clone(),
+        })
+        .collect::<Vec<_>>();
+    for event in events {
+        if !event.physical_motion_supported
+            || event.ball_occluded_at_contact
+            || event.direction_change_deg < 45.0
+            || event.velocity_residual_px_frame < 12.0
+        {
+            continue;
+        }
+        let Some(id) = event.provisional_track_id else {
+            continue;
+        };
+        let Some(frame) = frames.iter().find(|f| f.frame_index == event.frame_index) else {
+            continue;
+        };
+        let Some(player) = frame.players.iter().find(|p| p.track_id == id) else {
+            continue;
+        };
+        let Some(pose) = refined
+            .get(&event.frame_index)
+            .and_then(|ps| ps.iter().find(|p| p.track_id == id && !p.interpolated))
+        else {
+            continue;
+        };
+        let Some(radius) = nearby_event_ball_radius(event, frames, dimensions, settings) else {
+            continue;
+        };
+        let bbox = player.bbox_xyxy_norm;
+        let geometry = event.action_prediction.clone().or_else(|| {
+            volley_core::action_prediction::predict(
+                volley_core::action_prediction::PositionEvidence {
+                    ball_y_px: event.ball_y_px,
+                    ball_radius_px: radius,
+                    player_bbox_px: [bbox[0] * w, bbox[1] * h, bbox[2] * w, bbox[3] * h],
+                    standing_height_px: (bbox[3] - bbox[1]) * h,
+                    touch_score: event.probability,
+                    track_score: player.score,
+                    context: volley_core::action_prediction::CourtContext::Unavailable,
+                },
+            )
+        });
+        let Some(geometry) = geometry else {
+            continue;
+        };
+        let evidence = volley_core::pose_classification::PoseEvidence {
+            keypoints: pose.keypoints,
+            ball_x_norm: event.ball_x_px / w,
+            ball_y_norm: event.ball_y_px / h,
+            video_width: w,
+            video_height: h,
+            player_bbox_norm: bbox,
+        };
+        if let Some(prediction) =
+            refine_observed_overhead_motion(&poses, event.frame_index, id, &evidence, &geometry)
+        {
+            event.action_prediction = Some(prediction);
+        }
+    }
+}
+
+fn resolve_nearest_occluded_track(
+    events: &mut [PhysicalTouchCandidate],
+    frames: &[TouchFrame],
+    refined: &BTreeMap<u64, Vec<PosePlayer>>,
+    occluded: &OccludedTouchFrames,
+    dimensions: (u32, u32),
+    settings: TouchSettings,
+    eligible: &BTreeMap<u64, Vec<u64>>,
+) {
+    let (w, h) = (f64::from(dimensions.0), f64::from(dimensions.1));
+    for event in events {
+        if !event.physical_motion_supported
+            || event.body_contact_supported
+            || event.inferred_body_reach_supported
+            || event.ball_occluded_at_contact
+            || event.direction_change_deg < 75.0
+            || event.velocity_residual_px_frame < 18.0
+        {
+            continue;
+        }
+        let Some(frame) = frames.iter().find(|f| f.frame_index == event.frame_index) else {
+            continue;
+        };
+        let Some(rears) = occluded.get(&event.frame_index) else {
+            continue;
+        };
+        let Some(radius) = nearby_event_ball_radius(event, frames, dimensions, settings) else {
+            continue;
+        };
+        let point = [event.ball_x_px, event.ball_y_px];
+        let gap = |bbox: [f64; 4]| {
+            (bbox[0] * w - point[0])
+                .max(point[0] - bbox[2] * w)
+                .max(0.0)
+        };
+        let plausible = |bbox: [f64; 4]| {
+            let height = (bbox[3] - bbox[1]) * h;
+            height >= 26.0
+                && radius > 0.0
+                && radius <= height * 0.20
+                && point[1] <= bbox[1] * h + 0.25 * height
+                && bbox[1] * h - point[1] <= radius + 0.45 * height
+        };
+        let measured = refined.get(&event.frame_index);
+        let mut candidates = rears.iter().filter(|rear| {
+            if event
+                .provisional_track_id
+                .is_some_and(|id| id != rear.track_id && !rear.fronts.contains(&id))
+                || eligible
+                    .get(&event.frame_index)
+                    .is_some_and(|ids| !ids.contains(&rear.track_id))
+                || !frame.players.iter().any(|p| p.track_id == rear.track_id)
+                || !plausible(rear.full)
+                || gap(rear.full) > radius
+            {
+                return false;
+            }
+            let at = event.frame_index;
+            let support = |before: bool| {
+                refined
+                    .range(at.saturating_sub(15)..=at.saturating_add(15))
+                    .any(|(&f, poses)| {
+                        (if before { f < at } else { f > at })
+                            && poses.iter().any(|p| {
+                                p.track_id == rear.track_id
+                                    && !p.interpolated
+                                    && p.keypoints[..7]
+                                        .iter()
+                                        .filter(|q| {
+                                            q[2] >= settings.pose_min_confidence
+                                                && q.iter().all(|v| {
+                                                    v.is_finite() && (0.0..=1.0).contains(v)
+                                                })
+                                                && q[0] >= rear.full[0] - 0.02
+                                                && q[0] <= rear.full[2] + 0.02
+                                        })
+                                        .count()
+                                        >= 2
+                            })
+                    })
+            };
+            if !support(true) || !support(false) {
+                return false;
+            }
+            !frame
+                .players
+                .iter()
+                .filter(|p| p.track_id != rear.track_id)
+                .any(|other| {
+                    let bbox = other.bbox_xyxy_norm;
+                    let height = (bbox[3] - bbox[1]) * h;
+                    let direct = measured
+                        .and_then(|ps| {
+                            ps.iter()
+                                .find(|p| p.track_id == other.track_id && !p.interpolated)
+                        })
+                        .and_then(|p| {
+                            volley_core::pose_contact::sampled_body_contact(
+                                p.keypoints,
+                                point,
+                                (w, h),
+                                height,
+                                radius,
+                                settings.pose_min_confidence,
+                                settings.pose_max_distance,
+                            )
+                        })
+                        .is_some();
+                    direct || (plausible(bbox) && gap(bbox) <= gap(rear.full) + 0.5 * radius)
+                })
+        });
+        let Some(candidate) = candidates.next() else {
+            continue;
+        };
+        if candidates.next().is_some() || event.provisional_track_id == Some(candidate.track_id) {
+            continue;
+        }
+        event.provisional_track_id = Some(candidate.track_id);
         event.action_prediction = None;
         event.court = None;
         event.contact_landmark = None;
@@ -2568,6 +2776,22 @@ fn detect_stream_with_pose(
                 settings,
                 &eligible_tracks,
             );
+            resolve_nearest_occluded_track(
+                &mut events,
+                evidence_frames,
+                refined,
+                occluded,
+                (width, height),
+                settings,
+                &eligible_tracks,
+            );
+            refine_motion_linked_overhead(
+                &mut events,
+                evidence_frames,
+                refined,
+                (width, height),
+                settings,
+            );
             apply_training(
                 &mut events,
                 evidence_frames,
@@ -2757,7 +2981,10 @@ fn detect_stream_with_pose(
             .tracked_players
             .iter()
             .filter_map(|p| {
-                let visible = p.visible_regions.as_ref().filter(|r| !r.is_empty())?;
+                let visible = p
+                    .visible_regions
+                    .as_ref()
+                    .filter(|r| !r.is_empty() || p.pose.is_some())?;
                 let full = p.full_track_box?;
                 if p.occluding_track_ids.is_empty() {
                     return None;
@@ -2781,7 +3008,9 @@ fn detect_stream_with_pose(
             let ids = raw
                 .tracked_players
                 .iter()
-                .filter(|p| p.visible_regions.as_ref().is_some_and(Vec::is_empty))
+                .filter(|p| {
+                    p.visible_regions.as_ref().is_some_and(Vec::is_empty) && p.pose.is_none()
+                })
                 .map(|p| p.track_id)
                 .collect::<BTreeSet<_>>();
             if !ids.is_empty() {
@@ -3581,6 +3810,93 @@ mod tests {
         );
         assert_eq!(events[0].provisional_track_id, None);
     }
+    #[test]
+    fn unassigned_turn_can_use_bracketed_rear_geometry_without_claiming_body_contact() {
+        use super::*;
+        let event = PhysicalTouchCandidate {
+            frame_index: 50,
+            provisional_track_id: None,
+            probability: 0.8,
+            ball_x_px: 425.0,
+            ball_y_px: 380.0,
+            motion_frame_index: 50,
+            direction_change_deg: 160.0,
+            speed_before_px_frame: 18.0,
+            speed_after_px_frame: 10.0,
+            velocity_residual_px_frame: 27.0,
+            technique: "unknown_touch",
+            action_prediction: None,
+            court: None,
+            physical_motion_supported: true,
+            body_contact_supported: false,
+            contact_landmark: None,
+            contact_pose_sample_frame: None,
+            ball_occluded_at_contact: false,
+            inferred_body_reach_supported: false,
+            athlete_identity_verified: false,
+        };
+        let rear = OccludedTouchTrack {
+            track_id: 7,
+            full: [0.42, 0.42, 0.45, 0.56],
+            visible: vec![],
+            fronts: vec![4],
+        };
+        let player = |id, score, bbox| TouchPlayer {
+            track_id: id,
+            score,
+            bbox_xyxy_norm: bbox,
+            touch_probability: None,
+        };
+        let frame = TouchFrame {
+            frame_index: 50,
+            players: vec![
+                player(7, 0.0, rear.full),
+                player(4, 0.9, [0.455, 0.41, 0.50, 0.65]),
+            ],
+            selected_ball: Some(TouchBall {
+                source_model: "vballnet".into(),
+                score: 0.9,
+                bbox_xyxy_norm: [0.415, 0.37, 0.435, 0.39],
+            }),
+        };
+        let mut pose = PosePlayer {
+            track_id: 7,
+            keypoints: [[0.0; 3]; 17],
+            interpolated: false,
+        };
+        pose.keypoints[0] = [0.435, 0.43, 0.7];
+        pose.keypoints[1] = [0.432, 0.429, 0.7];
+        let poses = BTreeMap::from([(46, vec![pose.clone()]), (55, vec![pose])]);
+        let occluded = BTreeMap::from([(50, vec![rear])]);
+        let mut events = vec![event.clone()];
+        resolve_nearest_occluded_track(
+            &mut events,
+            std::slice::from_ref(&frame),
+            &poses,
+            &occluded,
+            (1000, 1000),
+            TouchSettings::default(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(events[0].provisional_track_id, Some(7));
+        assert!(!events[0].body_contact_supported);
+        let mut ambiguous = frame;
+        ambiguous
+            .players
+            .push(player(8, 0.9, [0.42, 0.42, 0.45, 0.56]));
+        let mut events = vec![event];
+        resolve_nearest_occluded_track(
+            &mut events,
+            &[ambiguous],
+            &poses,
+            &occluded,
+            (1000, 1000),
+            TouchSettings::default(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(events[0].provisional_track_id, None);
+    }
+
     #[test]
     fn overhead_ball_cannot_be_assigned_to_player_with_both_arms_down() {
         let mut pose = super::PosePlayer {

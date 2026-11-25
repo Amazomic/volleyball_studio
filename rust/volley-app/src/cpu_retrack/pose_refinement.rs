@@ -277,10 +277,7 @@ fn proposals(players: &[Value]) -> Vec<(usize, [f64; 4], &'static str)> {
             } else {
                 "stabilized_track_box"
             };
-            if player["visible_regions"]
-                .as_array()
-                .is_some_and(Vec::is_empty)
-            {
+            if pose_visibility(player).is_some_and(|regions| regions.is_empty()) {
                 return None;
             }
             let bbox = serde_json::from_value(
@@ -498,6 +495,192 @@ pub(super) fn refine(
     Ok((format!("{:x}", hash.finalize()), accepted))
 }
 
+const MAX_POSE_GAP_SIDE: u64 = 15;
+pub(crate) const INTERPOLATED_POSE_SOURCE: &str = "same_track_pose_interpolation_v1";
+
+fn reliable_joint(player: &Value, joint: usize) -> Option<[f64; 3]> {
+    if player["pose_interpolated"] == true || player["pose_source"] != POLICY {
+        return None;
+    }
+    let p: [f64; 3] = serde_json::from_value(player["pose"].get(joint)?.clone()).ok()?;
+    (p.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) && p[2] >= 0.32).then_some(p)
+}
+
+fn fill_missing_pose(row: &mut Value, context: &VecDeque<Value>) -> u64 {
+    let Some(frame) = row["frame_index"].as_u64() else {
+        return 0;
+    };
+    let Some(roster) = row["rally_roster_window"].as_u64() else {
+        return 0;
+    };
+    let Some(players) = row["tracked_players"].as_array_mut() else {
+        return 0;
+    };
+    let mut count = 0;
+    for player in players.iter_mut().filter(|p| !p["pose"].is_array()) {
+        let Some(id) = player["track_id"].as_u64() else {
+            continue;
+        };
+        let Ok(bbox) = serde_json::from_value::<[f64; 4]>(
+            player
+                .get("full_track_box")
+                .unwrap_or(&player["detection"]["bbox_xyxy_norm"])
+                .clone(),
+        ) else {
+            continue;
+        };
+        if !bbox
+            .iter()
+            .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            || bbox[0] >= bbox[2]
+            || bbox[1] >= bbox[3]
+        {
+            continue;
+        }
+        let before = context
+            .iter()
+            .rev()
+            .filter(|r| r["frame_index"].as_u64().is_some_and(|f| f < frame));
+        let after = context
+            .iter()
+            .filter(|r| r["frame_index"].as_u64().is_some_and(|f| f > frame));
+        let mut left = [None; 17];
+        let mut right = [None; 17];
+        for (rows, anchors) in [
+            (before.collect::<Vec<_>>(), &mut left),
+            (after.collect::<Vec<_>>(), &mut right),
+        ] {
+            for r in rows {
+                let Some(at) = r["frame_index"].as_u64() else {
+                    break;
+                };
+                if at.abs_diff(frame) > MAX_POSE_GAP_SIDE || r["rally_roster_window"] != roster {
+                    break;
+                }
+                let Some(p) = r["tracked_players"]
+                    .as_array()
+                    .and_then(|ps| ps.iter().find(|p| p["track_id"] == id))
+                else {
+                    break;
+                };
+                for (joint, anchor) in anchors.iter_mut().enumerate() {
+                    if anchor.is_none() {
+                        *anchor = reliable_joint(p, joint).map(|point| (at, point));
+                    }
+                }
+            }
+        }
+        let mut joints = [[0.0; 3]; 17];
+        let mut first = frame;
+        let mut last = frame;
+        let mut supported = 0;
+        let pad_x = (bbox[2] - bbox[0]) * 0.25;
+        let pad_y = (bbox[3] - bbox[1]) * 0.20;
+        for i in 0..17 {
+            let (Some((a, p)), Some((b, q))) = (left[i], right[i]) else {
+                continue;
+            };
+            let t = (frame - a) as f64 / (b - a) as f64;
+            let point = [
+                p[0] + (q[0] - p[0]) * t,
+                p[1] + (q[1] - p[1]) * t,
+                p[2].min(q[2]),
+            ];
+            if point[0] < bbox[0] - pad_x
+                || point[0] > bbox[2] + pad_x
+                || point[1] < bbox[1] - pad_y
+                || point[1] > bbox[3] + pad_y
+            {
+                continue;
+            }
+            joints[i] = point;
+            first = first.min(a);
+            last = last.max(b);
+            supported += 1;
+        }
+        if supported >= 2 {
+            player["pose"] = json!(joints);
+            player["pose_interpolated"] = json!(true);
+            player["pose_source"] = json!(INTERPOLATED_POSE_SOURCE);
+            player["pose_interpolation_frames"] = json!([first, last]);
+            count += 1;
+        }
+    }
+    count
+}
+
+pub(super) fn interpolate_gaps(
+    source: &Path,
+    expected_sha: &str,
+    frames: u64,
+    cancel: Option<&AtomicBool>,
+) -> Result<(String, u64), String> {
+    let tmp = source.with_extension("pose-interpolation");
+    let result = (|| {
+        let mut reader = BoundedReader::open(source)?;
+        let mut writer = BufWriter::new(
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .map_err(|e| e.to_string())?,
+        );
+        let mut hash = Sha256::new();
+        let mut context = VecDeque::new();
+        let mut next = 0;
+        let mut count = 0;
+        for frame in 0..frames {
+            if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+                return Err("cancelled".into());
+            }
+            let row: Value = serde_json::from_slice(
+                &reader
+                    .line()?
+                    .ok_or("Pose interpolation replay truncated")?,
+            )
+            .map_err(|e| e.to_string())?;
+            if row["frame_index"] != frame {
+                return Err("Pose interpolation frame mismatch".into());
+            }
+            context.push_back(row);
+            while next + MAX_POSE_GAP_SIDE <= frame || (frame + 1 == frames && next < frames) {
+                let start = next.saturating_sub(MAX_POSE_GAP_SIDE);
+                while context
+                    .front()
+                    .is_some_and(|r| r["frame_index"].as_u64().is_some_and(|f| f < start))
+                {
+                    context.pop_front();
+                }
+                let mut output = context
+                    .get((next - start) as usize)
+                    .ok_or("Missing pose interpolation context")?
+                    .clone();
+                count += fill_missing_pose(&mut output, &context);
+                let mut bytes = serde_json::to_vec(&output).map_err(|e| e.to_string())?;
+                bytes.push(b'\n');
+                if bytes.len() > MAX_ROW_BYTES {
+                    return Err("Pose interpolation row exceeds limit".into());
+                }
+                writer.write_all(&bytes).map_err(|e| e.to_string())?;
+                hash.update(&bytes);
+                next += 1;
+            }
+        }
+        if reader.line()?.is_some() || reader.finish() != expected_sha {
+            return Err("Pose interpolation replay SHA mismatch".into());
+        }
+        writer.flush().map_err(|e| e.to_string())?;
+        writer.get_ref().sync_all().map_err(|e| e.to_string())?;
+        drop(writer);
+        fs::rename(&tmp, source).map_err(|e| e.to_string())?;
+        Ok((format!("{:x}", hash.finalize()), count))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(tmp);
+    }
+    result
+}
+
 pub(super) fn attach(
     source: &Path,
     expected_sha: &str,
@@ -651,6 +834,54 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn missing_detector_fragment_can_still_supply_masked_original_pixels() {
+        let players = vec![
+            json!({"track_id":7,"measurement_source":"interpolated_track_bbox",
+            "full_track_box":[0.2,0.2,0.3,0.6],"visible_regions":[],
+            "pose_visible_regions":[[0.2,0.2,0.22,0.6]]}),
+        ];
+        assert_eq!(proposals(&players).len(), 1);
+        assert_eq!(proposals(&players)[0].1, [0.2, 0.2, 0.3, 0.6]);
+    }
+
+    #[test]
+    fn pose_gap_uses_same_id_and_rally_real_joint_anchors_only() {
+        let make = |frame, roster, id, pose: Option<[[f64; 3]; 17]>| {
+            let mut p =
+                json!({"track_id":id,"full_track_box":[0.2,0.2,0.4,0.6],"visible_regions":[]});
+            if let Some(pose) = pose {
+                p["pose"] = json!(pose);
+                p["pose_source"] = json!(POLICY);
+            }
+            json!({"frame_index":frame,"rally_roster_window":roster,"tracked_players":[p]})
+        };
+        let mut a = [[0.0; 3]; 17];
+        let mut b = a;
+        a[0] = [0.25, 0.25, 0.8];
+        b[0] = [0.27, 0.27, 0.6];
+        a[5] = [0.3, 0.32, 0.7];
+        b[5] = [0.32, 0.34, 0.7];
+        a[9] = [0.3, 0.23, 0.8];
+        let mut row = make(11, 1, 7, None);
+        let mut context = VecDeque::from([
+            make(10, 1, 7, Some(a)),
+            row.clone(),
+            make(12, 1, 7, Some(b)),
+        ]);
+        assert_eq!(fill_missing_pose(&mut row, &context), 1);
+        let p = &row["tracked_players"][0];
+        assert_eq!(p["pose_interpolated"], true);
+        assert_eq!(p["pose_interpolation_frames"], json!([10, 12]));
+        assert_eq!(p["pose"][9][2], 0.0);
+        assert!((p["pose"][0][0].as_f64().unwrap() - 0.26).abs() < 1e-9);
+        let mut row = make(11, 1, 7, None);
+        context[2] = make(12, 2, 7, Some(b));
+        assert_eq!(fill_missing_pose(&mut row, &context), 0);
+        context[2] = make(12, 1, 8, Some(b));
+        assert_eq!(fill_missing_pose(&mut row, &context), 0);
+    }
 
     #[test]
     fn pose_progress_counts_only_sampled_frames_with_stable_crops() {

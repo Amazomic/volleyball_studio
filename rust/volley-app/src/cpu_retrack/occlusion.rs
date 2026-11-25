@@ -317,7 +317,14 @@ fn track_frame(row: &mut Value, anchors: &mut BTreeMap<u64, Anchor>, frame: u64)
             }));
         }
         let front_ids = fronts.iter().map(|(id, _)| *id).collect::<Vec<_>>();
-        let pose_regions = if regions.is_empty() {
+        let pose_regions = if regions.is_empty()
+            && (frame.saturating_sub(anchor.confirmed) > 12
+                || visible_regions(full, &fronts)
+                    .iter()
+                    .map(|&r| area(r))
+                    .sum::<f64>()
+                    < 0.02 * area(full))
+        {
             Vec::new()
         } else {
             let mut search = full;
@@ -631,5 +638,10 @@ mod tests {
         row["interpolated_track_ids"] = json!([]);
         assert_eq!(track_frame(&mut row, &mut anchors, 12), 1);
         assert_eq!(row["tracked_players"][1]["visible_regions"], json!([]));
+        let search: Vec<BBox> =
+            serde_json::from_value(row["tracked_players"][1]["pose_visible_regions"].clone())
+                .unwrap();
+        assert!(!search.is_empty());
+        assert!(search.iter().all(|r| area(intersection(*r, front)) == 0.0));
     }
 }

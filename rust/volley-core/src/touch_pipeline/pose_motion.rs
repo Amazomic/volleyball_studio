@@ -63,6 +63,19 @@ fn observed_pose_motion_offset(
     Some((before.keypoints, after.keypoints))
 }
 
+pub fn refine_observed_overhead_motion(
+    poses: &[PoseFrame],
+    frame: u64,
+    track_id: u64,
+    evidence: &PoseEvidence,
+    geometry: &crate::action_prediction::ActionPrediction,
+) -> Option<crate::action_prediction::ActionPrediction> {
+    [2, 4, 1].into_iter().find_map(|offset| {
+        let (before, after) = observed_pose_motion_offset(poses, frame, track_id, offset)?;
+        pose_classification::refine_overhead_peak(evidence, geometry, &before, &after)
+    })
+}
+
 pub fn refine_observed_pose_motion(
     poses: &[PoseFrame],
     frame: u64,
@@ -76,6 +89,11 @@ pub fn refine_observed_pose_motion(
         {
             return Some(prediction);
         }
+    }
+    if let Some(prediction) =
+        refine_observed_overhead_motion(poses, frame, track_id, evidence, geometry)
+    {
+        return Some(prediction);
     }
     let (before, after) = observed_pose_motion(poses, frame, track_id)?;
     pose_classification::refine_with_motion(evidence, geometry, &before, &after)

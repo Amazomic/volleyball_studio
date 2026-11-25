@@ -11,9 +11,10 @@ const visible=source.slice(source.indexOf("  const poseVisibleInRally="),source.
 const render="(()=>{"+visible+source.slice(first,last)+"})()";
 const points=Array.from({length:17},(_,i)=>[0.2+i*0.01,0.4,0.98]);
 const events=[];
+const dashes=[];
 const canvas={
   beginPath(){},moveTo(){},lineTo(){},stroke(){},arc(x,y,r){events.push(["arc",x,y,r,this.globalAlpha]);},
-  fill(){},globalAlpha:1
+  fill(){},setLineDash(pattern){dashes.push([...pattern]);},globalAlpha:1
 };
 const row={frame:1,in_rally:true,players:[],pose_points:[{keypoints:points}],pose_points_interpolated:false};
 const context={frames:[row],frame:1,ctx:canvas,overlay:{flags:{pose:true}},
@@ -28,6 +29,15 @@ runInNewContext(render,context);
 assert.equal(events.length,17);
 assert.ok(events.every(event=>event[4]===0.78),"inferred joints must be visually distinct");
 assert.equal(canvas.globalAlpha,1,"drawing restores global alpha");
+row.pose_points_interpolated=false;
+row.pose_points.push({keypoints:points,interpolated:true});
+events.length=0;
+dashes.length=0;
+runInNewContext(render,context);
+assert.equal(events.length,34);
+assert.ok(events.slice(0,17).every(event=>event[4]===1));
+assert.ok(events.slice(17).every(event=>event[4]===0.68));
+assert.deepEqual(dashes,[[],[4,3],[]],"only the interpolated skeleton is dashed and dash state is restored");
 row.in_rally=false;
 events.length=0;
 runInNewContext(render,context);

@@ -1072,6 +1072,8 @@
       for(const person of current.pose_points){
         const pose=person.keypoints;
         if(!Array.isArray(pose)||pose.length!==17)continue;
+        ctx.globalAlpha=person.interpolated===true?0.68:current.pose_points_interpolated===true?0.78:1;
+        ctx.setLineDash(person.interpolated===true?[4,3]:[]);
         const valid=i=>Array.isArray(pose[i])&&pose[i].length===3&&
           pose[i].every(Number.isFinite)&&pose[i][2]>=0.3;
         for(const [a,b] of edges){
@@ -1085,7 +1087,7 @@
           ctx.beginPath();ctx.arc(px,py,i===9||i===10?3.5:2.5,0,2*Math.PI);ctx.fill();
         }
       }
-      ctx.globalAlpha=1;
+      ctx.globalAlpha=1;ctx.setLineDash([]);
     }
     // Only CPU-processed mode may display verified timeline touch annotations.
     drawCpuTouches(ctx,record,project,run,video,frame,x,y,width,height);

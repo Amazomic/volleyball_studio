@@ -497,6 +497,9 @@ fn overlay_players(frame: &Value) -> Vec<Value> {
             {
                 player["pose"] = p["pose"].clone();
                 player["pose_interpolated"] = json!(p["pose_interpolated"] == true);
+                if p["pose_interpolation_frames"].is_array() {
+                    player["pose_interpolation_frames"] = p["pose_interpolation_frames"].clone();
+                }
                 if p["pose_source"].is_string() {
                     player["pose_source"] = p["pose_source"].clone();
                 }
