@@ -239,15 +239,15 @@ pub async fn embeddings(
             )
         })?;
         tokio::task::spawn_blocking(move || -> Result<Vec<(u64, Vec<f32>)>, ApiError> {
-            let mut encoder =
-                volley_inference::reid_openvino::Encoder::load(&repo, Path::new(&library))
+            let inputs: Vec<&[f32]> = frames.iter().map(|(_, _, chw)| chw.as_slice()).collect();
+            let vectors =
+                volley_inference::reid_openvino::infer_batch(&repo, Path::new(&library), &inputs)
                     .map_err(storage::bad_request)?;
-            let mut output = Vec::new();
-            for (id, _, chw) in frames {
-                let vector = encoder.infer(&chw).map_err(storage::bad_request)?;
-                output.push((id, vector));
-            }
-            Ok(output)
+            Ok(frames
+                .into_iter()
+                .zip(vectors)
+                .map(|((id, _, _), vector)| (id, vector))
+                .collect())
         })
         .await
         .map_err(|e| storage::internal(format!("ReID native inference task: {e}")))??

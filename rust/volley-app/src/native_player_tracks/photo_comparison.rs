@@ -714,15 +714,13 @@ pub(super) async fn compare(
             let batch_library = library.clone();
             let inferred =
                 tokio::task::spawn_blocking(move || -> Result<Vec<Vec<f32>>, ApiError> {
-                    let mut encoder = volley_inference::reid_openvino::Encoder::load(
+                    let refs: Vec<&[f32]> = inputs.iter().map(Vec::as_slice).collect();
+                    volley_inference::reid_openvino::infer_batch(
                         &batch_repo,
                         Path::new(&batch_library),
+                        &refs,
                     )
-                    .map_err(storage::bad_request)?;
-                    inputs
-                        .iter()
-                        .map(|input| encoder.infer(input).map_err(storage::bad_request))
-                        .collect()
+                    .map_err(storage::bad_request)
                 })
                 .await
                 .map_err(|e| storage::internal(format!("Photo ReID worker: {e}")))??;
@@ -863,20 +861,21 @@ pub(super) async fn compare(
             type EncodedFeature = (u64, usize, String, Vec<f32>);
             let inferred =
                 tokio::task::spawn_blocking(move || -> Result<Vec<EncodedFeature>, ApiError> {
-                    let mut encoder =
-                        volley_inference::reid_openvino::Encoder::load(&repo, Path::new(&library))
-                            .map_err(storage::bad_request)?;
-                    decoded
+                    let refs: Vec<&[f32]> = decoded
+                        .iter()
+                        .map(|(_, _, _, input)| input.as_slice())
+                        .collect();
+                    let vectors = volley_inference::reid_openvino::infer_batch(
+                        &repo,
+                        Path::new(&library),
+                        &refs,
+                    )
+                    .map_err(storage::bad_request)?;
+                    Ok(decoded
                         .into_iter()
-                        .map(|(id, index, key, input)| {
-                            Ok((
-                                id,
-                                index,
-                                key,
-                                encoder.infer(&input).map_err(storage::bad_request)?,
-                            ))
-                        })
-                        .collect()
+                        .zip(vectors)
+                        .map(|((id, index, key, _), vector)| (id, index, key, vector))
+                        .collect())
                 })
                 .await
                 .map_err(|e| storage::internal(format!("ReID independent crop worker: {e}")))??;

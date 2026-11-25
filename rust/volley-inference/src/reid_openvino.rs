@@ -13,6 +13,7 @@ use std::{
 
 pub const MODEL_NAME: &str = "person-reidentification-retail-0287";
 pub const PREPROCESS: &str = "raw-bgr-f32-nchw-1x3x256x128-v1";
+const INFERENCE_CONTRACT: &str = "fp32-inference-v2";
 pub const WIDTH: usize = 128;
 pub const HEIGHT: usize = 256;
 pub const PIXELS: usize = WIDTH * HEIGHT;
@@ -54,6 +55,8 @@ pub fn fingerprint(repository: &Path) -> Result<String, String> {
     hash.update(MODEL_NAME.as_bytes());
     hash.update(b"\0");
     hash.update(PREPROCESS.as_bytes());
+    hash.update(b"\0");
+    hash.update(INFERENCE_CONTRACT.as_bytes());
     hash.update(b"\0xml\0");
     stream_hash(&xml, &mut hash)?;
     hash.update(b"\0bin\0");
@@ -219,8 +222,10 @@ impl Encoder {
         // included in the caller-visible model fingerprint.
         let _ = bin;
         let cpu = CString::new("CPU").expect("literal CPU");
+        let precision = CString::new("INFERENCE_PRECISION_HINT").expect("literal key");
+        let fp32 = CString::new("f32").expect("literal precision");
         // SAFETY: all pointers are either OpenVINO-owned or CString-backed and
-        // remain alive during the C call; varargs count is zero.
+        // remain alive during the C call; one property is passed as key/value.
         unsafe {
             check(core_create(&mut encoder.core), "core_create")?;
             check(
@@ -228,8 +233,10 @@ impl Encoder {
                     encoder.core,
                     model.as_ptr(),
                     cpu.as_ptr(),
-                    0,
+                    2,
                     &mut encoder.compiled,
+                    precision.as_ptr(),
+                    fp32.as_ptr(),
                 ),
                 "compile_model_from_file",
             )?;
@@ -304,6 +311,144 @@ impl Encoder {
         }
     }
 }
+const CUDA_BATCH: usize = 16;
+const CUDA_MIN_BATCH: usize = 8;
+const CUDA_MODEL: &str = "person-reidentification-retail-0287-batch16.onnx";
+const CUDA_MODEL_SHA: &str = "13b2e60ffe4320bcc97a820c642c9fe3b304291631544b4df883d13b66945807";
+const CUDA_SOURCE_FINGERPRINT: &str =
+    "91a71dd9f0334cd98d5db2922b4bd80a6d0a3d45911de38ed0c541e9520782de";
+
+fn cuda_session(repository: &Path) -> Result<ort::session::Session, String> {
+    use ort::execution_providers::{CUDAExecutionProvider, ExecutionProvider};
+    use ort::session::Session;
+    #[cfg(any(target_os = "linux", windows))]
+    super::runtime_library(super::Device::Cuda)?;
+    let path = repository.join("models/openvino").join(CUDA_MODEL);
+    let mut hash = Sha256::new();
+    stream_hash(&path, &mut hash)?;
+    if format!("{:x}", hash.finalize()) != CUDA_MODEL_SHA {
+        return Err("ReID CUDA model checksum mismatch".into());
+    }
+    let model = std::fs::read(&path).map_err(|e| e.to_string())?;
+    if format!("{:x}", Sha256::digest(&model)) != CUDA_MODEL_SHA {
+        return Err("ReID CUDA model changed during loading".into());
+    }
+    ort::init().commit().map_err(|e| e.to_string())?;
+    let cuda = CUDAExecutionProvider::default()
+        .with_device_id(0)
+        .with_memory_limit(512 * 1024 * 1024)
+        .with_tf32(false)
+        .with_conv_algorithm_search(
+            ort::execution_providers::cuda::CuDNNConvAlgorithmSearch::Heuristic,
+        );
+    if !cuda.is_available().map_err(|e| e.to_string())? {
+        return Err("ReID CUDA provider unavailable".into());
+    }
+    Session::builder()
+        .and_then(|b| b.with_intra_threads(1))
+        .and_then(|b| b.with_config_entry("session.disable_cpu_ep_fallback", "1"))
+        .and_then(|b| b.with_execution_providers([cuda.build().error_on_failure()]))
+        .and_then(|b| b.commit_from_memory(&model))
+        .map_err(|e| format!("ReID CUDA session: {e}"))
+}
+
+fn cuda_batch(
+    session: &mut ort::session::Session,
+    inputs: &[&[f32]],
+) -> Result<Vec<Vec<f32>>, String> {
+    if inputs.is_empty()
+        || inputs.len() > CUDA_BATCH
+        || inputs.iter().any(|input| !valid_input(input))
+    {
+        return Err("Invalid ReID CUDA batch".into());
+    }
+    let mut pixels = vec![0_f32; CUDA_BATCH * INPUT_LEN];
+    for (index, input) in inputs.iter().enumerate() {
+        pixels[index * INPUT_LEN..(index + 1) * INPUT_LEN].copy_from_slice(input);
+    }
+    let tensor = ort::value::Tensor::from_array((
+        [CUDA_BATCH as i64, 3, HEIGHT as i64, WIDTH as i64],
+        pixels,
+    ))
+    .map_err(|e| e.to_string())?;
+    let outputs = session
+        .run(ort::inputs!["data" => tensor])
+        .map_err(|e| format!("ReID CUDA inference: {e}"))?;
+    let output = outputs
+        .get("reid_embedding/sink_port_0")
+        .ok_or("ReID CUDA output missing")?;
+    let (shape, data) = output
+        .try_extract_tensor::<f32>()
+        .map_err(|e| e.to_string())?;
+    if shape.as_ref() != [CUDA_BATCH as i64, DIMENSIONS as i64]
+        || data.len() != CUDA_BATCH * DIMENSIONS
+    {
+        return Err("Unexpected ReID CUDA output shape".into());
+    }
+    data.as_chunks::<DIMENSIONS>()
+        .0
+        .iter()
+        .take(inputs.len())
+        .map(|row| normalize_embedding(row))
+        .collect()
+}
+
+fn valid_input(input: &[f32]) -> bool {
+    input.len() == INPUT_LEN
+        && input
+            .iter()
+            .all(|v| v.is_finite() && (0.0..=255.0).contains(v))
+}
+
+pub fn infer_batch(
+    repository: &Path,
+    library: &Path,
+    inputs: &[&[f32]],
+) -> Result<Vec<Vec<f32>>, String> {
+    use std::sync::{Mutex, OnceLock};
+    static GPU: OnceLock<Result<Mutex<ort::session::Session>, String>> = OnceLock::new();
+    if inputs.iter().any(|input| !valid_input(input)) {
+        return Err("Invalid ReID BGR F32 image tensor".into());
+    }
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut gpu_enabled = inputs.len() >= CUDA_MIN_BATCH
+        && fingerprint(repository)? == CUDA_SOURCE_FINGERPRINT
+        && std::env::var("VOLLEY_REID_DEVICE").as_deref() != Ok("cpu");
+    let mut cpu = None;
+    let mut output = Vec::with_capacity(inputs.len());
+    for chunk in inputs.chunks(CUDA_BATCH) {
+        if gpu_enabled && chunk.len() >= CUDA_MIN_BATCH {
+            let result = match GPU.get_or_init(|| cuda_session(repository).map(Mutex::new)) {
+                Ok(session) => session
+                    .lock()
+                    .map_err(|_| "ReID CUDA session lock poisoned".to_owned())
+                    .and_then(|mut session| cuda_batch(&mut session, chunk)),
+                Err(error) => Err(error.clone()),
+            };
+            match result {
+                Ok(vectors) => {
+                    output.extend(vectors);
+                    continue;
+                }
+                Err(error) => {
+                    eprintln!("ReID CUDA unavailable; using existing CPU encoder: {error}");
+                    gpu_enabled = false;
+                }
+            }
+        }
+        let encoder = match &mut cpu {
+            Some(encoder) => encoder,
+            None => cpu.insert(Encoder::load(repository, library)?),
+        };
+        for input in chunk {
+            output.push(encoder.infer(input)?);
+        }
+    }
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,6 +495,92 @@ mod tests {
         assert_ne!(a, fingerprint(&root).unwrap());
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn batch_rejects_invalid_input_without_loading_runtime() {
+        assert!(infer_batch(Path::new("unused"), Path::new("unused"), &[&[1.0]]).is_err());
+        assert!(infer_batch(Path::new("unused"), Path::new("unused"), &[])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn actual_cuda_batch_matches_native_cpu_if_enabled() {
+        if std::env::var("VOLLEY_TEST_REID_CUDA").as_deref() != Ok("1") {
+            return;
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let library = std::env::var("VOLLEY_TEST_OPENVINO_C_LIB").unwrap();
+        let mut cpu = Encoder::load(&root, Path::new(&library)).unwrap();
+        let mut gpu = cuda_session(&root).unwrap();
+        let inputs: Vec<Vec<f32>> = (0..CUDA_BATCH)
+            .map(|i| {
+                (0..INPUT_LEN)
+                    .map(|p| ((p.wrapping_mul(13 + i) ^ (p / WIDTH)) % 256) as f32)
+                    .collect()
+            })
+            .collect();
+        let refs: Vec<&[f32]> = inputs.iter().map(Vec::as_slice).collect();
+        let expected: Vec<_> = refs.iter().map(|input| cpu.infer(input).unwrap()).collect();
+        let actual = cuda_batch(&mut gpu, &refs).unwrap();
+        let padded = cuda_batch(&mut gpu, &refs[..CUDA_MIN_BATCH]).unwrap();
+        for (expected, actual) in expected
+            .iter()
+            .zip(&actual)
+            .chain(expected.iter().zip(&padded))
+        {
+            let dot: f64 = expected
+                .iter()
+                .zip(actual)
+                .map(|(a, b)| *a as f64 * *b as f64)
+                .sum();
+            assert!(dot > 0.9999, "CPU/CUDA cosine {dot}");
+        }
+        for (i, a) in expected.iter().enumerate() {
+            for (j, b) in expected.iter().enumerate() {
+                let cpu_dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
+                let gpu_dot: f64 = actual[i]
+                    .iter()
+                    .zip(&actual[j])
+                    .map(|(x, y)| *x as f64 * *y as f64)
+                    .sum();
+                assert!((cpu_dot - gpu_dot).abs() < 0.001, "cosine drift");
+            }
+        }
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            for input in &refs {
+                std::hint::black_box(cpu.infer(input).unwrap());
+            }
+        }
+        let cpu_ms = start.elapsed().as_secs_f64() * 1000.0 / (10 * CUDA_BATCH) as f64;
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            std::hint::black_box(cuda_batch(&mut gpu, &refs).unwrap());
+        }
+        let gpu_ms = start.elapsed().as_secs_f64() * 1000.0 / (10 * CUDA_BATCH) as f64;
+        println!("ReID native warm batch16: CPU {cpu_ms:.3} ms/image, CUDA {gpu_ms:.3} ms/image");
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            std::hint::black_box(cuda_batch(&mut gpu, &refs[..CUDA_MIN_BATCH]).unwrap());
+        }
+        let gpu_half_ms = start.elapsed().as_secs_f64() * 1000.0 / (10 * CUDA_MIN_BATCH) as f64;
+        println!("ReID native warm batch8: CUDA {gpu_half_ms:.3} ms/image");
+        drop(gpu);
+        let mut mixed = refs.clone();
+        mixed.push(refs[3]);
+        let mixed_result = infer_batch(&root, Path::new(&library), &mixed).unwrap();
+        assert_eq!(mixed_result.len(), mixed.len());
+        for (i, actual) in mixed_result.iter().enumerate() {
+            let target = &expected[if i == CUDA_BATCH { 3 } else { i }];
+            let dot: f64 = target
+                .iter()
+                .zip(actual)
+                .map(|(a, b)| *a as f64 * *b as f64)
+                .sum();
+            assert!(dot > 0.9999, "batch order or precision mismatch {i}: {dot}");
+        }
+    }
+
     #[test]
     fn actual_openvino_model_vector_if_native_library_configured() {
         let Ok(library) = std::env::var("VOLLEY_TEST_OPENVINO_C_LIB") else {

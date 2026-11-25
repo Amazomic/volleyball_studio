@@ -185,16 +185,15 @@ async fn infer_missing(
         {
             return Err(storage::conflict("ReID model changed during photo refresh"));
         }
-        let mut encoder =
-            volley_inference::reid_openvino::Encoder::load(&repo, Path::new(&library))
+        let refs: Vec<&[f32]> = inputs.iter().map(|(_, input)| input.as_slice()).collect();
+        let vectors =
+            volley_inference::reid_openvino::infer_batch(&repo, Path::new(&library), &refs)
                 .map_err(storage::bad_request)?;
-        inputs
+        Ok(inputs
             .into_iter()
-            .map(|(sha, input)| {
-                let vector = encoder.infer(&input).map_err(storage::bad_request)?;
-                Ok((sha, vector))
-            })
-            .collect()
+            .zip(vectors)
+            .map(|((sha, _), vector)| (sha, vector))
+            .collect())
     })
     .await
     .map_err(|e| storage::internal(format!("Reference feature worker: {e}")))?
