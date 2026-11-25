@@ -2222,3 +2222,16 @@ body[data-ui-theme="light"] .montage-assembly-meta{background:#edf4fb;color:#345
 #studio-preview-view .studio-debug-action-group #studio-debug-touch-mark[aria-pressed="true"]{background:#19544f;color:#bffff1;border-color:#39c9b0}
 #studio-annotation-context-actions .studio-manual-touch-kind{display:grid;gap:5px;font-size:11px;color:#dceaff;font-weight:650}
 #studio-annotation-context-actions .studio-manual-touch-kind select{width:100%;min-width:0;min-height:34px;padding:6px 8px;color:#effbff;border:1px solid #6a99b5;border-radius:7px;background:#182f49}
+
+#studio-preview-view .rally-card-teams{display:grid;gap:5px;min-width:0;border-top:1px solid #303b4c;padding-top:7px}
+#studio-preview-view .rally-card-team{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:6px;align-items:baseline;font-size:11px;line-height:1.4}
+#studio-preview-view .rally-team-label{font-weight:650;white-space:nowrap}
+#studio-preview-view .rally-team-near .rally-team-label{color:#71acff}
+#studio-preview-view .rally-team-far .rally-team-label{color:#ff7782}
+#studio-preview-view .rally-team-members{color:#b8c9e0;overflow-wrap:anywhere;min-width:0}
+#studio-preview-view .rally-team-point{color:#83d7ac;font-variant-numeric:tabular-nums}
+#studio-preview-view .rally-card-result{font-size:11px;color:#a6b7cd}
+body[data-ui-theme="light"] #studio-preview-view .rally-team-near .rally-team-label{color:#225ca8}
+body[data-ui-theme="light"] #studio-preview-view .rally-team-far .rally-team-label{color:#b93846}
+body[data-ui-theme="light"] #studio-preview-view .rally-team-members,body[data-ui-theme="light"] #studio-preview-view .rally-card-result{color:#425c7b}
+body[data-ui-theme="light"] #studio-preview-view .rally-team-point{color:#216b47}

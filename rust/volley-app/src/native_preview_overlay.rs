@@ -26,7 +26,7 @@ use std::{
 
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 mod continuity;
-mod team_sides;
+pub(crate) mod team_sides;
 const MAX_REPLAY_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_LINE_BYTES: u64 = 512 * 1024 + 1;
 const MAX_WINDOW: u64 = 180;

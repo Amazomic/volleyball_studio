@@ -53,8 +53,16 @@ const context={fps:()=>30,ui,s,wasmReady:true,
   document:{createTextNode:s=>({textContent:s})},
   view:(...args)=>playbackCalls.push(args),toggleGold(){},toggleSelected(){}};
 runInNewContext(helpers+"\n"+estimates+"\n"+renderer+"\nthis.render=cards;",context);
+s.items[0].metadata={team_1:[4,9],team_2:[10,11],winning_team:"team_2"};
 context.render();
 const card=list.children[0];
+const teamBlock=card.children.find(node=>node.klass==="rally-card-teams");
+assert.ok(teamBlock,"Rally card displays team rosters");
+assert.equal(teamBlock.children[0].children[1].textContent,"ID 4, ID 9");
+assert.equal(teamBlock.children[1].children[1].textContent,"ID 10, ID 11");
+assert.equal(teamBlock.children[0].children.length,2);
+assert.equal(teamBlock.children[1].children[2].textContent,"+1");
+assert.equal(teamBlock.children[2].textContent,"Очко: команда 2 (предп.)");
 assert.equal(card.klass,"rally-card");
 const progress=card.children.find(node=>node.klass==="rally-card-progress");
 assert.ok(progress,

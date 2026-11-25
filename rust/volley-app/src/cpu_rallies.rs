@@ -2,6 +2,7 @@
 //! verified player-track and motion-supported Touch replay snapshots.
 //! This does NOT certify rallies, serve/attack techniques, or player identity.
 mod court_history;
+pub(crate) mod rally_metadata;
 use crate::{
     cpu_retrack::opaque_id,
     inference_stream, preparation, project_guard, projects,
@@ -214,6 +215,7 @@ fn write_proposal(
     source_ids: (&str, &str),
     counters: &mut OutputCounters,
     track_counts: &[u8],
+    metadata: Option<Value>,
 ) -> Result<(), String> {
     let (replay_id, touch_id) = source_ids;
     let mut value =
@@ -248,6 +250,10 @@ fn write_proposal(
     let unique = format!("{:x}", Sha256::digest(key.as_bytes()));
     value["candidate_id"] = json!(&unique[..24]);
     value["reviewed"] = json!(false);
+    if let Some(mut metadata) = metadata {
+        metadata["rally_id"] = value["candidate_id"].clone();
+        value["metadata"] = metadata;
+    }
     if proposal.method == "primary_gpu_rally_mask_v1" {
         value["ball_coverage_not_recomputed"] = json!(true);
     }
@@ -560,6 +566,7 @@ fn rebuild_from_snapshots_with_scope(
                     (replay_id, touch_id),
                     &mut totals,
                     &track_counts,
+                    None,
                 )?;
             }
         } else if in_preliminary_rally && reliable_ball.is_some() {
@@ -623,6 +630,7 @@ fn rebuild_from_snapshots_with_scope(
                             (replay_id, touch_id),
                             &mut totals,
                             &track_counts,
+                            None,
                         )?;
                     }
                 } else if let Some(surface) = net_surface.as_ref() {
@@ -690,6 +698,7 @@ fn rebuild_from_snapshots_with_scope(
                         (replay_id, touch_id),
                         &mut totals,
                         &track_counts,
+                        None,
                     )?;
                     intervals.next();
                     continuity_ball_frames = 0;
@@ -724,6 +733,7 @@ fn rebuild_from_snapshots_with_scope(
                 (replay_id, touch_id),
                 &mut totals,
                 &track_counts,
+                None,
             )?;
         }
     }
@@ -817,6 +827,8 @@ fn publish_primary_from_touches(
     replay_id: &str,
     touch_id: &str,
     rosters: &[Vec<u64>],
+    side_source: Option<(&Path, &str, &crate::video_edits::CourtSnapshot)>,
+    offset_sec: f64,
     surface_events: &std::collections::VecDeque<SurfaceEventProposal>,
     cancel: Option<&AtomicBool>,
 ) -> Result<(String, RallyTotals, OutputCounters), String> {
@@ -854,6 +866,7 @@ fn publish_primary_from_touches(
         let mut last = None;
         let mut maximum: f64 = 0.0;
         let mut unidentified = 0;
+        let mut observed = Vec::new();
         let mut count = 0;
         while next.as_ref().is_some_and(|item| item.frame_index <= end) {
             if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
@@ -874,6 +887,14 @@ fn publish_primary_from_touches(
             first.get_or_insert(item.frame_index);
             last = Some(item.frame_index);
             maximum = maximum.max(item.probability);
+            observed.push((
+                item.frame_index,
+                item.provisional_track_id,
+                item.action_prediction
+                    .as_ref()
+                    .map(|p| p.kind.as_str())
+                    .unwrap_or("unknown_touch"),
+            ));
             count += 1;
             counters.ingested_touch_candidates += 1;
             if let Some(track_id) = item.provisional_track_id {
@@ -906,6 +927,34 @@ fn publish_primary_from_touches(
             suggested_context_after_frames: settings.suggested_context_frames,
             end_reason: "primary_gpu_ball_trajectory",
         };
+        let sides = if let Some((path, sha, snapshot)) = side_source {
+            if let Some(court) = snapshot.transform.as_ref() {
+                crate::native_preview_overlay::team_sides::rally_sides(
+                    (path, sha, frames),
+                    (start, end),
+                    court,
+                    &snapshot.revision,
+                )?
+                .as_ref()
+                .clone()
+            } else {
+                Default::default()
+            }
+        } else {
+            Default::default()
+        };
+        let first_floor = surface_events
+            .iter()
+            .find(|event| event.surface == "floor" && (start..=end).contains(&event.frame_index));
+        let metadata = rally_metadata::build(
+            start,
+            end,
+            &sides,
+            roster,
+            &observed,
+            first_floor.map(|event| (event.frame_index, event.outcome)),
+            offset_sec,
+        );
         write_proposal(
             &mut writer,
             &mut digest,
@@ -915,6 +964,7 @@ fn publish_primary_from_touches(
             (replay_id, touch_id),
             &mut counters,
             &[],
+            Some(metadata),
         )?;
     }
     if next.is_some()
@@ -1282,6 +1332,12 @@ fn process_inner(
                         .as_deref()
                         .ok_or("No primary intervals")?,
                 )?,
+                court
+                    .as_ref()
+                    .map(|snapshot| (tracked_file.as_path(), replay_sha.as_str(), snapshot)),
+                tracked["analysis_range"]["start_sec"]
+                    .as_f64()
+                    .unwrap_or(0.0),
                 &ground_events,
                 cancel,
             )?
@@ -1480,6 +1536,8 @@ mod tests {
             "replay-primary",
             "touch-primary",
             &rosters,
+            None,
+            0.0,
             &surface,
             None,
         )
@@ -1538,6 +1596,8 @@ mod tests {
             "replay-primary",
             "touch-primary",
             &rosters[1..],
+            None,
+            0.0,
             &std::collections::VecDeque::new(),
             None,
         )
