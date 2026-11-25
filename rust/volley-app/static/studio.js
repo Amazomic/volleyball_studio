@@ -103,7 +103,7 @@
   // Cache only small derived metadata and immutable CPU preview pages, never video bytes.
   // A versioned session cache survives refresh; all writes / new pipeline results invalidate it.
   const previewCache=(()=>{
-    const prefix="volley:studio-preview:v4:";
+    const prefix="volley:studio-preview:v5:";
     const memory=new Map(),inflight=new Map(),limit=24;
     let epoch=0;
     const storage=()=>{
@@ -446,7 +446,7 @@
       overlayLabels.names=names;
       overlayLabels.manualIds=new Set(value.manual_track_ids);
       overlayLabels.loaded=true;
-      if(s.project===project&&s.run===run&&s.video===video)drawOverlay();
+      if(s.project===project&&s.run===run&&s.video===video){drawOverlay();if(typeof cards==="function")cards();}
     }).catch(error=>{
       if(epoch!==overlayLabels.epoch||controller?.signal.aborted||
          error?.name==="AbortError")return;
@@ -3907,6 +3907,7 @@
       s.canLoadMore=s.items.length<s.filtered;
       s.video=typeof raw.video==="string"?raw.video:"";
       ensurePreviewVideo();
+      if(typeof raw.source_replay_sha256==="string")requestOverlayLabels(s.project,s.run,s.video,raw.source_replay_sha256);
       if(s.items.length&&previewIsVisible()){
         const first=Number(s.items[0].detected_start_frame);
         if(Number.isSafeInteger(first)&&first>=0)
@@ -4421,7 +4422,22 @@
       for(const part of [filled,markers,head])part.setAttribute("aria-hidden","true");
       progress.append(filled,markers,head);
       rallyCardProgresses.set(id,{progress,markers,start,end});
-      card.append(top,foot,types,progress);ui.list.append(card);
+      const result=make("div","rally-card-teams");
+      const metadata=item.metadata;
+      const winner=metadata?.winning_team;
+      for(const [key,label,side] of [["team_1","Команда 1","near"],["team_2","Команда 2","far"]]){
+        const team=make("div","rally-card-team rally-team-"+side);
+        const ids=Array.isArray(metadata?.[key])?metadata[key]:[];
+        const names=ids.filter(id=>Number.isSafeInteger(id)&&id>0).map(id=>
+          (typeof overlayLabels!=="undefined"&&overlayLabels.loaded&&overlayLabels.key.startsWith([s.project,s.run,s.video].join(":")+":")?overlayLabels.names.get(String(id)):null)||"ID "+id);
+        team.append(make("strong","rally-team-label",label),
+          make("span","rally-team-members",names.length?names.join(", "):"Не определена"));
+        if(winner===key)team.append(make("strong","rally-team-point","+1"));
+        result.append(team);
+      }
+      const resultLabel=winner==="team_1"?"Очко: команда 1":winner==="team_2"?"Очко: команда 2":"Очко: не определено";
+      result.append(make("div","rally-card-result",winner==="team_1"||winner==="team_2"?resultLabel+" (предп.)":resultLabel));
+      card.append(top,foot,types,result,progress);ui.list.append(card);
     }
     ui.list.scrollTop=previousScroll;
     refreshRallyCardTouchTicks();updateRallyCardProgress();

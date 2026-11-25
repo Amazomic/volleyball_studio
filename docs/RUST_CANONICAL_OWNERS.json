@@ -240,6 +240,8 @@
                                          "rust/volley-app/src/native_rally_evidence.rs",
                                          "rust/volley-app/src/native_rally_evidence/camera.rs",
                                          "rust/volley-app/src/cpu_rallies.rs",
+                                         "rust/volley-app/src/cpu_rallies/rally_metadata.rs",
+                                         "rust/volley-core/src/rally_score.rs",
                                          "rust/volley-app/src/rally_training_comparison.rs",
                                          "rust/volley-app/src/native_rally_preview.rs",
                                          "rust/volley-app/src/native_preview_overlay.rs",

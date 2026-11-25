@@ -14,6 +14,7 @@ pub mod motion;
 pub mod rallies;
 pub mod rally_contact_context;
 pub mod rally_reconstruction;
+pub mod rally_score;
 pub mod rally_selector;
 pub mod reid;
 pub mod statistics;

@@ -7,12 +7,12 @@ use std::{
 };
 use volley_core::court_geometry::{resolve_team_sides, CourtSide, CourtTransform, TeamSideVotes};
 
-type Sides = BTreeMap<u64, CourtSide>;
+pub(crate) type Sides = BTreeMap<u64, CourtSide>;
 type CacheKey = (PathBuf, String, String, (u64, u64));
 type Cache = VecDeque<(CacheKey, Arc<Sides>)>;
 static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
 
-fn rally_sides(
+pub(crate) fn rally_sides(
     source: (&Path, &str, u64),
     interval: (u64, u64),
     court: &CourtTransform,
