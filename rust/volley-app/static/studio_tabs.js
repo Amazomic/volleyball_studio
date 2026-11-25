@@ -485,6 +485,7 @@
     publish:[["path",{d:"M4 12h16m-6-6 6 6-6 6"}]],
     identity:[["path",{d:"M10 13a5 5 0 0 0 7 .5l3-3a5 5 0 0 0-7-7l-2 2m3 5a5 5 0 0 0-7-.5l-3 3a5 5 0 0 0 7 7l2-2"}]],
   };
+  pipelineGlyphs.touch_detector=pipelineGlyphs.touches;
   const pipelineIcon=id=>{
     const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
     svg.setAttribute("class","analysis-flow-node-icon");
@@ -915,16 +916,6 @@
     return element;
   };
   let graphId=0;
-  const graphPhaseSummary=nodes=>{
-    let ready=0,total=0;
-    for(const node of nodes){
-      if(node.classList.contains("is-skipped"))continue;
-      total++;
-      if(!node.classList.contains("is-failed")&&!node.classList.contains("is-active")&&
-        (node.classList.contains("is-complete")||node.classList.contains("is-reused")))ready++;
-    }
-    return {ready,total};
-  };
   const createPipelineGraph=(target,run)=>{
     clear(target);
     const grid=make("div","analysis-flow-grid");
@@ -939,8 +930,7 @@
       graphText(title,label);
       const cards=make("div","analysis-flow-cards");
       const header=make("div","analysis-flow-phase-header");
-      const summary=make("span","analysis-flow-phase-summary");
-      header.append(title,summary);
+      header.append(title);
       panel.append(header,cards);
       phases.set(row,cards);
       grid.append(panel);
@@ -1050,18 +1040,6 @@
         (entry?.frames_total?" · "+(entry.frames_processed||0)+"/"+entry.frames_total+" кадров":"")+
         (running?" · выполняется":done?" · завершено":reused?" · из кэша":"");
     }
-    for(const panel of target.querySelectorAll(".analysis-flow-phase")){
-      const summary=panel.querySelector(".analysis-flow-phase-summary");
-      const {ready,total}=graphPhaseSummary(panel.querySelectorAll(".analysis-flow-node"));
-      const text=window.VolleyballUi.translate("Готово")+" "+ready+" / "+total;
-      if(summary.textContent!==text)summary.textContent=text;
-    }
-    for(const option of target._graphFocusSelect?.options||[]){
-      if(option.value){
-        const label=graphLabel(option.value,run);
-        if(option.textContent!==label)option.textContent=label;
-      }
-    }
     paintGraphEdges(target,run);
     target._scheduleGraphDraw?.();
   };
@@ -1103,13 +1081,6 @@
     };
     mainGraph._scheduleGraphDraw=scheduleDraw;
     scheduleDraw();
-    const focusSelect=$("analysis-flow-focus");
-    mainGraph._graphFocusSelect=focusSelect;
-    for(const [id] of pipelineStages){
-      const option=make("option","",graphLabel(id,mainGraph._graphRun));
-      option.value=id;
-      focusSelect.append(option);
-    }
     if(typeof ResizeObserver!=="undefined"){
       const observer=new ResizeObserver(scheduleDraw);
       observer.observe(mainGraph);
@@ -1118,13 +1089,12 @@
     let hoveredStage="",keyboardStage="";
     const stageAt=element=>element?.closest?.(".analysis-flow-node")?.dataset.stageId||"";
     const highlight=()=>{
-      const id=hoveredStage||keyboardStage||focusSelect.value;
+      const id=hoveredStage||keyboardStage;
       mainGraph.dataset.focusStage=id;
       for(const node of mainGraph.querySelectorAll(".analysis-flow-node"))
         node.classList.toggle("is-linked-focus",id===node.dataset.stageId);
       scheduleDraw();
     };
-    focusSelect.addEventListener("change",highlight);
     for(const type of ["pointerover","pointerout","focusin","focusout"]){
       mainGraph.addEventListener(type,event=>{
         if(type==="pointerover"||type==="pointerout"){
@@ -1142,9 +1112,6 @@
       for(const node of mainGraph.querySelectorAll(".analysis-flow-node")){
         const heading=node.querySelector(".analysis-flow-node-title");
         heading.textContent=graphLabel(node.dataset.stageId,mainGraph._graphRun);
-      }
-      for(const option of focusSelect.options){
-        if(option.value)option.textContent=graphLabel(option.value,mainGraph._graphRun);
       }
       updatePipelineGraph(mainGraph,mainGraph._graphRun);
     });

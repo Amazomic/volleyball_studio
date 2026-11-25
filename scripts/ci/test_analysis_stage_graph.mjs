@@ -53,9 +53,11 @@ assert.match(css,/\.analysis-flow-node\.is-active\{[^}]*border-color:var\(--flow
 assert.doesNotMatch(css,/\.analysis-flow-node[^{}]*(?:hover|focus)[^{}]*\{[^}]*outline:[^;}]*var\(--flow-active\)/);
 assert.match(css,/\.analysis-flow-diagram:not\(:has\(\.analysis-flow-node\.is-active\)\) \.analysis-flow-node\.is-linked-focus\{[^}]*outline:1px dashed var\(--flow-muted\)/);
 assert.match(css,/body\[data-ui-theme="light"\] \.analysis-flow\{/);
-assert.match(html,/class="analysis-flow-legend"/);
+assert.doesNotMatch(html,/analysis-flow-legend|analysis-flow-focus/);
 assert.ok(html.indexOf('id="analysis-flow-result"')<html.indexOf('id="analysis-flow-diagram"'));
-assert.match(js,/analysis-flow-phase-summary/);
+assert.doesNotMatch(js,/analysis-flow-phase-summary|graphPhaseSummary|focusSelect|_graphFocusSelect/);
+assert.match(js,/const id=hoveredStage\|\|keyboardStage;/);
+assert.match(css,/\.analysis-flow-phase\[data-phase="cpu"\] \.analysis-flow-cards\{grid-template-columns:repeat\(4,minmax\(0,1fr\)\);direction:rtl/);
 assert.match(js,/edge\.classList\.toggle\("is-active",!!running\)/);
 
 const extract=(begin,end)=>{
@@ -66,13 +68,18 @@ const extract=(begin,end)=>{
 const definitions=extract("const pipelineStages=","const pipelineEdges=");
 const context=vm.createContext({});
 context.$=()=>({checked:false});
-vm.runInContext(definitions+"this.stages=pipelineStages;this.id=pipelineId;this.model=pipelineModelMeta;this.combine=combineRallyStages;",context);
+vm.runInContext(definitions+"this.stages=pipelineStages;this.id=pipelineId;this.model=pipelineModelMeta;this.combine=combineRallyStages;this.icon=pipelineIcon;",context);
 assert.equal(context.model("ball")[0],"VballNetV4c");
 assert.equal(context.model("ball_stabilizer")[0],"Ball Stabilizer");
 assert.equal(context.model("players")[0],"RF-DETR Medium");
 assert.equal(context.model("pose")[0],"RTMPose-M Body7");
 assert.equal(context.model("tracking")[1],"algorithm");
 assert.equal(context.model("touch_detector")[0],"Touch Detector");
+context.document={createElementNS:(_ns,tag)=>({tag,children:[],setAttribute(){},append(child){this.children.push(child);}})};
+for(const id of context.stages.map(item=>item[0])){
+  const icon=context.icon(id);
+  assert.ok(icon.children.length>0,"Every stage must render an icon: "+id);
+}
 assert.equal(context.model("ground_detector"),null);
 const legacyGround={id:"ground_detector",name:"Ground Detector",started_ms:1000,finished_ms:4000,duration_ms:3000};
 const legacyRally={id:"rallies",name:"Поиск розыгрышей",started_ms:4000,finished_ms:5000,duration_ms:1000};
@@ -222,18 +229,6 @@ assert.match(js,/primary_rallies:\{\s*min_trajectory_seconds:/);
 assert.match(js,/merge_gap_seconds:inputValue\("studio-gpu-rally-merge-seconds"\)/);
 assert.match(js,/stationary_ball_ms:inputValue\("studio-gpu-rally-stationary-ms"\)/);
 
-const summarizePhase=vm.runInNewContext(extract("const graphPhaseSummary=","const createPipelineGraph=")+"graphPhaseSummary;");
-const phaseNode=(stageId,...classes)=>({dataset:{stageId},classList:{contains:name=>classes.includes(name)}});
-const phaseSummary=summarizePhase([
-  phaseNode("video","is-complete"),phaseNode("ball","is-reused"),
-  phaseNode("pose","is-skipped"),
-  phaseNode("touches","is-active"),phaseNode("tracking","is-complete","is-failed"),
-  phaseNode("publish"),phaseNode("identity","is-complete","is-active")
-]);
-assert.equal(phaseSummary.ready,2);
-assert.equal(phaseSummary.total,6);
-assert.equal(summarizePhase([]).total,0);
-assert.deepEqual({...summarizePhase(stages.filter(item=>item[3]===2).map(item=>phaseNode(item[0],"is-complete")))},{ready:4,total:4});
 assert.match(js,/identity:"[^"]*исходных кадров[^"]*"/);
 const dataLinks=vm.runInNewContext(extract("const pipelineEdges=","const graphSettings=")
   +"({links:pipelineEdges,state:graphLinkState});");

@@ -592,7 +592,6 @@
           <section id="studio-analysis-flow" class="analysis-flow" aria-label="Граф стадий анализа">
             <div class="analysis-flow-toolbar">
               <strong>Конвейер анализа</strong>
-              <label class="analysis-flow-focus"><span>Связи</span><select id="analysis-flow-focus"><option value="">Обзор</option></select></label>
               <div class="analysis-flow-actions">
                 <button id="analysis-flow-gpu-start" type="button" class="secondary">▶ 1 фаза</button>
                 <button id="analysis-flow-cpu-start" type="button" class="secondary">▶ 2 фаза</button>
@@ -601,14 +600,6 @@
             </div>
             <div id="analysis-flow-result" class="analysis-flow-result" aria-live="polite">После анализа здесь будет виден последний результат.</div>
             <div id="analysis-flow-diagram" class="analysis-flow-diagram" aria-live="polite"></div>
-            <div class="analysis-flow-legend">
-              <span><i data-state="waiting" aria-hidden="true"></i>Ожидание запуска</span>
-              <span><i data-state="active" aria-hidden="true"></i>Выполняется</span>
-              <span><i data-state="complete" aria-hidden="true"></i>Готово</span>
-              <span><i data-state="reused" aria-hidden="true"></i>Из кэша</span>
-              <span><i data-state="skipped" aria-hidden="true"></i>Пропущено</span>
-              <span><i data-state="failed" aria-hidden="true"></i>Ошибка</span>
-            </div>
             <div id="analysis-flow-feedback" class="analysis-flow-feedback"></div>
           </section>
           <div class="analysis-profile-grid">
