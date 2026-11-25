@@ -24,7 +24,7 @@
     rosterEpoch:0,rosterBusy:false,rosterLoaded:false,tracksLoaded:false,loadingKey:null,grouping:false,
     photoIndices:new Map(),groupNavigation:new Map(),viewPlayer:"",viewConflicts:false,viewExcluded:false,filteredTotal:0,unassignedIds:new Set(),excludedIds:new Set(),identityConflictIds:new Set(),comparisonIds:new Set(),
     photoScoreLoading:false,autoThresholdScope:"",autoAssignPending:null,pendingEditFailure:"",
-    unassignedReasons:{},appliedAutoThreshold:75,
+    unassignedReasons:{},appliedAutoThreshold:65,
     assignmentQueue:Promise.resolve(),assignmentPending:new Set(),bindingHold:false,
     bindingNeedsRefresh:false,bindingEpoch:0
   };
@@ -461,7 +461,7 @@
       state.roster=Array.isArray(result.roster)?result.roster:[];
       const appliedThreshold=Number(result.automatic_assignment_threshold_percent);
       state.appliedAutoThreshold=Number.isInteger(appliedThreshold)&&appliedThreshold>=1&&appliedThreshold<=99?
-        appliedThreshold:75;
+        appliedThreshold:65;
       const autoScope=[project,video,replay,state.rallyRun].join("|");
       if(state.autoThresholdScope!==autoScope){
         state.autoThresholdScope=autoScope;
@@ -642,7 +642,6 @@
       manually_suppressed:"автопривязка отменена вручную",
       below_similarity_threshold:"ниже порога "+state.appliedAutoThreshold+"%",
       insufficient_observations:"недостаточно наблюдений (нужно 5)",
-      inconsistent_photo_samples:"признаки на пяти кадрах нестабильны",
       identity_conflict_or_ambiguity:"конфликт ID или неоднозначное сходство",
       no_photo_match:"нет совпадения с эталонами"
     };
@@ -1166,9 +1165,9 @@
   galleryAuto.addEventListener("click",()=>autoAssignSimilar());
   const galleryAutoThreshold=node("input");
   galleryAutoThreshold.type="range";galleryAutoThreshold.min="1";galleryAutoThreshold.max="99";
-  galleryAutoThreshold.step="1";galleryAutoThreshold.value="75";
+  galleryAutoThreshold.step="1";galleryAutoThreshold.value="65";
   galleryAutoThreshold.setAttribute("aria-label","Минимальное сходство для автопривязки, %");
-  const galleryAutoValue=node("output","","75%");
+  const galleryAutoValue=node("output","","65%");
   const galleryAutoLabel=node("label","track-auto-threshold","Сходство от");
   galleryAutoLabel.append(galleryAutoThreshold,galleryAutoValue);
   galleryAutoThreshold.addEventListener("input",()=>{
@@ -1558,7 +1557,6 @@
         (remaining?" · нет совпадений: "+count("no_photo_match")+
           " · мало наблюдений: "+count("insufficient_observations")+
           " · ниже порога: "+count("below_similarity_threshold")+
-          " · нестабильные признаки: "+count("inconsistent_photo_samples")+
           " · конфликт: "+count("identity_conflict_or_ambiguity")+
           " · вручную отключено: "+count("manually_suppressed"):"");
       reviewNote("Автопривязка выполнена: "+result.automatic_count+

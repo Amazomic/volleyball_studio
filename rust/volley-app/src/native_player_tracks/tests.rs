@@ -55,7 +55,7 @@ fn automatic_links_use_four_agreeing_frames_when_one_crop_drops_the_mean() {
     ]});
     let doc = base_document(&ctx);
     assert_eq!(
-        choose_automatic_photo_links(&ctx, &doc, &matches)
+        choose_automatic_photo_links_at_threshold(&ctx, &doc, &matches, 0.75)
             .unwrap()
             .get(&7)
             .map(String::as_str),
@@ -63,14 +63,16 @@ fn automatic_links_use_four_agreeing_frames_when_one_crop_drops_the_mean() {
     );
     let mut switched = matches;
     switched["7"][1]["sample_similarities"][4] = json!(0.91);
-    assert!(choose_automatic_photo_links(&ctx, &doc, &switched)
-        .unwrap()
-        .is_empty());
+    assert!(
+        choose_automatic_photo_links_at_threshold(&ctx, &doc, &switched, 0.75)
+            .unwrap()
+            .is_empty()
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn automatic_links_abstain_on_two_inconsistent_frames() {
+fn automatic_links_accept_two_inconsistent_frames_above_threshold() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
     let mut ctx = context(&root, sha, tracks);
@@ -81,10 +83,12 @@ fn automatic_links_abstain_on_two_inconsistent_frames() {
         {"player_id":"123456abcdef","cosine_similarity":0.43,"samples_used":5,
          "sample_similarities":[0.42,0.43,0.44,0.43,0.43]}
     ]});
-    assert!(
+    assert_eq!(
         choose_automatic_photo_links(&ctx, &base_document(&ctx), &matches)
             .unwrap()
-            .is_empty()
+            .get(&7)
+            .map(String::as_str),
+        Some("abcdef012345")
     );
     fs::remove_dir_all(root).unwrap();
 }
@@ -1115,7 +1119,7 @@ fn automatic_photo_links_enforce_threshold_and_conflicting_tracks() {
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[&7], "abcdef012345");
     doc["excluded_ids"] = json!([7]);
-    let below = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.99}],"8":[{"player_id":"abcdef012345","cosine_similarity":0.749}]});
+    let below = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.99}],"8":[{"player_id":"abcdef012345","cosine_similarity":0.649}]});
     assert!(choose_automatic_photo_links(&ctx, &doc, &below)
         .unwrap()
         .is_empty());
@@ -1379,7 +1383,7 @@ fn reviewed_group_counts_only_unassigned_tracks_and_recomputes_average() {
 #[test]
 fn legacy_automatic_similarity_threshold_is_not_reused() {
     let mut doc = json!({"automatic_identity_evidence":{"threshold":0.35}});
-    assert_eq!(saved_automatic_photo_threshold(&doc), 0.75);
+    assert_eq!(saved_automatic_photo_threshold(&doc), 0.65);
     doc["automatic_identity_evidence"]["photo_sample_policy"] = json!("five_observations_v2");
     assert_eq!(saved_automatic_photo_threshold(&doc), 0.35);
 }
@@ -1395,7 +1399,7 @@ fn auto_assignment_requires_five_samples_when_sample_count_is_known() {
     assert!(choose_automatic_photo_links(&ctx, &doc, &incomplete)
         .unwrap()
         .is_empty());
-    let complete = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.75,
+    let complete = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.65,
         "samples_used":5}]});
     assert_eq!(
         choose_automatic_photo_links(&ctx, &doc, &complete)
@@ -1404,7 +1408,7 @@ fn auto_assignment_requires_five_samples_when_sample_count_is_known() {
             .map(String::as_str),
         Some("abcdef012345")
     );
-    let below = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.749,
+    let below = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.649,
         "samples_used":5}]});
     assert!(choose_automatic_photo_links(&ctx, &doc, &below)
         .unwrap()
@@ -1428,7 +1432,7 @@ fn automatic_photo_assignment_survives_one_outlier_among_five_photos() {
 }
 
 #[test]
-fn automatic_photo_assignment_rejects_two_outliers_and_weak_four_photo_consensus() {
+fn automatic_photo_assignment_accepts_unstable_samples_above_threshold() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
     let ctx = context(&root, sha, tracks);
@@ -1442,13 +1446,23 @@ fn automatic_photo_assignment_rejects_two_outliers_and_weak_four_photo_consensus
             "sample_similarities":scores}]});
         let (_, chosen) =
             refresh_automatic_photo_links(&ctx, &base_document(&ctx), &matches, 0.65).unwrap();
-        assert!(!chosen.contains_key(&7));
+        assert_eq!(chosen.get(&7).map(String::as_str), Some("abcdef012345"));
+        assert_eq!(
+            automatic_unassigned_reason(7, &base_document(&ctx), &matches, 0.65),
+            "identity_conflict_or_ambiguity"
+        );
+        assert!(
+            refresh_automatic_photo_links(&ctx, &base_document(&ctx), &matches, 0.90)
+                .unwrap()
+                .1
+                .is_empty()
+        );
     }
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn competing_player_photo_with_identity_switch_stays_unassigned() {
+fn competing_player_photo_with_clear_aggregate_match_is_assigned() {
     let (root, _, sha) = fixture();
     let indexed = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
     let mut ctx = context(&root, sha, indexed);
@@ -1504,7 +1518,7 @@ fn competing_player_photo_with_identity_switch_stays_unassigned() {
 
     let chosen = choose_automatic_photo_links(&ctx, &base_document(&ctx), &verified).unwrap();
     assert_eq!(chosen.get(&12).map(String::as_str), Some("abcdef012345"));
-    assert!(!chosen.contains_key(&13));
+    assert_eq!(chosen.get(&13).map(String::as_str), Some("123456abcdef"));
     fs::remove_dir_all(root).unwrap();
 }
 

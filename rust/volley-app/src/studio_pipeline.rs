@@ -489,7 +489,7 @@ fn default_pose_classification() -> bool {
     true
 }
 fn default_auto_assign_threshold_percent() -> u8 {
-    75
+    65
 }
 impl Default for PostProfile {
     fn default() -> Self {
@@ -4089,7 +4089,7 @@ mod tests {
         .unwrap();
         assert_eq!(manual.gpu.cpu_threads, 12);
         assert_eq!(manual.gpu.gpu_memory_limit_mb, 4096);
-        assert_eq!(profile.post.auto_assign_threshold_percent, 75);
+        assert_eq!(profile.post.auto_assign_threshold_percent, 65);
         let custom: StartRequest = serde_json::from_value(json!({
             "project_id":"abc123def456","video":"match.mp4",
             "post":{"auto_assign_threshold_percent":87}

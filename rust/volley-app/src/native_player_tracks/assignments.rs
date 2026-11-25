@@ -1,6 +1,6 @@
 use super::*;
 
-const AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD: f64 = 0.75;
+const AUTOMATIC_PLAYER_SIMILARITY_THRESHOLD: f64 = 0.65;
 
 pub(super) fn saved_automatic_photo_threshold(doc: &Value) -> f64 {
     if doc["automatic_identity_evidence"]["photo_sample_policy"] != PHOTO_SAMPLE_POLICY {
@@ -175,43 +175,6 @@ pub(super) fn choose_automatic_photo_links(
     )
 }
 
-fn consistent_photo_samples(row: &Value, threshold: f64) -> bool {
-    let Some(raw) = row.get("sample_similarities") else {
-        return true;
-    };
-    let Some(samples) = raw
-        .as_array()
-        .filter(|samples| samples.len() == REID_PHOTOS_PER_TRACK)
-    else {
-        return false;
-    };
-    let Some(mut scores) = samples
-        .iter()
-        .map(Value::as_f64)
-        .collect::<Option<Vec<_>>>()
-    else {
-        return false;
-    };
-    if scores
-        .iter()
-        .any(|score| !score.is_finite() || !(0.0..=1.0).contains(score))
-    {
-        return false;
-    }
-    scores.sort_by(f64::total_cmp);
-    if scores[REID_PHOTOS_PER_TRACK - 1] - scores[0] >= 0.25
-        && scores[0] < (threshold - 0.10).max(0.60)
-    {
-        return false;
-    }
-    [&scores[..REID_PHOTOS_PER_TRACK - 1], &scores[1..]]
-        .iter()
-        .any(|stable| {
-            stable[stable.len() - 1] - stable[0] < 0.25
-                && stable.iter().sum::<f64>() / stable.len() as f64 >= threshold
-        })
-}
-
 fn track_photo_consensus(row: &Value, candidates: &[Value], threshold: f64) -> Option<f64> {
     let scores = row["sample_similarities"].as_array()?;
     if row["samples_used"].as_u64()? != REID_PHOTOS_PER_TRACK as u64
@@ -275,7 +238,7 @@ pub(super) fn choose_automatic_photo_links_at_threshold(
         .collect();
     // Evaluate strongest evidence first. An athlete can have many tracklets,
     // but not two co-visible tracklets with distinct positions.
-    let mut candidates = Vec::<(f64, u64, String, &Value, bool)>::new();
+    let mut candidates = Vec::<(f64, u64, String)>::new();
     for (id, rows) in matches.as_object().ok_or("Invalid photo matches")? {
         let track_id = id.parse::<u64>().map_err(|_| "Invalid track ID")?;
         if !ctx.tracks.contains_key(&track_id)
@@ -311,7 +274,7 @@ pub(super) fn choose_automatic_photo_links_at_threshold(
                 .flatten();
             let score = consensus.map_or(raw_score, |consensus| consensus.max(raw_score));
             if score >= threshold {
-                candidates.push((score, track_id, owner.to_owned(), row, consensus.is_some()));
+                candidates.push((score, track_id, owner.to_owned()));
             }
         }
     }
@@ -347,13 +310,9 @@ pub(super) fn choose_automatic_photo_links_at_threshold(
         };
         let mut ranked = candidates.iter().filter(|v| v.1 == id).collect::<Vec<_>>();
         ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
-        let Some((best_score, _, owner, best_evidence, consensus)) = ranked.first() else {
+        let Some((best_score, _, owner)) = ranked.first() else {
             continue;
         };
-        if !threshold_only(doc) && !consensus && !consistent_photo_samples(best_evidence, threshold)
-        {
-            continue;
-        }
         let runner_up = matches[id.to_string()]
             .as_array()
             .into_iter()
@@ -1535,14 +1494,8 @@ pub(super) fn automatic_unassigned_reason(
                 .as_f64()
                 .is_some_and(|score| score >= threshold)
     });
-    if above_threshold
-        .clone()
-        .any(|row| consistent_photo_samples(row, threshold))
-    {
-        return "identity_conflict_or_ambiguity";
-    }
     if above_threshold.count() > 0 {
-        return "inconsistent_photo_samples";
+        return "identity_conflict_or_ambiguity";
     }
     if rows
         .iter()
