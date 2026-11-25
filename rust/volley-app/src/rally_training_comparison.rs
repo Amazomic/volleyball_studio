@@ -499,6 +499,7 @@ fn compare(state: &AppState, run: &ValidatedRun, query: &CompareQuery) -> Result
             min_trajectory_seconds: seconds,
             merge_gap_seconds: merge_seconds,
             stationary_ball_ms: stationary_ms,
+            ..Default::default()
         }
         .validate()
         .map_err(storage::bad_request)?;
