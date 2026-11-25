@@ -445,8 +445,9 @@
     ["rallies","Розыгрыши","cpu",1],
     ["players","Поиск игроков","gpu",1],
     ["fusion","Данные GPU","output",1],
-    ["tracking","Стабилизация рамок","cpu",2],
+    ["boxes","Стабилизация рамок","cpu",2],
     ["pose","Позы по стабилизированным рамкам","gpu",2],
+    ["tracking","Трекинг ID","cpu",2],
     ["touches","Уточнение касаний","cpu",2],
     ["touch_types","Типы касаний","cpu",2],
     ["publish","Публикация розыгрышей","output",2],
@@ -462,6 +463,7 @@
       ball_stabilizer:["ball_stabilizer","algorithm"],
       players:[(run?run.profile?.gpu?.person_detector:$("studio-gpu-person-detector")?.value)==="rfdetr-large"?"RF-DETR Large":"RF-DETR Medium","model"],
       pose:["RTMPose-M Body7","model"],
+      boxes:["ByteTrack","algorithm"],
       tracking:["ByteTrack","algorithm"],
       touch_detector:["Touch Detector","algorithm"],
       rallies:["Маска игровых интервалов","algorithm"],
@@ -478,6 +480,7 @@
     players:[["circle",{cx:9,cy:7,r:3}],["path",{d:"M2 21v-2a7 7 0 0 1 14 0v2M17 4a4 4 0 0 1 0 7m4 10v-2a6 6 0 0 0-4-5.7"}]],
     pose:[["circle",{cx:12,cy:3,r:2}],["path",{d:"M12 5v7m0 0-7 9m7-9 7 9M5 8l7 4 7-4M5 8l-2 6m16-6 2 6"}]],
     fusion:[["rect",{x:5,y:5,width:14,height:14,rx:2}],["path",{d:"M9 1v4m6-4v4M9 19v4m6-4v4M1 9h4m-4 6h4m14-6h4m-4 6h4"}]],
+    boxes:[["rect",{x:3,y:3,width:18,height:18,rx:2}],["path",{d:"M7 7h10v10H7z"}]],
     tracking:[["rect",{x:2,y:3,width:20,height:18,rx:3}],["circle",{cx:8,cy:9,r:2}],["path",{d:"M4 17c1-3 7-3 8 0m4-9h4m-4 5h4m-4 5h3"}]],
     touches:[["path",{d:"M8 22V11a2 2 0 0 1 4 0V5a2 2 0 0 1 4 0v6a2 2 0 0 1 4 0v5a7 7 0 0 1-7 7h-2a8 8 0 0 1-6-3l-3-4a2 2 0 0 1 3-3l3 3"}]],
     touch_types:[["circle",{cx:11,cy:13,r:8}],["path",{d:"m5 8 6 2 4-4m-7 9 3-5 8 3m-8 2-4 6m4-11 1 11M19 1v4m-2-2h4"}]],
@@ -509,6 +512,7 @@
     if(/ball_stabilizer|Ball Stabilizer|Интерполяция траектории мяча/.test(name))return "ball_stabilizer";
     if(name==="Touch Detector")return "touch_detector";
     if(/Поиск розыгрышей/.test(name))return "rallies";
+    if(/Связывание рамок игроков/.test(name))return "boxes";
     if(/GPU.*V[Bb]allNet/.test(name))return "ball";
     if(/RTMPose/.test(name)&&!/RF-DETR/.test(name))return "pose";
     if(/Объединение/.test(name))return "fusion";
@@ -615,9 +619,11 @@
     ["video","pose","pose"],
     ["ball","fusion"],
     ["players","fusion"],
-    ["fusion","tracking"],
-    ["tracking","pose","pose"],
-    ["rallies","tracking"],
+    ["fusion","boxes"],
+    ["boxes","pose","pose"],
+    ["rallies","boxes"],
+    ["pose","tracking","pose"],
+    ["boxes","tracking","no_pose"],
     ["ball_stabilizer","rallies"],
     ["ball_stabilizer","touch_detector"],
     ["touch_detector","touches"],
@@ -635,6 +641,10 @@
     ["photos","identity"],
   ];
   const graphLinkState=(condition,run)=>{
+    if(condition==="no_pose"){
+      if(run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0)return "disabled";
+      return run?.profile?.gpu?.pose_enabled===false?"available":run?"disabled":"optional";
+    }
     if(condition!=="pose")return "available";
     if(run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0)return "available";
     return run?.profile?.gpu?.pose_enabled===false?"disabled":"optional";
@@ -647,6 +657,7 @@
     players:["#studio-gpu-person-detector","#studio-gpu-person-stride"],
     pose:["#studio-gpu-pose-enabled","#studio-gpu-interpolate-pose"],
     fusion:["#studio-gpu-memory","#studio-gpu-threads"],
+    boxes:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap","#studio-post-nms"],
     tracking:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap",
       "#studio-post-lost-low-gap","#studio-post-lost-low-iou","#studio-post-min-track-frames","#studio-post-nms","#studio-post-assignment","#studio-post-margin"],
     touches:["#studio-post-touch-threshold","#studio-post-occluded-turn","#studio-post-touch-gap",
@@ -664,9 +675,10 @@
     ball_stabilizer:"Отбрасывает ложные точки и интерполирует короткие пропуски. Одна сохранённая траектория используется для поиска розыгрышей, касаний и предпросмотра.",
     rallies:"Рабочие настройки первичного анализа: длительность траектории, остановка мяча в миллисекундах и объединение без перекрытия удержаний или пропусков детекции от 3 секунд. Эксперименты в «Дебаге» имеют собственные значения и не меняют этот GPU-профиль.",
     players:"RF-DETR ищет игроков только внутри найденных игровых интервалов.",
-    pose:"RTMPose-M Body7 получает рамки игроков и кадры в общем GPU-проходе с RF-DETR. Позы сохраняются после проверки объединённой версии GPU.",
+    boxes:"ByteTrack связывает рамки детектора в игровых интервалах и при включённой интерполяции восстанавливает пропуски. Части тела на этой стадии не распознаются.",
+    pose:"RTMPose-M Body7 измеряет точки тела по стабилизированным рамкам в исходных кадрах. Измерения сохраняются отдельно от предварительных ID.",
     fusion:"Сохранение общей версии GPU-наблюдений и повторное использование кэша.",
-    tracking:"ByteTrack сопровождает Track ID на CPU. Это алгоритм трекинга, а не нейросеть.",
+    tracking:"ByteTrack строит итоговые Track ID по измеренным позам, объединяет фрагменты и отбрасывает неподтверждённые треки. Без RTMPose используется трекинг рамок.",
     touches:"Touch Detector определяет моменты касаний исключительно по траектории мяча. Контакт с телом и классификация дополняют найденное событие, не изменяя его время.",
     touch_types:"RTMPose и геометрия тела уточняют тип уже найденного касания. Без достаточных признаков остаётся unknown_touch. Привязка Track ID к конкретному игроку выполняется отдельно, позднее.",
     publish:"Публикует границы первичных розыгрышей с результатом Touch Detector для выбранной версии CPU replay.",
@@ -948,7 +960,7 @@
       fusion:run?.analysis_id,pose:run?.gpu_jobs?.pose||(Number(run?.player_tracking_stats?.refined_poses)>0?run?.cpu_runs?.tracking:null)
     };
     const savedCpu={
-      tracking:run?.cpu_runs?.tracking,ball_stabilizer:run?.ball_stabilizer,
+      boxes:run?.cpu_runs?.tracking,tracking:run?.cpu_runs?.tracking,ball_stabilizer:run?.ball_stabilizer,
       touches:run?.cpu_runs?.touches,touch_types:run?.cpu_runs?.touches&&(run?.gpu_jobs?.pose||Number(run?.player_tracking_stats?.refined_poses)>0),
       publish:run?.cpu_runs?.rallies,identity:run?.automatic_identity||run?.automatic_identity_available
     };
@@ -963,7 +975,7 @@
       const running=active&&(id===currentId||combinedPose||concurrentTypes||
         id!=="touch_types"&&!!entry&&entry.finished_ms==null&&entry===stages.at(-1));
       const done=!!entry&&(entry.finished_ms!=null||complete&&!running)||
-        (id==="pose"&&!!run?.gpu_jobs?.pose&&!running);
+        (id==="pose"&&hasPose&&!running);
       const reused=!entry&&((cached&&!!savedGpu[id])||(run?.result_reused===true&&!!savedCpu[id]));
       node.classList.toggle("is-active",!!running);
       node.classList.toggle("is-complete",done);

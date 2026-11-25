@@ -63,9 +63,9 @@ assert.equal(context.model("rallies")[1],"algorithm");
 const stages=context.stages;
 const ids=stages.map(item=>item[0]);
 assert.equal(new Set(ids).size,ids.length);
-assert.equal(stages.length,14);
+assert.equal(stages.length,15);
 assert.ok(ids.includes("publish")&&!ids.includes("material"));
-for(const [row,count] of [[1,7],[2,7]]){
+for(const [row,count] of [[1,7],[2,8]]){
   const nodes=stages.filter(item=>item[3]===row);
   assert.equal(nodes.length,count);
 }
@@ -124,6 +124,7 @@ const examples=[
   ["GPU · RF-DETR + RTMPose: игровые интервалы","players"],
   ["GPU · RTMPose-M: позы игроков","pose"],
   ["Объединение · VBallNet и рамки игроков","fusion"],
+  ["CPU · Связывание рамок игроков","boxes"],
   ["Постобработка · Track ID","tracking"],
   ["Постобработка · касания в первичных розыгрышах","touches"],
   ["Публикация розыгрышей","publish"],
@@ -179,7 +180,10 @@ const actualInputs=target=>Array.from(dataLinks.links.filter(link=>link[1]===tar
 assert.deepEqual(actualInputs("ball_stabilizer"),["ball"]);
 assert.deepEqual(actualInputs("rallies"),["ball_stabilizer"]);
 assert.deepEqual(actualInputs("fusion"),["ball","players"]);
-assert.deepEqual(actualInputs("tracking"),["fusion","rallies"]);
+assert.deepEqual(actualInputs("boxes"),["fusion","rallies"]);
+assert.deepEqual(actualInputs("tracking"),["boxes","pose"]);
+assert.equal(dataLinks.state("no_pose",{profile:{gpu:{pose_enabled:false}}}),"available");
+assert.equal(dataLinks.state("no_pose",{gpu_jobs:{pose:"saved"}}),"disabled");
 assert.deepEqual(actualInputs("touch_detector"),["ball_stabilizer"]);
 assert.deepEqual(actualInputs("touches"),["ball_stabilizer","rallies","touch_detector","tracking"]);
 assert.deepEqual(actualInputs("publish"),["rallies","touches","tracking"]);
@@ -187,7 +191,7 @@ assert.deepEqual(actualInputs("identity"),["photos","publish","tracking","video"
 assert.equal(dataLinks.state("pose",null),"optional");
 assert.equal(dataLinks.state("pose",{profile:{gpu:{pose_enabled:false}}}),"disabled");
 assert.equal(dataLinks.state("pose",{gpu_reused:true,gpu_jobs:{pose:"saved"}}),"available");
-assert.deepEqual(actualInputs("pose"),["tracking","video"]);
+assert.deepEqual(actualInputs("pose"),["boxes","video"]);
 assert.deepEqual(actualInputs("touch_types"),["pose","touches"]);
 assert.equal(dataLinks.state("pose",{profile:{post:{pose_classification:false}},gpu_jobs:{pose:"saved"}}),"available");
 const withClass=(stageId,classes)=>({
@@ -195,9 +199,9 @@ const withClass=(stageId,classes)=>({
   setAttribute(name,value){this[name]=value;},removeAttribute(name){delete this[name];}
 });
 const fusionNode=withClass("fusion",["is-reused"]);
-const trackingNode=withClass("tracking",["is-active"]);
+const trackingNode=withClass("boxes",["is-active"]);
 const link={
-  dataset:{edgeSource:"fusion",edgeTarget:"tracking",edgeCondition:""},
+  dataset:{edgeSource:"fusion",edgeTarget:"boxes",edgeCondition:""},
   classList:{toggle(name,enabled){this[name]=enabled;}},
   setAttribute(name,value){this[name]=value;}
 };

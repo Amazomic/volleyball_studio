@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
+    fs::OpenOptions,
     io::{BufWriter, Write},
     path::Path,
     sync::atomic::AtomicBool,
@@ -127,7 +127,7 @@ pub(super) fn refine(
     cancelled: &AtomicBool,
 ) -> Result<(String, u64), String> {
     let mut reader = BoundedReader::open(source.replay)?;
-    let output = source.replay.with_extension("pose-refinement.partial");
+    let output = source.replay.with_file_name("poses.jsonl");
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -150,12 +150,12 @@ pub(super) fn refine(
             let row = reader
                 .line()?
                 .ok_or("Tracking replay truncated during RTMPose refinement")?;
-            let mut row: Value = serde_json::from_slice(&row).map_err(|e| e.to_string())?;
+            let row: Value = serde_json::from_slice(&row).map_err(|e| e.to_string())?;
             if row["frame_index"].as_u64() != Some(index) {
                 return Err("Tracking replay frame mismatch during RTMPose refinement".into());
             }
             let players = row["tracked_players"]
-                .as_array_mut()
+                .as_array()
                 .ok_or("Missing tracked players")?;
             let mut next_crops = BTreeMap::new();
             let mut crops = Vec::new();
@@ -181,11 +181,12 @@ pub(super) fn refine(
                     settings.memory_mb,
                 )?);
             }
+            let mut measured = Vec::new();
             if let Some(engine) = &mut engine {
                 for group in crops.chunks(8) {
                     let boxes = group.iter().map(|(_, bbox, _)| *bbox).collect::<Vec<_>>();
                     let estimates = engine.infer_batch_original(pixels, width, height, &boxes)?;
-                    for ((player, bbox, origin), joints) in group.iter().zip(estimates) {
+                    for ((_player, bbox, origin), joints) in group.iter().zip(estimates) {
                         let joints = joints.map(|p| [p.x as f64, p.y as f64, p.score as f64]);
                         let evidence = PoseEvidence { joints };
                         if evidence.valid()
@@ -194,17 +195,25 @@ pub(super) fn refine(
                                     && (bbox[1]..=bbox[3]).contains(&p[1])
                             })
                         {
-                            players[*player]["pose"] = json!(joints);
-                            players[*player]["pose_interpolated"] = json!(false);
-                            players[*player]["pose_crop_origin"] = json!(origin);
-                            players[*player]["pose_crop_bbox_xyxy_norm"] = json!(bbox);
-                            players[*player]["pose_source"] = json!(POLICY);
+                            measured.push(json!({
+                                "box": bbox,
+                                "keypoints": joints,
+                                "crop_origin": if *origin == "interpolated_track_box" {
+                                    "interpolated_box"
+                                } else {
+                                    "observed"
+                                },
+                            }));
                             accepted += 1;
                         }
                     }
                 }
             }
-            let mut bytes = serde_json::to_vec(&row).map_err(|e| e.to_string())?;
+            if !(index as usize).is_multiple_of(settings.stride) {
+                return Ok(());
+            }
+            let mut bytes = serde_json::to_vec(&json!({"frame":index,"players":measured}))
+                .map_err(|e| e.to_string())?;
             bytes.push(b'\n');
             if bytes.len() > MAX_ROW_BYTES {
                 return Err("Refined tracking row exceeds the replay limit".into());
@@ -220,8 +229,6 @@ pub(super) fn refine(
     writer.flush().map_err(|e| e.to_string())?;
     writer.get_ref().sync_all().map_err(|e| e.to_string())?;
     drop(writer);
-    fs::rename(output, source.replay)
-        .map_err(|e| format!("Publish refined RTMPose replay: {e}"))?;
     Ok((format!("{:x}", hash.finalize()), accepted))
 }
 

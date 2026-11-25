@@ -784,6 +784,8 @@ fn pipeline_stage_id(name: &str) -> &'static str {
         "rallies"
     } else if name.contains("VBallNet") && name.contains("GPU") {
         "ball"
+    } else if name.contains("Связывание рамок игроков") {
+        "boxes"
     } else if name.contains("RTMPose") && !name.contains("RF-DETR") {
         "pose"
     } else if name.contains("RF-DETR") || name.contains("рамки игроков") {
@@ -1847,20 +1849,29 @@ async fn pipeline(
             .as_deref()
             .ok_or("Не выбран первичный GPU-анализ в верхней панели")?;
         let source = selected_gpu(app, request, &identity, source_id)?;
-        if request.post.touches.require_pose
-            && crate::native_preview_pose::source_info(
-                &projects::project_root(app).join(&request.project_id),
-                source_id,
-            )?
-            .is_none()
-        {
-            return Err("Для пересчёта по движению точек тела в выбранном GPU-анализе нужна сохранённая поза".into());
+        let (gpu, _) = decode_profiles(source["profile"]["gpu"].clone(), empty_profile())?;
+        if gpu.pose_enabled || request.post.touches.require_pose {
+            let project = projects::project_root(app).join(&request.project_id);
+            let fusion = saved_stage(&project, "native_gpu_fusions", source_id, "frames.jsonl")
+                .ok_or("Выбранный GPU-анализ не найден")?;
+            let mut scope_source = source.clone();
+            scope_source["original_source"] = original_source.clone();
+            let (primary, _) = load_primary_rally_scope(app, &request.project_id, &scope_source)?;
+            if crate::native_preview_pose::source_info(&project, source_id)?.is_none()
+                && !cpu_retrack::has_refined_pose(
+                    &project,
+                    source_id,
+                    fusion["sha256"].as_str().ok_or("Нет SHA-256 Fusion")?,
+                    Some(&primary.sha256),
+                )?
+            {
+                return Err("Для пересчёта нужны сохранённые позы RTMPose. Выполните полный анализ один раз.".into());
+            }
         }
         status["analysis_id"] = source["analysis_id"].clone();
         status["analysis_range"] = source["analysis_range"].clone();
         status["gpu_jobs"] = source["gpu_jobs"].clone();
         status["shared_pose"] = source["shared_pose"].clone();
-        let (gpu, _) = decode_profiles(source["profile"]["gpu"].clone(), empty_profile())?;
         status["profile"]["gpu"] = json!(gpu);
         status["gpu_model_stack"] = source["gpu_model_stack"].clone();
         status["gpu_reused"] = json!(true);
@@ -2167,7 +2178,7 @@ async fn pipeline(
         json!({"ball_job_id":primary.ball_job_id,"sha256":primary.sha256});
     save(path, status)?;
     let fusion_id = require_id(status, "analysis_id")?;
-    progress(path, status, "Постобработка · Track ID", 86.0)?;
+    progress(path, status, "CPU · Связывание рамок игроков", 86.0)?;
     log_native(
         path,
         "Track ID",
@@ -2209,13 +2220,17 @@ async fn pipeline(
         interpolate_players: request.post.interpolate_players,
     };
     let replay = tokio::task::block_in_place(|| {
-        cpu_retrack::process_with_cancel(app, &replay_request, cancel, refine_pose, || {
-            progress(
-                path,
-                status,
-                "GPU · RTMPose по стабилизированным рамкам",
-                88.0,
-            )
+        cpu_retrack::process_with_cancel(app, &replay_request, cancel, refine_pose, |final_pass| {
+            if final_pass {
+                progress(path, status, "CPU · Track ID", 89.0)
+            } else {
+                progress(
+                    path,
+                    status,
+                    "GPU · RTMPose по стабилизированным рамкам",
+                    88.0,
+                )
+            }
         })
     })
     .map_err(reason)?;
@@ -3292,6 +3307,7 @@ mod tests {
             pipeline_stage_id("Объединение · VBallNet и рамки игроков"),
             "fusion"
         );
+        assert_eq!(pipeline_stage_id("CPU · Связывание рамок игроков"), "boxes");
         assert_eq!(pipeline_stage_id("Постобработка · Track ID"), "tracking");
         assert_eq!(
             pipeline_stage_id("Постобработка · касания в первичных розыгрышах"),

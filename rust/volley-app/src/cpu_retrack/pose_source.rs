@@ -1,18 +1,21 @@
 //! Verified RTMPose measurements for CPU provisional association.
 //! The immutable GPU fusion still supplies balls and raw detector proposals.
 //! Pose-derived tracker proposals are versioned CPU evidence, not GPU detections.
-use super::safe_file;
+use super::{
+    safe_file, storage, MAX_INPUT_BYTES, MAX_MANIFEST_BYTES, POSE_REFINEMENT_POLICY,
+    TRACK_ASSOCIATION_VERSION,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    fs::File,
+    fs::{self, File},
     io::{BufRead, BufReader},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 use volley_core::{bbox_iou, fusion::Candidate, tracker::PoseEvidence};
 
-const MAX_ROW: usize = 64 * 1024;
-const MAX_POSES: usize = 12;
+const MAX_ROW: usize = 512 * 1024;
+const MAX_POSES: usize = 128;
 
 pub(super) struct Snapshot {
     pub id: String,
@@ -31,6 +34,100 @@ pub(super) fn locate(root: &std::path::Path, fusion_id: &str) -> Result<Option<S
         sha,
         stride,
     }))
+}
+
+pub(super) fn locate_refined(
+    root: &Path,
+    fusion_id: &str,
+    fusion_sha: &str,
+    mask_sha: Option<&str>,
+    crop_profile: Option<(&volley_core::tracker::TrackingOptions, usize, bool)>,
+) -> Result<Option<Snapshot>, String> {
+    let parent = root.join("native_cpu_replays");
+    match fs::symlink_metadata(&parent) {
+        Ok(_) => storage::safe_folder(&parent)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut best: Option<Snapshot> = None;
+    for (index, entry) in fs::read_dir(&parent)
+        .map_err(|e| e.to_string())?
+        .enumerate()
+    {
+        if index >= 10_000 {
+            return Err("Too many CPU pose evidence versions".into());
+        }
+        let entry = entry.map_err(|e| e.to_string())?;
+        let id = entry.file_name().to_string_lossy().into_owned();
+        if !super::opaque_id(&id) {
+            continue;
+        }
+        let folder = entry.path();
+        if storage::safe_folder(&folder).is_err() {
+            continue;
+        }
+        let Ok(file) = safe_file(&folder, "manifest.json", MAX_MANIFEST_BYTES) else {
+            continue;
+        };
+        let Ok(bytes) = fs::read(file) else { continue };
+        let Ok(record) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        if record["schema"] != "volley-native-cpu-tracking/1"
+            || record["replay_id"] != id
+            || record["source_fusion_id"] != fusion_id
+            || record["source_fusion_sha256"] != fusion_sha
+            || record["player_frame_scope_sha256"].as_str() != mask_sha
+            || record["track_association_version"] != TRACK_ASSOCIATION_VERSION
+            || record["pose_refinement_policy"] != POSE_REFINEMENT_POLICY
+            || record["refined_pose_model_sha256"] != volley_inference::pose::MODEL_SHA256
+            || record["refined_pose_source_replay_id"] != id
+        {
+            continue;
+        }
+        let Some(sha) = record["refined_pose_sha256"]
+            .as_str()
+            .filter(|s| volley_core::contracts::sha256(s))
+        else {
+            continue;
+        };
+        let Some(stride) = record["refined_pose_stride"]
+            .as_u64()
+            .filter(|s| (1..=30).contains(s))
+        else {
+            continue;
+        };
+        if safe_file(&folder, "poses.jsonl", MAX_INPUT_BYTES).is_err() {
+            continue;
+        }
+        let stride = stride as usize;
+        if let Some((settings, requested_stride, interpolate)) = crop_profile {
+            let Ok(mut stored) = serde_json::from_value::<volley_core::tracker::TrackingOptions>(
+                record["settings"].clone(),
+            ) else {
+                continue;
+            };
+            stored.min_track_observations = settings.min_track_observations;
+            if stride != requested_stride
+                || record["interpolate_players"] != interpolate
+                || serde_json::to_value(stored).ok() != serde_json::to_value(settings).ok()
+            {
+                continue;
+            }
+        }
+        if best
+            .as_ref()
+            .is_none_or(|old| (stride, &id) < (old.stride, &old.id))
+        {
+            best = Some(Snapshot {
+                id,
+                sha: sha.to_owned(),
+                stride,
+                folder,
+            });
+        }
+    }
+    Ok(best)
 }
 
 type PoseFrameProjection = (Vec<Candidate>, Vec<Option<PoseEvidence>>, u64);
