@@ -86,7 +86,7 @@ impl RallyMask {
             frames,
             settings,
             BallStabilizerSettings::default(),
-            |_| Ok(Vec::new()),
+            |_, _| Ok(Vec::new()),
         )
         .map(|(mask, _)| mask)
     }
@@ -96,7 +96,7 @@ impl RallyMask {
         frames: u64,
         settings: PrimaryRallySettings,
         stabilizer_settings: BallStabilizerSettings,
-        on_stabilized: impl FnOnce(&StabilizedBallMotion) -> Result<Vec<u64>, String>,
+        on_stabilized: impl FnOnce(&StabilizedBallMotion, &[(u64, u64)]) -> Result<Vec<u64>, String>,
     ) -> Result<(Self, StabilizedBallMotion), String> {
         settings.validate()?;
         let len = usize::try_from(frames).map_err(|_| "Rally mask frame count overflow")?;
@@ -140,9 +140,6 @@ impl RallyMask {
             })
             .collect::<Vec<_>>();
         let trajectory = stabilize_ball_motion(&samples, len, stabilizer_settings)?;
-        let mut ground_frames = on_stabilized(&trajectory)?;
-        ground_frames.sort_unstable();
-        ground_frames.dedup();
         let observed_ball_frames = trajectory.observed_frames;
         let mut points = trajectory.points.clone();
         let motion = crate::cpu_retrack::ball_track::analyze_moving_ball(
@@ -151,6 +148,9 @@ impl RallyMask {
             settings.merge_gap_seconds,
             settings.stationary_ball_ms,
         )?;
+        let mut ground_frames = on_stabilized(&trajectory, &motion.merged)?;
+        ground_frames.sort_unstable();
+        ground_frames.dedup();
         let detected = motion.detected;
         let mut grounded_intervals = Vec::new();
         for (mut start, end) in motion.merged {
@@ -308,12 +308,17 @@ mod tests {
     fn first_ground_contact_ends_rally_without_reopening_on_bounce() {
         let mut samples = moving_samples(80, 330);
         samples.extend(moving_samples(500, 710));
+        let baseline =
+            RallyMask::from_ball_samples(&samples, 900, PrimaryRallySettings::default()).unwrap();
         let (mask, _) = RallyMask::with_ball_stabilizer(
             &samples,
             900,
             PrimaryRallySettings::default(),
             BallStabilizerSettings::default(),
-            |_| Ok(vec![240, 255]),
+            |_, preliminary| {
+                assert_eq!(preliminary, baseline.merged.as_slice());
+                Ok(vec![240, 255])
+            },
         )
         .unwrap();
         assert_eq!(mask.merged, vec![(80, 240), (500, 710)]);
@@ -331,7 +336,10 @@ mod tests {
             900,
             PrimaryRallySettings::default(),
             BallStabilizerSettings::default(),
-            |_| Ok(vec![255, 270]),
+            |_, preliminary| {
+                assert_eq!(preliminary, baseline.merged.as_slice());
+                Ok(vec![255, 270])
+            },
         )
         .unwrap();
         assert_eq!(mask.merged, vec![(80, 255), (315, 520)]);

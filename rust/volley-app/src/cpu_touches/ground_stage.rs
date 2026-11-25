@@ -12,6 +12,7 @@ pub(crate) struct GroundStage {
 pub(crate) fn candidates(
     motion: &volley_core::ball_interpolation::StabilizedBallMotion,
     impacts: &[volley_core::motion::TrajectoryBreak],
+    intervals: &[(u64, u64)],
     court: Option<&CourtTransform>,
     width: u32,
     height: u32,
@@ -24,6 +25,16 @@ pub(crate) fn candidates(
     for impact in impacts {
         if cancel.load(Ordering::Acquire) {
             return Err("cancelled".into());
+        }
+        let Ok(frame) = u64::try_from(impact.frame) else {
+            continue;
+        };
+        let index = intervals.partition_point(|&(_, end)| end < frame);
+        let Some(&(start, end)) = intervals.get(index) else {
+            continue;
+        };
+        if frame < start {
+            continue;
         }
         let mut anchors = impact.before_frames.clone();
         anchors.extend_from_slice(&impact.after_frames);
@@ -40,14 +51,9 @@ pub(crate) fn candidates(
                 })
             })
             .collect::<Vec<_>>();
-        if let Some(contact) = volley_core::motion::classify_ground_contact(
-            &points,
-            impact,
-            court,
-            width,
-            height,
-            impact.frame.max(0) as u64,
-        ) {
+        if let Some(contact) =
+            volley_core::motion::classify_ground_contact(&points, impact, court, width, height, end)
+        {
             if result.len() >= LIMIT {
                 return Err("Ground candidate limit exceeded".into());
             }
@@ -171,6 +177,8 @@ pub(crate) fn prepare(
         && primary["height"] == dim.height
         && primary["frames"] == scope.source_frames
         && primary["calibrated"] == court.as_ref().is_some_and(|c| c.transform.is_some());
+    let intervals =
+        align_primary_intervals(&scope.intervals, scope.source_frames, stabilized.frames)?;
     let mut contacts = if reusable {
         let bytes = fs::read(safe_file(
             &mask_folder,
@@ -213,6 +221,7 @@ pub(crate) fn prepare(
         candidates(
             &stabilized.motion,
             &breaks,
+            &intervals,
             court.as_ref().and_then(|c| c.transform.as_ref()),
             dim.width,
             dim.height,
@@ -238,8 +247,6 @@ pub(crate) fn prepare(
     )?;
     summary["primary_reused"] = json!(reusable);
     summary["primary_breaks_reused"] = json!(primary_breaks_reused);
-    let intervals =
-        align_primary_intervals(&scope.intervals, scope.source_frames, stabilized.frames)?;
     contacts.retain(|contact| {
         let index = intervals.partition_point(|&(_, end)| end < contact.frame);
         let Some(&(start, end)) = intervals.get(index) else {
@@ -292,6 +299,7 @@ mod tests {
         let events = candidates(
             &motion,
             std::slice::from_ref(&impact),
+            &[(0, 8)],
             Some(&court),
             1000,
             200,
@@ -304,6 +312,7 @@ mod tests {
         assert!(candidates(
             &motion,
             std::slice::from_ref(&impact),
+            &[(0, 8)],
             None,
             1000,
             200,
@@ -312,7 +321,120 @@ mod tests {
         .unwrap()
         .is_empty());
         cancel.store(true, Ordering::Release);
-        assert!(candidates(&motion, &[impact], Some(&court), 1000, 200, &cancel).is_err());
+        assert!(candidates(
+            &motion,
+            &[impact],
+            &[(0, 8)],
+            Some(&court),
+            1000,
+            200,
+            &cancel
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn early_in_court_player_like_rebound_is_not_a_ground_boundary() {
+        let court = CourtTransform::new([[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]]).unwrap();
+        let mut motion = volley_core::ball_interpolation::StabilizedBallMotion {
+            points: [46., 55., 65., 75., 103., 97., 91., 85., 79.]
+                .into_iter()
+                .map(|y| Some([0.3, y / 200.]))
+                .collect(),
+            interpolated: vec![false; 9],
+            rejected_frames: vec![],
+            confidence_frames: 9,
+            observed_frames: 9,
+        };
+        motion.points.resize(100, None);
+        motion.interpolated.resize(100, false);
+        let impact = volley_core::motion::TrajectoryBreak {
+            frame: 4,
+            position: [300., 103.],
+            motion: Default::default(),
+            fit_error: 0.5,
+            before_frames: vec![0, 1, 2, 3],
+            after_frames: vec![5, 6, 7, 8],
+            contact_observed: true,
+        };
+        let cancel = AtomicBool::new(false);
+        let events = candidates(
+            &motion,
+            std::slice::from_ref(&impact),
+            &[(0, 99)],
+            Some(&court),
+            1000,
+            200,
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            events.is_empty(),
+            "early in-court rebound must not end a rally: {events:?}"
+        );
+        let near_end = candidates(
+            &motion,
+            std::slice::from_ref(&impact),
+            &[(0, 49)],
+            Some(&court),
+            1000,
+            200,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(near_end.len(), 1);
+        assert_eq!(near_end[0].frame, 4);
+        assert_eq!(near_end[0].landing, "near_half");
+        let just_too_early = candidates(
+            &motion,
+            std::slice::from_ref(&impact),
+            &[(0, 50)],
+            Some(&court),
+            1000,
+            200,
+            &cancel,
+        )
+        .unwrap();
+        assert!(just_too_early.is_empty());
+        let outside_scope = candidates(
+            &motion,
+            std::slice::from_ref(&impact),
+            &[(5, 99)],
+            Some(&court),
+            1000,
+            200,
+            &cancel,
+        )
+        .unwrap();
+        assert!(outside_scope.is_empty());
+        let mut line_impact = impact;
+        line_impact.position[0] = 100.;
+        for point in motion.points.iter_mut().flatten() {
+            point[0] = 0.1;
+        }
+        let line = candidates(
+            &motion,
+            std::slice::from_ref(&line_impact),
+            &[(0, 99)],
+            Some(&court),
+            1000,
+            200,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(line[0].landing, "line_uncertain");
+        line_impact.contact_observed = false;
+        let unobserved_line = candidates(
+            &motion,
+            &[line_impact],
+            &[(0, 99)],
+            Some(&court),
+            1000,
+            200,
+            &cancel,
+        )
+        .unwrap();
+        assert!(unobserved_line.is_empty());
     }
 
     #[test]

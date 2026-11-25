@@ -483,7 +483,7 @@ pub(crate) fn run_joint_pair(
             ball_scan.decode.decoded_frames,
             rally_settings,
             stabilizer_settings,
-            |motion| {
+            |motion, preliminary_intervals| {
                 trajectory_sha =
                     crate::cpu_touches::write_ball_trajectory(&ball.folder, motion, cancelled)?;
                 report(
@@ -500,6 +500,7 @@ pub(crate) fn run_joint_pair(
                 let contacts = crate::cpu_touches::ground_stage::candidates(
                     motion,
                     &breaks,
+                    preliminary_intervals,
                     court.as_ref().and_then(|c| c.transform.as_ref()),
                     dimensions.0,
                     dimensions.1,
@@ -532,7 +533,7 @@ pub(crate) fn run_joint_pair(
         let mut mask_value = serde_json::to_value(&mask)
             .map_err(|error| format!("Serialize primary rally mask: {error}"))?;
         mask_value["selected_frames"] = json!(selected_frames);
-        mask_value["ground_boundary_version"] = json!("ground_ends_rally_v1");
+        mask_value["ground_boundary_version"] = json!("ground_ends_rally_v2");
         mask_value["ground_detector"] = ground_summary;
         mask_value["ball_stabilizer"]["trajectory_sha256"] = json!(trajectory_sha);
         mask_value["ball_stabilizer"]["confidence_frames"] = json!(trajectory.confidence_frames);
