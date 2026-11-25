@@ -1447,7 +1447,7 @@ fn requested_gpu_model_stack(detector: DetectorVariant) -> &'static str {
 fn rally_pipeline_enabled(request: &StartRequest) -> bool {
     request.gpu.pose_enabled
         && request.mode.allows_gpu_execution()
-        && std::env::var("VOLLEY_RALLY_PIPELINE").as_deref() == Ok("1")
+        && std::env::var("VOLLEY_RALLY_PIPELINE").as_deref() != Ok("0")
 }
 fn compatible_version(saved: &Value, request: &StartRequest, identity: &Value) -> bool {
     saved["schema"] == SCHEMA
@@ -1467,6 +1467,7 @@ fn find_reusable(
     request: &StartRequest,
     identity: &Value,
     current_id: &str,
+    rally_blocks: bool,
 ) -> ExistingVersions {
     let mut matches = ExistingVersions::default();
     // A newly trained or replaced TCN must never reuse a cached CPU Touch run
@@ -1520,7 +1521,7 @@ fn find_reusable(
             continue;
         };
         let complete_gpu = gpu_lineage_valid(&project, request, identity, &saved);
-        if rally_pipeline_enabled(request)
+        if rally_blocks
             && (!complete_gpu
                 || saved["status"] != "complete"
                 || !decode_profiles(
@@ -1547,8 +1548,7 @@ fn find_reusable(
                 gpu_lineage_valid(&project, &without_pose, identity, &saved)
             };
         if saved["id"] != id
-            || (saved["rally_block_pipeline"].as_bool().unwrap_or(false)
-                != rally_pipeline_enabled(request))
+            || (saved["rally_block_pipeline"].as_bool().unwrap_or(false) != rally_blocks)
             || !compatible_version(&saved, request, identity)
             || !(complete_gpu || recoverable_pose)
             || saved["gpu_rally_mask"]["ground_detector"]["court_revision"] != json!(court_revision)
@@ -1925,7 +1925,13 @@ async fn pipeline(
         "Проверка GPU/CPU профилей, подготовленного видео и подписанных идентификаторов источника",
     )?;
     let reusable = if request.mode.allows_gpu_execution() {
-        let reusable = find_reusable(app, request, &identity, current_id);
+        let reusable = find_reusable(
+            app,
+            request,
+            &identity,
+            current_id,
+            rally_pipeline_enabled(request),
+        );
         let matches = |saved: &Value| saved["original_source"] == original_source;
         ExistingVersions {
             full: reusable.full.filter(|saved| matches(saved)),
@@ -1961,6 +1967,7 @@ async fn pipeline(
         status["analysis_range"] = source["analysis_range"].clone();
         status["gpu_jobs"] = source["gpu_jobs"].clone();
         status["shared_pose"] = source["shared_pose"].clone();
+        status["rally_block_pipeline"] = source["rally_block_pipeline"].clone();
         status["pose_frame_progress"] = source["pose_frame_progress"].clone();
         status["profile"]["gpu"] = json!(gpu);
         status["gpu_model_stack"] = source["gpu_model_stack"].clone();
@@ -4674,12 +4681,14 @@ mod branching_tests {
             inference_limit: tokio::sync::Semaphore::new(1),
             full_inference: crate::inference_full::FullInferenceManager::new(),
         };
-        let matching = find_reusable(&state, &request, &identity, &"2".repeat(32));
+        let matching = find_reusable(&state, &request, &identity, &"2".repeat(32), false);
         assert!(
             matching.full.is_some(),
             "unchanged settings must reuse both versions"
         );
         assert!(matching.gpu.is_some());
+        let new_pipeline = find_reusable(&state, &request, &identity, &"2".repeat(32), true);
+        assert!(new_pipeline.gpu.is_none() && new_pipeline.full.is_none());
         assert!(compatible_version(&saved, &request, &identity));
 
         let mut failed_pose = saved.clone();
@@ -4689,7 +4698,7 @@ mod branching_tests {
         storage::write_json_atomic(&directory.join("status.json"), &failed_pose).unwrap();
         request.gpu.pose_enabled = true;
         request.mode = PipelineMode::Gpu;
-        let recovered = find_reusable(&state, &request, &identity, &"2".repeat(32));
+        let recovered = find_reusable(&state, &request, &identity, &"2".repeat(32), false);
         assert!(recovered.full.is_none());
         assert!(
             recovered.gpu.is_some(),
@@ -4697,9 +4706,11 @@ mod branching_tests {
         );
         failed_pose["gpu_jobs"]["pose"] = json!("9".repeat(32));
         storage::write_json_atomic(&directory.join("status.json"), &failed_pose).unwrap();
-        assert!(find_reusable(&state, &request, &identity, &"2".repeat(32))
-            .gpu
-            .is_none());
+        assert!(
+            find_reusable(&state, &request, &identity, &"2".repeat(32), false)
+                .gpu
+                .is_none()
+        );
         request.gpu.pose_enabled = false;
         request.mode = PipelineMode::Full;
         storage::write_json_atomic(&directory.join("status.json"), &saved).unwrap();
@@ -4712,14 +4723,16 @@ mod branching_tests {
             old_profile["profile"]["gpu"][key] = json!(true);
         }
         storage::write_json_atomic(&directory.join("status.json"), &old_profile).unwrap();
-        assert!(find_reusable(&state, &request, &identity, &"2".repeat(32))
-            .full
-            .is_some());
+        assert!(
+            find_reusable(&state, &request, &identity, &"2".repeat(32), false)
+                .full
+                .is_some()
+        );
         assert!(selected_gpu(&state, &request, &identity, &analysis).is_ok());
         for (players, pose) in [(false, true), (true, false), (false, false)] {
             request.post.interpolate_players = players;
             request.post.interpolate_pose = pose;
-            let changed = find_reusable(&state, &request, &identity, &"2".repeat(32));
+            let changed = find_reusable(&state, &request, &identity, &"2".repeat(32), false);
             assert!(changed.full.is_none());
             assert!(changed.gpu.is_some());
             assert!(!cpu_lineage_valid(&project_dir, &request, &saved, None));
@@ -4727,7 +4740,7 @@ mod branching_tests {
         request.post.interpolate_players = true;
         request.post.interpolate_pose = true;
         request.post.ball_stabilizer.max_gap_frames = 8;
-        let changed = find_reusable(&state, &request, &identity, &"2".repeat(32));
+        let changed = find_reusable(&state, &request, &identity, &"2".repeat(32), false);
         assert!(
             changed.full.is_none(),
             "changed Ball Stabilizer must invalidate CPU results"
@@ -4798,14 +4811,14 @@ mod branching_tests {
                 !cpu_lineage_valid(&project_dir, &request, &saved, None),
                 "Old CPU evidence must not be reused after pose policy changes: {field}"
             );
-            let reusable = find_reusable(&state, &request, &identity, &"2".repeat(32));
+            let reusable = find_reusable(&state, &request, &identity, &"2".repeat(32), false);
             assert!(reusable.full.is_none());
             assert!(reusable.gpu.is_some());
         }
         storage::write_json_atomic(&touch_manifest, &original_touch).unwrap();
         assert!(cpu_lineage_valid(&project_dir, &request, &saved, None));
         request.post.touches.algorithm = TouchAlgorithm::PoseMotion;
-        let obsolete_pose = find_reusable(&state, &request, &identity, &"2".repeat(32));
+        let obsolete_pose = find_reusable(&state, &request, &identity, &"2".repeat(32), false);
         assert!(
             obsolete_pose.full.is_none(),
             "PoseMotion v1 must not be reused after the body-contact gate is upgraded"
@@ -4818,7 +4831,7 @@ mod branching_tests {
 
         // Reconstructing touches differently reuses the same GPU analysis.
         request.post.touches.threshold = 0.61;
-        let changed_cpu = find_reusable(&state, &request, &identity, &"2".repeat(32));
+        let changed_cpu = find_reusable(&state, &request, &identity, &"2".repeat(32), false);
         assert!(changed_cpu.full.is_none());
         assert!(
             changed_cpu.gpu.is_some(),
@@ -4843,12 +4856,13 @@ mod branching_tests {
 
         // Changing inference parameters or video identity cannot reuse the GPU branch.
         request.gpu.stride = 8;
-        let changed_gpu = find_reusable(&state, &request, &identity, &"2".repeat(32));
+        let changed_gpu = find_reusable(&state, &request, &identity, &"2".repeat(32), false);
         assert!(changed_gpu.full.is_none() && changed_gpu.gpu.is_none());
         assert!(!compatible_version(&saved, &request, &identity));
         request.gpu.stride = 9;
         let other_source = json!({"bytes":2048,"mtime_ns":123456790u64});
-        let replaced_source = find_reusable(&state, &request, &other_source, &"2".repeat(32));
+        let replaced_source =
+            find_reusable(&state, &request, &other_source, &"2".repeat(32), false);
         assert!(replaced_source.gpu.is_none() && replaced_source.full.is_none());
         assert!(!compatible_version(&saved, &request, &other_source));
         assert!(!gpu_lineage_valid(
