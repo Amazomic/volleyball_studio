@@ -32,6 +32,9 @@ struct Track {
     last_head: Option<(u64, [f64; 2])>,
     first_pose: Option<(u64, PoseEvidence)>,
     last_pose: Option<(u64, PoseEvidence)>,
+    first_motion: Option<(u64, [f64; 2])>,
+    recent_motion: Option<(u64, [f64; 2])>,
+    prior_motion: Option<(u64, [f64; 2])>,
     first_box: Option<[f64; 4]>,
     last_box: Option<[f64; 4]>,
     first_reliable: Option<(u64, [f64; 4])>,
@@ -45,9 +48,126 @@ struct Simultaneous {
     total: u32,
     complementary: u32,
     same_pose: u32,
+    partial_pose: u32,
     distinct_pose: u32,
     switched_forward: u32,
     switched_backward: u32,
+}
+
+fn partial_pose_agreement(a: &Observation, b: &Observation) -> bool {
+    let (Some(a_pose), Some(b_pose)) = (a.pose, b.pose) else {
+        return false;
+    };
+    let (a_pose, b_pose) = (
+        PoseEvidence { joints: a_pose },
+        PoseEvidence { joints: b_pose },
+    );
+    if !a_pose.valid()
+        || !b_pose.valid()
+        || a_pose.distinct_observation(&b_pose)
+        || !volley_core::tracker::same_head_body_duplicate(&a.detection, &b.detection)
+    {
+        return false;
+    }
+    let mut shared = 0;
+    let mut near = 0;
+    let mut body = 0;
+    for (i, (p, q)) in a_pose.joints.iter().zip(&b_pose.joints).enumerate() {
+        if i >= 11 || p[2].min(q[2]) < 0.32 {
+            continue;
+        }
+        shared += 1;
+        if (p[0] - q[0]).hypot(p[1] - q[1]) <= 0.006 {
+            near += 1;
+            body += usize::from(i >= 5);
+        }
+    }
+    near >= 6 && body >= 4 && near * 5 >= shared * 4
+}
+
+fn motion_point(pose: &PoseEvidence) -> Option<[f64; 2]> {
+    let (a, b) = (pose.joints[5], pose.joints[6]);
+    (a[2].min(b[2]) >= 0.32).then_some([(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5])
+}
+
+fn translated_pose_gap(
+    old: &Track,
+    new: &Track,
+    old_at: u64,
+    new_at: u64,
+    a: &PoseEvidence,
+    b: &PoseEvidence,
+) -> Option<f64> {
+    let elapsed = new_at.checked_sub(old_at)?;
+    if !(2..=90).contains(&elapsed) {
+        return None;
+    }
+    let mut offsets = Vec::new();
+    let mut body = 0;
+    for (i, (p, q)) in a.joints.iter().zip(&b.joints).enumerate() {
+        if p[2].min(q[2]) >= 0.32 {
+            offsets.push([q[0] - p[0], q[1] - p[1]]);
+            body += usize::from(i >= 5);
+        }
+    }
+    if offsets.len() < 6 || body < 4 {
+        return None;
+    }
+    let mut xs = offsets.iter().map(|p| p[0]).collect::<Vec<_>>();
+    let mut ys = offsets.iter().map(|p| p[1]).collect::<Vec<_>>();
+    xs.sort_by(f64::total_cmp);
+    ys.sort_by(f64::total_cmp);
+    let delta = [xs[xs.len() / 2], ys[ys.len() / 2]];
+    let distance = delta[0].hypot(delta[1]);
+    if distance > (0.035 + (elapsed - 1) as f64 * 0.003).min(0.15)
+        || offsets
+            .iter()
+            .filter(|p| (p[0] - delta[0]).hypot(p[1] - delta[1]) <= 0.015)
+            .count()
+            * 5
+            < offsets.len() * 4
+    {
+        return None;
+    }
+    let (left, right) = (motion_point(a)?, motion_point(b)?);
+    let error = |velocity: [f64; 2]| {
+        (delta[0] - velocity[0] * elapsed as f64).hypot(delta[1] - velocity[1] * elapsed as f64)
+    };
+    let old_error = old
+        .recent_motion
+        .into_iter()
+        .chain(old.prior_motion)
+        .filter(|(at, _)| (4..=18).contains(&old_at.saturating_sub(*at)))
+        .map(|(at, p)| {
+            error([
+                (left[0] - p[0]) / (old_at - at) as f64,
+                (left[1] - p[1]) / (old_at - at) as f64,
+            ])
+        })
+        .min_by(f64::total_cmp);
+    let new_error = new
+        .first_motion
+        .filter(|(at, _)| (4..=18).contains(&at.saturating_sub(new_at)))
+        .map(|(at, p)| {
+            error([
+                (p[0] - right[0]) / (at - new_at) as f64,
+                (p[1] - right[1]) / (at - new_at) as f64,
+            ])
+        });
+    let tolerance = (0.018 + distance * 0.35).min(0.065);
+    let best = old_error
+        .into_iter()
+        .chain(new_error)
+        .min_by(f64::total_cmp)?;
+    if best > tolerance
+        || old_error
+            .into_iter()
+            .chain(new_error)
+            .any(|e| e > 2.0 * tolerance)
+    {
+        return None;
+    }
+    Some(distance + best)
 }
 
 fn complementary_parts(a: &Candidate, b: &Candidate) -> bool {
@@ -193,7 +313,16 @@ fn find_links(
                 .map(|joints| PoseEvidence { joints })
                 .filter(PoseEvidence::valid)
             {
-                track.first_pose.get_or_insert((frame, pose));
+                let (first_at, _) = *track.first_pose.get_or_insert((frame, pose));
+                if let Some(point) = motion_point(&pose) {
+                    if track.first_motion.is_none() && (5..=12).contains(&(frame - first_at)) {
+                        track.first_motion = Some((frame, point));
+                    }
+                    if track.recent_motion.is_none_or(|(at, _)| frame - at >= 6) {
+                        track.prior_motion = track.recent_motion;
+                        track.recent_motion = Some((frame, point));
+                    }
+                }
                 track.last_pose = Some((frame, pose));
             }
             if let Some(head) = observation.detection.head_point_norm {
@@ -211,6 +340,7 @@ fn find_links(
                 }
                 let evidence = pairs.entry(pair).or_default();
                 evidence.total += 1;
+                evidence.partial_pose += u32::from(partial_pose_agreement(a, b));
                 if let (Some(a), Some(b)) = (a.pose, b.pose) {
                     let (a, b) = (PoseEvidence { joints: a }, PoseEvidence { joints: b });
                     evidence.same_pose += u32::from(a.same_observation(&b));
@@ -331,24 +461,55 @@ fn find_links(
             let second = tracks.get(&b)?;
             let start = first.start?.min(second.start?);
             let end = first.end.max(second.end);
-            if !scope.is_some_and(|mask| mask.same_interval(start, end))
-                || evidence.distinct_pose > 0
-            {
+            if evidence.distinct_pose > 0 {
                 return None;
             }
-            let overlap = evidence.same_pose >= 2 && evidence.same_pose * 2 >= evidence.total;
-            let alternating = evidence.switched_forward >= 2
+            let boundary_start = first.start?.max(second.start?);
+            let boundary_end = first.end.min(second.end);
+            let ordered = (first.start? < second.start? && first.end < second.end)
+                || (second.start? < first.start? && second.end < first.end);
+            let partial_boundary = ordered
+                && first.observed >= 12
+                && second.observed >= 12
+                && boundary_start <= boundary_end
+                && boundary_end - boundary_start <= 2
+                && (1..=3).contains(&evidence.total)
+                && evidence.partial_pose == evidence.total
+                && scope
+                    .is_some_and(|mask| mask.same_confirmed_rally(boundary_start, boundary_end));
+            let within = scope.is_some_and(|mask| mask.same_interval(start, end));
+            let overlap =
+                within && evidence.same_pose >= 2 && evidence.same_pose * 2 >= evidence.total;
+            let alternating = within
+                && evidence.switched_forward >= 2
                 && evidence.switched_backward >= 2
                 && evidence.same_pose == evidence.total;
-            (overlap || alternating).then_some((
+            (overlap || alternating || partial_boundary).then_some((
                 a,
                 b,
-                evidence.same_pose + evidence.switched_forward + evidence.switched_backward,
+                evidence.same_pose
+                    + evidence.switched_forward
+                    + evidence.switched_backward
+                    + evidence.partial_pose,
+                partial_boundary && !overlap && !alternating,
             ))
         })
         .collect::<Vec<_>>();
-    pose_links.sort_by_key(|&(a, b, n)| (std::cmp::Reverse(n), a, b));
-    for (a, b, _) in pose_links {
+    pose_links.sort_by_key(|&(a, b, n, _)| (std::cmp::Reverse(n), a, b));
+    let ambiguous_partial = pose_links
+        .iter()
+        .filter(|(_, _, _, partial)| *partial)
+        .filter_map(|&(a, b, _, _)| {
+            pose_links
+                .iter()
+                .any(|&(x, y, _, _)| (a, b) != (x, y) && (a == x || a == y || b == x || b == y))
+                .then_some((a, b))
+        })
+        .collect::<BTreeSet<_>>();
+    for (a, b, _, _) in pose_links {
+        if ambiguous_partial.contains(&(a, b)) {
+            continue;
+        }
         let root_a = aliases.get(&a).copied().unwrap_or(a);
         let root_b = aliases.get(&b).copied().unwrap_or(b);
         if root_a == root_b {
@@ -367,7 +528,8 @@ fn find_links(
         let conflict = left.iter().any(|&x| {
             right.iter().any(|&y| {
                 pairs.get(&(x.min(y), x.max(y))).is_some_and(|e| {
-                    e.distinct_pose > 0 || (e.total > 0 && e.same_pose * 2 < e.total)
+                    e.distinct_pose > 0
+                        || (e.total > 0 && e.same_pose.max(e.partial_pose) * 2 < e.total)
                 })
             })
         });
@@ -411,6 +573,19 @@ fn find_links(
                             && old_pose
                                 .similarity(&new_pose, new_at - old_at)
                                 .is_some_and(|score| score >= 0.72)
+                        {
+                            gap_candidates.push((
+                                distance + 0.0006 * (start - old.end) as f64,
+                                old_id,
+                                new_id,
+                                None,
+                            ));
+                            continue;
+                        }
+                    }
+                    if scope.is_some_and(|mask| mask.same_confirmed_rally(old.end, start)) {
+                        if let Some(distance) =
+                            translated_pose_gap(old, new, old_at, new_at, &old_pose, &new_pose)
                         {
                             gap_candidates.push((
                                 distance + 0.0006 * (start - old.end) as f64,
@@ -670,6 +845,112 @@ mod tests {
         })
     }
 
+    #[test]
+    fn single_frame_partial_pose_handoff_keeps_first_id_across_rally_context() {
+        for distinct in [false, true] {
+            let path = std::env::temp_dir()
+                .join(format!("volley-partial-handoff-{}.jsonl", Uuid::new_v4()));
+            let mut raw = Vec::new();
+            for frame in 0..90_u64 {
+                let mut players = Vec::new();
+                for (id, start, end) in [(5, 0, 25), (7, 25, 89)] {
+                    if !(start..=end).contains(&frame) {
+                        continue;
+                    }
+                    let x = 0.43 + if distinct && id == 7 { 0.035 } else { 0.0 };
+                    let joints: [[f64; 3]; 17] = std::array::from_fn(|i| {
+                        [
+                            x + (i % 2) as f64 * 0.010,
+                            0.44 + (i / 2) as f64 * 0.009,
+                            if i < 11 { 0.43 } else { 0.20 },
+                        ]
+                    });
+                    players.push(json!({"track_id":id,"pose":joints,"measurement_source":"rtmpose_rgb",
+                        "detection":candidate(frame, [x-0.01,0.43,x+0.023,if id==5 {0.49} else {0.56}], Some([x,0.44]))}));
+                }
+                serde_json::to_writer(
+                    &mut raw,
+                    &json!({"frame_index":frame,"tracked_players":players}),
+                )
+                .unwrap();
+                raw.push(b'\n');
+            }
+            fs::write(&path, &raw).unwrap();
+            let sha = format!("{:x}", Sha256::digest(&raw));
+            let scope = rally_scope(vec![(0, 49), (60, 89)]);
+            let (_, merged, removed) = stitch(&path, &sha, 90, Some(&scope), true).unwrap();
+            assert_eq!((merged, removed), if distinct { (0, 0) } else { (1, 1) });
+            if !distinct {
+                let rows = fs::read_to_string(&path).unwrap();
+                for line in rows.lines() {
+                    let row: Value = serde_json::from_str(line).unwrap();
+                    assert_eq!(row["tracked_players"].as_array().unwrap().len(), 1);
+                    assert_eq!(row["tracked_players"][0]["track_id"], 5);
+                }
+            }
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn moving_pose_gap_reconnects_and_interpolates_under_original_id() {
+        let path = std::env::temp_dir().join(format!("volley-moving-gap-{}.jsonl", Uuid::new_v4()));
+        let mut raw = Vec::new();
+        for frame in 0..85_u64 {
+            let id = if frame <= 24 {
+                Some(5)
+            } else if frame >= 55 {
+                Some(7)
+            } else {
+                None
+            };
+            let x = 0.30 + frame as f64 * 0.002;
+            let players = id
+                .map(|id| {
+                    let joints: [[f64; 3]; 17] = std::array::from_fn(|i| {
+                        [
+                            x + (i % 2) as f64 * 0.018,
+                            0.35 + (i / 2) as f64 * 0.025,
+                            0.85,
+                        ]
+                    });
+                    vec![
+                        json!({"track_id":id,"pose":joints,"measurement_source":"rtmpose_rgb",
+                    "detection":candidate(frame,[x-0.02,0.33,x+0.04,0.65],Some([x,0.35]))}),
+                    ]
+                })
+                .unwrap_or_default();
+            serde_json::to_writer(
+                &mut raw,
+                &json!({"frame_index":frame,"tracked_players":players}),
+            )
+            .unwrap();
+            raw.push(b'\n');
+        }
+        fs::write(&path, &raw).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&raw));
+        let scope = rally_scope(vec![(0, 84)]);
+        let (sha, merged, removed) = stitch(&path, &sha, 85, Some(&scope), true).unwrap();
+        assert_eq!((merged, removed), (1, 0));
+        let (_, filled) =
+            super::super::fill_confirmed_track_gaps(&path, &sha, 85, Some(&scope), None).unwrap();
+        assert_eq!(filled, 30);
+        let rows = fs::read_to_string(&path).unwrap();
+        for line in rows.lines() {
+            let row: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(row["tracked_players"].as_array().unwrap().len(), 1);
+            assert_eq!(row["tracked_players"][0]["track_id"], 5);
+            let frame = row["frame_index"].as_u64().unwrap();
+            if (25..55).contains(&frame) {
+                assert_eq!(row["interpolated_track_ids"], json!([5]));
+                assert_eq!(
+                    row["tracked_players"][0]["measurement_source"],
+                    "interpolated_track_bbox"
+                );
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
     #[test]
     fn repeated_shared_joints_merge_full_tracks_with_long_overlap() {
         for distinct in [false, true] {

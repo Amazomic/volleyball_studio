@@ -78,7 +78,8 @@ pub(super) fn locate_refined(
             || record["source_fusion_id"] != fusion_id
             || record["source_fusion_sha256"] != fusion_sha
             || record["player_frame_scope_sha256"].as_str() != mask_sha
-            || record["track_association_version"] != TRACK_ASSOCIATION_VERSION
+            || (record["track_association_version"] != TRACK_ASSOCIATION_VERSION
+                && record["track_association_version"] != "bytetrack_rally_partial_pose_v15")
             || record["pose_refinement_policy"] != POSE_REFINEMENT_POLICY
             || record["refined_pose_model_sha256"] != volley_inference::pose::MODEL_SHA256
             || record["refined_pose_source_replay_id"] != id
