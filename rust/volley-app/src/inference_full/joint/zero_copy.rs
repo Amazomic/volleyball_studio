@@ -104,8 +104,8 @@ pub(super) fn run(
     original: &Path,
     source: ZeroCopySource,
     range: Option<volley_media::raw_decoder::AnalysisRange>,
-    ball_engine: &mut Engine,
-    person_engine: &mut PersonEngine,
+    ball_engine: Option<&mut Engine>,
+    person_engine: Option<&mut PersonEngine>,
     pose: Option<&GpuPoseStage>,
     ball_writer: Option<&mut EvidenceWriter>,
     person_writer: Option<&mut EvidenceWriter>,
@@ -118,6 +118,7 @@ pub(super) fn run(
     report: impl FnMut(f64, u64) -> Result<(), String>,
 ) -> Result<DecodeSummary, String> {
     if matches!(pass, ScanPass::PlayersOnly(_)) {
+        let person_engine = person_engine.ok_or("Missing RF-DETR engine")?;
         let batch_size = person_engine.batch_size();
         let allocate = || -> Result<PersonBatch, String> {
             Ok(PersonBatch {
@@ -210,7 +211,7 @@ fn run_inner(
     original: &Path,
     source: ZeroCopySource,
     range: Option<volley_media::raw_decoder::AnalysisRange>,
-    ball_engine: &mut Engine,
+    mut ball_engine: Option<&mut Engine>,
     mut person_queue: Option<&mut FrameQueue<PersonBatch, Vec<RawDetection>>>,
     batch_size: usize,
     pose: Option<&GpuPoseStage>,
@@ -228,9 +229,16 @@ fn run_inner(
         return Err("cancelled".into());
     }
     let gpu = GpuPreprocessor::new()?;
-    let ball_input = (!matches!(pass, ScanPass::PlayersOnly(_)))
-        .then(|| ball_engine.allocate_cuda_clip_input())
-        .transpose()?;
+    let ball_input = if matches!(pass, ScanPass::BallOnly) {
+        Some(
+            ball_engine
+                .as_deref_mut()
+                .ok_or("Missing VBallNet engine")?
+                .allocate_cuda_clip_input()?,
+        )
+    } else {
+        None
+    };
     let mut observations = Vec::<RawDetection>::new();
     let mut prepared: Option<PersonBatch> = None;
     let mut cached_window: Option<Vec<RawDetection>> = None;
@@ -340,6 +348,8 @@ fn run_inner(
                     Some(records) => records,
                     None => {
                         let outputs = ball_engine
+                            .as_deref_mut()
+                            .ok_or("Missing VBallNet engine")?
                             .infer_cuda_clip(input)
                             .map_err(|error| window_error(ModelKind::Ball, first, &error))?;
                         decode_vball(&outputs, first, 0.05)?

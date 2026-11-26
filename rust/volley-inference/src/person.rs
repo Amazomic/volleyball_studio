@@ -265,11 +265,11 @@ impl PersonEngine {
         self.batch
     }
 
-    pub fn model_file(&self) -> &'static str {
-        if self.batch == 4 {
+    pub fn primary_model_file(variant: DetectorVariant, memory_mb: u64) -> &'static str {
+        if Self::primary_batch_size(variant, memory_mb) == 4 {
             RFDETR_MEDIUM_BATCH4_FILE
         } else {
-            self.variant.file()
+            variant.file()
         }
     }
 

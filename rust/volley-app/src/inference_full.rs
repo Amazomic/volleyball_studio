@@ -4,6 +4,7 @@
 mod checkpoint;
 #[cfg(any(unix, windows))]
 mod joint;
+pub(crate) mod stage_queue;
 use crate::{
     inference_stream, preparation, project_guard, projects,
     storage::{self, ApiError, ApiResult},

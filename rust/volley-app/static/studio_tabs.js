@@ -35,28 +35,34 @@
   // defaults. A changed native default never gets silently overwritten.
   const analysisFormCache=(()=>{
     const prefix="volley:studio-analysis-form:v1:";
-    const read=project=>{
+    const read=(project,video)=>{
       if(!/^[a-f0-9]{12}$/.test(project||""))return null;
       try{
-        const raw=localStorage.getItem(prefix+project);
+        const raw=(video?localStorage.getItem(prefix+project+":"+encodeURIComponent(video)):null)||
+          localStorage.getItem(prefix+project);
         if(!raw||raw.length>8192)return null;
         const data=JSON.parse(raw);
-        if(!data||![1,2,3].includes(data.version)||!data.fields||typeof data.fields!=="object")return null;
+        if(!data||![1,2,3].includes(data.version)||!data.fields||typeof data.fields!=="object"||(video&&data.video!==video))return null;
         if(data.version!==3){
           const fields={...data.fields};
           delete fields["studio-post-require-pose"];
           const migrated={version:3,video:data.video,fields};
           localStorage.setItem(prefix+project,JSON.stringify(migrated));
+          if(migrated.video)localStorage.setItem(prefix+project+":"+encodeURIComponent(migrated.video),JSON.stringify(migrated));
           return migrated;
         }
+        if(data.video&&!localStorage.getItem(prefix+project+":"+encodeURIComponent(data.video)))
+          localStorage.setItem(prefix+project+":"+encodeURIComponent(data.video),JSON.stringify(data));
         return data;
       }catch{return null;}
     };
     const write=(project,video,fields)=>{
       if(!/^[a-f0-9]{12}$/.test(project||""))return;
-      try{localStorage.setItem(prefix+project,JSON.stringify({
-        version:3,video,fields
-      }));}catch{}
+      try{
+        const snapshot=JSON.stringify({version:3,video,fields});
+        if(video)localStorage.setItem(prefix+project+":"+encodeURIComponent(video),snapshot);
+        localStorage.setItem(prefix+project,snapshot);
+      }catch{}
     };
     return {read,write};
   })();
@@ -278,8 +284,8 @@
     }
     analysisFormCache.write(projectId(),ui.video.value,fields);
   };
-  const restoreAnalysisSettings=project=>{
-    const saved=analysisFormCache.read(project);
+  const restoreAnalysisSettings=(project,video)=>{
+    const saved=analysisFormCache.read(project,video);
     for(const input of allProfileFields()){
       applyFieldValue(input,input.dataset.default);
       const row=saved?.fields?.[input.id];
@@ -1242,9 +1248,11 @@
       const pct=Number(video.progress_percent);
       const range=video.analysis_range;
       const segment=range?historyDuration(range.start_sec*1000)+" – "+historyDuration(range.end_sec*1000):"Весь файл";
-      const rallies=Number.isSafeInteger(video.rallies_total)?" · "+video.rallies_total+" розыгр.":"";
+      const rallies=Number.isSafeInteger(video.rallies_total)?" · "+
+        (Number.isSafeInteger(video.rallies_completed)?video.rallies_completed+"/":"")+video.rallies_total+" розыгр.":"";
+      const stage=video.status==="running"&&video.stage?" · "+video.stage:"";
       info.append(make("span","",name+" · "+segment),
-        make("span","",(labels[video.status]||video.status)+rallies+" · "+(Number.isFinite(pct)?pct.toFixed(1)+"%":"—")));
+        make("span","",(labels[video.status]||video.status)+stage+rallies+" · "+(Number.isFinite(pct)?pct.toFixed(1)+"%":"—")));
       const progress=make("progress");progress.max=100;
       progress.value=Number.isFinite(pct)?Math.max(0,Math.min(100,pct)):0;
       progress.setAttribute("aria-label",name+" · прогресс");
@@ -1693,6 +1701,7 @@
       videos.includes(savedVideo)?savedVideo:
       videos[0]||"");
     state.formProject=project;
+    restoreAnalysisSettings(project,ui.video.value);
     window.VolleyballEditor?.load(project,ui.video.value,true);
     updateProfile();
     renderGraphSummary();
@@ -1722,6 +1731,17 @@
       payload.post=postProfile();
       if(mode==="post")payload.source_analysis_id=source;
       const allVideos=mode==="full"&&Array.from(ui.video.options||[]).filter(option=>option.value).length>1;
+      if(allVideos){
+        saveAnalysisSettings();
+        const profiles=Object.create(null);
+        try{
+          for(const option of Array.from(ui.video.options||[]).filter(item=>item.value)){
+            restoreAnalysisSettings(project,option.value);
+            profiles[option.value]={gpu:gpuProfile(),post:postProfile()};
+          }
+        }finally{restoreAnalysisSettings(project,video);}
+        payload.video_profiles=profiles;
+      }
       const response=await startWithRecovery(payload,allVideos);
       if(response.schema!=="volley-studio-pipeline/1"||
           !/^[a-f0-9]{32}$/.test(String(response.id||"")))
@@ -1940,6 +1960,7 @@
   ui.gpuOnly.addEventListener("click",()=>launchPipeline("gpu"));
   ui.postOnly.addEventListener("click",()=>launchPipeline("post"));
   ui.video.addEventListener("change",()=>{
+    restoreAnalysisSettings(projectId(),ui.video.value);
     saveAnalysisSettings();
     window.VolleyballEditor?.load(projectId(),ui.video.value);
     updateProfile();
@@ -1953,6 +1974,8 @@
     if([...ui.video.options].some(option=>option.value===detail.video)&&
         ui.video.value!==detail.video){
       ui.video.value=detail.video;
+      restoreAnalysisSettings(projectId(),ui.video.value);
+      saveAnalysisSettings();
       window.VolleyballEditor?.load(projectId(),ui.video.value);
       renderGraphSummary();
     }

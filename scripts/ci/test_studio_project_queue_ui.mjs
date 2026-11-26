@@ -11,7 +11,7 @@ const section=(from,to)=>{
 const project="a".repeat(12),first="b".repeat(32),second="c".repeat(32);
 const queue={active:true,completed_videos:0,total_videos:2,progress_percent:10,
   videos:[{id:first,video:"first.mp4",status:"running",progress_percent:50,
-    rallies_total:33,analysis_range:{start_sec:38,end_sec:1000}},
+    rallies_total:33,rallies_completed:12,stage:"RF-DETR",analysis_range:{start_sec:38,end_sec:1000}},
   {id:second,video:"second.mp4",status:"queued",progress_percent:0}]};
 const run={schema:"volley-studio-pipeline/1",id:first,project_id:project,
   queue_id:first,video:"first.mp4",status:"running",project_queue:queue};
@@ -69,7 +69,8 @@ assert.equal(target.hidden,false);
 assert.equal(target.children[0].children[0].textContent,"Проект · 0/2 видео");
 assert.equal(target.children[1].value,10);
 assert.equal(target.children[2].children[0].children[0].textContent,"Match A · 38 – 1000");
-assert.match(target.children[2].children[0].children[1].textContent,/33 розыгр/);
+assert.match(target.children[2].children[0].children[1].textContent,/12\/33 розыгр/);
+assert.match(target.children[2].children[0].children[1].textContent,/RF-DETR/);
 assert.match(target.children[3].children[0].children[1].textContent,/В очереди/);
 assert.equal(target.children[3].children[1].value,0);
 renderer(null);

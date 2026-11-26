@@ -11,11 +11,12 @@ use axum::{
     http::HeaderMap,
     Json,
 };
+use inference_full::stage_queue::{acquire_gpu, video_turns, GpuStages, VideoTurn};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -563,6 +564,8 @@ pub struct StartRequest {
     client_request_id: Option<String>,
     #[serde(default)]
     analysis_range: Option<volley_media::raw_decoder::AnalysisRange>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    video_profiles: BTreeMap<String, VideoAnalysisProfile>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -579,6 +582,91 @@ struct StartRequestWire {
     source_analysis_id: Option<String>,
     #[serde(default)]
     client_request_id: Option<String>,
+    #[serde(default)]
+    video_profiles: BTreeMap<String, VideoProfileWire>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct VideoAnalysisProfile {
+    gpu: GpuProfile,
+    post: PostProfile,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VideoProfileWire {
+    #[serde(default = "empty_profile")]
+    gpu: Value,
+    #[serde(default = "empty_profile")]
+    post: Value,
+}
+
+fn decode_start_profile(gpu: Value, post: Value) -> Result<VideoAnalysisProfile, String> {
+    let (gpu, mut post) = decode_profiles(gpu, post)?;
+    gpu.primary_rallies.validate()?;
+    post.ball_stabilizer.validate().map_err(str::to_owned)?;
+    if !(1..=99).contains(&post.auto_assign_threshold_percent) {
+        return Err("Порог сходства для автопривязки должен быть от 1 до 99%".into());
+    }
+    post.touches.algorithm = TouchAlgorithm::BallTrajectory;
+    post.touches.require_pose = false;
+    Ok(VideoAnalysisProfile { gpu, post })
+}
+
+impl StartRequest {
+    fn scoped_to_video(&self, video: &str) -> Self {
+        let mut scoped = self.clone();
+        scoped.video = video.to_owned();
+        if let Some(profile) = self.video_profiles.get(video) {
+            scoped.gpu = profile.gpu.clone();
+            scoped.post = profile.post.clone();
+        }
+        scoped.video_profiles.clear();
+        scoped
+    }
+
+    fn queue_profiles_digest(&self) -> Option<String> {
+        (!self.video_profiles.is_empty()).then(|| {
+            format!(
+                "{:x}",
+                Sha256::digest(json!(self.video_profiles).to_string().as_bytes())
+            )
+        })
+    }
+}
+
+fn validate_queue_profiles(
+    request: &StartRequest,
+    videos: &[String],
+    all_videos: bool,
+) -> Result<(), ApiError> {
+    if request.video_profiles.is_empty() {
+        return Ok(());
+    }
+    if !all_videos
+        || request.video_profiles.len() != videos.len()
+        || videos
+            .iter()
+            .any(|video| !request.video_profiles.contains_key(video))
+    {
+        return Err(storage::bad_request(
+            "Укажите отдельный профиль каждого видео проекта",
+        ));
+    }
+    let primary = request
+        .video_profiles
+        .get(&request.video)
+        .ok_or_else(|| storage::bad_request("Нет профиля выбранного видео"))?;
+    if json!(primary.gpu) != json!(request.gpu) || json!(primary.post) != json!(request.post) {
+        return Err(storage::bad_request(
+            "Профиль выбранного видео не совпадает с профилем запроса",
+        ));
+    }
+    for video in videos {
+        let scoped = request.scoped_to_video(video);
+        validate_start_profile(&scoped)?;
+    }
+    Ok(())
 }
 
 fn empty_profile() -> Value {
@@ -612,14 +700,17 @@ impl TryFrom<StartRequestWire> for StartRequest {
     type Error = String;
 
     fn try_from(wire: StartRequestWire) -> Result<Self, Self::Error> {
-        let (gpu, mut post) = decode_profiles(wire.gpu, wire.post)?;
-        gpu.primary_rallies.validate()?;
-        post.ball_stabilizer.validate().map_err(str::to_owned)?;
-        if !(1..=99).contains(&post.auto_assign_threshold_percent) {
-            return Err("Порог сходства для автопривязки должен быть от 1 до 99%".into());
+        let VideoAnalysisProfile { gpu, post } = decode_start_profile(wire.gpu, wire.post)?;
+        if wire.video_profiles.len() > 100 {
+            return Err("Очередь проекта ограничена 100 видео".into());
         }
-        post.touches.algorithm = TouchAlgorithm::BallTrajectory;
-        post.touches.require_pose = false;
+        let video_profiles = wire
+            .video_profiles
+            .into_iter()
+            .map(|(video, profile)| {
+                decode_start_profile(profile.gpu, profile.post).map(|profile| (video, profile))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
         Ok(Self {
             project_id: wire.project_id,
             video: wire.video,
@@ -629,6 +720,7 @@ impl TryFrom<StartRequestWire> for StartRequest {
             source_analysis_id: wire.source_analysis_id,
             client_request_id: wire.client_request_id,
             analysis_range: None,
+            video_profiles,
         })
     }
 }
@@ -701,28 +793,45 @@ pub(crate) async fn uses_analysis(
     video: &str,
     artifact_id: &str,
 ) -> Result<bool, ApiError> {
-    let running_id = {
+    let running_ids = {
         let slot = manager().lock().await;
         slot.as_ref()
             .filter(|job| job.project_id == project_id)
-            .map(|job| job.id.clone())
+            .map(|job| {
+                if job.queue_runs.is_empty() {
+                    vec![job.id.clone()]
+                } else {
+                    job.queue_runs.clone()
+                }
+            })
     };
-    let Some(running_id) = running_id else {
+    let Some(running_ids) = running_ids else {
         return Ok(false);
     };
     let root = folder(state, project_id, false)?;
-    let running_path = status_path(&root, &running_id)?;
-    let status = tokio::task::spawn_blocking(move || read(&running_path))
-        .await
-        .map_err(|e| storage::internal(format!("Read active pipeline worker: {e}")))??;
+    let ids = running_ids.clone();
+    let video = video.to_owned();
+    let artifact = artifact_id.to_owned();
+    let used = tokio::task::spawn_blocking(move || {
+        for id in ids {
+            let status = read(&status_path(&root, &id)?)?;
+            if status_uses_analysis(&status, &video, &artifact) {
+                return Ok::<_, ApiError>(true);
+            }
+        }
+        Ok(false)
+    })
+    .await
+    .map_err(|e| storage::internal(format!("Read active pipeline worker: {e}")))??;
     let slot = manager().lock().await;
-    if !slot
-        .as_ref()
-        .is_some_and(|job| job.project_id == project_id && job.id == running_id)
-    {
+    if !slot.as_ref().is_some_and(|job| {
+        job.project_id == project_id
+            && (job.queue_runs == running_ids
+                || (job.queue_runs.is_empty() && running_ids == [job.id.clone()]))
+    }) {
         return Ok(true);
     }
-    Ok(status_uses_analysis(&status, video, artifact_id))
+    Ok(used)
 }
 
 fn reason(error: ApiError) -> String {
@@ -1876,12 +1985,19 @@ async fn cpu_cancel<T: Send + 'static>(
         .map_err(reason)
 }
 
+async fn begin_publication(turn: &mut VideoTurn, cancel: &AtomicBool) -> Result<(), String> {
+    turn.wait_ball(cancel).await?;
+    turn.finish_ball();
+    turn.wait_publish(cancel).await
+}
+
 async fn pipeline(
     app: &Arc<AppState>,
     request: &StartRequest,
     cancel: &Arc<AtomicBool>,
     path: &Path,
     status: &mut Value,
+    turn: &mut VideoTurn,
 ) -> Result<(), String> {
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
@@ -2080,6 +2196,7 @@ async fn pipeline(
             "Настройки совпали: выбраны сохранённые версии GPU и CPU",
             99.9,
         )?;
+        begin_publication(turn, cancel).await?;
         return Ok(());
     }
     if request.mode.allows_gpu_execution() {
@@ -2165,13 +2282,14 @@ async fn pipeline(
                         "primary_rallies":request.gpu.primary_rallies,
                     }),
                 )?;
-                // A single permit covers both persistent model sessions. It
-                // also prevents a standalone GPU job from starting concurrently.
-                let _permit = app
-                    .inference_limit
-                    .acquire()
-                    .await
-                    .map_err(|e| format!("Shared GPU inference limit: {e}"))?;
+                let queued = !status["queue_id"].is_null();
+                if queued {
+                    progress(path, status, "Ожидание очереди VBallNet", 8.0)?;
+                }
+                turn.wait_ball_admission(cancel).await?;
+                let mut permit = Some(acquire_gpu(&app.inference_limit, cancel).await?);
+                turn.wait_ball(cancel).await?;
+                turn.admit_ball();
                 let total = status["gpu_total_frames"].as_u64().unwrap_or(0);
                 progress_with_frames(
                     path,
@@ -2185,6 +2303,15 @@ async fn pipeline(
                 ));
                 let block_mode = rally_pipeline_enabled(request);
                 let result = tokio::task::block_in_place(|| {
+                    let stages = if queued {
+                        Some(GpuStages::new(
+                            &app.inference_limit,
+                            permit.take().ok_or("Missing GPU permit")?,
+                            turn,
+                        ))
+                    } else {
+                        None
+                    };
                     inference_full::run_joint_pair(
                         app,
                         &request.project_id,
@@ -2216,6 +2343,7 @@ async fn pipeline(
                                 .then(|| shared_reid_crops.clone()),
                         }),
                         cancel,
+                        stages,
                         |fraction, processed, total, rally_mask| {
                             if block_mode && fraction >= 0.4 {
                                 status["rally_stage_progress"] =
@@ -2227,7 +2355,9 @@ async fn pipeline(
                             if let Some((mask, decoded_frames)) = rally_mask {
                                 publish_primary_rally_mask(path, status, mask, decoded_frames)?;
                             }
-                            let label = if fraction == 0.399999 && rally_mask.is_none() {
+                            let label = if queued && fraction == 0.4 && rally_mask.is_some() {
+                                "Ожидание очереди игроков"
+                            } else if fraction == 0.399999 && rally_mask.is_none() {
                                 "ball_stabilizer"
                             } else if fraction == 0.3999995 && rally_mask.is_none() {
                                 "Rally Detector"
@@ -2246,6 +2376,7 @@ async fn pipeline(
                         },
                     )
                 })?;
+                drop(permit);
                 crate::preparation::primary_preview::enqueue(
                     app.clone(),
                     request.project_id.clone(),
@@ -2296,6 +2427,10 @@ async fn pipeline(
                 return Err("cancelled".into());
             }
 
+            if !status["queue_id"].is_null() {
+                progress(path, status, "Ожидание очереди публикации", 80.0)?;
+            }
+            begin_publication(turn, cancel).await?;
             progress(path, status, "Объединение · VBallNet и рамки игроков", 82.0)?;
             log_native(
                 path,
@@ -2350,6 +2485,7 @@ async fn pipeline(
         }
     }
 
+    begin_publication(turn, cancel).await?;
     let (primary, primary_mask) = load_primary_rally_scope(app, &request.project_id, status)?;
     if request.mode == PipelineMode::Post {
         for key in ["padding_before_ms", "padding_after_ms"] {
@@ -2389,12 +2525,7 @@ async fn pipeline(
         if !shared_native_pose_supported(true, native.width, native.height) {
             return Err("RTMPose: исходное разрешение превышает предел декодера".into());
         }
-        Some(
-            app.inference_limit
-                .acquire()
-                .await
-                .map_err(|e| e.to_string())?,
-        )
+        Some(acquire_gpu(&app.inference_limit, cancel).await?)
     } else {
         None
     };
@@ -2650,6 +2781,13 @@ async fn pipeline(
     let replay_sha = replay["sha256"]
         .as_str()
         .ok_or("У треков отсутствует SHA-256")?;
+    let reid_permit = if !status["queue_id"].is_null()
+        && request.post.reid_device != volley_inference::reid_openvino::ReidDevice::Cpu
+    {
+        Some(acquire_gpu(&app.inference_limit, cancel).await?)
+    } else {
+        None
+    };
     let identity_result = crate::native_player_tracks::reid_review_with_crops(
         State(app.clone()),
         HeaderMap::new(),
@@ -2670,6 +2808,7 @@ async fn pipeline(
         Some(&shared_reid_crops),
     )
     .await;
+    drop(reid_permit);
     status["reid_shared_crops"] = shared_reid_crops.stats();
     let identities = match identity_result {
         Ok(Json(value)) => value,
@@ -2765,20 +2904,23 @@ fn cancelled_outcome(outcome: Result<(), String>, cancelled: bool) -> Result<(),
 
 async fn perform(
     state: Arc<AppState>,
-    request: StartRequest,
-    id: String,
+    job: QueuedRun,
     cancel: Arc<AtomicBool>,
-    path: PathBuf,
-    mut status: Value,
-    retain_slot: bool,
+    mut turn: VideoTurn,
 ) {
+    let QueuedRun {
+        request,
+        path,
+        mut status,
+        ..
+    } = job;
     let _ = log_event(
         &path,
         request.mode.label(),
         "info",
         "Запуск создан, настройки и выбранный источник сохранены.",
     );
-    let mut outcome = pipeline(&state, &request, &cancel, &path, &mut status).await;
+    let mut outcome = pipeline(&state, &request, &cancel, &path, &mut status, &mut turn).await;
     if outcome.is_ok() && request.mode != PipelineMode::Gpu && !cancel.load(Ordering::Acquire) {
         let _ = progress(&path, &mut status, "Монтажная временная разметка", 99.5);
         let rally = status["postprocessing_id"]
@@ -2807,7 +2949,7 @@ async fn perform(
             Err(error) => outcome = Err(format!("Timeline worker: {error}")),
         }
     }
-    let mut slot = manager().lock().await;
+    let _slot = manager().lock().await;
     outcome = cancelled_outcome(outcome, cancel.load(Ordering::Acquire));
     match outcome {
         Ok(()) => {
@@ -2870,6 +3012,7 @@ async fn perform(
     finish_timed_stage(&mut status);
     let saved = save(&path, &status).is_ok();
     if saved && status["status"] == "complete" {
+        turn.finish_publish();
         if let (Some(key), Some(root)) = (
             status["phase1_checkpoint_key"].as_str(),
             path.parent().and_then(Path::parent),
@@ -2881,9 +3024,6 @@ async fn perform(
                 }
             }
         }
-    }
-    if !retain_slot && slot.as_ref().is_some_and(|current| current.id == id) {
-        *slot = None;
     }
 }
 
@@ -2937,7 +3077,7 @@ async fn supervise_pipeline_worker(
     let mut slot = active.lock().await;
     if !slot
         .as_ref()
-        .is_some_and(|run| run.project_id == project_id && run.id == id)
+        .is_some_and(|run| run.contains_run(project_id, id))
     {
         return;
     }
@@ -2962,6 +3102,56 @@ pub async fn start_project(
     Json(request): Json<StartRequest>,
 ) -> ApiResult<Value> {
     start_batch(state, headers, request, true).await
+}
+
+fn validate_start_profile(request: &StartRequest) -> Result<(), ApiError> {
+    if request.mode == PipelineMode::Full
+        && request.post.touches.require_pose
+        && !request.gpu.pose_enabled
+    {
+        return Err(storage::bad_request(
+            "Для алгоритма касаний по движению точек тела включите GPU-анализ позы",
+        ));
+    }
+    if request
+        .client_request_id
+        .as_deref()
+        .is_some_and(|id| !valid_id(id))
+    {
+        return Err(storage::bad_request("Некорректный идентификатор запроса"));
+    }
+    if !(1..=9).contains(&request.gpu.stride)
+        || request.gpu.cpu_threads > 128
+        || request.gpu.gpu_memory_limit_mb > 131072
+        || !(1..=30).contains(&request.gpu.pose_stride)
+    {
+        return Err(storage::bad_request(
+            "GPU-профиль вне допустимых диапазонов",
+        ));
+    }
+    if request.mode.allows_gpu_execution()
+        && request.gpu.pose_mode != crate::pose_inference::PoseInputMode::Photo
+    {
+        return Err(storage::bad_request(
+            "Рамки игроков и RTMPose должны использовать общий шаг кадров",
+        ));
+    }
+    request
+        .post
+        .tracking
+        .validate()
+        .map_err(storage::bad_request)?;
+    request
+        .post
+        .touches
+        .validate()
+        .map_err(storage::bad_request)?;
+    request
+        .post
+        .rallies
+        .validate()
+        .map_err(storage::bad_request)?;
+    Ok(())
 }
 
 async fn start_batch(
@@ -3013,52 +3203,7 @@ async fn start_batch(
             "GPU-источник указывается только при CPU-пересчёте",
         ));
     }
-    if request.mode == PipelineMode::Full
-        && request.post.touches.require_pose
-        && !request.gpu.pose_enabled
-    {
-        return Err(storage::bad_request(
-            "Для алгоритма касаний по движению точек тела включите GPU-анализ позы",
-        ));
-    }
-    if request
-        .client_request_id
-        .as_deref()
-        .is_some_and(|id| !valid_id(id))
-    {
-        return Err(storage::bad_request("Некорректный идентификатор запроса"));
-    }
-    if !(1..=9).contains(&request.gpu.stride)
-        || request.gpu.cpu_threads > 128
-        || request.gpu.gpu_memory_limit_mb > 131072
-        || !(1..=30).contains(&request.gpu.pose_stride)
-    {
-        return Err(storage::bad_request(
-            "GPU-профиль вне допустимых диапазонов",
-        ));
-    }
-    if request.mode.allows_gpu_execution()
-        && request.gpu.pose_mode != crate::pose_inference::PoseInputMode::Photo
-    {
-        return Err(storage::bad_request(
-            "Рамки игроков и RTMPose должны использовать общий шаг кадров",
-        ));
-    }
-    request
-        .post
-        .tracking
-        .validate()
-        .map_err(storage::bad_request)?;
-    request
-        .post
-        .touches
-        .validate()
-        .map_err(storage::bad_request)?;
-    request
-        .post
-        .rallies
-        .validate()
-        .map_err(storage::bad_request)?;
+    validate_start_profile(&request)?;
     let project = projects::existing_project(&state, &request.project_id)?;
     if !project["videos"].as_array().is_some_and(|videos| {
         videos
@@ -3069,6 +3214,13 @@ async fn start_batch(
             "Видео не принадлежит выбранному проекту",
         ));
     }
+    let videos = if all_videos {
+        queue_video_order(&project, &request.video)?
+    } else {
+        vec![request.video.clone()]
+    };
+    validate_queue_profiles(&request, &videos, all_videos)?;
+    let queue_profiles_sha256 = request.queue_profiles_digest();
     let _admission = admission_guard().await;
     let mut slot = manager().lock().await;
     // If the HTTP response was lost after scheduling, replaying the same
@@ -3088,6 +3240,7 @@ async fn start_batch(
                         } else {
                             previous["video"] != request.video || !previous["queue_id"].is_null()
                         })
+                        || previous["queue_profiles_sha256"] != json!(queue_profiles_sha256)
                         || previous["mode"] != json!(request.mode)
                         || previous["source_analysis_id"] != json!(request.source_analysis_id)
                         || !decode_profiles(
@@ -3120,14 +3273,16 @@ async fn start_batch(
     let root = folder(&state, &request.project_id, true)?;
     let project_id = request.project_id.clone();
     let start_video = request.video.clone();
-    let videos = if all_videos {
-        queue_video_order(
+    if all_videos
+        && queue_video_order(
             &projects::existing_project(&state, &project_id)?,
             &start_video,
-        )?
-    } else {
-        vec![start_video.clone()]
-    };
+        )? != videos
+    {
+        return Err(storage::conflict(
+            "Список видео изменился после выбора профилей",
+        ));
+    }
     let ids: Vec<String> = videos
         .iter()
         .map(|_| Uuid::new_v4().simple().to_string())
@@ -3136,8 +3291,7 @@ async fn start_batch(
     let queue_id = all_videos.then_some(id.clone());
     let mut jobs = Vec::with_capacity(videos.len());
     for (index, (video, run_id)) in videos.into_iter().zip(ids.iter()).enumerate() {
-        let mut scoped = request.clone();
-        scoped.video = video;
+        let mut scoped = request.scoped_to_video(&video);
         let mut queue_snapshot = Value::Null;
         if all_videos {
             storage::video_name(&scoped.video)?;
@@ -3163,7 +3317,7 @@ async fn start_batch(
                 .map(|court| court.revision);
             queue_snapshot = json!({"weight":duration,"source":{"bytes":bytes,"mtime_ns":mtime_ns},"court":court});
         }
-        let status = json!({
+        let mut status = json!({
             "schema":SCHEMA,"id":run_id,"project_id":project_id,"video":scoped.video,
             "status":"queued","stage":"В очереди","progress_percent":0.0,
             "started_ms":if index == 0 { Some(epoch_ms()) } else { None },
@@ -3186,6 +3340,7 @@ async fn start_batch(
             "queue_weight_sec":queue_snapshot["weight"],"queued_source_identity":queue_snapshot["source"],
             "queued_court_revision":queue_snapshot["court"]
         });
+        status["queue_profiles_sha256"] = json!(queue_profiles_sha256);
         jobs.push(QueuedRun {
             id: run_id.clone(),
             request: scoped,
@@ -3218,7 +3373,7 @@ async fn start_batch(
         queue_runs: ids,
     });
     drop(_guard);
-    tokio::spawn(run_project_queue(state, root, project_id, jobs, cancelled));
+    tokio::spawn(run_project_queue(state, project_id, jobs, cancelled));
     Ok(Json(
         json!({"schema":SCHEMA,"id":id,"status":"queued","queue_id":queue_id}),
     ))
@@ -3286,55 +3441,56 @@ fn mark_unstarted(job: &mut QueuedRun, cancelled: bool, error: Option<&str>) {
 
 async fn run_project_queue(
     state: Arc<AppState>,
-    root: PathBuf,
     project: String,
     jobs: Vec<QueuedRun>,
     cancel: Arc<AtomicBool>,
 ) {
     let first = jobs[0].id.clone();
-    let mut previous_ok = true;
-    for (index, mut job) in jobs.into_iter().enumerate() {
-        if !previous_ok || cancel.load(Ordering::Acquire) {
-            let cancelled = cancel.load(Ordering::Acquire);
-            mark_unstarted(
-                &mut job,
-                cancelled,
-                (!cancelled).then_some("Предыдущий анализ не завершился успешно"),
-            );
-            continue;
+    let turns = video_turns(jobs.len());
+    let mut pending = jobs.into_iter().zip(turns).enumerate();
+    let mut workers = tokio::task::JoinSet::new();
+    let mut failed = false;
+    loop {
+        while workers.len() < 2 && !failed && !cancel.load(Ordering::Acquire) {
+            let Some((index, (mut job, turn))) = pending.next() else {
+                break;
+            };
+            if index > 0 {
+                job.status["started_ms"] = json!(epoch_ms());
+                if let Err(error) =
+                    save(&job.path, &job.status).and_then(|()| log_queued_start(&job))
+                {
+                    mark_unstarted(&mut job, false, Some(&error));
+                    failed = true;
+                    cancel.store(true, Ordering::Release);
+                    break;
+                }
+            }
+            let app = state.clone();
+            let cancellation = cancel.clone();
+            let project = project.clone();
+            workers.spawn(async move {
+                let path = job.path.clone();
+                let id = job.id.clone();
+                let worker = tokio::spawn(perform(app, job, cancellation, turn));
+                supervise_pipeline_worker(worker, manager(), &path, &project, &id, true).await;
+                read(&path).is_ok_and(|status| status["status"] == "complete")
+            });
         }
-        if index > 0 {
-            let mut slot = manager().lock().await;
-            if cancel.load(Ordering::Acquire) {
-                mark_unstarted(&mut job, true, None);
-                continue;
-            }
-            job.status["started_ms"] = json!(epoch_ms());
-            let activation = save(&job.path, &job.status)
-                .and_then(|()| log_queued_start(&job))
-                .and_then(|()| save(&root.join("latest.json"), &json!({"id":job.id})));
-            if let Err(error) = activation {
-                mark_unstarted(&mut job, false, Some(&error));
-                previous_ok = false;
-                continue;
-            }
-            if let Some(active) = slot.as_mut() {
-                active.id = job.id.clone();
-            }
+        let Some(outcome) = workers.join_next().await else {
+            break;
+        };
+        if !matches!(outcome, Ok(true)) && !cancel.load(Ordering::Acquire) {
+            failed = true;
+            cancel.store(true, Ordering::Release);
         }
-        let id = job.id.clone();
-        let path = job.path.clone();
-        let worker = tokio::spawn(perform(
-            state.clone(),
-            job.request,
-            job.id,
-            cancel.clone(),
-            job.path,
-            job.status,
-            true,
-        ));
-        supervise_pipeline_worker(worker, manager(), &path, &project, &id, true).await;
-        previous_ok = read(&path).is_ok_and(|status| status["status"] == "complete");
+    }
+    for (_, (mut job, _)) in pending {
+        mark_unstarted(
+            &mut job,
+            !failed && cancel.load(Ordering::Acquire),
+            failed.then_some("Предыдущий анализ не завершился успешно"),
+        );
     }
     let mut slot = manager().lock().await;
     if slot
@@ -3522,6 +3678,8 @@ fn queue_progress(rows: &[Value], active: bool) -> Value {
                         .map(|rallies| rallies.len() as u64)
                 });
             json!({"id":row["id"],"video":row["video"],"status":state,"progress_percent":percent,
+            "stage":row["stage"],"stage_id":row["stage_id"],
+            "rallies_completed":row["rally_stage_progress"]["pose"]["rallies_completed"],
             "analysis_range":row["analysis_range"],"duration_sec":weight,
             "court_revision":row["queued_court_revision"],"rallies_total":rallies,
             "analysis_id":row["analysis_id"],"postprocessing_id":row["postprocessing_id"],
@@ -3531,6 +3689,23 @@ fn queue_progress(rows: &[Value], active: bool) -> Value {
     json!({"active":active,"completed_videos":completed,"total_videos":rows.len(),
         "progress_percent":if total_weight > 0.0 {weighted_progress / total_weight} else {0.0},
         "videos":videos})
+}
+
+fn queue_focus(rows: &[Value]) -> Option<&Value> {
+    rows.iter()
+        .find(|row| {
+            row["started_ms"].as_u64().is_some()
+                && matches!(
+                    row["status"].as_str(),
+                    Some("queued" | "running" | "cancelling")
+                )
+        })
+        .or_else(|| rows.iter().find(|row| row["status"] == "failed"))
+        .or_else(|| rows.iter().find(|row| row["status"] == "cancelled"))
+        .or_else(|| {
+            rows.iter()
+                .rfind(|row| row["started_ms"].as_u64().is_some())
+        })
 }
 
 fn status_snapshot(
@@ -3543,9 +3718,8 @@ fn status_snapshot(
             return Err(storage::bad_request("Укажите запуск или очередь"));
         }
         let rows = read_queue_rows(&root, &query.project_id, queue_id)?;
-        let row = rows
-            .into_iter()
-            .rfind(|row| row["started_ms"].as_u64().is_some())
+        let row = queue_focus(&rows)
+            .cloned()
             .ok_or_else(|| storage::bad_request("Очередь не запущена"))?;
         let id = row["id"]
             .as_str()
@@ -3571,6 +3745,18 @@ fn status_snapshot(
     if result["schema"] != SCHEMA || result["project_id"] != query.project_id || result["id"] != id
     {
         return Err(storage::bad_request("Статус принадлежит другому проекту"));
+    }
+    if query.id.is_none() {
+        if let Some(queue_id) = result["queue_id"].as_str() {
+            let rows = read_queue_rows(&root, &query.project_id, queue_id)?;
+            if let Some(row) = queue_focus(&rows) {
+                let id = row["id"]
+                    .as_str()
+                    .ok_or_else(|| storage::bad_request("Нет ID запуска"))?
+                    .to_owned();
+                return Ok(Some((id, row.clone())));
+            }
+        }
     }
     Ok(Some((id, result)))
 }
@@ -3610,7 +3796,7 @@ pub async fn status(
             .as_ref()
             .filter(|entry| entry.contains_run(&project_id, &id))
         {
-            Some(entry) if entry.id == id && entry.cancel.load(Ordering::Acquire) => {
+            Some(entry) if entry.cancel.load(Ordering::Acquire) => {
                 result["status"] = json!("cancelling");
                 result["stage"] = json!("Отмена запрошена · остановка текущей операции");
                 result["cancel_requested"] = json!(true);
@@ -3696,6 +3882,61 @@ pub async fn cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_focus_does_not_hide_running_or_failed_video() {
+        let mut rows = vec![
+            json!({"id":"first","started_ms":1,"status":"running"}),
+            json!({"id":"second","started_ms":2,"status":"running"}),
+            json!({"id":"third","status":"queued"}),
+        ];
+        assert_eq!(queue_focus(&rows).unwrap()["id"], "first");
+        rows[0]["status"] = json!("complete");
+        assert_eq!(queue_focus(&rows).unwrap()["id"], "second");
+        rows[0]["status"] = json!("failed");
+        rows[1]["status"] = json!("cancelled");
+        assert_eq!(queue_focus(&rows).unwrap()["id"], "first");
+    }
+
+    #[test]
+    fn project_queue_profiles_are_independent_and_validated() {
+        let input = json!({
+            "project_id":"abc123def456","video":"a.mp4",
+            "gpu":{"pose_stride":1},
+            "video_profiles":{
+                "a.mp4":{"gpu":{"pose_stride":1}},
+                "b.mp4":{"gpu":{"pose_stride":5,"person_detector":"rfdetr-large"},
+                    "post":{"interpolate_players":false}}
+            }
+        });
+        let request: StartRequest = serde_json::from_value(input.clone()).unwrap();
+        let videos = vec!["a.mp4".to_owned(), "b.mp4".to_owned()];
+        assert!(validate_queue_profiles(&request, &videos, true).is_ok());
+        let a = request.scoped_to_video("a.mp4");
+        let b = request.scoped_to_video("b.mp4");
+        assert_eq!(a.gpu.pose_stride, 1);
+        assert_eq!(b.gpu.pose_stride, 5);
+        assert_eq!(b.gpu.person_detector, DetectorVariant::RfDetrLarge);
+        assert!(a.post.interpolate_players);
+        assert!(!b.post.interpolate_players);
+        assert!(a.video_profiles.is_empty() && b.video_profiles.is_empty());
+        assert!(validate_queue_profiles(&request, &videos, false).is_err());
+        let mut missing = input.clone();
+        missing["video_profiles"]
+            .as_object_mut()
+            .unwrap()
+            .remove("b.mp4");
+        let missing: StartRequest = serde_json::from_value(missing).unwrap();
+        assert!(validate_queue_profiles(&missing, &videos, true).is_err());
+        let mut invalid = input.clone();
+        invalid["video_profiles"]["b.mp4"]["gpu"]["pose_stride"] = json!(0);
+        let invalid: StartRequest = serde_json::from_value(invalid).unwrap();
+        assert!(validate_queue_profiles(&invalid, &videos, true).is_err());
+        let mut wrong_primary = input;
+        wrong_primary["video_profiles"]["a.mp4"]["gpu"]["pose_stride"] = json!(9);
+        let wrong_primary: StartRequest = serde_json::from_value(wrong_primary).unwrap();
+        assert!(validate_queue_profiles(&wrong_primary, &videos, true).is_err());
+    }
 
     #[test]
     fn project_queue_orders_selected_video_first_without_duplicates() {
@@ -4056,6 +4297,118 @@ mod tests {
             result["primary_tracking"]["pose_sampling"],
             cpu_retrack::pose_sampling_contract(Default::default()),
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires isolated example and native CUDA/ORT"]
+    async fn project_queue_two_videos_cuda_stage_handoff() {
+        let base = PathBuf::from(std::env::var("VOLLEY_AB_DATA_ROOT").unwrap());
+        let source = PathBuf::from(std::env::var("VOLLEY_AB_SOURCE").unwrap());
+        assert!(!base.exists(), "A/B requires a fresh data root");
+        let project_id = "abc123def456";
+        let videos = ["first.mp4", "second.mp4"];
+        let uploads = base.join("uploads/project_sources");
+        fs::create_dir_all(&uploads).unwrap();
+        for video in videos {
+            fs::copy(&source, uploads.join(video)).unwrap();
+        }
+        fs::create_dir_all(base.join("projects").join(project_id)).unwrap();
+        storage::write_json_atomic(
+            &base.join("projects/projects.json"),
+            &json!({"schema":1,"projects":[{"id":project_id,"videos":videos}]}),
+        )
+        .unwrap();
+        let state = Arc::new(AppState {
+            repository_root: PathBuf::from(std::env::var("VOLLEY_AB_MODEL_ROOT").unwrap()),
+            data_root: base.clone(),
+            writes_enabled: true,
+            montage: crate::montage::MontageManager::new(),
+            preparation: crate::preparation::PreparationManager::new(),
+            preview_limit: tokio::sync::Semaphore::new(1),
+            touch_limit: tokio::sync::Semaphore::new(1),
+            continuity_limit: tokio::sync::Semaphore::new(1),
+            reid_limit: tokio::sync::Semaphore::new(1),
+            identity_limit: tokio::sync::Semaphore::new(1),
+            statistics_limit: tokio::sync::Semaphore::new(1),
+            marks_limit: tokio::sync::Semaphore::new(1),
+            quick_reel: crate::quick_reel::QuickReelManager::new(),
+            inference_limit: tokio::sync::Semaphore::new(1),
+            full_inference: crate::inference_full::FullInferenceManager::new(),
+        });
+        let request = serde_json::from_value::<StartRequest>(json!({
+            "project_id":project_id,"video":videos[0],"mode":"full",
+            "gpu":{"pose_stride":1,"primary_rallies":{"min_trajectory_seconds":1.0}},
+            "post":{"reid_device":"cpu","reid_buffer_mib":0},
+            "video_profiles":{
+                "first.mp4":{"gpu":{"pose_stride":1,"primary_rallies":{"min_trajectory_seconds":1.0}},
+                    "post":{"reid_device":"cpu","reid_buffer_mib":0}},
+                "second.mp4":{"gpu":{"pose_stride":3,"primary_rallies":{"min_trajectory_seconds":1.0}},
+                    "post":{"reid_device":"cpu","reid_buffer_mib":0}}
+            }
+        })).unwrap();
+        let Json(queued) = start_project(State(state.clone()), HeaderMap::new(), Json(request))
+            .await
+            .unwrap();
+        let queue_id = queued["queue_id"].as_str().unwrap();
+        let root = folder(&state, project_id, false).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(180), async {
+            while has_active().await {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let rows = read_queue_rows(&root, project_id, queue_id).unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            println!(
+                "VIDEO {} state={} error={} stages={}",
+                row["video"], row["status"], row["error"], row["stages"]
+            );
+            assert_eq!(row["status"], "complete", "{}", row["error"]);
+            assert!(row["phase1_checkpoint_key"].as_str().is_some());
+        }
+        let stage_start = |row: &Value, id: &str| {
+            row["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"] == id)
+                .unwrap()["started_ms"]
+                .as_u64()
+                .unwrap()
+        };
+        assert!(stage_start(&rows[0], "ball") <= stage_start(&rows[1], "ball"));
+        assert!(
+            stage_start(&rows[1], "ball") < rows[0]["finished_ms"].as_u64().unwrap(),
+            "VBallNet must not wait for the previous video to complete"
+        );
+        assert!(
+            stage_start(&rows[1], "ball") <= stage_start(&rows[0], "players"),
+            "Ready next VBallNet should enter the GPU queue before the previous RF-DETR"
+        );
+        assert_eq!(rows[0]["profile"]["gpu"]["pose_stride"], 1);
+        assert_eq!(rows[1]["profile"]["gpu"]["pose_stride"], 3);
+        assert_ne!(
+            rows[0]["phase1_checkpoint_key"],
+            rows[1]["phase1_checkpoint_key"]
+        );
+        assert_ne!(rows[0]["analysis_id"], rows[1]["analysis_id"]);
+        assert_ne!(rows[0]["postprocessing_id"], rows[1]["postprocessing_id"]);
+        for (row, video) in rows.iter().zip(videos) {
+            for model in ["ball", "players"] {
+                let job = row["gpu_jobs"][model].as_str().unwrap();
+                let file = base
+                    .join("projects")
+                    .join(project_id)
+                    .join("native_gpu_runs")
+                    .join(job)
+                    .join("manifest.json");
+                let manifest: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+                assert_eq!(manifest["video"], video);
+            }
+        }
+        println!("PROJECT STAGE HANDOFF: independent profiles, checkpoints, artifacts and earlier second VBallNet");
     }
 
     #[tokio::test]

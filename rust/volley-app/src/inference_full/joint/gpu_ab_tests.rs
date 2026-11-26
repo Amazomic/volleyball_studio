@@ -340,6 +340,7 @@ fn real_uu_match_gpu_ab_legacy_vs_shared() -> Result<(), String> {
         Default::default(),
         None,
         &abort,
+        None,
         |_, _, _, _| Ok(()),
     )?;
     let shared_fusion = fusion_pair(&app, video, &joint.ball_job_id, &joint.player_job_id)?;
@@ -646,6 +647,7 @@ fn original_pose_single_decode_benchmark() -> Result<(), String> {
             Default::default(),
             None,
             &abort,
+            None,
             |_, _, _, _| Ok(()),
         )?;
         let gpu_sec = started.elapsed().as_secs_f64();
@@ -975,6 +977,7 @@ fn primary_rally_prefilter_cuda_integration_smoke() -> Result<(), String> {
         Default::default(),
         None,
         &abort,
+        None,
         |_, _, _, _| Ok(()),
     )?;
     let evidence = manifest(&app.data_root, "native_gpu_runs", &pair.player_job_id)?;
@@ -1129,6 +1132,7 @@ fn phase1_checkpoint_cuda_resume() -> Result<(), String> {
                 checkpoint_root: Some(checkpoints.clone()),
             }),
             &cancel,
+            None,
             |_, _, _, _| {
                 let snapshot = serde_json::to_value(&*progress.lock().map_err(|e| e.to_string())?)
                     .map_err(|e| e.to_string())?;

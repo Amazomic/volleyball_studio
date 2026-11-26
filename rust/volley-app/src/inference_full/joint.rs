@@ -302,6 +302,7 @@ pub(crate) fn run_joint_pair(
     stabilizer_settings: volley_core::ball_interpolation::BallStabilizerSettings,
     early_pose: Option<EarlyPoseOptions>,
     cancelled: &AtomicBool,
+    mut stages: Option<stage_queue::GpuStages<'_>>,
     mut report: impl FnMut(f64, u64, u64, Option<(&Value, u64)>) -> Result<(), String>,
 ) -> Result<JointPair, String> {
     if cancelled.load(Ordering::Acquire) {
@@ -343,12 +344,6 @@ pub(crate) fn run_joint_pair(
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
-    let mut person_engine = PersonEngine::load_for_primary_gpu_evidence(
-        &state.repository_root,
-        cpu_threads,
-        session_memory,
-        person_detector,
-    )?;
 
     let mut pending = PendingFolders::default();
     let ball = new_context(
@@ -377,7 +372,7 @@ pub(crate) fn run_joint_pair(
         person_stride,
     )?;
     pending.paths.push(players.folder.clone());
-    players.person_batch_size = person_engine.batch_size();
+    players.person_batch_size = PersonEngine::primary_batch_size(person_detector, session_memory);
     players.person_tf32 =
         person_detector != volley_inference::person::DetectorVariant::RfDetrMedium;
 
@@ -412,7 +407,7 @@ pub(crate) fn run_joint_pair(
     let checkpoint_dir = checkpoint_root.map(|root| {
         let options = early_pose.as_ref().ok_or("Missing rally checkpoint settings")?;
         let ball_model = "VballNetV4c_seq9_grayscale_20260908_213829.onnx";
-        let detector_model = person_engine.model_file();
+        let detector_model = PersonEngine::primary_model_file(person_detector, session_memory);
         let identity = json!({
             "schema":"volley-phase1-checkpoint/1",
             "build":env!("VOLLEY_BUILD_GIT_SHA"),
@@ -441,20 +436,7 @@ pub(crate) fn run_joint_pair(
         )?);
     }
     let (pose_original, pose_source) = pose_manifest_identities(&original_provenance, before);
-    let pose = RefCell::new(if pose_enabled && !zero_copy {
-        Some(PoseStream::new(
-            state,
-            project_id,
-            video,
-            pose_original.clone(),
-            pose_source.clone(),
-            person_stride,
-            session_memory,
-            cpu_threads,
-        )?)
-    } else {
-        None
-    });
+    let pose = RefCell::new(None);
     let mut gpu_pose = None;
     let mut early_worker = None;
     let early_progress = early_pose.as_ref().map(|options| options.progress.clone());
@@ -468,9 +450,9 @@ pub(crate) fn run_joint_pair(
                 original,
                 source_info,
                 range,
-                &mut ball_engine,
-                &mut person_engine,
-                gpu_pose.as_ref(),
+                Some(&mut ball_engine),
+                None,
+                None,
                 Some(&mut ball_writer),
                 None,
                 zero_copy::ScanPass::BallOnly,
@@ -527,6 +509,10 @@ pub(crate) fn run_joint_pair(
         };
         if cancelled.load(Ordering::Acquire) {
             return Err("cancelled".into());
+        }
+        drop(ball_engine);
+        if let Some(stages) = stages.as_mut() {
+            stages.finish_ball();
         }
         report(
             0.399999,
@@ -611,6 +597,30 @@ pub(crate) fn run_joint_pair(
             Some((&mask_value, ball_scan.decode.decoded_frames)),
         )?;
         rally_filter = Some(mask_value);
+        if let Some(stages) = stages.as_mut() {
+            stages.enter_people(cancelled)?;
+            report(0.4, 0, player_total, None)?;
+        }
+        let mut person_engine = PersonEngine::load_for_primary_gpu_evidence(
+            &state.repository_root,
+            cpu_threads,
+            session_memory,
+            person_detector,
+        )?;
+        *pose.borrow_mut() = if pose_enabled && !zero_copy {
+            Some(PoseStream::new(
+                state,
+                project_id,
+                video,
+                pose_original.clone(),
+                pose_source.clone(),
+                person_stride,
+                session_memory,
+                cpu_threads,
+            )?)
+        } else {
+            None
+        };
         let rally_checkpoint = checkpoint_dir
             .as_ref()
             .map(|directory| {
@@ -700,8 +710,8 @@ pub(crate) fn run_joint_pair(
                 original,
                 source_info,
                 range,
-                &mut ball_engine,
-                &mut person_engine,
+                None,
+                Some(&mut person_engine),
                 gpu_pose.as_ref(),
                 None,
                 Some(&mut person_writer),
