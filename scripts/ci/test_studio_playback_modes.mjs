@@ -62,6 +62,15 @@ s.playbackMode="free";s.stopAt=40;ctx.onRallyBoundary();
 assert.equal(paused,2,"Free mode must not pause at rally boundary");
 assert.equal(s.stopAt,null);
 assert.deepEqual(followed,["b"],"Other playback modes must not scroll");
+const nextSource={run:"second",rows:[{candidate_id:"d",start_frame:0,end_frame:59}]};
+s.projectRallies=new Map([["r",{run:"r",rows:rallies}],["second",nextSource]]);
+s.playbackMode="sequence";s.stopAt=40;
+ctx.training={active:false};
+ctx.openProjectRally=async (source,item)=>played.push([source.run,item.candidate_id]);
+ctx.failed=error=>{throw error;};
+ctx.onRallyBoundary();
+assert.deepEqual(played.at(-1),["second","d"],"Sequence crosses into the next video at its first rally");
+assert.equal(paused,3);
 console.log("Studio playback modes and controls: OK");
 
 

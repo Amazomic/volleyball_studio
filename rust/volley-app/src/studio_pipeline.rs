@@ -11,7 +11,7 @@ use axum::{
     http::HeaderMap,
     Json,
 };
-use inference_full::stage_queue::{acquire_gpu, video_turns, GpuStages, VideoTurn};
+use inference_full::stage_queue::{acquire_gpu, video_turns, VideoTurn};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -1140,6 +1140,7 @@ fn publish_primary_rally_mask(
         Some((decoded_frames, decoded_frames)),
     )?;
     status["gpu_rally_mask"] = mask.clone();
+    status["analysis_frames_processed"] = json!(decoded_frames);
     status["ground_detector"] = mask["ground_detector"].clone();
     save(path, status)?;
     log_event(
@@ -2016,8 +2017,8 @@ async fn cpu_cancel<T: Send + 'static>(
 }
 
 async fn begin_publication(turn: &mut VideoTurn, cancel: &AtomicBool) -> Result<(), String> {
-    turn.wait_ball(cancel).await?;
-    turn.finish_ball();
+    turn.wait_detector(cancel).await?;
+    turn.finish_detector();
     turn.wait_publish(cancel).await
 }
 
@@ -2203,11 +2204,13 @@ async fn pipeline(
         status["shared_pose"] = existing["shared_pose"].clone();
         status["pose_frame_progress"] = existing["pose_frame_progress"].clone();
         status["gpu_rally_mask"] = existing["gpu_rally_mask"].clone();
+        status["analysis_frames_processed"] = json!(pipeline_frames_processed(&existing));
         status["gpu_rally_mask_sha256"] = existing["gpu_rally_mask_sha256"].clone();
         status["cpu_runs"] = existing["cpu_runs"].clone();
         status["primary_tracking"] = existing["primary_tracking"].clone();
         status["player_tracking_stats"] = existing["player_tracking_stats"].clone();
         status["postprocessing_id"] = existing["postprocessing_id"].clone();
+        status["rallies_published"] = existing["rallies_published"].clone();
         status["gpu_reused"] = json!(true);
         status["result_reused"] = json!(true);
         status["reused_from_id"] = existing["id"].clone();
@@ -2241,6 +2244,7 @@ async fn pipeline(
             status["shared_pose"] = existing["shared_pose"].clone();
             status["pose_frame_progress"] = existing["pose_frame_progress"].clone();
             status["gpu_rally_mask"] = existing["gpu_rally_mask"].clone();
+            status["analysis_frames_processed"] = json!(pipeline_frames_processed(&existing));
             status["gpu_rally_mask_sha256"] = existing["gpu_rally_mask_sha256"].clone();
             status["gpu_reused"] = json!(true);
             status["reused_from_id"] = existing["id"].clone();
@@ -2321,10 +2325,8 @@ async fn pipeline(
                 if queued {
                     progress(path, status, "Ожидание очереди VBallNet", 8.0)?;
                 }
-                turn.wait_ball_admission(cancel).await?;
-                let mut permit = Some(acquire_gpu(&app.inference_limit, cancel).await?);
-                turn.wait_ball(cancel).await?;
-                turn.admit_ball();
+                turn.wait_detector(cancel).await?;
+                let permit = acquire_gpu(&app.inference_limit, cancel).await?;
                 let total = status["gpu_total_frames"].as_u64().unwrap_or(0);
                 progress_with_frames(
                     path,
@@ -2338,14 +2340,6 @@ async fn pipeline(
                 ));
                 let block_mode = rally_pipeline_enabled(request);
                 let result = tokio::task::block_in_place(|| {
-                    let stages = if queued {
-                        Some(GpuStages::new(
-                            permit.take().ok_or("Missing GPU permit")?,
-                            turn,
-                        ))
-                    } else {
-                        None
-                    };
                     inference_full::run_joint_pair(
                         app,
                         &request.project_id,
@@ -2380,7 +2374,6 @@ async fn pipeline(
                                 .then(|| shared_reid_crops.clone()),
                         }),
                         cancel,
-                        stages,
                         |fraction, processed, total, rally_mask| {
                             if block_mode && fraction >= 0.4 {
                                 status["rally_stage_progress"] =
@@ -2801,6 +2794,7 @@ async fn pipeline(
     let rally_id = require_id(&rallies, "rally_run_id")?;
     status["cpu_runs"]["rallies"] = json!(rally_id);
     status["postprocessing_id"] = json!(rally_id);
+    status["rallies_published"] = rallies["rally_candidates"].clone();
     save(path, status)?;
     log_event(
         path,
@@ -3494,7 +3488,7 @@ async fn run_project_queue(
     let mut workers = tokio::task::JoinSet::new();
     let mut failed = false;
     loop {
-        while workers.is_empty() && !failed && !cancel.load(Ordering::Acquire) {
+        while workers.len() < 2 && !failed && !cancel.load(Ordering::Acquire) {
             let Some((index, (mut job, turn))) = pending.next() else {
                 break;
             };
@@ -3683,10 +3677,27 @@ fn read_queue_rows(root: &Path, project: &str, queue_id: &str) -> Result<Vec<Val
         .collect()
 }
 
+fn pipeline_frames_processed(row: &Value) -> Option<u64> {
+    row["analysis_frames_processed"].as_u64().or_else(|| {
+        row["stages"].as_array()?.iter().rev().find_map(|stage| {
+            if matches!(
+                stage["id"].as_str(),
+                Some("ball" | "ball_stabilizer" | "rallies")
+            ) {
+                stage["frames_processed"].as_u64()
+            } else {
+                None
+            }
+        })
+    })
+}
+
 fn queue_progress(rows: &[Value], active: bool) -> Value {
     let mut weighted_progress = 0.0;
     let mut total_weight = 0.0;
     let mut completed = 0;
+    let mut frames_processed = 0_u64;
+    let mut rallies_total = 0_u64;
     let videos: Vec<Value> = rows
         .iter()
         .map(|row| {
@@ -3712,15 +3723,20 @@ fn queue_progress(rows: &[Value], active: bool) -> Value {
             };
             weighted_progress += weight * percent;
             total_weight += weight;
-            let rallies = row["rally_stage_progress"]["pose"]["rallies_total"]
+            let rallies = row["rallies_published"]
                 .as_u64()
+                .or_else(|| row["rally_stage_progress"]["pose"]["rallies_total"].as_u64())
                 .or_else(|| row["rally_stage_progress"]["boxes"]["rallies_total"].as_u64())
                 .or_else(|| {
                     row["gpu_rally_mask"]["merged"]
                         .as_array()
                         .map(|rallies| rallies.len() as u64)
                 });
+            let frames = pipeline_frames_processed(row);
+            frames_processed += frames.unwrap_or(0);
+            rallies_total += rallies.unwrap_or(0);
             json!({"id":row["id"],"video":row["video"],"status":state,"progress_percent":percent,
+            "frames_processed":frames,
             "stage":row["stage"],"stage_id":row["stage_id"],
             "rallies_completed":row["rally_stage_progress"]["pose"]["rallies_completed"],
             "analysis_range":row["analysis_range"],"duration_sec":weight,
@@ -3731,7 +3747,7 @@ fn queue_progress(rows: &[Value], active: bool) -> Value {
         .collect();
     json!({"active":active,"completed_videos":completed,"total_videos":rows.len(),
         "progress_percent":if total_weight > 0.0 {weighted_progress / total_weight} else {0.0},
-        "videos":videos})
+        "frames_processed":frames_processed,"rallies_total":rallies_total,"videos":videos})
 }
 
 fn queue_focus(rows: &[Value]) -> Option<&Value> {
@@ -4010,18 +4026,20 @@ mod tests {
     fn queue_progress_uses_video_duration_and_never_completes_pending_video() {
         let rows = vec![
             json!({"id":"first","video":"a.mp4","status":"complete","progress_percent":100.0,
-                "queue_weight_sec":20.0,"gpu_rally_mask":{"merged":[[0,30]]}}),
+                "queue_weight_sec":20.0,"analysis_frames_processed":100,"rallies_published":30,"gpu_rally_mask":{"merged":[[0,30]]}}),
             json!({"id":"second","video":"b.mp4","status":"running","progress_percent":25.0,
-                "queue_weight_sec":80.0,"rally_stage_progress":{"pose":{"rallies_total":12}}}),
+                "queue_weight_sec":80.0,"stages":[{"id":"ball","frames_processed":200},{"id":"players","frames_processed":40}],"rally_stage_progress":{"pose":{"rallies_total":20}}}),
             json!({"id":"third","video":"c.mp4","status":"queued","progress_percent":0.0,
                 "queue_weight_sec":100.0}),
         ];
         let summary = queue_progress(&rows, true);
         assert_eq!(summary["progress_percent"], 20.0);
         assert_eq!(summary["completed_videos"], 1);
+        assert_eq!(summary["frames_processed"], 300);
+        assert_eq!(summary["rallies_total"], 50);
         assert_eq!(summary["total_videos"], 3);
-        assert_eq!(summary["videos"][0]["rallies_total"], 1);
-        assert_eq!(summary["videos"][1]["rallies_total"], 12);
+        assert_eq!(summary["videos"][0]["rallies_total"], 30);
+        assert_eq!(summary["videos"][1]["rallies_total"], 20);
         assert!(summary["videos"][2]["rallies_total"].is_null());
         let interrupted = queue_progress(&rows, false);
         assert_eq!(interrupted["videos"][1]["status"], "interrupted");
@@ -4369,6 +4387,13 @@ mod tests {
         fs::create_dir_all(&uploads).unwrap();
         for video in videos {
             fs::copy(&source, uploads.join(video)).unwrap();
+            write_test_court(
+                &base,
+                project_id,
+                video,
+                &json!({"court":[[0.08,0.2],[0.92,0.2],[0.97,0.9],[0.03,0.9]],
+                    "net":[[0.08,0.48],[0.92,0.48]]}),
+            );
         }
         fs::create_dir_all(base.join("projects").join(project_id)).unwrap();
         storage::write_json_atomic(
@@ -4437,14 +4462,16 @@ mod tests {
                 .unwrap()
         };
         assert!(stage_start(&rows[0], "ball") <= stage_start(&rows[1], "ball"));
-        assert!(
-            stage_start(&rows[1], "ball") >= rows[0]["finished_ms"].as_u64().unwrap(),
-            "Next video must wait until the previous video fully completes"
-        );
-        assert!(
-            rows[1]["started_ms"].as_u64().unwrap() >= rows[0]["finished_ms"].as_u64().unwrap(),
-            "No overlapping video analysis is permitted"
-        );
+        let detector_finished = rows[0]["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stage| stage["id"] == "players")
+            .unwrap()["finished_ms"]
+            .as_u64()
+            .unwrap();
+        assert!(stage_start(&rows[1], "ball") >= detector_finished);
+        assert!(rows[1]["started_ms"].as_u64().unwrap() < rows[0]["finished_ms"].as_u64().unwrap());
         assert_eq!(rows[0]["profile"]["gpu"]["pose_stride"], 1);
         assert_eq!(rows[1]["profile"]["gpu"]["pose_stride"], 3);
         assert_ne!(
@@ -4466,7 +4493,7 @@ mod tests {
                 assert_eq!(manifest["video"], video);
             }
         }
-        println!("PROJECT STAGE HANDOFF: independent profiles, checkpoints, artifacts and strict sequential video execution");
+        println!("PROJECT STAGE HANDOFF: independent profiles, checkpoints, artifacts and overlapping video execution with an ordered GPU handoff");
     }
 
     fn write_test_court(base: &Path, project_id: &str, video: &str, geometry: &Value) {

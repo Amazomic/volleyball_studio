@@ -16,7 +16,7 @@
     projectCreateStatus:$("studio-project-create-status"),
     projectCancel:$("studio-project-cancel"),projectClose:$("studio-project-close"),
 
-    list:$("studio-rallies"),filter:$("studio-filter"),previewVideo:$("studio-preview-video"),
+    list:$("studio-rallies"),filter:$("studio-filter"),
     selectedCount:$("studio-selected-count"),banner:$("studio-banner"),
     video:$("studio-video"),
     emptyVideo:$("studio-video-empty"),videoTime:$("studio-video-time"),
@@ -32,7 +32,7 @@
   const s = {
     project:"",analysis:"",run:"",video:"",items:[],total:0,offset:0,limit:24,
     projectCatalog:[],projectVideos:[],chain:null,chainEpoch:0,catalogEpoch:0,
-    pipelineBlocks:new Map(),pipelineCompleted:new Map(),
+    pipelineBlocks:new Map(),pipelineCompleted:new Map(),projectRallies:new Map(),queueRallyUpdates:new Map(),
     filtered:0,gold:new Set(),revision:"absent",writable:false,marksLoaded:false,selected:new Map(),
     current:"",videoKey:"",seekAt:0,stopAt:null,clipStart:null,clipEnd:null,analysisOffset:0,
     playbackMode:"sequence",generation:0,busy:false,jobId:"",timer:null,
@@ -3629,7 +3629,7 @@
   // The linked source chain is project -> GPU analysis (video + lineage) -> CPU snapshot.
   // Preserve selections on refresh; reset only dependent selections when an upstream
   // source changes. Stale async responses must never reselect a different project.
-  const setRuns=async(preferred="",exact=false,previewVideo="")=>{
+  const setRuns=async(preferred="",exact=false,previewVideo="",rally=null)=>{
     if(s.pipelineBlocks?.has(s.project))return;
     reset();
     const source=s.chain?.choices.find(row=>row.value===s.analysis);
@@ -3650,8 +3650,7 @@
     refreshPicker(ui.run);
     s.run=ui.run.value;
     s.video=rows.find(row=>row.rally_run_id===s.run)?.video||source?.video||previewVideo;
-    syncPreviewVideo(s.video);
-    if(s.video){s.fps=30;ensurePreviewVideo();}
+    if(s.video){s.fps=30;if(!rally)ensurePreviewVideo();}
     // Overlay playback follows the selected CPU snapshot, not a rally card.
     // reset() clears the canvas source; restore it for full-video preview too.
     setOverlaySource(overlay.raw||s.run?{}:null);
@@ -3664,6 +3663,11 @@
     }));
     // SHA-verifying a long Touch file may take seconds. Never block the
     // already-resolved header and source chain on that independent operation.
+    if(rally&&s.run===rally.run&&s.video===rally.video){
+      s.analysisOffset=rally.offset;s.fps=rally.fps;
+      view(rally.item);
+    }
+    if(s.projectRallies)void refreshProjectRallies().catch(failed);
     if(s.run){
       void loadPage().catch(failed);
       void loadTimeline().catch(failed);
@@ -3674,22 +3678,14 @@
       "У выбранного анализа пока нет связанной CPU-постобработки.");
     if(overlay.raw&&rawFusion())prefetchOverlayAtFrame(0);
   };
-  const syncPreviewVideo=(selected="")=>{
-    if(!ui.previewVideo)return;
-    const videos=(s.projectVideos||[]).map(video=>({video}));
-    options(ui.previewVideo,videos,"video",row=>row.video.split(/[\\/]/).pop()||row.video,
-      "Выберите видео",!videos.some(row=>row.video===selected));
-    ui.previewVideo.value=selected;
-    ui.previewVideo.disabled=!s.chain||!videos.length||s.pipelineBlocks?.has(s.project)===true;
-  };
-  const setAnalysis=async(preferredRun="",exact=false,previewVideo="")=>{
+  const setAnalysis=async(preferredRun="",exact=false,previewVideo="",rally=null)=>{
     s.analysis=ui.analysis.value;
     const source=s.chain?.choices.find(row=>row.value===s.analysis);
     window.dispatchEvent(new CustomEvent("volley:chain-change",{
       detail:{project_id:s.project,video:source?.video||previewVideo,analysis:s.analysis}
     }));
     s.previewVideoWithoutAnalysis=source?"":previewVideo;
-    await setRuns(preferredRun,exact,previewVideo);
+    await setRuns(preferredRun,exact,previewVideo,rally);
   };
   const selectReferenceEntry=async entry=>{
     if(!reference.active||!entry||annotation.dirty)return;
@@ -3765,15 +3761,6 @@
       (Number(b.created_at)||0)-(Number(a.created_at)||0)||
       String(b.id||"").localeCompare(String(a.id||"")))[0]?.value||"";
   };
-  const selectPreviewVideo=async()=>{
-    const video=ui.previewVideo.value;
-    if(ui.previewVideo.disabled||!s.chain||!s.projectVideos.includes(video)||video===s.video)return;
-    const analysis=newestPrimaryAnalysis(s.chain.choices.filter(row=>row.video===video));
-    ui.analysis.value=analysis;
-    refreshPicker(ui.analysis);
-    if(analysis)await setAnalysis();
-    else await setAnalysis("",true,video);
-  };
   const renderChain=async(chain,preferredAnalysis="",preferredRun="",retainCurrent=false,exact=false)=>{
     const unchanged=retainCurrent&&s.analysis===preferredAnalysis&&s.run===preferredRun&&
       chain.choices.some(row=>row.value===s.analysis)&&
@@ -3804,7 +3791,7 @@
       ui.run.disabled=!rows.length;
       ui.run.value=s.run;
       refreshPicker(ui.run);
-      syncPreviewVideo(s.video||chain.choices.find(row=>row.value===s.analysis)?.video||"");
+      if(s.projectRallies)void refreshProjectRallies().catch(failed);
       return;
     }
     // If the selected source was deleted (including dependent data), switch
@@ -3818,9 +3805,10 @@
     const previous=s.pipelineBlocks?.get(project);
     s.pipelineBlocks?.set(project,status.id);
     if(project!==s.project||previous===status.id&&!s.run&&!s.analysis)return;
+    if(s.projectRallies){s.projectRallyRequest=null;s.projectRallies.clear();}
     s.chainEpoch++;
     reset();s.analysis="";s.chain=null;
-    s.previewVideoWithoutAnalysis="";syncPreviewVideo();
+    s.previewVideoWithoutAnalysis="";
     options(ui.analysis,[],"value",x=>x,"Анализ выполняется…");
     options(ui.run,[],"rally_run_id",x=>x,"Ожидаем завершения анализа");
     ui.analysis.disabled=true;ui.run.disabled=true;
@@ -3832,9 +3820,9 @@
   const loadChain=async(preferredAnalysis="",preferredRun="",retainCurrent=false,freshOnly=false,exact=false)=>{
     const token=++s.chainEpoch,project=s.project;
     if(!retainCurrent){
+      if(s.projectRallyRequest?.project!==project){s.projectRallyRequest=null;s.projectRallies?.clear();}
       reset();
       s.analysis="";s.chain=null;
-      syncPreviewVideo();
       options(ui.analysis,[],"value",x=>x,"Загрузка анализов…");
       options(ui.run,[],"rally_run_id",x=>x,"Сначала выберите анализ");
       ui.analysis.disabled=true;ui.run.disabled=true;
@@ -3851,7 +3839,7 @@
     if(token!==s.chainEpoch||s.project!==project)return;
     if(pipeline.schema!=="volley-studio-pipeline/1"||pipeline.project_id!==project)
       throw Error("Некорректное состояние анализа");
-    if(pipelineActive(pipeline)){
+    if(pipelineActive(pipeline)&&!pipeline.project_queue){
       blockPipelinePreview(pipeline);return;
     }
     if(pipeline.id&&s.pipelineBlocks?.get(project)===pipeline.id){
@@ -3861,7 +3849,7 @@
       preferredRun=pipeline.status==="complete"?pipeline.postprocessing_id||"":"";
       freshOnly=true;exact=true;
     }
-    const videos=s.projectVideos.slice(0,40);
+    const videos=s.projectVideos;
     const cached=freshOnly?null:chainSnapshot.read(project,videos);
     if(cached){
       await renderChain(cached,retainCurrent?s.analysis:preferredAnalysis,
@@ -3954,6 +3942,8 @@
     s.gold=new Set((Array.isArray(raw.candidate_ids)?raw.candidate_ids:[]).filter(valid));
     s.revision=typeof raw.revision==="string"?raw.revision:"absent";
     s.writable=raw.writable===true;s.marksLoaded=true;
+    const source=s.projectRallies?.get(s.run);
+    if(source)source.marked=s.gold;
     syncFavoritesSelection();drawTimeline();
   };
   const rallyListQuery=()=>{
@@ -3973,7 +3963,7 @@
       ...rallyListQuery()
     });
     // Reopening a tab reuses the rendered list and the cached page silently.
-    if(previewCache.peek(path)===null)
+    if(previewCache.peek(path)===null&&!s.projectRallies?.size)
       ui.list.replaceChildren(make("div","empty-state","Проверка источников и загрузка розыгрышей…"));
     try{
       // Bookmarks have a separate revision and a separate metadata request.
@@ -4037,6 +4027,8 @@
       previewCache.drop(path=>path.startsWith("/api/cpu/native/rallies/marks?"));
       s.gold=new Set((Array.isArray(raw.candidate_ids)?raw.candidate_ids:[]).filter(valid));
       s.revision=String(raw.revision);s.marksLoaded=true;
+      const source=s.projectRallies?.get(run);
+      if(source)source.marked=s.gold;
       syncFavoritesSelection();drawTimeline();
       if(ui.filter.value==="marked"||ui.filter.value==="unmarked"){
         await loadPage();
@@ -4363,6 +4355,124 @@
     if(!rallies.length&&!unassigned.length)
       ui.list.append(make("div","empty-state","В этом эталоне нет размеченных розыгрышей и касаний."));
   };
+  const projectRallyRuns=(chain,videos,activeRun)=>{
+    const choices=new Map();
+    for(const [analysis,runs] of chain?.byAnalysis||[]){
+      for(const row of runs){
+        const current=choices.get(row.video);
+        const newest=Number(row.created_at||0)-Number(current?.created_at||0)||
+          row.rally_run_id.localeCompare(current?.run||"");
+        if(!current||row.rally_run_id===activeRun||(current.run!==activeRun&&newest>0))
+          choices.set(row.video,{video:row.video,analysis,run:row.rally_run_id,created_at:row.created_at});
+      }
+    }
+    return videos.map(video=>choices.get(video)).filter(Boolean);
+  };
+  const refreshProjectRallies=async()=>{
+    const project=s.project,choices=projectRallyRuns(s.chain,s.projectVideos,s.run);
+    const previous=s.projectRallyRequest;
+    const signature=JSON.stringify(choices.map(({run})=>run));
+    if(previous?.project===project&&previous.signature===signature)return;
+    const update={project,signature};
+    s.projectRallyRequest=update;
+    const existing=s.projectRallies;
+    const next=new Map(choices.map(source=>[source.run,previous?.project===project?
+      existing.get(source.run)||source:source]));
+    s.projectRallies=next;
+    cards();
+    const missing=[...next.values()].filter(source=>!source.rows);
+    for(let offset=0;offset<missing.length;offset+=4){
+      const loaded=await Promise.allSettled(missing.slice(offset,offset+4).map(async source=>{
+        const query={project_id:project,rally_run_id:source.run};
+        const [raw,marks]=await Promise.all([
+          previewCache.load(url("/api/cpu/native/rallies/timeline",query),900000,true),
+          previewCache.load(url("/api/cpu/native/rallies/marks",query),7000).catch(()=>null)
+        ]);
+        if(raw.schema!=="volley-native-rally-timeline/1"||raw.project_id!==project||
+           raw.rally_run_id!==source.run||raw.video!==source.video||!Array.isArray(raw.rallies)||
+           !Number.isFinite(raw.fps)||raw.fps<=0||
+           !raw.rallies.every(item=>valid(item.candidate_id)&&Number.isSafeInteger(item.start_frame)&&
+             Number.isSafeInteger(item.end_frame)&&item.start_frame>=0&&item.end_frame>=item.start_frame))
+          throw Error("Некорректные розыгрыши проекта");
+        return {...source,rows:raw.rallies,fps:raw.fps,offset:Number(raw.analysis_offset_sec)||0,
+          marked:marks?new Set(marks.candidate_ids||[]):null};
+      }));
+      if(s.projectRallyRequest!==update||s.project!==project)return;
+      for(const result of loaded){
+        if(result.status==="fulfilled")next.set(result.value.run,result.value);
+      }
+      cards();
+      if(loaded.some(result=>result.status==="rejected"))
+        message("Часть розыгрышей проекта недоступна. Обновите данные проекта.","error");
+    }
+  };
+  const projectRallyEntries=(sources,activeRun,items,activeMarks,filter)=>{
+    const detailed=new Map(items.map(item=>[item.candidate_id,item]));
+    const entries=[];
+    for(const source of sources){
+      const active=source.run===activeRun;
+      const marked=(active?activeMarks:null)||source.marked;
+      for(const row of source.rows||(active?items:[])){
+        const id=row.candidate_id;
+        if(filter==="marked"&&!(marked?.has(id)||active&&!marked&&detailed.has(id)))continue;
+        if(filter==="unmarked"&&(marked?.has(id)||!marked&&!active))continue;
+        const detail=active?detailed.get(id):null;
+        entries.push({kind:"touch",source,item:detail||row,detail:Boolean(detail)});
+      }
+    }
+    if(filter==="duration_desc")entries.sort((a,b)=>{
+      const length=entry=>{
+        const {start,end}=rallyClipFrames(entry.item);
+        return (end-start+1)/(entry.source.fps||30);
+      };
+      return length(b)-length(a);
+    });
+    if(filter==="touches_desc")entries.sort((a,b)=>
+      (b.item.motion_event_count||0)-(a.item.motion_event_count||0));
+    return entries;
+  };
+  const openProjectRally=async(source,item)=>{
+    if(source.run===s.run){view(item);return;}
+    if(!s.chain?.byAnalysis.get(source.analysis)?.some(row=>row.rally_run_id===source.run))return;
+    const scroll=ui.list.scrollTop;
+    ui.analysis.value=source.analysis;
+    refreshPicker(ui.analysis);
+    await setAnalysis(source.run,true,"",{...source,item});
+    if(s.run===source.run&&s.current===item.candidate_id){
+      ui.list.scrollTop=scroll;
+      alignActiveRally();
+    }
+  };
+  const projectRallyCard=({source,item})=>{
+    const id=item.candidate_id;
+    const active=source.run===s.run&&s.current===id;
+    const card=make("article","rally-card"+(active?" active":"")+
+      ((source.run===s.run?s.gold:source.marked)?.has(id)?" gold":""));
+    card.tabIndex=0;
+    card.setAttribute("role","button");
+    card.setAttribute("data-rally-id",id);
+    const {start,end}=rallyClipFrames(item),rate=source.fps||30,offset=source.offset||0;
+    const range=timeLabel(offset+start/rate)+" – "+timeLabel(offset+end/rate);
+    card.setAttribute("aria-label","Просмотр розыгрыша "+range);
+    const head=make("div","card-top");
+    head.append(make("span","id-label","ID "+id.slice(0,6)),make("strong","rally-card-time-value",range));
+    const stats=make("div","card-stats");
+    for(const [label,value] of [
+      ["Длительность",((end-start+1)/rate).toFixed(1)+" с"],
+      ["Касаний",item.motion_event_count??"—"],["Игроков",rallyPlayerCount(item)??"—"]
+    ]){
+      const stat=make("div","rally-card-stat");
+      stat.append(make("span","",label),make("strong","",value));
+      stats.append(stat);
+    }
+    card.append(head,stats);
+    const open=()=>void openProjectRally(source,item).catch(failed);
+    card.addEventListener("click",open);
+    card.addEventListener("keydown",event=>{
+      if(event.key==="Enter"||event.key===" "){event.preventDefault();open();}
+    });
+    return card;
+  };
   const cards=()=>{
     const previousScroll=ui.list.scrollTop;
     rallyCardProgresses.clear();
@@ -4383,7 +4493,8 @@
       (timelineRallyLayers.ball.checked?groups.ball:[]).map(group=>({
         kind:"ball",item:group,start:group.start
       })):
-      cpuItems.map(item=>({kind:"touch",item}));
+      s.projectRallies?.size?projectRallyEntries(s.projectRallies.values(),s.run,cpuItems,
+        s.marksLoaded?s.gold:null,ui.filter.value):cpuItems.map(item=>({kind:"touch",item}));
     if(!visible.length){
       const text=trainingList&&!timelineRallyLayers.ball.checked?
         "Включите розыгрыши по траектории мяча.":
@@ -4446,6 +4557,7 @@
         ui.list.append(card);
         continue;
       }
+      if(entry.source&&!entry.detail){ui.list.append(projectRallyCard(entry));continue;}
       const item=entry.item;
       const id=item.candidate_id;
       if(!valid(id))continue;
@@ -4947,26 +5059,41 @@
       if(project===s.project&&reference.active)void refreshReferenceCatalog();
     }catch(e){if(project===s.project)failed(e);}
   });
-  ui.previewVideo.addEventListener("change",()=>selectPreviewVideo().catch(failed));
   ui.analysis.addEventListener("change",()=>setAnalysis().catch(failed));
   ui.run.addEventListener("change",async()=>{
     const id=ui.run.value;reset();
     if(!(s.chain?.byAnalysis.get(s.analysis)||[]).some(row=>row.rally_run_id===id))return;
     s.run=id;
     s.video=s.chain.choices.find(row=>row.value===s.analysis)?.video||"";
-    syncPreviewVideo(s.video);
     sourceSelection.save(s.project,s.analysis,s.run);
     window.dispatchEvent(new CustomEvent("volley:postprocessing-change",{
       detail:{project_id:s.project,rally_run_id:s.run}
     }));
+    void refreshProjectRallies().catch(failed);
     void loadTimeline().catch(failed);
     try{await loadPage();}catch(e){failed(e);}
   });
   window.addEventListener("volley:refresh-projects",()=>{invalidateCatalog();projects().catch(failed);});
   window.addEventListener("volley:refresh-chain",()=>{invalidateCatalog();projects().catch(failed);});
+  const refreshQueueRallies=status=>{
+    const project=status.project_id;
+    if(project!==s.project)return;
+    const published=(status.project_queue.videos||[]).map(row=>row.postprocessing_id).filter(Boolean);
+    if(!published.length)return;
+    const signature=JSON.stringify(published);
+    const previous=s.queueRallyUpdates.get(project);
+    if(previous?.signature===signature)return;
+    const update={signature};
+    s.queueRallyUpdates.set(project,update);
+    void loadChain(s.analysis,s.run,Boolean(s.chain),true).catch(error=>{
+      if(s.queueRallyUpdates.get(project)===update)s.queueRallyUpdates.delete(project);
+      if(project===s.project)failed(error);
+    });
+  };
   window.addEventListener("volley:pipeline-status",event=>{
     const status=event.detail;
     if(status?.schema!=="volley-studio-pipeline/1")return;
+    if(status.project_queue){refreshQueueRallies(status);return;}
     if(pipelineActive(status)){blockPipelinePreview(status);return;}
     if(!status.id||status.project_id!==s.project||s.pipelineBlocks?.get(status.project_id)!==status.id)return;
     s.pipelineBlocks.delete(status.project_id);
@@ -4980,7 +5107,8 @@
   });
   // One authoritative place to select the new GPU -> CPU lineage: header selects.
   window.addEventListener("volley:pipeline-complete",async event=>{
-    const {project_id,video,analysis_id,postprocessing_id,pipeline_id}=event.detail||{};
+    const {project_id,video,analysis_id,postprocessing_id,pipeline_id,project_queue}=event.detail||{};
+    if(project_queue){refreshQueueRallies(event.detail);return;}
     if(project_id!==s.project||typeof analysis_id!=="string")return;
     if(pipeline_id&&s.pipelineCompleted?.get(project_id)===pipeline_id)return;
     if(pipeline_id&&s.pipelineBlocks?.has(project_id)&&s.pipelineBlocks.get(project_id)!==pipeline_id)return;
@@ -5031,7 +5159,7 @@
   });
   ui.filter.addEventListener("change",()=>{
     ui.list.scrollTop=0;
-    void loadPage().catch(failed);
+    cards();void loadPage().catch(failed);
   });
   ui.list.addEventListener("scroll",()=>{
     if(ui.list.scrollTop+ui.list.clientHeight>=ui.list.scrollHeight-240)
@@ -5061,7 +5189,8 @@
   const nextRally=()=>{
     // The full CPU timeline is authoritative; filtered/paginated cards are only a fallback.
     const rows=timeline.data?.project_id===s.project&&
-      timeline.data?.rally_run_id===s.run?timeline.data.rallies:s.items;
+      timeline.data?.rally_run_id===s.run?timeline.data.rallies:
+      s.projectRallies?.get(s.run)?.rows||s.items;
     const start=row=>Number(row.detected_start_frame??row.start_frame??
       row.manual_clip?.start_frame??Infinity);
     const ordered=[...rows].filter(row=>Number.isFinite(start(row)))
@@ -5084,6 +5213,12 @@
     if(s.playbackMode==="sequence"){
       const next=nextRally();
       if(next){view(next);void followSequenceRally();return;}
+      if(s.projectRallies?.size&&!training.active){
+        const sources=[...s.projectRallies.values()];
+        const index=sources.findIndex(source=>source.run===s.run);
+        const source=index>=0?sources.slice(index+1).find(entry=>entry.rows?.length):null;
+        if(source){s.stopAt=null;ui.video.pause();void openProjectRally(source,source.rows[0]).catch(failed);return;}
+      }
     }
     s.stopAt=null;
     ui.video.pause();
