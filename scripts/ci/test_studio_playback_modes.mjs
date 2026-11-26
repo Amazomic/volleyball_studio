@@ -39,14 +39,15 @@ const rallies=[
 const s={project:"p",run:"r",current:"a",clipStart:0,clipEnd:10,
   stopAt:10,seekAt:0,playbackMode:"sequence",
   items:[{candidate_id:"a",detected_start_frame:0,detected_end_frame:299}]};
-let paused=0;const played=[];
+let paused=0;const played=[],followed=[];
 const ui={video:{currentTime:10,paused:false,play:()=>Promise.resolve(),
   pause:()=>{paused++;}}};
 const timeline={data:{project_id:"p",rally_run_id:"r",rallies}};
-const ctx={fps:()=>30,s,ui,timeline,view:item=>played.push(item.candidate_id),message:()=>{}};
+const ctx={fps:()=>30,s,ui,timeline,view:item=>{played.push(item.candidate_id);s.current=item.candidate_id;},followSequenceRally:()=>followed.push(s.current),message:()=>{}};
 runInNewContext(script,ctx,{filename:"studio-rally-boundary.js"});
 ctx.onRallyBoundary();
 assert.deepEqual(played,["b"],"Sequence must use full timeline, not paginated cards");
+assert.deepEqual(followed,["b"],"Only an automatic sequence transition follows the next card");
 s.current="c";s.clipEnd=40;ctx.onRallyBoundary();
 assert.equal(paused,1,"Sequence must stop after last rally");
 s.playbackMode="loop";s.clipStart=30;s.clipEnd=40;
@@ -60,4 +61,50 @@ assert.equal(s.stopAt,null);
 s.playbackMode="free";s.stopAt=40;ctx.onRallyBoundary();
 assert.equal(paused,2,"Free mode must not pause at rally boundary");
 assert.equal(s.stopAt,null);
+assert.deepEqual(followed,["b"],"Other playback modes must not scroll");
 console.log("Studio playback modes and controls: OK");
+
+
+const followStart=js.indexOf("  const followSequenceRally=async()=>");
+const followEnd=js.indexOf("  const view=",followStart);
+assert.ok(followStart>=0&&followEnd>followStart);
+let mounted=true,cardTop=210,cardHeight=100,loads=0;
+const rail={scrollTop:230,clientTop:1,clientHeight:320,
+  getBoundingClientRect:()=>({top:100}),
+  querySelector:()=>mounted?{getBoundingClientRect:()=>({top:cardTop,bottom:cardTop+cardHeight})}:null};
+const state={current:"b",generation:1,videoKey:"p:v",playbackMode:"sequence",canLoadMore:false,items:[]};
+const scrollContext={s:state,ui:{list:rail,filter:{value:"all"}},training:{active:false},
+  previewIsVisible:()=>true,loadMore:async()=>{loads++;state.items.push({candidate_id:"b"});mounted=true;}};
+runInNewContext(js.slice(followStart,followEnd)+"\nthis.follow=followSequenceRally;",scrollContext);
+await scrollContext.follow();
+assert.equal(rail.scrollTop,230,"Fully visible next card must not jump");
+cardTop=380;
+await scrollContext.follow();
+assert.equal(rail.scrollTop,289,"Partially hidden card: scroll only the bottom overflow");
+cardTop=460;
+await scrollContext.follow();
+assert.equal(rail.scrollTop,428,"Below viewport: reveal bottom of card, not align to top");
+cardTop=75;
+await scrollContext.follow();
+assert.equal(rail.scrollTop,402,"Above viewport: scroll upward only as far as necessary");
+mounted=false;state.canLoadMore=true;cardTop=450;
+await scrollContext.follow();
+assert.equal(loads,1,"Load another page when the playing card is not mounted");
+assert.equal(rail.scrollTop,531,"Reveal the card after pagination");
+mounted=false;
+scrollContext.loadMore=async()=>{loads++;state.current="manual";mounted=true;state.items.push({candidate_id:"manual"});};
+await scrollContext.follow();
+assert.equal(rail.scrollTop,531,"Do not scroll after a different manual selection during pagination");
+mounted=false;state.current="b";
+scrollContext.loadMore=async()=>{loads++;state.sequenceFollow=null;mounted=true;state.items.push({candidate_id:"b"});};
+await scrollContext.follow();
+assert.equal(rail.scrollTop,531,"A repeated manual click cancels an outstanding follow");
+mounted=false;
+scrollContext.loadMore=async()=>{loads++;};
+await scrollContext.follow();
+assert.equal(loads,4,"No endless pagination if the request makes no progress");
+assert.equal(rail.scrollTop,531);
+state.marksLoaded=true;state.gold=new Set();scrollContext.ui.filter.value="marked";
+await scrollContext.follow();
+assert.equal(loads,4,"Preserve an explicit filter that excludes the playing card");
+console.log("Sequence follow: nearest-edge scrolling, pagination, cancellation and filter preservation: OK");

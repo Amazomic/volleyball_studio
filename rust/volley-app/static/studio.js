@@ -4222,9 +4222,35 @@
     const top=active.getBoundingClientRect().top-ui.list.getBoundingClientRect().top;
     ui.list.scrollTop=Math.max(0,ui.list.scrollTop+top-ui.list.clientTop);
   };
+  const followSequenceRally=async()=>{
+    const token={},current=s.current,generation=s.generation,key=s.videoKey;
+    s.sequenceFollow=token;
+    const valid=()=>s.sequenceFollow===token&&s.current===current&&
+      s.generation===generation&&s.videoKey===key&&
+      s.playbackMode==="sequence"&&previewIsVisible();
+    if(!valid())return;
+    const list=ui.list;
+    let active=list.querySelector(".rally-card.active");
+    const filter=ui.filter.value;
+    const excluded=s.marksLoaded&&((filter==="marked"&&!s.gold.has(current))||
+      (filter==="unmarked"&&s.gold.has(current)));
+    while(!active&&s.canLoadMore&&!training.active&&!excluded){
+      const count=s.items.length;
+      await loadMore();
+      if(!valid()||s.items.length<=count)return;
+      active=list.querySelector(".rally-card.active");
+    }
+    if(!active||!valid())return;
+    const top=list.getBoundingClientRect().top+list.clientTop;
+    const bottom=top+list.clientHeight;
+    const bounds=active.getBoundingClientRect();
+    if(bounds.top<top||(bounds.bottom-bounds.top>list.clientHeight&&bounds.bottom>bottom))
+      list.scrollTop+=bounds.top-top;
+    else if(bounds.bottom>bottom)list.scrollTop+=bounds.bottom-bottom;
+  };
   const view=(item,requestedTime=null)=>{
     if(!s.project||!s.video)return;
-    s.keyboardRallyAnchor=null;
+    s.sequenceFollow=null;s.keyboardRallyAnchor=null;
     if(s.current!==item.candidate_id){
       s.current=item.candidate_id;cards();
     }
@@ -5057,7 +5083,7 @@
     }
     if(s.playbackMode==="sequence"){
       const next=nextRally();
-      if(next){view(next);return;}
+      if(next){view(next);void followSequenceRally();return;}
     }
     s.stopAt=null;
     ui.video.pause();
