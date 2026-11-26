@@ -3053,8 +3053,8 @@
       Number.isFinite(ui.video.currentTime)&&s.videoKey===s.project+":"+s.video?
         ui.video.currentTime:s.seekAt));
     timeline.playhead.style.left=duration?(100*position/duration)+"%":"0%";
-    const milliseconds=Math.round(position*1000);
-    timeline.middle.textContent=timeLabel(milliseconds/1000)+"."+String(milliseconds%1000).padStart(3,"0");
+    const tenths=Math.floor(position*10);
+    timeline.middle.textContent=timeLabel(tenths/10)+"."+String(tenths%10);
     timeline.track.setAttribute("aria-valuemax",String(Math.ceil(duration)));
     timeline.track.setAttribute("aria-valuenow",String(Math.floor(position)));
     timeline.track.setAttribute("aria-valuetext",
@@ -3221,7 +3221,7 @@
         actual.length+" касаний (CPU) · "+floorContacts(raw).length+" касаний пола · "+
         attacks+" атак · "+blocks+" блоков";
       const duration=timelineDuration();
-      timeline.middle.textContent="00:00.000";
+      timeline.middle.textContent="00:00.0";
       timeline.end.textContent=timeLabel(duration);
       drawTimeline();syncFavoritesSelection();drawOverlay();
       refreshRallyCardTouchTicks();updateRallyCardProgress();
@@ -5031,7 +5031,7 @@
     }catch{}
     const duration=timelineDuration();
     if(duration){
-      timeline.middle.textContent="00:00.000";
+      timeline.middle.textContent="00:00.0";
       timeline.end.textContent=timeLabel(duration);
     }
     drawTimeline();updateRallyCardProgress();
