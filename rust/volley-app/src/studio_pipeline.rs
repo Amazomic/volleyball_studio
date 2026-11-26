@@ -1632,6 +1632,76 @@ fn compatible_version(saved: &Value, request: &StartRequest, identity: &Value) -
         // the fusion and both GPU manifests are always validated separately.
         && (saved["source_identity"].is_null() || saved["source_identity"] == *identity)
 }
+fn deleted_launch(names: &Value, id: &str, saved: &Value) -> bool {
+    names[format!("hidden_launch:{id}")] == true
+        || saved["queue_id"]
+            .as_str()
+            .is_some_and(|queue| names[format!("hidden_launch:{queue}")] == true)
+}
+
+fn latest_deleted_video_start(
+    root: &Path,
+    project: &str,
+    video: &str,
+    names: &Value,
+) -> Option<u64> {
+    names
+        .as_object()?
+        .iter()
+        .filter(|(_, value)| **value == true)
+        .filter_map(|(key, _)| key.strip_prefix("hidden_launch:").filter(|id| valid_id(id)))
+        .filter_map(|id| read_queue_rows(root, project, id).ok())
+        .flatten()
+        .filter(|row| row["video"] == video)
+        .filter_map(|row| row["started_ms"].as_u64())
+        .max()
+}
+
+pub(crate) fn unfinished_pipeline_videos(
+    project_root: &Path,
+    project: &str,
+    deleting: &str,
+) -> Result<BTreeSet<String>, ApiError> {
+    let root = project_root.join("native_studio_pipelines");
+    let names = storage::read_json(&project_root.join("native_analysis_names.json"))?
+        .unwrap_or_else(|| json!({}));
+    let mut videos = BTreeSet::new();
+    let mut checked = 0;
+    for entry in fs::read_dir(&root)
+        .map_err(|e| storage::internal(format!("Read checkpoint owners: {e}")))?
+    {
+        let entry = entry.map_err(|e| storage::internal(format!("Read checkpoint owner: {e}")))?;
+        let id = entry.file_name().to_string_lossy().into_owned();
+        if !valid_id(&id) || id == deleting {
+            continue;
+        }
+        checked += 1;
+        if checked > MAX_PIPELINES {
+            return Err(storage::conflict("Too many checkpoint owners"));
+        }
+        let Ok(path) = status_path(&root, &id) else {
+            continue;
+        };
+        let Ok(row) = read(&path) else { continue };
+        if row["schema"] != SCHEMA
+            || row["project_id"] != project
+            || row["id"] != id
+            || row["queue_id"] == deleting
+            || row["status"] == "complete"
+            || deleted_launch(&names, &id, &row)
+        {
+            continue;
+        }
+        if let Some(video) = row["video"]
+            .as_str()
+            .filter(|video| storage::video_name(video).is_ok())
+        {
+            videos.insert(video.to_owned());
+        }
+    }
+    Ok(videos)
+}
+
 fn find_reusable(
     state: &AppState,
     request: &StartRequest,
@@ -1676,6 +1746,12 @@ fn find_reusable(
     }
     paths.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     let project = projects::project_root(state).join(&request.project_id);
+    let Ok(names) = storage::read_json(&project.join("native_analysis_names.json")) else {
+        return matches;
+    };
+    let names = names.unwrap_or_else(|| json!({}));
+    let deleted_before =
+        latest_deleted_video_start(&root, &request.project_id, &request.video, &names);
     // Real execution validates the court snapshot before attempting reuse.
     // In synthetic version tests, the optional source store is absent.
     let court_revision =
@@ -1690,6 +1766,15 @@ fn find_reusable(
         let Ok(saved) = read(&file) else {
             continue;
         };
+        if deleted_launch(&names, &id, &saved)
+            || deleted_before.is_some_and(|cutoff| {
+                saved["started_ms"]
+                    .as_u64()
+                    .is_none_or(|start| start <= cutoff)
+            })
+        {
+            continue;
+        }
         let complete_gpu = gpu_lineage_valid(&project, request, identity, &saved);
         if rally_blocks
             && (!complete_gpu
@@ -3676,7 +3761,11 @@ fn stage_aware_remaining(current: &Value, history: &Value, now: u64) -> Option<u
     (remaining <= 7 * 24 * 3_600_000).then_some(remaining.max(1000))
 }
 
-fn read_queue_rows(root: &Path, project: &str, queue_id: &str) -> Result<Vec<Value>, ApiError> {
+pub(crate) fn read_queue_rows(
+    root: &Path,
+    project: &str,
+    queue_id: &str,
+) -> Result<Vec<Value>, ApiError> {
     let first = read(&status_path(root, queue_id)?)?;
     let ids = first["queue_runs"]
         .as_array()
@@ -5957,6 +6046,47 @@ mod branching_tests {
             "unchanged settings must reuse both versions"
         );
         assert!(matching.gpu.is_some());
+        let names = project_dir.join("native_analysis_names.json");
+        let queue = "a".repeat(32);
+        let older_id = "b".repeat(32);
+        let head_dir = project_dir.join("native_studio_pipelines").join(&queue);
+        let older_dir = project_dir.join("native_studio_pipelines").join(&older_id);
+        fs::create_dir(&head_dir).unwrap();
+        fs::create_dir(&older_dir).unwrap();
+        let mut older = saved.clone();
+        older["id"] = json!(older_id);
+        older["started_ms"] = json!(1);
+        storage::write_json_atomic(&older_dir.join("status.json"), &older).unwrap();
+        saved["queue_id"] = json!(queue);
+        saved["queue_runs"] = json!([queue, run_id]);
+        saved["started_ms"] = json!(2);
+        let mut head = saved.clone();
+        head["id"] = json!(queue);
+        head["video"] = json!("other.mp4");
+        storage::write_json_atomic(&head_dir.join("status.json"), &head).unwrap();
+        storage::write_json_atomic(&directory.join("status.json"), &saved).unwrap();
+        storage::write_json_atomic(&names, &json!({format!("hidden_launch:{queue}"):true}))
+            .unwrap();
+        let deleted = find_reusable(&state, &request, &identity, &"2".repeat(32), false);
+        assert!(
+            deleted.gpu.is_none() && deleted.full.is_none(),
+            "deleted launch and older results must not supply cache"
+        );
+        older["started_ms"] = json!(3);
+        storage::write_json_atomic(&older_dir.join("status.json"), &older).unwrap();
+        let newer = find_reusable(&state, &request, &identity, &"2".repeat(32), false);
+        assert!(
+            newer.gpu.is_some() && newer.full.is_some(),
+            "a newer visible analysis remains reusable"
+        );
+        fs::remove_dir_all(head_dir).unwrap();
+        fs::remove_dir_all(older_dir).unwrap();
+        fs::remove_file(names).unwrap();
+        for field in ["queue_id", "queue_runs", "started_ms"] {
+            saved.as_object_mut().unwrap().remove(field);
+        }
+        storage::write_json_atomic(&directory.join("status.json"), &saved).unwrap();
+
         let new_pipeline = find_reusable(&state, &request, &identity, &"2".repeat(32), true);
         assert!(new_pipeline.gpu.is_none() && new_pipeline.full.is_none());
         assert!(compatible_version(&saved, &request, &identity));

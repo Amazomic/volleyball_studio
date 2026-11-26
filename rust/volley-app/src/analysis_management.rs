@@ -11,6 +11,10 @@ mod tests {
             "native_cpu_replays" => ("volley-native-cpu-tracking/1", "replay_id"),
             "native_cpu_touch_runs" => ("volley-native-cpu-touch-proposals/1", "touch_id"),
             "native_cpu_rallies" => ("volley-native-cpu-rally-proposals/1", "rally_run_id"),
+            "native_gpu_pose_runs" => ("volley-native-gpu-pose/1", "pose_run_id"),
+            "native_cpu_ball_stabilizer" => {
+                ("volley-native-stabilized-ball-trajectory/1", "artifact_id")
+            }
             _ => panic!("unknown fixture"),
         };
         data["schema"] = json!(schema);
@@ -24,6 +28,214 @@ mod tests {
             serde_json::to_vec(&data).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn deleting_project_launch_removes_owned_results_and_preserves_shared_results() {
+        let root = std::env::temp_dir().join(format!("volley-launch-delete-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let launch = "11111111111111111111111111111111";
+        let other_launch = "22222222222222222222222222222222";
+        let fusion = "33333333333333333333333333333333";
+        let shared_fusion = "44444444444444444444444444444444";
+        let replay = "55555555555555555555555555555555";
+        let rally = "66666666666666666666666666666666";
+        let shared_rally = "77777777777777777777777777777777";
+        let gpu = "88888888888888888888888888888888";
+        let second = "99999999999999999999999999999999";
+        record(&root, "native_gpu_runs", gpu, json!({}));
+        record(
+            &root,
+            "native_gpu_fusions",
+            fusion,
+            json!({"sources":{"vballnet":{"job_id":gpu}}}),
+        );
+        record(
+            &root,
+            "native_cpu_replays",
+            replay,
+            json!({"source_fusion_id":fusion}),
+        );
+        record(
+            &root,
+            "native_cpu_rallies",
+            rally,
+            json!({"source_replay_id":replay}),
+        );
+        record(&root, "native_gpu_fusions", shared_fusion, json!({}));
+        record(&root, "native_cpu_rallies", shared_rally, json!({}));
+        for (folder, id) in [
+            ("native_gpu_fusions", shared_fusion),
+            ("native_cpu_rallies", shared_rally),
+        ] {
+            let path = root.join(folder).join(id).join("manifest.json");
+            let mut row = storage::read_json(&path).unwrap().unwrap();
+            row["video"] = json!("other.mp4");
+            storage::write_json_atomic(&path, &row).unwrap();
+        }
+        for (id, queue, runs, video, analysis, result) in [
+            (
+                launch,
+                launch,
+                vec![launch, second],
+                "match.mp4",
+                fusion,
+                rally,
+            ),
+            (
+                second,
+                launch,
+                vec![launch, second],
+                "other.mp4",
+                shared_fusion,
+                shared_rally,
+            ),
+            (
+                other_launch,
+                other_launch,
+                vec![other_launch],
+                "other.mp4",
+                shared_fusion,
+                shared_rally,
+            ),
+        ] {
+            let path = root.join("native_studio_pipelines").join(id);
+            fs::create_dir_all(&path).unwrap();
+            storage::write_json_atomic(
+                &path.join("status.json"),
+                &json!({
+                    "schema":"volley-studio-pipeline/1","project_id":"123456abcdef",
+                    "id":id,"queue_id":queue,"queue_runs":runs,"mode":"full",
+                    "video":video,"analysis_id":analysis,"postprocessing_id":result
+                }),
+            )
+            .unwrap();
+        }
+        let touch = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let trajectory = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let pose = "cccccccccccccccccccccccccccccccc";
+        record(
+            &root,
+            "native_gpu_pose_runs",
+            pose,
+            json!({"fusion_id":fusion}),
+        );
+        record(
+            &root,
+            "native_cpu_ball_stabilizer",
+            trajectory,
+            json!({"source_replay_id":replay}),
+        );
+        record(
+            &root,
+            "native_cpu_touch_runs",
+            touch,
+            json!({
+                "source_replay_id":replay,"ball_stabilizer":{"artifact_id":trajectory},
+                "pose_source":{"pose_run_id":pose}
+            }),
+        );
+        let rally_path = root
+            .join("native_cpu_rallies")
+            .join(rally)
+            .join("manifest.json");
+        let mut rally_record = storage::read_json(&rally_path).unwrap().unwrap();
+        rally_record["source_touch_id"] = json!(touch);
+        storage::write_json_atomic(&rally_path, &rally_record).unwrap();
+        let checkpoint_root = root.join("native_studio_pipelines/phase1_checkpoints");
+        let checkpoint = "a".repeat(64);
+        let shared_checkpoint = "b".repeat(64);
+        let unrelated_checkpoint = "c".repeat(64);
+        for (key, video) in [
+            (&checkpoint, "match.mp4"),
+            (&shared_checkpoint, "other.mp4"),
+            (&unrelated_checkpoint, "third.mp4"),
+        ] {
+            let path = checkpoint_root.join(key);
+            fs::create_dir_all(&path).unwrap();
+            storage::write_json_atomic(
+                &path.join("identity.json"),
+                &json!({
+                    "schema":"volley-phase1-checkpoint/1","project":"123456abcdef","video":video
+                }),
+            )
+            .unwrap();
+        }
+        let request = EditRequest {
+            project_id: "123456abcdef".into(),
+            video: "".into(),
+            kind: "launch".into(),
+            id: launch.into(),
+            action: "delete".into(),
+            name: None,
+        };
+        let trash = edit(&root, &request)
+            .unwrap()
+            .expect("owned results staged");
+        assert!(trash.is_dir());
+        for (folder, id) in [
+            ("native_gpu_runs", gpu),
+            ("native_gpu_fusions", fusion),
+            ("native_cpu_replays", replay),
+            ("native_cpu_rallies", rally),
+            ("native_cpu_touch_runs", touch),
+            ("native_cpu_ball_stabilizer", trajectory),
+            ("native_gpu_pose_runs", pose),
+        ] {
+            assert!(!root.join(folder).join(id).exists(), "{folder}/{id}");
+        }
+        assert!(!checkpoint_root.join(&checkpoint).exists());
+        assert!(checkpoint_root.join(&shared_checkpoint).is_dir());
+        assert!(checkpoint_root.join(&unrelated_checkpoint).is_dir());
+        assert!(root.join("native_gpu_fusions").join(shared_fusion).is_dir());
+        assert!(root.join("native_cpu_rallies").join(shared_rally).is_dir());
+        let launches = crate::studio_pipeline::project_launches(&root, "123456abcdef").unwrap();
+        assert!(launches
+            .iter()
+            .any(|row| row["id"] == launch && row["hidden"] == true));
+        assert!(launches
+            .iter()
+            .any(|row| row["id"] == other_launch && row["hidden"] != true));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_launch_delete_recovers_hidden_marker_and_checkpoint() {
+        let root = std::env::temp_dir().join(format!("volley-launch-recover-{}", Uuid::new_v4()));
+        let id = "a".repeat(32);
+        let key = "b".repeat(64);
+        let folder = "native_studio_pipelines/phase1_checkpoints";
+        let txn = root.join("native_analysis_deletion");
+        fs::create_dir_all(root.join(folder).join(&key)).unwrap();
+        fs::create_dir(&txn).unwrap();
+        storage::write_json_atomic(
+            &txn.join("journal.json"),
+            &json!({
+                "paths":[[folder,&key]],"hidden_launch":id
+            }),
+        )
+        .unwrap();
+        fs::rename(root.join(folder).join(&key), txn.join("0")).unwrap();
+        recover(&root).unwrap();
+        assert!(root.join(folder).join(&key).is_dir());
+        assert!(!root.join("native_analysis_names.json").exists());
+        fs::create_dir(&txn).unwrap();
+        fs::rename(root.join(folder).join(&key), txn.join("0")).unwrap();
+        storage::write_json_atomic(
+            &root.join("native_analysis_deletion_committed.json"),
+            &json!({
+                "paths":[[folder,&key]],"hidden_launch":id
+            }),
+        )
+        .unwrap();
+        recover(&root).unwrap();
+        let names = storage::read_json(&root.join("native_analysis_names.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(names[format!("hidden_launch:{id}")], true);
+        assert!(!root.join(folder).join(&key).exists());
+        assert!(!txn.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -512,8 +724,9 @@ pub(crate) fn recover(root: &Path) -> Result<(), ApiError> {
     let txn = root.join("native_analysis_deletion");
     let committed = root.join("native_analysis_deletion_committed.json");
     if committed.exists() {
-        storage::read_json(&committed)?
+        let journal = storage::read_json(&committed)?
             .ok_or_else(|| storage::conflict("Повреждён журнал удаления"))?;
+        finish_launch_deletion(root, &journal)?;
         if txn.exists() {
             safe_folder(&txn).map_err(storage::bad_request)?;
             fs::remove_dir_all(&txn)
@@ -569,8 +782,7 @@ pub(crate) fn recover(root: &Path) -> Result<(), ApiError> {
         let name = item[1]
             .as_str()
             .ok_or_else(|| storage::conflict("Повреждён журнал удаления"))?;
-        let stage_folder =
-            STAGES.iter().any(|(_, path)| *path == folder) || folder == "native_gpu_pose_runs";
+        let stage_folder = STAGES.iter().any(|(_, path)| *path == folder);
         let sidecar_folder = [
             "native_rally_marks",
             "native_action_reviews",
@@ -578,13 +790,18 @@ pub(crate) fn recover(root: &Path) -> Result<(), ApiError> {
             "native_reid_reviews",
         ]
         .contains(&folder);
-        let valid_name = if stage_folder {
+        let valid_name = if folder == "native_studio_pipelines/phase1_checkpoints" {
+            checkpoint_id(name)
+        } else if stage_folder {
             opaque_id(name)
         } else {
             sidecar_folder && name.strip_suffix(".json").is_some_and(opaque_id)
         };
         if !valid_name {
             return Err(storage::conflict("Повреждён журнал удаления"));
+        }
+        if folder == "native_studio_pipelines/phase1_checkpoints" {
+            safe_folder(&root.join("native_studio_pipelines")).map_err(storage::bad_request)?;
         }
         let parent = root.join(folder);
         safe_folder(&parent).map_err(storage::bad_request)?;
@@ -669,12 +886,14 @@ pub(crate) fn cleanup_orphaned_deletions(state: &AppState) {
     }
 }
 
-const STAGES: [(&str, &str); 5] = [
+const STAGES: [(&str, &str); 7] = [
     ("gpu", "native_gpu_runs"),
     ("fusion", "native_gpu_fusions"),
     ("tracking", "native_cpu_replays"),
     ("touches", "native_cpu_touch_runs"),
     ("rallies", "native_cpu_rallies"),
+    ("pose", "native_gpu_pose_runs"),
+    ("stabilizer", "native_cpu_ball_stabilizer"),
 ];
 
 #[derive(Deserialize)]
@@ -714,6 +933,8 @@ fn entries(root: &Path) -> Result<Vec<(String, String, Value)>, ApiError> {
                 "tracking" => ("volley-native-cpu-tracking/1", "replay_id"),
                 "touches" => ("volley-native-cpu-touch-proposals/1", "touch_id"),
                 "rallies" => ("volley-native-cpu-rally-proposals/1", "rally_run_id"),
+                "pose" => ("volley-native-gpu-pose/1", "pose_run_id"),
+                "stabilizer" => ("volley-native-stabilized-ball-trajectory/1", "artifact_id"),
                 _ => return Err(storage::internal("Unknown analysis stage")),
             };
             if value["schema"] != schema || value[field] != id {
@@ -737,8 +958,9 @@ pub(crate) fn display_name(root: &Path, kind: &str, id: &str) -> Result<Option<S
 }
 
 fn edit_launch(root: &Path, req: &EditRequest) -> Result<Option<std::path::PathBuf>, ApiError> {
+    let launches = crate::studio_pipeline::project_launches(root, &req.project_id)?;
     if !opaque_id(&req.id)
-        || !crate::studio_pipeline::project_launches(root, &req.project_id)?
+        || !launches
             .iter()
             .any(|row| row["id"] == req.id && row["hidden"] != true)
     {
@@ -759,13 +981,190 @@ fn edit_launch(root: &Path, req: &EditRequest) -> Result<Option<std::path::PathB
             }
             map.insert(format!("launch:{}", req.id), json!(name));
         }
-        "delete" => {
-            map.insert(format!("hidden_launch:{}", req.id), json!(true));
-        }
+        "delete" => return delete_launch(root, req, &launches),
         _ => return Err(storage::bad_request("Unknown action")),
     }
     storage::write_json_atomic(&names_path, &names)?;
     Ok(None)
+}
+
+type Artifact<'a> = (&'a str, &'a str);
+
+fn artifact_refs(row: &Value) -> Vec<Artifact<'_>> {
+    [
+        ("fusion", &row["analysis_id"]),
+        ("gpu", &row["gpu_jobs"]["ball"]),
+        ("gpu", &row["gpu_jobs"]["players"]),
+        ("gpu", &row["current_gpu_job_id"]),
+        ("pose", &row["gpu_jobs"]["pose"]),
+        ("tracking", &row["primary_tracking"]["replay_id"]),
+        ("tracking", &row["cpu_runs"]["tracking"]),
+        ("touches", &row["cpu_runs"]["touches"]),
+        ("rallies", &row["cpu_runs"]["rallies"]),
+        ("rallies", &row["postprocessing_id"]),
+        ("stabilizer", &row["ball_stabilizer"]["artifact_id"]),
+    ]
+    .into_iter()
+    .filter_map(|(kind, id)| id.as_str().filter(|id| opaque_id(id)).map(|id| (kind, id)))
+    .collect()
+}
+
+fn artifact_parents<'a>(stage: &str, row: &'a Value) -> Vec<Artifact<'a>> {
+    let refs: &[(&str, &Value)] = match stage {
+        "fusion" => &[
+            ("gpu", &row["sources"]["person_pose"]["job_id"]),
+            ("gpu", &row["sources"]["vballnet"]["job_id"]),
+        ],
+        "tracking" => &[
+            ("fusion", &row["source_fusion_id"]),
+            ("pose", &row["source_pose_run_id"]),
+            ("tracking", &row["refined_pose_source_replay_id"]),
+            ("gpu", &row["player_frame_scope_ball_job_id"]),
+        ],
+        "touches" => &[
+            ("tracking", &row["source_replay_id"]),
+            ("pose", &row["pose_source"]["pose_run_id"]),
+            ("stabilizer", &row["ball_stabilizer"]["artifact_id"]),
+            ("gpu", &row["primary_ball_job_id"]),
+        ],
+        "rallies" => &[
+            ("tracking", &row["source_replay_id"]),
+            ("touches", &row["source_touch_id"]),
+            ("gpu", &row["primary_ball_job_id"]),
+        ],
+        "pose" => &[("fusion", &row["fusion_id"])],
+        "stabilizer" => &[("tracking", &row["source_replay_id"])],
+        _ => &[],
+    };
+    refs.iter()
+        .filter_map(|(kind, id)| id.as_str().filter(|id| opaque_id(id)).map(|id| (*kind, id)))
+        .collect()
+}
+
+fn delete_launch(
+    root: &Path,
+    req: &EditRequest,
+    launches: &[Value],
+) -> Result<Option<std::path::PathBuf>, ApiError> {
+    let pipeline_root = root.join("native_studio_pipelines");
+    let mut rows = Vec::new();
+    let mut other_rows = Vec::new();
+    for launch in launches {
+        let id = launch["id"]
+            .as_str()
+            .ok_or_else(|| storage::conflict("Invalid launch ID"))?;
+        let members = crate::studio_pipeline::read_queue_rows(&pipeline_root, &req.project_id, id)?;
+        if id == req.id || launch["hidden"] == true {
+            rows.extend(members);
+        } else {
+            other_rows.extend(members);
+        }
+    }
+    let all = entries(root)?;
+    let mut selected = HashSet::new();
+    for row in &rows {
+        let mut pending = artifact_refs(row);
+        let mut visited = HashSet::new();
+        while let Some(reference) = pending.pop() {
+            if !visited.insert(reference) {
+                continue;
+            }
+            if let Some((stage, id, manifest)) = all
+                .iter()
+                .find(|(kind, id, _)| (kind.as_str(), id.as_str()) == reference)
+            {
+                if manifest["project_id"] != req.project_id || manifest["video"] != row["video"] {
+                    return Err(storage::conflict(
+                        "Analysis artifact belongs to another video or project",
+                    ));
+                }
+                selected.insert((stage.as_str(), id.as_str()));
+                pending.extend(artifact_parents(stage, manifest));
+            }
+        }
+    }
+    for row in &other_rows {
+        for reference in artifact_refs(row) {
+            selected.remove(&reference);
+        }
+    }
+    loop {
+        let count = selected.len();
+        for (stage, id, row) in &all {
+            if !selected.contains(&(stage.as_str(), id.as_str())) {
+                for parent in artifact_parents(stage, row) {
+                    selected.remove(&parent);
+                }
+            }
+        }
+        if selected.len() == count {
+            break;
+        }
+    }
+    let mut selected: Vec<_> = selected.into_iter().collect();
+    selected.sort_unstable();
+    let mut paths = artifact_paths(root, &selected)?;
+    let checkpoint_parent = pipeline_root.join("phase1_checkpoints");
+    if checkpoint_parent.exists() {
+        safe_folder(&checkpoint_parent).map_err(storage::bad_request)?;
+        let unfinished =
+            crate::studio_pipeline::unfinished_pipeline_videos(root, &req.project_id, &req.id)?;
+        for entry in fs::read_dir(&checkpoint_parent)
+            .map_err(|e| storage::internal(format!("Read checkpoints: {e}")))?
+        {
+            let entry = entry.map_err(|e| storage::internal(format!("Read checkpoint: {e}")))?;
+            let id = entry.file_name().to_string_lossy().to_string();
+            if !checkpoint_id(&id) {
+                continue;
+            }
+            safe_folder(&entry.path()).map_err(storage::bad_request)?;
+            let Some(identity) = storage::read_json(&entry.path().join("identity.json"))? else {
+                continue;
+            };
+            if identity["schema"] != "volley-phase1-checkpoint/1"
+                || identity["project"] != req.project_id
+            {
+                continue;
+            }
+            let belongs = rows.iter().any(|row| row["video"] == identity["video"]);
+            let shared = identity["video"]
+                .as_str()
+                .is_some_and(|video| unfinished.contains(video))
+                || other_rows
+                    .iter()
+                    .any(|row| row["phase1_checkpoint_key"] == id);
+            if belongs && !shared {
+                paths.push(("native_studio_pipelines/phase1_checkpoints".into(), id));
+            }
+        }
+    }
+    let staged = stage_deletion(root, &paths, Some(&req.id))?;
+    Ok(Some(staged))
+}
+
+fn checkpoint_id(id: &str) -> bool {
+    id.len() == 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+fn finish_launch_deletion(root: &Path, journal: &Value) -> Result<(), ApiError> {
+    let Some(id) = journal.get("hidden_launch").filter(|id| !id.is_null()) else {
+        return Ok(());
+    };
+    let id = id
+        .as_str()
+        .filter(|id| opaque_id(id))
+        .ok_or_else(|| storage::conflict("Invalid deleted launch ID"))?;
+    let path = root.join("native_analysis_names.json");
+    let mut names = storage::read_json(&path)?.unwrap_or_else(|| json!({}));
+    let map = names
+        .as_object_mut()
+        .ok_or_else(|| storage::conflict("Invalid analysis names"))?;
+    map.remove(&format!("launch:{id}"));
+    map.insert(format!("hidden_launch:{id}"), json!(true));
+    storage::write_json_atomic(&path, &names)
 }
 
 fn edit(root: &Path, req: &EditRequest) -> Result<Option<std::path::PathBuf>, ApiError> {
@@ -994,30 +1393,7 @@ fn edit(root: &Path, req: &EditRequest) -> Result<Option<std::path::PathBuf>, Ap
             return Err(storage::conflict("Результат связан с другим видео"));
         }
     }
-    let mut paths: Vec<(String, String)> = Vec::new();
-    for (stage, id) in &selected {
-        let folder = STAGES.iter().find(|(s, _)| s == stage).unwrap().1;
-        safe_folder(&root.join(folder).join(id)).map_err(storage::bad_request)?;
-        paths.push((folder.to_owned(), (*id).to_owned()));
-        let sidecars: &[&str] = match *stage {
-            "rallies" => &["native_rally_marks", "native_action_reviews"],
-            "tracking" => &["native_track_assignments", "native_reid_reviews"],
-            _ => &[],
-        };
-        for sidecar in sidecars {
-            let parent = root.join(sidecar);
-            if !parent.exists() {
-                continue;
-            }
-            safe_folder(&parent).map_err(storage::bad_request)?;
-            let name = format!("{id}.json");
-            let path = parent.join(&name);
-            if fs::symlink_metadata(&path).is_ok() {
-                storage::read_json(&path)?;
-                paths.push(((*sidecar).to_owned(), name));
-            }
-        }
-    }
+    let mut paths = artifact_paths(root, &selected)?;
     if req.kind == "fusion" {
         let parent = root.join("native_gpu_pose_runs");
         if parent.exists() {
@@ -1046,11 +1422,57 @@ fn edit(root: &Path, req: &EditRequest) -> Result<Option<std::path::PathBuf>, Ap
             }
         }
     }
+    let staged = stage_deletion(root, &paths, None)?;
+    for (stage, id) in &selected {
+        names_map.remove(&format!("{stage}:{id}"));
+    }
+    names_map.remove(&key);
+    if let Err(error) = storage::write_json_atomic(&names_path, &names) {
+        eprintln!("Analysis display-name cleanup: {error:?}");
+    }
+    Ok(Some(staged))
+}
+
+fn artifact_paths(
+    root: &Path,
+    selected: &[Artifact<'_>],
+) -> Result<Vec<(String, String)>, ApiError> {
+    let mut paths: Vec<(String, String)> = Vec::new();
+    for (stage, id) in selected {
+        let folder = STAGES.iter().find(|(s, _)| s == stage).unwrap().1;
+        safe_folder(&root.join(folder).join(id)).map_err(storage::bad_request)?;
+        paths.push((folder.to_owned(), (*id).to_owned()));
+        let sidecars: &[&str] = match *stage {
+            "rallies" => &["native_rally_marks", "native_action_reviews"],
+            "tracking" => &["native_track_assignments", "native_reid_reviews"],
+            _ => &[],
+        };
+        for sidecar in sidecars {
+            let parent = root.join(sidecar);
+            if !parent.exists() {
+                continue;
+            }
+            safe_folder(&parent).map_err(storage::bad_request)?;
+            let name = format!("{id}.json");
+            let path = parent.join(&name);
+            if fs::symlink_metadata(&path).is_ok() {
+                storage::read_json(&path)?;
+                paths.push(((*sidecar).to_owned(), name));
+            }
+        }
+    }
+    Ok(paths)
+}
+
+fn stage_deletion(
+    root: &Path,
+    paths: &[(String, String)],
+    hidden_launch: Option<&str>,
+) -> Result<std::path::PathBuf, ApiError> {
+    let journal = json!({"paths":paths,"hidden_launch":hidden_launch});
     let txn = root.join("native_analysis_deletion");
     fs::create_dir(&txn).map_err(|e| storage::internal(format!("Create deletion journal: {e}")))?;
-    if let Err(error) =
-        storage::write_json_atomic(&txn.join("journal.json"), &json!({"paths":paths}))
-    {
+    if let Err(error) = storage::write_json_atomic(&txn.join("journal.json"), &journal) {
         let _ = fs::remove_dir(&txn);
         return Err(error);
     }
@@ -1071,6 +1493,7 @@ fn edit(root: &Path, req: &EditRequest) -> Result<Option<std::path::PathBuf>, Ap
             "Commit analysis deletion: {error}"
         )));
     }
+    finish_launch_deletion(root, &journal)?;
     // Rename the committed transaction out of the fixed staging slot before
     // responding. Deletion of large evidence trees must not block the UI.
     let trash = root.join(format!(
@@ -1087,14 +1510,7 @@ fn edit(root: &Path, req: &EditRequest) -> Result<Option<std::path::PathBuf>, Ap
             txn
         }
     };
-    for (stage, id) in &selected {
-        names_map.remove(&format!("{stage}:{id}"));
-    }
-    names_map.remove(&key);
-    if let Err(error) = storage::write_json_atomic(&names_path, &names) {
-        eprintln!("Analysis display-name cleanup: {error:?}");
-    }
-    Ok(Some(staged))
+    Ok(staged)
 }
 
 pub async fn change(
