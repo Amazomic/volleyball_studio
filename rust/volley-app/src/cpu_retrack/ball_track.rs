@@ -16,6 +16,7 @@ pub(crate) const LOCAL_POLICY: &str = "vballnet_local_artifacts_v1";
 pub(crate) const CONTINUOUS_MIN_SECONDS: f64 = 1.5;
 pub(crate) const CONTINUOUS_MERGE_SECONDS: f64 = 4.0;
 pub(crate) const MIN_RALLY_FRAMES: u64 = 5 * 30;
+pub(crate) const MIN_CONFIRMED_GROUNDED_RALLY_FRAMES: u64 = 45;
 pub(crate) const MOVEMENT_FILTER_VERSION: &str = "stationary_ball_min_rally_5s_v4";
 
 pub(crate) fn movement_filter_supported(version: Option<&str>) -> bool {

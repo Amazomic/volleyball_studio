@@ -1,7 +1,7 @@
 use super::{BallObservation, TrajectoryBreak};
 use crate::court_geometry::CourtTransform;
 
-pub const GROUND_DETECTOR_VERSION: &str = "court_ball_roll_v10";
+pub const GROUND_DETECTOR_VERSION: &str = "court_ball_roll_v11";
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroundContact {
@@ -25,6 +25,9 @@ pub fn classify_ground_contact(
         || impact.after_frames.len() < 4
     {
         return None;
+    }
+    if let Some(contact) = short_damped_out_rebound(points, impact, court, width, height) {
+        return Some(contact);
     }
     if let Some(contact) = distant_sand_rebound(points, impact, court, width, height) {
         return Some(contact);
@@ -125,6 +128,87 @@ pub fn classify_ground_contact(
     })
 }
 
+fn short_damped_out_rebound(
+    points: &[BallObservation],
+    impact: &TrajectoryBreak,
+    court: &CourtTransform,
+    width: u32,
+    height: u32,
+) -> Option<GroundContact> {
+    if !impact.contact_observed {
+        return None;
+    }
+    let [w, h] = [f64::from(width), f64::from(height)];
+    let peak = points
+        .iter()
+        .filter(|p| p.frame.abs_diff(impact.frame) <= 2)
+        .max_by(|a, b| a.y.total_cmp(&b.y))?;
+    let position = [peak.x / w, peak.y / h];
+    let zones = court.zones()?;
+    let top = zones
+        .near_half
+        .iter()
+        .chain(&zones.far_half)
+        .map(|p| p[1])
+        .reduce(f64::min)?;
+    if !(top - 0.045..top - 0.005).contains(&position[1]) {
+        return None;
+    }
+    let [x, y] = court.to_court(position)?;
+    let outside = (x.abs() - crate::court_geometry::COURT_LENGTH_M / 2.0)
+        .max(y.abs() - crate::court_geometry::COURT_WIDTH_M / 2.0);
+    if !(0.25..=3.0).contains(&outside) {
+        return None;
+    }
+    let frame = peak.frame;
+    let lo = points.partition_point(|p| p.frame < frame - 17);
+    let mid = points.partition_point(|p| p.frame <= frame);
+    let hi = points.partition_point(|p| p.frame <= frame + 40);
+    let before = &points[lo..mid];
+    let after = &points[mid..hi];
+    let tail_len = after
+        .windows(2)
+        .position(|p| p[1].frame - p[0].frame > 6)
+        .map_or(after.len(), |i| i + 1);
+    let tail = &after[..tail_len];
+    let start = before.first()?;
+    let last = tail.last()?;
+    let descent = (peak.y - start.y) / h;
+    if before.len() < 12
+        || tail.len() < 10
+        || frame - start.frame < 12
+        || descent < 0.045
+        || before
+            .windows(2)
+            .any(|p| p[1].frame - p[0].frame > 3 || p[1].y + h * 0.008 < p[0].y)
+        || tail[0].frame - frame > 2
+        || !(10..=20).contains(&(last.frame - frame))
+        || after
+            .get(tail_len)
+            .is_some_and(|p| p.frame - last.frame < 16)
+        || tail
+            .iter()
+            .any(|p| (p.x - peak.x).abs() > w * 0.025 || p.y > peak.y + h * 0.006)
+    {
+        return None;
+    }
+    let apex = tail.iter().min_by(|a, b| a.y.total_cmp(&b.y))?;
+    let rise = (peak.y - apex.y) / h;
+    if !(5..=13).contains(&(apex.frame - frame))
+        || !(0.008..=0.024).contains(&rise)
+        || rise > descent * 0.4
+        || last.frame - apex.frame < 3
+        || (last.y - apex.y) / h < rise * 0.35
+        || (last.y - peak.y).abs() > h * 0.012
+    {
+        return None;
+    }
+    Some(GroundContact {
+        frame: impact.frame as u64,
+        position,
+        landing: "out".to_owned(),
+    })
+}
 fn distant_sand_rebound(
     points: &[BallObservation],
     impact: &TrajectoryBreak,
@@ -810,5 +894,47 @@ mod tests {
             }
         }
         assert!(classify_ground_contact(&points, &impact, &court, 1000, 1000, 200).is_none());
+    }
+    #[test]
+    fn distant_short_damped_out_rebound_before_loss() {
+        let court =
+            CourtTransform::new([[0.1, 0.9], [0.35, 0.28], [0.6, 0.28], [0.9, 0.9]]).unwrap();
+        let points = (2..=34)
+            .map(|frame| {
+                let t = (frame - 20) as f64;
+                let y = if t <= 0.0 {
+                    0.255 + 0.005 * t
+                } else if t <= 9.0 {
+                    0.255 - 0.0016 * t
+                } else {
+                    0.2406 + 0.0015 * (t - 9.0)
+                };
+                BallObservation {
+                    frame,
+                    x: (0.53 - t.max(0.0) * 0.0007) * 3840.0,
+                    y: y * 2160.0,
+                }
+            })
+            .collect::<Vec<_>>();
+        let impact = TrajectoryBreak {
+            frame: 20,
+            position: [0.53 * 3840.0, 0.255 * 2160.0],
+            motion: MotionEvidence::default(),
+            fit_error: 0.5,
+            before_frames: vec![16, 17, 18, 19],
+            after_frames: vec![21, 22, 23, 24],
+            contact_observed: true,
+        };
+        let hit = classify_ground_contact(&points, &impact, &court, 3840, 2160, 200)
+            .expect("short damped rebound behind the far baseline");
+        assert_eq!(hit.frame, 20);
+        assert_eq!(hit.landing, "out");
+        let mut continuing = points.clone();
+        continuing.extend((35..=55).map(|frame| BallObservation {
+            frame,
+            x: 0.52 * 3840.0,
+            y: (0.25 - (frame - 35) as f64 * 0.008) * 2160.0,
+        }));
+        assert!(classify_ground_contact(&continuing, &impact, &court, 3840, 2160, 200).is_none());
     }
 }

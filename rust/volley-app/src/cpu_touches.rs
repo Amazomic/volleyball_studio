@@ -1443,9 +1443,12 @@ fn separate_ground_contacts(
         })
     });
     events.retain(|event| {
-        !ground
-            .iter()
-            .any(|contact| contact.frame == event.frame_index)
+        !ground.iter().any(|contact| {
+            contact.frame == event.frame_index
+                || (event.frame_index > contact.frame
+                    && event.frame_index - contact.frame <= 10
+                    && !event.body_contact_supported)
+        })
     });
 }
 
@@ -4439,7 +4442,9 @@ mod tests {
             distance_px: 0.0,
             normalized_distance: 0.0,
         });
-        let mut touches = vec![player, floor];
+        let mut echo = floor.clone();
+        echo.frame_index += 7;
+        let mut touches = vec![player, floor, echo];
         let mut ground = vec![
             volley_core::motion::GroundContact {
                 frame: 235,

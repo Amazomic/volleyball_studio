@@ -286,6 +286,7 @@ impl RallyMask {
         let mut grounded_intervals = Vec::new();
         let mut short_grounded = Vec::new();
         let minimum = crate::cpu_retrack::ball_track::MIN_RALLY_FRAMES;
+        let confirmed_minimum = crate::cpu_retrack::ball_track::MIN_CONFIRMED_GROUNDED_RALLY_FRAMES;
         let preroll = u64::from(
             settings
                 .padding_before_ms
@@ -301,9 +302,9 @@ impl RallyMask {
                     break;
                 };
                 let length = ground - start + 1;
-                if start == initial_start
-                    && length < minimum
-                    && length + start.min(preroll) >= minimum
+                if length < minimum
+                    && ((start == initial_start && length + start.min(preroll) >= minimum)
+                        || (serve_detector.is_some() && length >= confirmed_minimum))
                 {
                     short_grounded.push((start, ground));
                 }
@@ -346,7 +347,11 @@ impl RallyMask {
             .into_iter()
             .zip(padded)
             .filter_map(|((start, end), (padded_start, _))| {
-                (end - padded_start + 1 >= minimum).then_some((start, end))
+                (end - padded_start + 1 >= minimum
+                    || (serve_detector.is_some()
+                        && end - start + 1 >= confirmed_minimum
+                        && ground_frames.binary_search(&end).is_ok()))
+                .then_some((start, end))
             })
             .collect::<Vec<_>>();
         let rally_intervals = pad_rally_intervals(
@@ -532,6 +537,70 @@ mod tests {
             "local motion must not become a rally: {:?}",
             mask.merged
         );
+    }
+
+    #[test]
+    fn short_confirmed_serve_and_ground_keep_rally() {
+        let project = |[x, y, z]: [f64; 3]| {
+            [
+                (0.5 + 0.03 * x + 0.04 * y) / (1.0 + 0.05 * x),
+                (0.5 - 0.01 * x - 0.09 * z) / (1.0 + 0.05 * x),
+            ]
+        };
+        let court = CourtTransform::new(
+            [
+                [-9., -4.5, 0.],
+                [9., -4.5, 0.],
+                [9., 4.5, 0.],
+                [-9., 4.5, 0.],
+            ]
+            .map(project),
+        )
+        .unwrap()
+        .with_net(Some([[0., -4.5, 2.43], [0., 4.5, 2.43]].map(project)))
+        .unwrap();
+        let detector = ServeFlightDetector::new(&court).unwrap();
+        let samples = (30..=220)
+            .map(|frame| {
+                let t = (frame - 30) as f64 / 30.;
+                let [x, y] = if frame <= 70 {
+                    project([9. - 12. * t, t, 2.2 + 5.5 * t - 4.905 * t * t])
+                } else {
+                    [
+                        0.35 + (frame - 70) as f64 * 0.002,
+                        0.55 + (frame - 70) as f64 * 0.001,
+                    ]
+                };
+                RawDetection {
+                    frame_index: frame,
+                    class_name: "ball",
+                    score: 0.9,
+                    bbox_xyxy_norm: [
+                        x as f32 - 0.005,
+                        y as f32 - 0.005,
+                        x as f32 + 0.005,
+                        y as f32 + 0.005,
+                    ],
+                    query_index: None,
+                    touch_probability: None,
+                    head_point_norm: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let settings = PrimaryRallySettings::default();
+        let stabilizer = BallStabilizerSettings::default();
+        let motion = RallyMask::stabilize(&samples, 300, stabilizer).unwrap();
+        let mask =
+            RallyMask::from_stabilized(&motion, settings, stabilizer, Some(&detector), |_, _| {
+                Ok(vec![100])
+            })
+            .unwrap();
+        assert_eq!(mask.merged, vec![(30, 100)]);
+        assert_eq!(mask.rally_intervals, vec![(15, 115)]);
+        let no_serve =
+            RallyMask::from_stabilized(&motion, settings, stabilizer, None, |_, _| Ok(vec![100]))
+                .unwrap();
+        assert!(no_serve.merged.is_empty());
     }
 
     #[test]

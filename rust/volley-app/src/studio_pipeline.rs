@@ -1158,11 +1158,17 @@ fn parse_primary_rally_scope(
             .clone(),
     )
     .map_err(|_| "Некорректные границы первичных розыгрышей")?;
-    if intervals.iter().any(|&(start, end)| {
-        start > end
-            || end >= frames
-            || end - start + 1 < crate::cpu_retrack::ball_track::MIN_RALLY_FRAMES
-    }) || intervals.windows(2).any(|pair| pair[0].1 >= pair[1].0)
+    let short_minimum = if mask["ground_boundary_version"] == "ground_ends_rally_v6"
+        && mask["serve_flight_geometry_available"] == true
+    {
+        crate::cpu_retrack::ball_track::MIN_CONFIRMED_GROUNDED_RALLY_FRAMES
+    } else {
+        crate::cpu_retrack::ball_track::MIN_RALLY_FRAMES
+    };
+    if intervals
+        .iter()
+        .any(|&(start, end)| start > end || end >= frames || end - start + 1 < short_minimum)
+        || intervals.windows(2).any(|pair| pair[0].1 >= pair[1].0)
         || !crate::cpu_retrack::ball_track::movement_filter_supported(
             mask["movement_filter_version"].as_str(),
         )
@@ -1301,7 +1307,7 @@ fn gpu_lineage_valid(
                 != json!(request.post.ball_stabilizer)
             || saved["gpu_rally_mask"]["serve_flight_version"]
                 != volley_core::rally_reconstruction::serve_flight::SERVE_FLIGHT_VERSION
-            || saved["gpu_rally_mask"]["ground_boundary_version"] != "ground_ends_rally_v5"
+            || saved["gpu_rally_mask"]["ground_boundary_version"] != "ground_ends_rally_v6"
             || saved["gpu_rally_mask"]["ground_detector"]["version"]
                 != volley_core::motion::GROUND_DETECTOR_VERSION
             || !valid_sha(&saved["gpu_rally_mask"]["ground_detector"]["sha256"])
@@ -5583,7 +5589,7 @@ mod branching_tests {
                 "movement_filter_version":crate::cpu_retrack::ball_track::MOVEMENT_FILTER_VERSION,
                 "min_rally_seconds":5.0,
                 "serve_flight_version":volley_core::rally_reconstruction::serve_flight::SERVE_FLIGHT_VERSION,
-                "ground_boundary_version":"ground_ends_rally_v5",
+                "ground_boundary_version":"ground_ends_rally_v6",
                 "ground_detector":{"version":volley_core::motion::GROUND_DETECTOR_VERSION,"sha256":sha},
                 "ball_stabilizer":{
                     "algorithm":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,

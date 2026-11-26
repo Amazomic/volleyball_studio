@@ -432,8 +432,10 @@ fn occluded_vertical_rebounds(
         };
         let incoming = slope(before);
         let outgoing = slope(after);
-        if incoming[1] < 18.0
-            || outgoing[1] > -15.0
+        let moderate = incoming[1] >= 10.0 && outgoing[1] <= -7.0;
+        let strong = incoming[1] >= 18.0 && outgoing[1] <= -15.0;
+        if !moderate
+            || (!strong && missing <= 4)
             || before
                 .windows(2)
                 .any(|pair| pair[1].y + 2.0 * config.max_fit_error_px < pair[0].y)
@@ -449,7 +451,9 @@ fn occluded_vertical_rebounds(
             (incoming[0] * outgoing[0] + incoming[1] * outgoing[1]) / (before_speed * after_speed);
         let angle = cosine.clamp(-1.0, 1.0).acos().to_degrees();
         let residual = (outgoing[0] - incoming[0]).hypot(outgoing[1] - incoming[1]);
-        if angle < config.min_turn_angle_deg.max(130.0) || residual < 35.0 {
+        if angle < config.min_turn_angle_deg.max(130.0)
+            || residual < if strong { 35.0 } else { 21.0 }
+        {
             continue;
         }
         let anchor = *before.last().unwrap();
@@ -491,9 +495,41 @@ fn occluded_vertical_rebounds(
             });
             continue;
         }
-        let impact_frame = anchor.frame + 1;
+        let impact_frame = if strong {
+            anchor.frame + 1
+        } else {
+            if index < 6 || index + 7 >= points.len() {
+                continue;
+            }
+            let approach = &points[index - 6..=index];
+            let departure = &points[index + 1..=index + 7];
+            let long_in = slope(approach);
+            let long_out = slope(departure);
+            if long_in[1] < 10.0
+                || long_out[1] > -7.0
+                || approach
+                    .windows(2)
+                    .chain(departure.windows(2))
+                    .any(|p| p[1].frame - p[0].frame > 2)
+                || (first_outbound.x - anchor.x).abs() > 45.0
+                || approach.windows(2).any(|p| p[1].y + 8.0 < p[0].y)
+                || departure.windows(2).any(|p| p[1].y > p[0].y + 8.0)
+            {
+                continue;
+            }
+            let span = (first_outbound.frame - anchor.frame) as f64;
+            let t = (first_outbound.y - anchor.y - long_out[1] * span) / (long_in[1] - long_out[1]);
+            if !(-1.5..=span + 0.5).contains(&t)
+                || (anchor.x + long_in[0] * t - first_outbound.x + long_out[0] * (span - t)).abs()
+                    > 35.0
+            {
+                continue;
+            }
+            anchor.frame + (t.round() as i64).clamp(0, missing + 1)
+        };
         let flight_back = (first_outbound.frame - impact_frame) as f64;
-        let predicted_before = [anchor.x + incoming[0], anchor.y + incoming[1]];
+        let dt = (impact_frame - anchor.frame) as f64;
+        let predicted_before = [anchor.x + incoming[0] * dt, anchor.y + incoming[1] * dt];
         let predicted_after = [
             first_outbound.x - outgoing[0] * flight_back,
             first_outbound.y - outgoing[1] * flight_back,
@@ -504,8 +540,12 @@ fn occluded_vertical_rebounds(
             continue;
         }
         results.push(TrajectoryBreak {
-            frame: anchor.frame,
-            position: [anchor.x, anchor.y],
+            frame: if strong { anchor.frame } else { impact_frame },
+            position: if strong {
+                [anchor.x, anchor.y]
+            } else {
+                predicted_before
+            },
             motion: MotionEvidence {
                 motion_frame: impact_frame,
                 speed_before: before_speed,
@@ -516,7 +556,7 @@ fn occluded_vertical_rebounds(
             fit_error: mismatch / (missing as f64 + 1.0),
             before_frames: before.iter().map(|sample| sample.frame).collect(),
             after_frames: after.iter().map(|sample| sample.frame).collect(),
-            contact_observed: true,
+            contact_observed: strong || impact_frame == anchor.frame,
         });
     }
     results
@@ -1723,5 +1763,37 @@ mod tests {
                 .iter()
                 .all(|e| !(10..17).contains(&e.frame))
         );
+    }
+    #[test]
+    fn moderate_occluded_reversal_with_quantized_ball() {
+        let samples = |shift: f64, reversed: bool| {
+            (4..=36)
+                .filter(|f| !(21..=26).contains(f) && *f != 18)
+                .map(|frame| {
+                    let t = (frame - 20) as f64;
+                    let (x, y) = if frame <= 20 {
+                        (2050.0 - 8.0 * t, 600.0 + 14.0 * t)
+                    } else if reversed {
+                        (2050.0 - t + shift, 624.0 - 10.0 * t)
+                    } else {
+                        (2050.0 - 8.0 * t, 600.0 + 14.0 * t)
+                    };
+                    BallObservation {
+                        frame,
+                        x: (x / 7.5).round() * 7.5,
+                        y: (y / 7.5).round() * 7.5,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let find = |points: Vec<BallObservation>| {
+            trajectory_direction_breaks(&points, DirectionBreakConfig::default())
+                .iter()
+                .filter(|impact| (19..=26).contains(&impact.frame))
+                .count()
+        };
+        assert_eq!(find(samples(0.0, true)), 1);
+        assert_eq!(find(samples(120.0, true)), 0);
+        assert_eq!(find(samples(0.0, false)), 0);
     }
 }
