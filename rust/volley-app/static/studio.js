@@ -16,7 +16,7 @@
     projectCreateStatus:$("studio-project-create-status"),
     projectCancel:$("studio-project-cancel"),projectClose:$("studio-project-close"),
 
-    list:$("studio-rallies"),filter:$("studio-filter"),
+    list:$("studio-rallies"),filter:$("studio-filter"),previewVideo:$("studio-preview-video"),
     selectedCount:$("studio-selected-count"),banner:$("studio-banner"),
     video:$("studio-video"),
     emptyVideo:$("studio-video-empty"),videoTime:$("studio-video-time"),
@@ -50,8 +50,8 @@
         return value&&typeof value==="object"&&!Array.isArray(value)?value:{};
       }catch{return {};}
     };
-    const save=(project,analysis="",run="")=>{
-      try{localStorage.setItem(key,JSON.stringify({project,analysis,run}));}catch{}
+    const save=(project,analysis="",run="",video="")=>{
+      try{localStorage.setItem(key,JSON.stringify({project,analysis,run,...(video?{video}:{})}));}catch{}
     };
     return {read,save};
   })();
@@ -3602,7 +3602,7 @@
   // The linked source chain is project -> GPU analysis (video + lineage) -> CPU snapshot.
   // Preserve selections on refresh; reset only dependent selections when an upstream
   // source changes. Stale async responses must never reselect a different project.
-  const setRuns=async(preferred="",exact=false)=>{
+  const setRuns=async(preferred="",exact=false,previewVideo="")=>{
     if(s.pipelineBlocks?.has(s.project))return;
     reset();
     const source=s.chain?.choices.find(row=>row.value===s.analysis);
@@ -3622,7 +3622,8 @@
       window.VolleyStudioChain.latestRun(rows,preferred);
     refreshPicker(ui.run);
     s.run=ui.run.value;
-    s.video=rows.find(row=>row.rally_run_id===s.run)?.video||source?.video||"";
+    s.video=rows.find(row=>row.rally_run_id===s.run)?.video||source?.video||previewVideo;
+    syncPreviewVideo(s.video);
     if(s.video){s.fps=30;ensurePreviewVideo();}
     // Overlay playback follows the selected CPU snapshot, not a rally card.
     // reset() clears the canvas source; restore it for full-video preview too.
@@ -3630,7 +3631,7 @@
     updateRawDetectorLabel();
     if(s.run&&s.video)
       prefetchOverlayAtFrame(Math.max(0,Math.floor(((ui.video.currentTime||0)-(Number(s.analysisOffset)||0))*fps())));
-    if(s.analysis)sourceSelection.save(s.project,s.analysis,s.run);
+    if(s.analysis||s.video)sourceSelection.save(s.project,s.analysis,s.run,s.analysis?"":s.video);
     window.dispatchEvent(new CustomEvent("volley:postprocessing-change",{
       detail:{project_id:s.project,rally_run_id:s.run}
     }));
@@ -3640,19 +3641,28 @@
       void loadPage().catch(failed);
       void loadTimeline().catch(failed);
     }
-    else message(!s.analysis?"Выберите первичный GPU-анализ.":
+    else message(!s.analysis?(s.video?"Для этого видео пока нет результатов анализа.":"Выберите первичный GPU-анализ."):
       overlay.raw&&rawFusion()?"Сырые GPU-данные доступны без CPU-постобработки.":
       rows.length?"Выберите версию постобработки.":
       "У выбранного анализа пока нет связанной CPU-постобработки.");
     if(overlay.raw&&rawFusion())prefetchOverlayAtFrame(0);
   };
-  const setAnalysis=async(preferredRun="",exact=false)=>{
+  const syncPreviewVideo=(selected="")=>{
+    if(!ui.previewVideo)return;
+    const videos=(s.projectVideos||[]).map(video=>({video}));
+    options(ui.previewVideo,videos,"video",row=>row.video.split(/[\\/]/).pop()||row.video,
+      "Выберите видео",!videos.some(row=>row.video===selected));
+    ui.previewVideo.value=selected;
+    ui.previewVideo.disabled=!s.chain||!videos.length||s.pipelineBlocks?.has(s.project)===true;
+  };
+  const setAnalysis=async(preferredRun="",exact=false,previewVideo="")=>{
     s.analysis=ui.analysis.value;
     const source=s.chain?.choices.find(row=>row.value===s.analysis);
     window.dispatchEvent(new CustomEvent("volley:chain-change",{
-      detail:{project_id:s.project,video:source?.video||"",analysis:s.analysis}
+      detail:{project_id:s.project,video:source?.video||previewVideo,analysis:s.analysis}
     }));
-    await setRuns(preferredRun,exact);
+    s.previewVideoWithoutAnalysis=source?"":previewVideo;
+    await setRuns(preferredRun,exact,previewVideo);
   };
   const selectReferenceEntry=async entry=>{
     if(!reference.active||!entry||annotation.dirty)return;
@@ -3728,6 +3738,15 @@
       (Number(b.created_at)||0)-(Number(a.created_at)||0)||
       String(b.id||"").localeCompare(String(a.id||"")))[0]?.value||"";
   };
+  const selectPreviewVideo=async()=>{
+    const video=ui.previewVideo.value;
+    if(ui.previewVideo.disabled||!s.chain||!s.projectVideos.includes(video)||video===s.video)return;
+    const analysis=newestPrimaryAnalysis(s.chain.choices.filter(row=>row.video===video));
+    ui.analysis.value=analysis;
+    refreshPicker(ui.analysis);
+    if(analysis)await setAnalysis();
+    else await setAnalysis("",true,video);
+  };
   const renderChain=async(chain,preferredAnalysis="",preferredRun="",retainCurrent=false,exact=false)=>{
     const unchanged=retainCurrent&&s.analysis===preferredAnalysis&&s.run===preferredRun&&
       chain.choices.some(row=>row.value===s.analysis)&&
@@ -3736,13 +3755,15 @@
        preferredRun&&!(chain.byAnalysis.get(preferredAnalysis)||[]).some(row=>row.rally_run_id===preferredRun)))
       throw Error("Новая версия анализа ещё недоступна");
     s.chain=chain;
+    const rawVideo=!exact&&!preferredAnalysis&&s.projectVideos.includes(s.previewVideoWithoutAnalysis)?s.previewVideoWithoutAnalysis:"";
+    if(rawVideo)preferredAnalysis=newestPrimaryAnalysis(chain.choices.filter(row=>row.video===rawVideo));
     options(ui.analysis,chain.choices,"value",item=>item.label,
       chain.choices.length?"Выберите 1 фазу":"Нет результатов 1 фазы",
-      !chain.choices.length||exact&&!preferredAnalysis);
+      !chain.choices.length||!preferredAnalysis&&(exact||!!rawVideo));
     ui.analysis.disabled=!chain.choices.length;
     // Restore a valid explicit choice; otherwise select the most recently
     // created GPU analysis, including after the selected version is deleted.
-    ui.analysis.value=exact||chain.choices.some(row=>row.value===preferredAnalysis)?
+    ui.analysis.value=exact||rawVideo||chain.choices.some(row=>row.value===preferredAnalysis)?
       preferredAnalysis:newestPrimaryAnalysis(chain.choices);
     refreshPicker(ui.analysis);
     if(unchanged){
@@ -3756,11 +3777,12 @@
       ui.run.disabled=!rows.length;
       ui.run.value=s.run;
       refreshPicker(ui.run);
+      syncPreviewVideo(s.video||chain.choices.find(row=>row.value===s.analysis)?.video||"");
       return;
     }
     // If the selected source was deleted (including dependent data), switch
     // to the remaining available versions using the normal reset flow.
-    await setAnalysis(preferredRun,exact);
+    await setAnalysis(preferredRun,exact,ui.analysis.value?"":rawVideo||(!chain.choices.length&&!exact?s.projectVideos[0]||"":""));
   };
   const pipelineActive=status=>status?.project_queue?.active===true||["queued","running","cancelling"].includes(status?.status);
   const blockPipelinePreview=status=>{
@@ -3771,6 +3793,7 @@
     if(project!==s.project||previous===status.id&&!s.run&&!s.analysis)return;
     s.chainEpoch++;
     reset();s.analysis="";s.chain=null;
+    s.previewVideoWithoutAnalysis="";syncPreviewVideo();
     options(ui.analysis,[],"value",x=>x,"Анализ выполняется…");
     options(ui.run,[],"rally_run_id",x=>x,"Ожидаем завершения анализа");
     ui.analysis.disabled=true;ui.run.disabled=true;
@@ -3784,6 +3807,7 @@
     if(!retainCurrent){
       reset();
       s.analysis="";s.chain=null;
+      syncPreviewVideo();
       options(ui.analysis,[],"value",x=>x,"Загрузка анализов…");
       options(ui.run,[],"rally_run_id",x=>x,"Сначала выберите анализ");
       ui.analysis.disabled=true;ui.run.disabled=true;
@@ -3856,8 +3880,8 @@
       if(!s.chain||chainSignature(s.chain)!==chainSignature(fresh)){
         // Preserve edits to the current selection made while revalidating.
         await renderChain(fresh,retainCurrent?s.analysis:
-          cached?(s.analysis||preferredAnalysis):preferredAnalysis,
-          retainCurrent?s.run:cached?(s.run||preferredRun):preferredRun,
+          cached?(s.previewVideoWithoutAnalysis?"":s.analysis||preferredAnalysis):preferredAnalysis,
+          retainCurrent?s.run:cached?(s.previewVideoWithoutAnalysis?"":s.run||preferredRun):preferredRun,
           retainCurrent,exact);
       }
     }catch(error){
@@ -3882,6 +3906,7 @@
       rows.length?rows[rows.length-1].id:"";
     refreshPicker(ui.project);
     s.project=ui.project.value;
+    if(s.project!==prev)s.previewVideoWithoutAnalysis=s.project===stored.project&&typeof stored.video==="string"?stored.video:"";
     const current=rows.find(row=>row.id===s.project);
     s.projectVideos=Array.isArray(current?.videos)?
       current.videos.filter(video=>typeof video==="string"):[];
@@ -4844,7 +4869,7 @@
   }
   ui.project.addEventListener("change",async()=>{
     s.catalogEpoch++;
-    s.project=ui.project.value;s.analysis="";
+    s.project=ui.project.value;s.analysis="";s.previewVideoWithoutAnalysis="";
     sourceSelection.save(s.project);
     const entry=s.projectCatalog.find(row=>row.id===s.project);
     s.projectVideos=Array.isArray(entry?.videos)?
@@ -4857,11 +4882,14 @@
       if(project===s.project&&reference.active)void refreshReferenceCatalog();
     }catch(e){if(project===s.project)failed(e);}
   });
+  ui.previewVideo.addEventListener("change",()=>selectPreviewVideo().catch(failed));
   ui.analysis.addEventListener("change",()=>setAnalysis().catch(failed));
   ui.run.addEventListener("change",async()=>{
     const id=ui.run.value;reset();
     if(!(s.chain?.byAnalysis.get(s.analysis)||[]).some(row=>row.rally_run_id===id))return;
     s.run=id;
+    s.video=s.chain.choices.find(row=>row.value===s.analysis)?.video||"";
+    syncPreviewVideo(s.video);
     sourceSelection.save(s.project,s.analysis,s.run);
     window.dispatchEvent(new CustomEvent("volley:postprocessing-change",{
       detail:{project_id:s.project,rally_run_id:s.run}
