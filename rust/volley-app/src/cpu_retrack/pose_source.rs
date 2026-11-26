@@ -372,7 +372,8 @@ mod tests {
             "refined_pose_stride":1,
         });
         let path = folder.join("manifest.json");
-        let requested = super::super::pose_sampling_contract(Default::default());
+        let requested =
+            super::super::pose_sampling_contract(Default::default(), Default::default());
         fs::write(&path, manifest.to_string()).unwrap();
         assert!(
             locate_refined(&root, "fusion", &sha, None, None, None, None)

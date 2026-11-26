@@ -2,7 +2,7 @@ use super::{BoundedReader, PlayerFrameScope, MAX_ROW_BYTES};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     fs::{self, OpenOptions},
     io::{BufWriter, Write},
     path::Path,
@@ -228,24 +228,40 @@ pub(crate) struct Refinement {
     pub threads: usize,
     pub memory_mb: u64,
     pub ball_stabilizer: volley_core::ball_interpolation::BallStabilizerSettings,
+    pub sampling: PoseSampling,
     pub early: Option<CompletedRallies>,
 }
 
 pub(super) const SAMPLE_ROW_STRIDE: usize = 1;
-const BACKGROUND_PERIOD: u64 = 10;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PoseSampling {
+    pub touch_stride: u64,
+    pub background_stride: u64,
+}
+
+impl Default for PoseSampling {
+    fn default() -> Self {
+        Self {
+            touch_stride: 1,
+            background_stride: 10,
+        }
+    }
+}
 const TOUCH_WINDOW: u64 = 8;
 const TRACK_LOOKUP_WINDOW: i64 = 2;
 const MAX_BOX_DISTANCE_IN_PLAYER_HEIGHTS: f64 = 0.5;
 
 pub(crate) fn sampling_contract(
     settings: volley_core::ball_interpolation::BallStabilizerSettings,
+    sampling: PoseSampling,
 ) -> Value {
     json!({
-        "version":"touch_guided_pose_sampling_v2",
+        "version":"touch_guided_pose_sampling_v3",
         "ball_stabilizer":settings,
         "ball_stabilizer_version":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,
         "trajectory_detector_version":volley_core::touch_pipeline::TRAJECTORY_DETECTOR_VERSION,
-        "background_period_frames":BACKGROUND_PERIOD,
+        "background_period_frames":sampling.background_stride,
+        "touch_period_frames":sampling.touch_stride,
         "touch_window_frames":TOUCH_WINDOW,
         "serve_search_frames":crate::cpu_touches::INITIAL_SERVE_SEARCH_FRAMES,
         "serve_contact_frames":crate::cpu_touches::INITIAL_SERVE_CONTACT_FRAMES,
@@ -255,20 +271,31 @@ pub(crate) fn sampling_contract(
 }
 
 #[derive(Default)]
-struct PoseSchedule(BTreeMap<u64, BTreeSet<u64>>);
+struct PoseSchedule(BTreeMap<u64, BTreeMap<u64, bool>>, PoseSampling);
 
 impl PoseSchedule {
+    fn new(sampling: PoseSampling) -> Self {
+        Self(BTreeMap::new(), sampling)
+    }
+
     fn measure(&self, frame: u64, track_id: u64) -> bool {
-        frame.is_multiple_of(BACKGROUND_PERIOD)
-            || self
-                .0
-                .get(&frame)
-                .is_some_and(|ids| ids.contains(&track_id))
+        self.0
+            .get(&frame)
+            .and_then(|ids| ids.get(&track_id))
+            .copied()
+            .unwrap_or_else(|| frame.is_multiple_of(self.1.background_stride))
     }
 
     fn select(&mut self, center: u64, track_id: u64, frames: u64) {
         for frame in center.saturating_sub(TOUCH_WINDOW)..=(center + TOUCH_WINDOW).min(frames - 1) {
-            self.0.entry(frame).or_default().insert(track_id);
+            let measured = frame.abs_diff(center).is_multiple_of(self.1.touch_stride);
+            let selected = self
+                .0
+                .entry(frame)
+                .or_default()
+                .entry(track_id)
+                .or_default();
+            *selected |= measured;
         }
     }
 }
@@ -305,6 +332,7 @@ fn initial_serve_pose_points(
 fn touch_pose_schedule(
     source: &Source<'_>,
     settings: volley_core::ball_interpolation::BallStabilizerSettings,
+    sampling: PoseSampling,
     cancelled: &AtomicBool,
 ) -> Result<PoseSchedule, String> {
     let dimensions = volley_media::probe(source.original)?;
@@ -325,7 +353,7 @@ fn touch_pose_schedule(
     let width = f64::from(dimensions.width);
     let height = f64::from(dimensions.height);
     let mut reader = BoundedReader::open(source.replay)?;
-    let mut schedule = PoseSchedule::default();
+    let mut schedule = PoseSchedule::new(sampling);
     for frame in 0..source.frames {
         if cancelled.load(Ordering::Acquire) {
             return Err("cancelled".into());
@@ -608,7 +636,12 @@ pub(super) fn refine(
     let mut engine = None;
     let mut accepted = 0;
     let mut previous_crops = BTreeMap::<u64, [f64; 4]>::new();
-    let schedule = touch_pose_schedule(&source, settings.ball_stabilizer, cancelled)?;
+    let schedule = touch_pose_schedule(
+        &source,
+        settings.ball_stabilizer,
+        settings.sampling,
+        cancelled,
+    )?;
     let measure = |frame, track_id| schedule.measure(frame, track_id);
     let total = pose_frame_total(&source, measure, cancelled)?;
     let mut processed = 0;
@@ -1069,6 +1102,25 @@ mod tests {
         assert!(schedule.measure(59, 9));
         assert!(!schedule.0.contains_key(&60));
     }
+    #[test]
+    fn configurable_pose_schedule_keeps_touch_center_and_independent_background() {
+        let mut schedule = PoseSchedule::new(PoseSampling {
+            touch_stride: 3,
+            background_stride: 5,
+        });
+        schedule.select(31, 7, 60);
+        assert!(schedule.measure(31, 7));
+        assert!(schedule.measure(28, 7));
+        assert!(schedule.measure(34, 7));
+        assert!(!schedule.measure(30, 7));
+        assert!(schedule.measure(30, 8));
+        assert!(!schedule.measure(31, 8));
+        assert!(schedule.measure(20, 7));
+        schedule.select(30, 7, 60);
+        assert!(schedule.measure(30, 7));
+        assert!(schedule.measure(31, 7));
+    }
+
     use serde_json::json;
 
     #[test]

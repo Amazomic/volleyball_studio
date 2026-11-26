@@ -401,8 +401,10 @@ VBallNet определяет мяч. Выбранный RF-DETR и RTMPose оп
 Исходное видео	Source video
 Шаг анализа мяча	Ball analysis stride
 Шаг VBallNet: 9 кадров, фиксирован для общего GPU-конвейера.	VBallNet uses a fixed 9-frame step in the shared GPU pipeline.
-Игроки и позы · шаг, кадров	Players and poses · stride, frames
-Детектор игроков и RTMPose работают на одних кадрах, по реальным рамкам детектора. Промежуточные кадры не передаются в эти нейросети.	The player detector and RTMPose use the same frames and observed detector boxes. Intermediate frames are not sent to these models.
+RF-DETR · шаг, кадров	RF-DETR · stride, frames
+Шаг кадра для игроков рядом с касанием	Frame stride for players near a contact
+Шаг кадров для всех остальных игроков	Frame stride for all other players
+RF-DETR измеряет рамки игроков на каждом N-м кадре. RTMPose использует отдельные настройки частоты поз.	RF-DETR measures player boxes every Nth frame. RTMPose uses independent pose sampling settings.
 Видео: 30 кадров в секунду (30 FPS). Каждый 10-й кадр → 3 раза/с.	Video: 30 frames per second (30 FPS). Every 10th frame → 3 samples/s.
 Видео: 30 кадров в секунду (30 FPS). Каждый кадр → 30 раз/с.	Video: 30 frames per second (30 FPS). Every frame → 30 samples/s.
 Дополнительные настройки	Additional settings

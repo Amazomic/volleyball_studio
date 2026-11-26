@@ -215,6 +215,8 @@
       pose_enabled:$("studio-gpu-pose-enabled").value==="1",
       pose_mode:"photo",
       pose_stride:inputValue("studio-gpu-person-stride"),
+      touch_pose_stride:inputValue("studio-gpu-touch-pose-stride"),
+      background_pose_stride:inputValue("studio-gpu-background-pose-stride"),
       primary_rallies:{
         min_trajectory_seconds:inputValue("studio-gpu-rally-min-seconds"),
         merge_gap_seconds:inputValue("studio-gpu-rally-merge-seconds"),
@@ -725,7 +727,7 @@
     ball:["#studio-gpu-stride","#studio-gpu-memory","#studio-gpu-threads"],
     ball_stabilizer:["#studio-post-ball-stabilizer-gap","#studio-post-ball-stabilizer-step"],
     rallies:["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds","#studio-gpu-rally-stationary-ms","#studio-gpu-rally-padding-before-ms","#studio-gpu-rally-padding-after-ms"],
-    players:["#studio-gpu-person-detector","#studio-gpu-person-stride","#studio-gpu-parallel-rally-poses"],
+    players:["#studio-gpu-person-detector","#studio-gpu-person-stride","#studio-gpu-touch-pose-stride","#studio-gpu-background-pose-stride","#studio-gpu-parallel-rally-poses"],
     pose:["#studio-gpu-pose-enabled","#studio-gpu-interpolate-pose"],
     boxes:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap","#studio-post-nms"],
     tracking:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap",

@@ -8,6 +8,8 @@ assert.match(html,/id="studio-gpu-person-stride"[^>]*min="1"[^>]*max="30"[^>]*va
 assert.match(html,/30 кадров в секунду \(30 FPS\)/);
 assert.match(html,/Каждый кадр → 30 раз\/с/);
 assert.doesNotMatch(html,/id="studio-gpu-pose-mode"/);
+assert.match(html,/id="studio-gpu-touch-pose-stride"[^>]*min="1"[^>]*max="30"[^>]*value="1"[^>]*data-default="1"/);
+assert.match(html,/id="studio-gpu-background-pose-stride"[^>]*min="1"[^>]*max="30"[^>]*value="10"[^>]*data-default="10"/);
 
 const start=source.indexOf("  const refreshPersonSamplingRate=()=>");
 const end=source.indexOf("  // Mirrors volley-core",start);
@@ -24,7 +26,7 @@ const fields={
   "studio-gpu-interpolate-pose":{checked:true}
 };
 const values={"studio-gpu-stride":9,"studio-gpu-memory":0,"studio-gpu-threads":8,
-  "studio-gpu-person-stride":10};
+  "studio-gpu-person-stride":10,"studio-gpu-touch-pose-stride":2,"studio-gpu-background-pose-stride":15};
 const ctx={$:id=>fields[id],inputValue:id=>values[id]};
 runInNewContext(source.slice(start,end)+
   "\nthis.test={refreshPersonSamplingRate,gpuProfile};",ctx);
@@ -47,4 +49,6 @@ assert.match(display.textContent,/от 1 до 30/);
 values["studio-gpu-person-stride"]=10;
 fields["studio-gpu-pose-enabled"].value="0";
 assert.equal(api.gpuProfile().pose_enabled,false);
+assert.equal(api.gpuProfile().touch_pose_stride,2);
+assert.equal(api.gpuProfile().background_pose_stride,15);
 console.log("Studio shared RF-DETR/RTMPose sampling: steps 1–30, displayed rates and GPU payload passed.");

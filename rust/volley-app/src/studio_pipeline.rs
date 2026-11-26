@@ -460,6 +460,8 @@ pub struct GpuProfile {
     /// Shared sampling interval for person detection and RTMPose at 30 FPS.
     /// The historical API name pose_stride is retained for saved profiles.
     pose_stride: usize,
+    touch_pose_stride: u64,
+    background_pose_stride: u64,
     #[serde(default)]
     primary_rallies: inference_full::PrimaryRallySettings,
 }
@@ -477,7 +479,17 @@ impl Default for GpuProfile {
             pose_enabled: true,
             pose_mode: crate::pose_inference::PoseInputMode::Photo,
             pose_stride: volley_inference::person::PERSON_SAMPLE_PERIOD_FRAMES,
+            touch_pose_stride: cpu_retrack::PoseSampling::default().touch_stride,
+            background_pose_stride: cpu_retrack::PoseSampling::default().background_stride,
             primary_rallies: inference_full::PrimaryRallySettings::default(),
+        }
+    }
+}
+impl GpuProfile {
+    fn pose_sampling(&self) -> cpu_retrack::PoseSampling {
+        cpu_retrack::PoseSampling {
+            touch_stride: self.touch_pose_stride,
+            background_stride: self.background_pose_stride,
         }
     }
 }
@@ -1506,7 +1518,7 @@ fn cpu_lineage_valid(
         && track["court_revision"] == saved["court_revision"]
         && (!request.gpu.pose_enabled
             || (track["pose_refinement_policy"] == cpu_retrack::POSE_REFINEMENT_POLICY
-                && track["pose_sampling"] == cpu_retrack::pose_sampling_contract(request.post.ball_stabilizer)))
+                && track["pose_sampling"] == cpu_retrack::pose_sampling_contract(request.post.ball_stabilizer, request.gpu.pose_sampling())))
         && track["replay_id"] == replay
         && track["interpolate_pose"].as_bool().unwrap_or(true) == request.post.interpolate_pose
         && track["source_fusion_id"] == fusion
@@ -2352,6 +2364,7 @@ async fn pipeline(
                         request.post.ball_stabilizer,
                         block_mode.then(|| cpu_retrack::EarlyPoseOptions {
                             parallel_rally_poses: request.gpu.parallel_rally_poses,
+                            sampling: request.gpu.pose_sampling(),
                             tracking: request.post.tracking,
                             court: None,
                             interpolate_players: request.post.interpolate_players,
@@ -2537,6 +2550,7 @@ async fn pipeline(
             threads: request.gpu.cpu_threads,
             memory_mb: request.gpu.gpu_memory_limit_mb,
             ball_stabilizer: request.post.ball_stabilizer,
+            sampling: request.gpu.pose_sampling(),
             early: early_poses,
         },
     );
@@ -3149,6 +3163,8 @@ fn validate_start_profile(request: &StartRequest) -> Result<(), ApiError> {
         || request.gpu.cpu_threads > 128
         || request.gpu.gpu_memory_limit_mb > 131072
         || !(1..=30).contains(&request.gpu.pose_stride)
+        || !(1..=30).contains(&request.gpu.touch_pose_stride)
+        || !(1..=30).contains(&request.gpu.background_pose_stride)
     {
         return Err(storage::bad_request(
             "GPU-профиль вне допустимых диапазонов",
@@ -4337,7 +4353,7 @@ mod tests {
         assert!(position("pose") < position("touches"));
         assert_eq!(
             result["primary_tracking"]["pose_sampling"],
-            cpu_retrack::pose_sampling_contract(Default::default()),
+            cpu_retrack::pose_sampling_contract(Default::default(), Default::default()),
         );
     }
 
@@ -5122,6 +5138,35 @@ mod tests {
             }))
             .is_err());
         }
+    }
+
+    #[test]
+    fn configurable_pose_sampling_changes_gpu_profile_and_evidence_identity() {
+        let identity = json!({"bytes":1234,"mtime_ns":5678});
+        let mut request: StartRequest = serde_json::from_value(json!({
+            "project_id":"abc123def456","video":"match.mp4"
+        }))
+        .unwrap();
+        let saved = json!({
+            "schema":SCHEMA,"gpu_model_stack":requested_gpu_model_stack(request.gpu.person_detector),
+            "project_id":request.project_id,"video":request.video,
+            "profile":{"gpu":request.gpu},"source_identity":identity
+        });
+        let default_sampling = request.gpu.pose_sampling();
+        assert_eq!(default_sampling.touch_stride, 1);
+        assert_eq!(default_sampling.background_stride, 10);
+        assert!(compatible_version(&saved, &request, &identity));
+        request.gpu.touch_pose_stride = 2;
+        assert!(!compatible_version(&saved, &request, &identity));
+        let contract =
+            cpu_retrack::pose_sampling_contract(Default::default(), request.gpu.pose_sampling());
+        assert_eq!(contract["touch_period_frames"], 2);
+        request.gpu.touch_pose_stride = 1;
+        request.gpu.background_pose_stride = 15;
+        assert!(!compatible_version(&saved, &request, &identity));
+        let contract =
+            cpu_retrack::pose_sampling_contract(Default::default(), request.gpu.pose_sampling());
+        assert_eq!(contract["background_period_frames"], 15);
     }
 
     #[test]

@@ -44,7 +44,7 @@ mod pose_source;
 mod track_stitch;
 pub(crate) use pose_refinement::{
     sampling_contract as pose_sampling_contract, CompletedRallies, EarlyPoseOptions,
-    EarlyPoseWorker, RallyWorkerSender, Refinement as PoseRefinement,
+    EarlyPoseWorker, PoseSampling, RallyWorkerSender, Refinement as PoseRefinement,
     LEGACY_POLICY as LEGACY_POSE_REFINEMENT_POLICY, POLICY as POSE_REFINEMENT_POLICY,
     PREVIOUS_POLICY as PREVIOUS_POSE_REFINEMENT_POLICY,
     PREVIOUS_TRACKED_CROP_POLICY as PREVIOUS_TRACKED_CROP_REFINEMENT_POLICY,
@@ -1055,7 +1055,7 @@ fn process_inner(
     let court_revision = court_snapshot.as_ref().map(|c| c.revision.as_str());
     let requested_sampling = refinement
         .as_ref()
-        .map(|r| pose_sampling_contract(r.ball_stabilizer));
+        .map(|r| pose_sampling_contract(r.ball_stabilizer, r.sampling));
     let saved_refined = pose_source::locate_refined(
         &project_root,
         &req.fusion_id,

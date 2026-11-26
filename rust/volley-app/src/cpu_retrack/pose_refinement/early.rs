@@ -38,6 +38,7 @@ impl CompletedRallies {
 
 pub(crate) struct EarlyPoseOptions {
     pub parallel_rally_poses: bool,
+    pub sampling: PoseSampling,
     pub tracking: TrackingOptions,
     pub court: Option<crate::video_edits::CourtSnapshot>,
     pub interpolate_players: bool,
@@ -295,7 +296,7 @@ fn build_local_plan(
         p.touch_started();
     })?;
     let mut reader = BoundedReader::open(&tracked)?;
-    let mut schedule = PoseSchedule::default();
+    let mut schedule = PoseSchedule::new(options.sampling);
     for frame in 0..frames {
         if stop.load(Ordering::Acquire) {
             return Err("cancelled".into());
@@ -694,6 +695,19 @@ fn run(
                 };
                 if let Some(root) = input.options.checkpoint_root.as_deref() {
                     let sha = packet_sha(&packet)?;
+                    let sha = if input.options.sampling == PoseSampling::default() {
+                        sha
+                    } else {
+                        format!(
+                            "{:x}",
+                            Sha256::digest(format!(
+                                "{}:{}:{}",
+                                sha,
+                                input.options.sampling.touch_stride,
+                                input.options.sampling.background_stride
+                            ))
+                        )
+                    };
                     if let Some((receipt, folder)) =
                         load_rally_checkpoint(root, packet.window, &sha, totals.tentative_tracks)?
                     {
