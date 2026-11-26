@@ -16,31 +16,23 @@ fn signed_direction(direction: i32) -> f64 {
 }
 
 #[no_mangle]
-pub extern "C" fn volley_preview_seek_frame(
+pub extern "C" fn volley_preview_seek_step(
     position: f64,
     direction: i32,
-    fps: f64,
     duration: f64,
-    frames: u32,
+    steps: u32,
 ) -> f64 {
     if !position.is_finite()
-        || !fps.is_finite()
-        || fps <= 0.0
-        || fps > 1000.0
         || !duration.is_finite()
         || duration <= 0.0
         || signed_direction(direction) == 0.0
-        || frames == 0
+        || steps == 0
     {
         return position;
     }
-    let last = ((duration * fps - 1e-7).ceil() - 1.0).max(0.0);
-    let current = ((position * fps + 1e-7).floor()).clamp(0.0, last);
-    let target = (current + signed_direction(direction) * f64::from(frames)).clamp(0.0, last);
-    if target == current && position >= 0.0 && position < duration {
-        return position;
-    }
-    ((target + 0.5) / fps).min((duration - 1e-7).max(0.0))
+    let target = (position * 1_000_000.0).round()
+        + signed_direction(direction) * f64::from(steps) * 100_000.0;
+    (target / 1_000_000.0).clamp(0.0, (duration - 1e-7).max(0.0))
 }
 
 /// Source seconds to advance for this rendered frame while holding an arrow.
@@ -72,21 +64,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tap_selects_the_adjacent_frame_at_native_rate() {
-        for fps in [24.0, 25.0, 29.97, 30.0, 59.94, 60.0, 120.0] {
-            let frame = |time: f64| (time * fps + 1e-7).floor();
-            let start = 100.25 / fps;
-            let next = volley_preview_seek_frame(start, 1, fps, 60.0, 1);
-            let previous = volley_preview_seek_frame(start, -1, fps, 60.0, 1);
-            assert_eq!(frame(next), 101.0);
-            assert_eq!(frame(previous), 99.0);
-            assert_eq!(
-                frame(volley_preview_seek_frame(next, -1, fps, 60.0, 1)),
-                100.0
-            );
-            assert_eq!(volley_preview_seek_frame(0.0, -1, fps, 60.0, 1), 0.0);
-            assert!(volley_preview_seek_frame(60.0, 1, fps, 60.0, 1) < 60.0);
+    fn tap_advances_exactly_one_tenth_of_a_second() {
+        for start in [0.0, 0.017, 4.123, 1234.567] {
+            let next = volley_preview_seek_step(start, 1, 2000.0, 1);
+            assert!((next - start - 0.1).abs() < 1e-10);
+            assert!((volley_preview_seek_step(next, -1, 2000.0, 1) - start).abs() < 1e-10);
+            let mut time = start;
+            for _ in 0..10 {
+                time = volley_preview_seek_step(time, 1, 2000.0, 1);
+            }
+            assert!((time - start - 1.0).abs() < 1e-10);
         }
+        assert_eq!(volley_preview_seek_step(0.0, -1, 60.0, 1), 0.0);
+        assert!(volley_preview_seek_step(60.0, 1, 60.0, 1) < 60.0);
+        assert_eq!(volley_preview_seek_step(4.0, 1, 60.0, 10), 5.0);
+        assert_eq!(volley_preview_seek_step(0.7, 1, 60.0, 1), 0.8);
+        assert_eq!(volley_preview_seek_step(4.0, 0, 60.0, 1), 4.0);
+        assert_eq!(volley_preview_seek_step(4.0, 1, 60.0, 0), 4.0);
     }
 
     #[test]

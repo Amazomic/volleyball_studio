@@ -3338,6 +3338,8 @@
     if(!keyboard)s.keyboardRallyAnchor=null;
     s.seekAt=position;
     timeline.playhead.style.left=(100*position/duration)+"%";
+    if(position>=(Number(s.analysisOffset)||0))
+      prefetchOverlayAtFrame(Math.round((position-(Number(s.analysisOffset)||0))*fps()));
     if(keyboard&&s.current&&s.clipStart!==null&&s.clipEnd!==null&&
        position>=s.clipStart&&position<s.clipEnd){
       s.stopAt=s.playbackMode==="free"?null:s.clipEnd;
@@ -3348,8 +3350,6 @@
     if(s.current){s.current="";cards();}
     // Preserve player boxes and trajectory when seeking outside the selected card.
     if(!overlay.source)setOverlaySource({motion_events:[]});
-    if(position>=(Number(s.analysisOffset)||0))
-      prefetchOverlayAtFrame(Math.floor((position-(Number(s.analysisOffset)||0))*fps()));
     const rally=rallyAtTimelineTime(position);
     ui.viewTitle.textContent=rally?
       "Розыгрыш · "+timeLabel(rally.start_frame/fps())+" – "+
@@ -5091,6 +5091,7 @@
   // timeline is the ONE seek slider. Keep transport controls accessible.
   const playback={
     play:$("studio-video-play"),mute:$("studio-video-mute"),
+    backward:$("studio-video-step-backward"),forward:$("studio-video-step-forward"),
     fullscreen:$("studio-video-fullscreen"),mode:$("studio-video-mode"),
     wrap:ui.video.closest(".video-wrap")
   };
@@ -5102,6 +5103,7 @@
   const updatePlaybackControls=()=>{
     const playing=!ui.video.paused&&!ui.video.ended;
     playback.play.disabled=!s.videoKey;
+    playback.backward.disabled=playback.forward.disabled=!s.videoKey;
     playback.play.textContent=playing?"❚❚ Пауза":"▶ Воспроизвести";
     playback.play.setAttribute("aria-label",playing?"Пауза":"Воспроизвести");
     playback.mute.disabled=!s.videoKey;
@@ -5153,7 +5155,7 @@
   });
   ui.video.addEventListener("click",toggleVideoPlayback);
   // Left/right arrows scrub the one source-wide timeline, including raw GPU.
-  // Rust/WASM owns adjacent-frame selection and exponential hold acceleration.
+  // Rust/WASM owns fixed-time step selection and exponential hold acceleration.
   // JS only adapts keyboard events, requestAnimationFrame and media seeking.
   const arrowScrub={direction:0,startedAt:0,lastSeekAt:0,frame:0,key:"",generation:0,navigation:0,remainder:0};
   const stopArrowScrub=()=>{
@@ -5161,17 +5163,26 @@
     if(arrowScrub.frame)cancelAnimationFrame(arrowScrub.frame);
     arrowScrub.frame=0;
   };
-  const previewFrameRate=()=>{
-    const media=ui.video.getAttribute?.("src")||"";
-    const compatible=media.startsWith("blob:")||media.includes("playback=compatible");
-    return window.VolleyballUi.engine.volley_evidence_fps(
-      compatible?30:previewLoad.sourceFps||fps());
-  };
-  const seekPreviewFrames=(position,direction,count)=>{
-    const target=window.VolleyballUi.engine.volley_preview_seek_frame(
-      position,direction,previewFrameRate(),timelineDuration(),count);
+  const seekPreviewSteps=(position,direction,count)=>{
+    const target=window.VolleyballUi.engine.volley_preview_seek_step(
+      position,direction,timelineDuration(),count);
     if(target!==position)seekTimeline(target,true);
   };
+  const stepPreview=direction=>{
+    if(!s.videoKey||!previewIsVisible()||s.videoKey!==s.project+":"+s.video||
+       !timelineDuration()||ui.video.readyState<1)return false;
+    stopArrowScrub();
+    arrowScrub.navigation++;
+    if(s.current)s.keyboardRallyAnchor={id:s.current,key:s.videoKey,generation:s.generation};
+    const current=ui.video.seeking?s.seekAt:
+      !ui.video.paused&&Number.isFinite(overlay.presentedTime)?overlay.presentedTime:
+      Number.isFinite(ui.video.currentTime)?ui.video.currentTime:s.seekAt;
+    ui.video.pause();
+    seekPreviewSteps(current,direction,1);
+    return true;
+  };
+  playback.backward.addEventListener("click",()=>stepPreview(-1));
+  playback.forward.addEventListener("click",()=>stepPreview(1));
   const tickArrowScrub=timestamp=>{
     arrowScrub.frame=0;
     if(!arrowScrub.direction)return;
@@ -5181,11 +5192,11 @@
       const delta=window.VolleyballUi.engine.volley_preview_seek_hold_delta(
         arrowScrub.direction,timestamp-arrowScrub.startedAt,
         timestamp-arrowScrub.lastSeekAt);
-      arrowScrub.remainder+=Math.abs(delta)*previewFrameRate();
+      arrowScrub.remainder+=Math.abs(delta)*10;
       const count=Math.floor(arrowScrub.remainder);
       if(count>0&&!ui.video.seeking){
         arrowScrub.remainder-=count;
-        seekPreviewFrames(s.seekAt,arrowScrub.direction,count);
+        seekPreviewSteps(s.seekAt,arrowScrub.direction,count);
       }
       arrowScrub.lastSeekAt=timestamp;
     }
@@ -5227,18 +5238,12 @@
     }
     const direction=event.key==="ArrowRight"?1:-1;
     if(event.repeat||arrowScrub.direction===direction)return;
-    stopArrowScrub();
-    arrowScrub.navigation++;
-    if(s.current)s.keyboardRallyAnchor={id:s.current,key:s.videoKey,generation:s.generation};
-    ui.video.pause();
+    if(!stepPreview(direction))return;
     arrowScrub.direction=direction;
     arrowScrub.key=s.videoKey;arrowScrub.generation=s.generation;
     arrowScrub.remainder=0;
     arrowScrub.startedAt=performance.now();
     arrowScrub.lastSeekAt=arrowScrub.startedAt;
-    const current=ui.video.seeking?s.seekAt:Number.isFinite(ui.video.currentTime)?
-      ui.video.currentTime:s.seekAt;
-    seekPreviewFrames(current,direction,1);
     arrowScrub.frame=requestAnimationFrame(tickArrowScrub);
   },true);
   document.addEventListener("keyup",event=>{

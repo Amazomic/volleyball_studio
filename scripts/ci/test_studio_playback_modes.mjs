@@ -11,7 +11,7 @@ const js=readFileSync(join(root,"rust/volley-app/static/studio.js"),"utf8");
 const wrap=html.slice(html.indexOf('<div class="video-wrap">'),
   html.indexOf('<div class="viewer-details"'));
 for(const id of ["studio-video-play","studio-video-mute",
-  "studio-video-fullscreen","studio-video-mode"]){
+  "studio-video-fullscreen","studio-video-mode","studio-video-step-backward","studio-video-step-forward"]){
   assert.equal((html.match(new RegExp('id="'+id+'"','g'))||[]).length,1,
     id+" must appear exactly once");
   assert.ok(wrap.includes('id="'+id+'"'),id+" must be inside video");
