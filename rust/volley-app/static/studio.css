@@ -2273,6 +2273,6 @@ body[data-ui-theme="light"] #studio-preview-view .rally-team-point{color:#216b47
 #studio-preview-view:not(.training-workspace) .video-timeline-track{overflow:visible}
 #studio-preview-view:not(.training-workspace) .video-timeline-track canvas{border-radius:inherit}
 #studio-preview-view:not(.training-workspace) .video-timeline-playhead{top:-8px;z-index:4;background:#ff7900;box-shadow:0 0 0 1px #17202e,0 0 6px #ff7900}
-#studio-preview-view:not(.training-workspace) .video-timeline-playhead::before{border-width:9px 7px 0;border-top-color:#ff7900;filter:drop-shadow(0 1px 1px #17202e)}
+#studio-preview-view:not(.training-workspace) .video-timeline-playhead::before{width:14px;height:14px;border:0;background:#ff7900;clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%)}
 #studio-preview-view:not(.training-workspace) .viewer-head{align-items:center;gap:12px}
 #studio-preview-view:not(.training-workspace) .viewer-head>strong{flex:0 0 auto;white-space:nowrap}
