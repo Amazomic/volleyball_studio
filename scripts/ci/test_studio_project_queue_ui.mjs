@@ -77,6 +77,16 @@ renderer(null);
 assert.equal(target.hidden,true);
 assert.equal(target.children.length,0);
 
+const courtChecks=[];
+const requireCourt=runInNewContext(section("  const requireAnalysisCourts=async","  const launchPipeline=async")+"\nrequireAnalysisCourts",{
+  get:async(path,query)=>{courtChecks.push({path,...query});return {court:query.video==="first.mp4"?[[0,0],[1,0],[1,1],[0,1]]:[]};}
+});
+const videoOptions=[{value:"first.mp4",textContent:"Match A"},{value:"second.mp4",textContent:"Match B"}];
+await requireCourt(project,videoOptions.slice(0,1));
+await assert.rejects(requireCourt(project,videoOptions),/Match B/);
+assert.equal(courtChecks.at(-1).path,"/api/video-edit");
+assert.equal(courtChecks.at(-1).video,"second.mp4");
+assert.match(source,/await requireAnalysisCourts\(project,/);
 const posts=[];
 const start=runInNewContext(section("  const startWithRecovery=async","  const announce=")+
   "\nstartWithRecovery",{post:async(path,payload)=>{posts.push({path,payload});return {id:first};}});

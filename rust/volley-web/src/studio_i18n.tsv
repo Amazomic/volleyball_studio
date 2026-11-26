@@ -552,6 +552,7 @@ ZIP с видео, траекторией мяча, Track ID и точками �
 По касаниям · CPU	From touches · CPU
 По траектории мяча	From ball trajectory
 Нет данных	No data
+Сохраните разметку четырёх углов площадки:	Save the four court corners:
 Нет расчёта	Not calculated
 Объединять при паузе меньше	Merge if the gap is shorter than
 Кандидаты касаний по мячу	Ball-based touch candidates

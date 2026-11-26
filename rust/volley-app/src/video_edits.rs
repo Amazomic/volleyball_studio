@@ -374,6 +374,20 @@ pub(crate) fn court_snapshot(
     geometry_snapshot(&record)
 }
 
+pub(crate) fn require_court_revision(
+    state: &AppState,
+    project_id: &str,
+    video: &str,
+) -> Result<String, storage::ApiError> {
+    court_snapshot(state, project_id, video)?
+        .filter(|court| court.transform.is_some())
+        .map(|court| court.revision)
+        .ok_or_else(|| {
+            storage::bad_request(format!(
+                "Сохраните разметку четырёх углов площадки: {video}"
+            ))
+        })
+}
 fn geometry_snapshot(record: &Value) -> Result<Option<CourtSnapshot>, storage::ApiError> {
     let points: Vec<[f64; 2]> = serde_json::from_value(record["court"].clone())
         .map_err(|_| storage::bad_request("Invalid saved court coordinates"))?;

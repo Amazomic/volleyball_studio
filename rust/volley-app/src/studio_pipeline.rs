@@ -2054,20 +2054,24 @@ async fn pipeline(
     let original_source = volley_media::preparation::source_provenance(&ready.source)?;
     status["original_source"] = original_source.clone();
     status["source_identity"] = identity.clone();
-    let court_revision =
-        crate::video_edits::court_snapshot(app, &request.project_id, &request.video)
-            .map_err(reason)?
-            .map(|court| court.revision);
+    let court_revision = Some(
+        crate::video_edits::require_court_revision(app, &request.project_id, &request.video)
+            .map_err(reason)?,
+    );
+    if status["queued_court_revision"] != json!(court_revision) {
+        return Err("Разметка видео изменилась после постановки в очередь".into());
+    }
     if !status["queue_id"].is_null()
-        && (status["queued_court_revision"] != json!(court_revision)
-            || {
-                let (bytes, mtime_ns) = crate::inference_stream::source_stamp(&ready.source)?;
-                status["queued_source_identity"] != json!({"bytes":bytes,"mtime_ns":mtime_ns})
-            }
-            || json!(
-                crate::video_edits::analysis_range(app, &request.project_id, &request.video)
-                    .map_err(reason)?
-            ) != status["analysis_range"])
+        && ({
+            let (bytes, mtime_ns) = crate::inference_stream::source_stamp(&ready.source)?;
+            status["queued_source_identity"] != json!({"bytes":bytes,"mtime_ns":mtime_ns})
+        } || json!(crate::video_edits::analysis_range(
+            app,
+            &request.project_id,
+            &request.video
+        )
+        .map_err(reason)?)
+            != status["analysis_range"])
     {
         return Err(
             "Источник, отрезок или разметка видео изменились после постановки в очередь".into(),
@@ -3267,7 +3271,6 @@ async fn start_batch(
         ));
     }
     let _guard = project_guard::write_guard(&state, &request.project_id)?;
-    let root = folder(&state, &request.project_id, true)?;
     let project_id = request.project_id.clone();
     let start_video = request.video.clone();
     if all_videos
@@ -3280,6 +3283,11 @@ async fn start_batch(
             "Список видео изменился после выбора профилей",
         ));
     }
+    let court_revisions = videos
+        .iter()
+        .map(|video| crate::video_edits::require_court_revision(&state, &project_id, video))
+        .collect::<Result<Vec<_>, _>>()?;
+    let root = folder(&state, &project_id, true)?;
     let ids: Vec<String> = videos
         .iter()
         .map(|_| Uuid::new_v4().simple().to_string())
@@ -3289,7 +3297,7 @@ async fn start_batch(
     let mut jobs = Vec::with_capacity(videos.len());
     for (index, (video, run_id)) in videos.into_iter().zip(ids.iter()).enumerate() {
         let mut scoped = request.scoped_to_video(&video);
-        let mut queue_snapshot = Value::Null;
+        let mut queue_snapshot = json!({"court":court_revisions[index]});
         if all_videos {
             storage::video_name(&scoped.video)?;
             let source = projects::canonical_source(&state, &scoped.video)?;
@@ -3310,9 +3318,7 @@ async fn start_batch(
             }
             let (bytes, mtime_ns) =
                 crate::inference_stream::source_stamp(&source).map_err(storage::bad_request)?;
-            let court = crate::video_edits::court_snapshot(&state, &project_id, &scoped.video)?
-                .map(|court| court.revision);
-            queue_snapshot = json!({"weight":duration,"source":{"bytes":bytes,"mtime_ns":mtime_ns},"court":court});
+            queue_snapshot = json!({"weight":duration,"source":{"bytes":bytes,"mtime_ns":mtime_ns},"court":court_revisions[index]});
         }
         let mut status = json!({
             "schema":SCHEMA,"id":run_id,"project_id":project_id,"video":scoped.video,
@@ -4423,6 +4429,19 @@ mod tests {
         println!("PROJECT STAGE HANDOFF: independent profiles, checkpoints, artifacts and strict sequential video execution");
     }
 
+    fn write_test_court(base: &Path, project_id: &str, video: &str, geometry: &Value) {
+        let dir = base.join("projects").join(project_id).join("video_edits");
+        fs::create_dir_all(&dir).unwrap();
+        let name = format!("{:x}.json", Sha256::digest(video.as_bytes()));
+        storage::write_json_atomic(
+            &dir.join(name),
+            &json!({"schema":"volley-video-edit/1","project_id":project_id,"video":video,
+                "trim_start_sec":0.0,"trim_end_sec":null,"court":geometry["court"],
+                "net":geometry["net"],"geometry_source":"manual"}),
+        )
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn start_queues_before_source_validation_and_records_validation_failure() {
         let base = std::env::temp_dir().join(format!("studio-queue-{}", Uuid::new_v4()));
@@ -4431,7 +4450,7 @@ mod tests {
         storage::write_json_atomic(
             &base.join("projects/projects.json"),
             &json!({
-                "projects":[{"id":project_id,"videos":["missing.mp4"]}]
+                "projects":[{"id":project_id,"videos":["missing.mp4","unmarked.mp4"]}]
             }),
         )
         .unwrap();
@@ -4452,6 +4471,32 @@ mod tests {
             inference_limit: tokio::sync::Semaphore::new(1),
             full_inference: crate::inference_full::FullInferenceManager::new(),
         });
+        let uploads = base.join("uploads/project_sources");
+        fs::create_dir_all(&uploads).unwrap();
+        let source = uploads.join("missing.mp4");
+        assert!(std::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=128x128:rate=30",
+                "-t",
+                "0.5",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p"
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let source_bytes = fs::read(&source).unwrap();
+        fs::copy(&source, uploads.join("unmarked.mp4")).unwrap();
         let request = || {
             serde_json::from_value::<StartRequest>(json!({
                 "project_id":project_id,"video":"missing.mp4","mode":"gpu",
@@ -4459,10 +4504,54 @@ mod tests {
             }))
             .unwrap()
         };
+        for mode in ["gpu", "full", "post"] {
+            let unmarked: StartRequest = serde_json::from_value(json!({
+                "project_id":project_id,"video":"missing.mp4","mode":mode,
+                "source_analysis_id":if mode == "post" {Some("a".repeat(32))} else {None}
+            }))
+            .unwrap();
+            let error = start(State(state.clone()), HeaderMap::new(), Json(unmarked))
+                .await
+                .unwrap_err();
+            assert!(
+                reason(error).contains("размет"),
+                "missing court must be rejected"
+            );
+        }
+        write_test_court(
+            &base,
+            project_id,
+            "missing.mp4",
+            &json!({"court":[],"net":[[0.1,0.5],[0.9,0.5]]}),
+        );
+        let error = start(State(state.clone()), HeaderMap::new(), Json(request()))
+            .await
+            .unwrap_err();
+        assert!(reason(error).contains("размет"));
+        write_test_court(
+            &base,
+            project_id,
+            "missing.mp4",
+            &json!({"court":[[0.1,0.2],[0.9,0.2],[0.9,0.8],[0.1,0.8]],"net":null}),
+        );
+        let queue: StartRequest = serde_json::from_value(json!({
+            "project_id":project_id,"video":"missing.mp4","mode":"full",
+            "video_profiles":{"missing.mp4":{"gpu":{},"post":{}},"unmarked.mp4":{"gpu":{},"post":{}}}
+        })).unwrap();
+        let error = start_project(State(state.clone()), HeaderMap::new(), Json(queue))
+            .await
+            .unwrap_err();
+        assert!(reason(error).contains("unmarked.mp4"));
+        assert!(!base
+            .join("projects")
+            .join(project_id)
+            .join("native_studio_pipelines")
+            .exists());
         let Json(queued) = start(State(state.clone()), HeaderMap::new(), Json(request()))
             .await
             .unwrap();
         assert_eq!(queued["status"], "queued");
+        fs::remove_file(&source).unwrap();
         let Json(recovered) = start(State(state.clone()), HeaderMap::new(), Json(request()))
             .await
             .unwrap();
@@ -4518,6 +4607,7 @@ mod tests {
         assert!(start(State(state.clone()), HeaderMap::new(), Json(unowned))
             .await
             .is_err());
+        fs::write(&source, &source_bytes).unwrap();
         let mut cancellation_request = request();
         cancellation_request.client_request_id = None;
         let Json(new_job) = start(
@@ -4527,6 +4617,7 @@ mod tests {
         )
         .await
         .unwrap();
+        fs::remove_file(&source).unwrap();
         let cancelled_id = new_job["id"].as_str().unwrap().to_owned();
         let cancelled_path = base
             .join("projects")

@@ -693,6 +693,9 @@ async fn start_internal(
     let project_id = request.project_id.clone();
     let _guard = project_guard::write_guard(&state, &project_id)?;
     projects::existing_project(&state, &project_id)?;
+    if !integrated {
+        crate::video_edits::require_court_revision(&state, &project_id, &request.video)?;
+    }
     let plan =
         preparation::plan_for_analysis_async(state.clone(), &project_id, &request.video, None)
             .await?;
@@ -1037,7 +1040,7 @@ mod tests {
             inference_limit: tokio::sync::Semaphore::new(1),
             full_inference: FullInferenceManager::new(),
         });
-        let request = StartRequest {
+        let request = || StartRequest {
             person_detector: None,
             analysis_range: None,
             project_id: project_id.into(),
@@ -1050,7 +1053,25 @@ mod tests {
             gpu_memory_limit_mb: 0,
             cpu_threads: 2,
         };
-        let Json(receipt) = start(State(state.clone()), HeaderMap::new(), Json(request))
+        let error = start(State(state.clone()), HeaderMap::new(), Json(request()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(!data
+            .join("projects")
+            .join(project_id)
+            .join("native_gpu_runs")
+            .exists());
+        let edits = data.join("projects").join(project_id).join("video_edits");
+        fs::create_dir_all(&edits).unwrap();
+        storage::write_json_atomic(
+            &edits.join(format!("{:x}.json", Sha256::digest(video.as_bytes()))),
+            &json!({"schema":"volley-video-edit/1","project_id":project_id,"video":video,
+                "trim_start_sec":0.0,"trim_end_sec":null,
+                "court":[[0.1,0.2],[0.9,0.2],[0.9,0.8],[0.1,0.8]],"net":null}),
+        )
+        .unwrap();
+        let Json(receipt) = start(State(state.clone()), HeaderMap::new(), Json(request()))
             .await
             .unwrap();
         let job_id = receipt["job_id"].as_str().unwrap().to_string();

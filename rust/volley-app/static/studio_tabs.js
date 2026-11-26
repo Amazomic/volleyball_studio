@@ -1707,6 +1707,13 @@
     renderGraphSummary();
     await restorePipeline();
   };
+  const requireAnalysisCourts=async(project,options)=>{
+    for(const option of options){
+      const edit=await get("/api/video-edit",{project_id:project,video:option.value});
+      if(!Array.isArray(edit.court)||edit.court.length!==4)
+        throw Error("Сохраните разметку четырёх углов площадки: "+(option.textContent||option.value));
+    }
+  };
   const launchPipeline=async(mode="full")=>{
     if(state.pipelineId||state.starting)return;
     const project=projectId(),video=ui.video.value;
@@ -1731,6 +1738,9 @@
       payload.post=postProfile();
       if(mode==="post")payload.source_analysis_id=source;
       const allVideos=mode==="full"&&Array.from(ui.video.options||[]).filter(option=>option.value).length>1;
+      const selectedOptions=Array.from(ui.video.options||[]).filter(option=>option.value&&(allVideos||option.value===video));
+      await requireAnalysisCourts(project,selectedOptions);
+      if(project!==projectId()||video!==ui.video.value)return;
       if(allVideos){
         saveAnalysisSettings();
         const profiles=Object.create(null);
