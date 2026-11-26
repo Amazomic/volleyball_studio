@@ -8,6 +8,7 @@ const css=readFileSync(new URL("../../rust/volley-app/static/studio.css",import.
 assert.ok(!html.includes('id="studio-rally-video-markers"'),"No separate marker rail");
 assert.ok(!html.includes('class="rally-scroll-region"'),"Keep the original scroll container");
 assert.match(css,/\.rally-grid::-webkit-scrollbar-track\{[^}]*background-image:var\(--rally-video-track,none\)/);
+assert.match(css,/#studio-preview-view \.rally-grid\{[^}]*overflow-y:auto;[^}]*scrollbar-gutter:auto/,"The native scrollbar must not reserve a gutter when the rally list fits");
 const start=js.indexOf("  const renderRallyVideoMarkers=");
 const end=js.indexOf("  const refreshRallyVideoMarkers=",start);
 assert.ok(start>=0&&end>start);

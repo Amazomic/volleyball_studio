@@ -761,7 +761,7 @@ body[data-ui-theme="light"] #studio-preview-view .rallies-panel-head select{
 #studio-preview-view .rally-grid{
   display:grid;grid-template-columns:minmax(0,1fr);gap:8px;flex:1 1 auto;min-height:0;
   overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;
-  padding:10px;scrollbar-gutter:stable;align-content:start;
+  padding:10px;scrollbar-gutter:auto;align-content:start;
 }
 /* Rally entries: information hierarchy first, restrained selected/gold accents.
    The card has a readable rhythm even in a 290px side rail. */
