@@ -4815,3 +4815,9 @@ Studio показывает кнопку перехода между debug и re
 - Base def344af739c3f41192ee67d2cd8746261f49af3; task d65a05a792cb060c3a6fdf597fd2a4f21a9e9aa4; integration base 5bd9e20e7d6e33d8a1edf1ae8341424c03a29cab. Owner rust/volley-web/src/preview_scrub.rs: hold threshold 280 to 180 ms, initial velocity 0.1 to 1 video second/s, doubling interval 650 to 400 ms. Preserve exact 100 ms tap, 80 s/s cap, frame clamp and keyboard cancellation.
 - RED: rustc --test preview_scrub.rs (2 expected failures); GREEN: all 4 policy tests, real WASM keyboard integration PASS. scripts/check-all.ps1 PASS (1107 Rust tests passed, 28 ignored; 115 Node gates; fmt/clippy/WASM). Integrated keyboard, DOM IDs, viewport, WASM and scroll-marker checks PASS. git diff --check PASS.
 - Actual browser playback and GPU/export NOT TESTED. Apply through deployment queue.
+
+### 2026-11-27 - Recover braking attack and weak terminal floor rebound
+
+- Base 614dc5fc; task 2024de76; integration base c6128f4a. Owners: motion/touch_detector.rs, motion/ground_detector.rs, cpu_touches/ground_stage.rs, touch_pipeline.rs. Recover sustained lateral reversal during descent with a clear speed drop; recognize a weak terminal rebound only with court geometry, bounded motion and measured anchors on both sides. Bump detector cache versions. No timestamp-specific rules or edits to saved evidence.
+- RED: two new core regressions failed on baseline; GREEN: 342 core tests, new application measured-anchor regression, scripts/check-all.ps1 PASS (1110 Rust tests passed, 28 ignored; fmt/clippy/WASM and 115 Node gates). Integrated native detector source unchanged from tested task; git diff --check PASS.
+- Read-only saved trajectory diagnostic: project f9be01f4b877, part 2, frame 1040 at 72.927s touch candidate and frame 1066 at 73.793s floor candidate. Track 14 has an automatic Ilnur link. Full pose classification, replay publication and actual preview NOT TESTED. Deploy via queue.
