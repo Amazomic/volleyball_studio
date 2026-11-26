@@ -1541,6 +1541,7 @@ fn cpu_lineage_valid(
         && rallies["court_contact_context_version"] == "not_computed_primary_gpu_v1"
         && touches["initial_serve_attribution_version"] == crate::cpu_touches::INITIAL_SERVE_ATTRIBUTION_VERSION
         && touches["touch_side_attribution_version"] == crate::court_touch::TOUCH_SIDE_ATTRIBUTION_VERSION
+        && touches["trajectory_detector_version"] == volley_core::touch_pipeline::TRAJECTORY_DETECTOR_VERSION
         && touches["ground_detector_version"] == volley_core::motion::GROUND_DETECTOR_VERSION
         && rallies["ground_boundary_version"] == volley_core::motion::GROUND_DETECTOR_VERSION
         && rallies["materialization_version"] == "primary_gpu_intervals_direct_v2"
@@ -5510,6 +5511,7 @@ mod branching_tests {
                 "automatic_action_prediction_method":volley_core::pose_classification::ACTION_PREDICTION_POLICY_VERSION,
                 "initial_serve_attribution_version":crate::cpu_touches::INITIAL_SERVE_ATTRIBUTION_VERSION,
                 "touch_side_attribution_version":crate::court_touch::TOUCH_SIDE_ATTRIBUTION_VERSION,
+                "trajectory_detector_version":volley_core::touch_pipeline::TRAJECTORY_DETECTOR_VERSION,
                 "ground_detector_version":volley_core::motion::GROUND_DETECTOR_VERSION,
                 "preliminary_rally_scope_version":"primary_gpu_rally_mask_v1",
                 "preliminary_rally_settings":request.post.rallies,
@@ -5713,6 +5715,10 @@ mod branching_tests {
         let original_touch: Value =
             serde_json::from_slice(&fs::read(&touch_manifest).unwrap()).unwrap();
         for (field, old_value) in [
+            (
+                "trajectory_detector_version",
+                json!("piecewise_ballistic_motion_v7"),
+            ),
             ("initial_serve_attribution_version", Value::Null),
             ("body_trajectory_intersection_required", json!(false)),
             (

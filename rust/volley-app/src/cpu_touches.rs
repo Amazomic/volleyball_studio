@@ -567,6 +567,11 @@ fn read_primary_touch_breaks(
         return Err("Primary Touch Detector SHA mismatch".into());
     }
     let mut artifact: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if artifact["trajectory_detector_version"]
+        != volley_core::touch_pipeline::TRAJECTORY_DETECTOR_VERSION
+    {
+        return Ok(None);
+    }
     if artifact["width"] != width
         || artifact["height"] != height
         || !artifact["frames"]

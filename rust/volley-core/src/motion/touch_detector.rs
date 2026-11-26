@@ -309,11 +309,23 @@ fn smooth_gravity_apex_near(points: &[BallObservation], frame: i64, max_fit_erro
 fn sustained_down_to_up_rebounds(
     points: &[BallObservation],
     config: DirectionBreakConfig,
+    extended: bool,
 ) -> Vec<TrajectoryBreak> {
     let mut candidates: Vec<TrajectoryBreak> = Vec::new();
     for at in 4..points.len().saturating_sub(4) {
-        let window = &points[at - 4..=at + 4];
-        if window[8].frame - window[0].frame > 10
+        let contact = points[at];
+        let displacement_needed = 10.0 * config.max_fit_error_px;
+        let before_count = if extended {
+            if at < 6 || contact.y - points[at - 4].y >= displacement_needed {
+                continue;
+            }
+            6
+        } else {
+            4
+        };
+        let window = &points[at - before_count..=at + 4];
+        let last = window.len() - 1;
+        if window[last].frame - window[0].frame > (before_count + 6) as i64
             || window.windows(2).any(|pair| {
                 pair[1].frame - pair[0].frame > 2
                     || (pair[1].x - pair[0].x).abs() > 4.0 * config.max_join_error_px
@@ -321,28 +333,32 @@ fn sustained_down_to_up_rebounds(
         {
             continue;
         }
-        let contact = window[4];
-        let displacement_needed = 10.0 * config.max_fit_error_px;
         if contact.y - window[0].y < displacement_needed
-            || contact.y - window[8].y < displacement_needed
-            || window[..5]
+            || contact.y - window[last].y < displacement_needed
+            || window[..=before_count]
                 .windows(2)
                 .any(|pair| pair[1].y + 2.0 * config.max_fit_error_px < pair[0].y)
-            || window[4..]
+            || window[before_count..]
                 .windows(2)
                 .any(|pair| pair[1].y > pair[0].y + 2.0 * config.max_fit_error_px)
         {
             continue;
         }
+        if before_count > 4
+            && (window.iter().any(|p| p.y > contact.y)
+                || contact.y - points[at - 4].y < 4.0 * config.max_fit_error_px)
+        {
+            continue;
+        }
         let before_span = (contact.frame - window[0].frame) as f64;
-        let after_span = (window[8].frame - contact.frame) as f64;
+        let after_span = (window[last].frame - contact.frame) as f64;
         let before = [
             (contact.x - window[0].x) / before_span,
             (contact.y - window[0].y) / before_span,
         ];
         let after = [
-            (window[8].x - contact.x) / after_span,
-            (window[8].y - contact.y) / after_span,
+            (window[last].x - contact.x) / after_span,
+            (window[last].y - contact.y) / after_span,
         ];
         let before_length = before[0].hypot(before[1]);
         let after_length = after[0].hypot(after[1]);
@@ -356,7 +372,8 @@ fn sustained_down_to_up_rebounds(
         if angle < config.min_turn_angle_deg {
             continue;
         }
-        let local_x_error = (contact.x - 0.5 * (window[3].x + window[5].x)).abs();
+        let local_x_error =
+            (contact.x - 0.5 * (window[before_count - 1].x + window[before_count + 1].x)).abs();
         let candidate = TrajectoryBreak {
             frame: contact.frame,
             position: [contact.x, contact.y],
@@ -368,8 +385,8 @@ fn sustained_down_to_up_rebounds(
                 residual: (after[0] - before[0]).hypot(after[1] - before[1]),
             },
             fit_error: local_x_error,
-            before_frames: window[..4].iter().map(|p| p.frame).collect(),
-            after_frames: window[5..].iter().map(|p| p.frame).collect(),
+            before_frames: window[..before_count].iter().map(|p| p.frame).collect(),
+            after_frames: window[before_count + 1..].iter().map(|p| p.frame).collect(),
             contact_observed: true,
         };
         if let Some(prior) = candidates.last_mut().filter(|event| {
@@ -731,7 +748,7 @@ pub fn trajectory_direction_breaks(
             found.push(candidate);
         }
     }
-    for rebound in sustained_down_to_up_rebounds(points, config) {
+    for rebound in sustained_down_to_up_rebounds(points, config, false) {
         if let Some(nearby) = found.iter_mut().find(|event| {
             event.frame.abs_diff(rebound.frame) <= config.min_separation_frames as u64
         }) {
@@ -763,6 +780,14 @@ pub fn trajectory_direction_breaks(
             }
         } else {
             found.push(launch);
+        }
+    }
+    for rebound in sustained_down_to_up_rebounds(points, config, true) {
+        if !found
+            .iter()
+            .any(|event| event.frame.abs_diff(rebound.frame) <= config.min_separation_frames as u64)
+        {
+            found.push(rebound);
         }
     }
     found.sort_by_key(|event| event.frame);
@@ -1401,5 +1426,43 @@ mod tests {
         let found = trajectory_breaks(&points);
         assert_eq!(found.len(), 1, "{found:?}");
         assert!((found[0].frame - 992).abs() <= 2, "{found:?}");
+    }
+
+    #[test]
+    fn slow_quantized_overhead_set_has_a_sustained_reversal() {
+        let coords = [
+            (1740., 360.),
+            (1732.5, 367.5),
+            (1725., 375.),
+            (1717.5, 382.5),
+            (1717.5, 390.),
+            (1702.5, 420.),
+            (1710., 427.5),
+            (1702.5, 442.5),
+            (1695., 442.5),
+            (1695., 450.),
+            (1695., 442.5),
+            (1695., 420.),
+            (1687.5, 405.),
+            (1680., 367.5),
+            (1680., 345.),
+            (1687.5, 322.5),
+            (1687.5, 300.),
+            (1687.5, 277.5),
+            (1687.5, 255.),
+            (1687.5, 232.5),
+        ];
+        let points: Vec<_> = coords
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, y))| BallObservation {
+                frame: i as i64,
+                x,
+                y,
+            })
+            .collect();
+        let events = trajectory_direction_breaks(&points, DirectionBreakConfig::default());
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].frame.abs_diff(9) <= 1, "{events:?}");
     }
 }
