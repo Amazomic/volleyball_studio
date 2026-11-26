@@ -1497,6 +1497,7 @@ fn cpu_lineage_valid(
         // A saved replay from the disabled legacy tracker must never be
         // silently reused when ByteTrack is now the default.
         && track["track_association_version"] == cpu_retrack::TRACK_ASSOCIATION_VERSION
+        && track["court_revision"] == saved["court_revision"]
         && (!request.gpu.pose_enabled
             || (track["pose_refinement_policy"] == cpu_retrack::POSE_REFINEMENT_POLICY
                 && track["pose_sampling"] == cpu_retrack::pose_sampling_contract(request.post.ball_stabilizer)))
@@ -2132,6 +2133,7 @@ async fn pipeline(
                 source_id,
                 fusion["sha256"].as_str().ok_or("Нет SHA-256 Fusion")?,
                 Some(&primary.sha256),
+                court_revision.as_deref(),
             )? {
                 return Err("Для пересчёта нужны позы RTMPose, измеренные по стабильным рамкам. Выполните первую фазу анализа.".into());
             }
@@ -2345,6 +2347,7 @@ async fn pipeline(
                         block_mode.then(|| cpu_retrack::EarlyPoseOptions {
                             parallel_rally_poses: request.gpu.parallel_rally_poses,
                             tracking: request.post.tracking,
+                            court: None,
                             interpolate_players: request.post.interpolate_players,
                             threads: request.gpu.cpu_threads,
                             cancelled: cancel.clone(),
@@ -2558,6 +2561,9 @@ async fn pipeline(
     .map_err(reason)?;
     drop(pose_permit);
     let replay_id = require_id(&replay, "replay_id")?;
+    if replay["court_revision"] != status["court_revision"] {
+        return Err("Court calibration changed during ByteTrack".into());
+    }
     if replay["player_frame_scope_version"] != "primary_gpu_selected_intervals_v1"
         || replay["player_frame_scope_sha256"] != status["gpu_rally_mask_sha256"]
         || replay["player_frame_scope_ball_job_id"] != status["gpu_jobs"]["ball"]

@@ -647,6 +647,7 @@ pub(crate) fn run_joint_pair(
         let mut player_samples = 0u64;
         if let Some(mut options) = early_pose.filter(|_| !pose_enabled) {
             options.checkpoint_root = rally_checkpoint;
+            options.court = court.clone();
             options.tracking.min_track_observations = crate::cpu_retrack::confirmation_threshold(
                 options.tracking.min_track_observations,
                 Some(person_stride as u64),
