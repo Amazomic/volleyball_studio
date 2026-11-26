@@ -4833,3 +4833,9 @@ Studio показывает кнопку перехода между debug и re
 - Base c6128f4a; integration base ed664928. Owner: rust/volley-app/static/studio.js, studio.css, studio.html. Remove separate marker rail and draw 2px source marks as background layers on the native scrollbar track (Chromium/WebKit), preserving native scroll and drag; markers are visual rather than independent click targets. Single-source and non-scrollable lists clear the marks.
 - RED: node scripts/ci/test_studio_rally_scroll_markers.mjs (separate rail); GREEN: new native track regression and seven targeted gates. scripts/check-all.ps1 PASS: fmt, clippy, 1107 Rust tests passed (28 ignored by existing suite), 116 Node gates. Integrated tree: 116 Node gates PASS; Rust changes from concurrent accepted develop are outside this UI change. git diff --check PASS.
 - Edge headless screenshot pixel verification PASS: 12px native track contains source-colored marks at 1440x900, 1920x1080, 800x900, 480x812, synthetic list. Real project playback, Firefox, GPU inference and export NOT TESTED. Deploy via queue.
+
+### 2026-11-27 - Diamond preview timeline playhead
+
+- Base ed664928; task 03d8bf18; integration base e6f3b370. Owner rust/volley-app/static/studio.css: replace the orange triangle with a 14x14px diamond using a clipped pseudo-element. Retain line, 8px protrusion, color, seek and numeric labels; training unchanged.
+- RED/GREEN: scripts/ci/test_studio_preview_layout_cache.mjs; DOM IDs, viewport layout PASS. Headless Edge isolated timeline geometry: 48 cases at four window sizes, light/dark, preview/training, 0/50/100% seek PASS. scripts/check-all.ps1 PASS (fmt, clippy, Rust tests, WASM, 116 Node gates). Integrated preview, DOM, viewport and native scrollbar marker tests PASS. git diff --check PASS.
+- Actual match playback NOT TESTED; no detection or saved-analysis changes. Deploy via queue.
