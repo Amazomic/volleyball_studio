@@ -372,6 +372,15 @@ assert.match(js,/identity:"GPU\/CPU"/);
 assert.match(js,/analysis-flow-node-status/);
 assert.match(css,/data-status="complete"/);
 assert.match(css,/data-status="failed"/);
+const runningIndicator=css.match(/\.analysis-flow-node\[data-status="running"\] \.analysis-flow-node-status\{([^}]+)\}/)?.[1];
+assert.ok(runningIndicator);
+assert.match(runningIndicator,/background:transparent/);
+assert.match(runningIndicator,/border:2px solid var\(--flow-active\)/);
+assert.match(runningIndicator,/border-right-color:transparent/);
+assert.match(runningIndicator,/animation:analysis-stage-status-spin 1s linear infinite/);
+assert.match(css,/@keyframes analysis-stage-status-spin\{to\{transform:rotate\(360deg\)\}\}/);
+assert.doesNotMatch(css,/\.analysis-flow-node\[data-status="running"\] \.analysis-flow-node-status::after/);
+assert.match(css,/@media\(prefers-reduced-motion:reduce\)\{[^}]*\.analysis-flow-node\[data-status="running"\] \.analysis-flow-node-status\{animation:none\}/);
 const historyProjection=rust.slice(rust.indexOf('rows.push(json!({"id":id'),rust.indexOf("    rows.sort_by"));
 for(const key of ["gpu_jobs","cpu_runs","analysis_id","profile","gpu_rally_count","automatic_identity_available"])
   assert.ok(historyProjection.includes('"'+key+'":'),"Saved graph needs "+key);

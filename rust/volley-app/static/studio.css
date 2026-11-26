@@ -2000,8 +2000,9 @@ body[data-ui-theme="light"] .analysis-flow{--flow-shell:#f7f9fc;--flow-phase:#ed
 .analysis-flow-node[data-status="complete"] .analysis-flow-node-status::after{content:"✓"}
 .analysis-flow-node[data-status="failed"] .analysis-flow-node-status{background:#c03542}
 .analysis-flow-node[data-status="failed"] .analysis-flow-node-status::after{content:"×"}
-.analysis-flow-node[data-status="running"] .analysis-flow-node-status{background:#b7791f}
-.analysis-flow-node[data-status="running"] .analysis-flow-node-status::after{content:"…"}
+.analysis-flow-node[data-status="running"] .analysis-flow-node-status{box-sizing:border-box;background:transparent;border:2px solid var(--flow-active);border-right-color:transparent;animation:analysis-stage-status-spin 1s linear infinite}
+@keyframes analysis-stage-status-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.analysis-flow-node[data-status="running"] .analysis-flow-node-status{animation:none}}
 .analysis-flow-node-heading-row{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;width:100%;max-width:100%}
 .analysis-flow-node-icon{width:16px;height:16px;flex:0 0 16px;color:var(--flow-muted)}
 .analysis-flow-node-title{font:inherit;max-width:100%;white-space:normal;overflow-wrap:anywhere}
