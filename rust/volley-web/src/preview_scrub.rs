@@ -1,9 +1,9 @@
 //! Pure, deterministic keyboard-scrub policy for the browser's video player.
 //! DOM events and HTMLVideoElement.currentTime stay in the JS platform adapter.
 
-const HOLD_DELAY_MS: f64 = 280.0;
-const HOLD_DOUBLING_MS: f64 = 650.0;
-const INITIAL_SECONDS_PER_SECOND: f64 = 0.1;
+const HOLD_DELAY_MS: f64 = 180.0;
+const HOLD_DOUBLING_MS: f64 = 400.0;
+const INITIAL_SECONDS_PER_SECOND: f64 = 1.0;
 const MAX_SECONDS_PER_SECOND: f64 = 80.0;
 const MAX_FRAME_MS: f64 = 200.0;
 
@@ -85,18 +85,18 @@ mod tests {
 
     #[test]
     fn hold_starts_only_after_grace_period() {
-        for held in [0.0, 16.0, 279.99] {
+        for held in [0.0, 16.0, 179.99] {
             assert_eq!(volley_preview_seek_hold_delta(1, held, 100.0), 0.0);
         }
-        assert_eq!(volley_preview_seek_hold_delta(1, 280.0, 100.0), 0.01);
-        assert_eq!(volley_preview_seek_hold_delta(-1, 280.0, 100.0), -0.01);
+        assert_eq!(volley_preview_seek_hold_delta(1, 180.0, 100.0), 0.1);
+        assert_eq!(volley_preview_seek_hold_delta(-1, 180.0, 100.0), -0.1);
     }
 
     #[test]
     fn holding_accelerates_exponentially_and_stops_at_limit() {
-        let t0 = volley_preview_seek_hold_delta(1, 280.0, 100.0);
-        let t1 = volley_preview_seek_hold_delta(1, 930.0, 100.0);
-        let t2 = volley_preview_seek_hold_delta(1, 1580.0, 100.0);
+        let t0 = volley_preview_seek_hold_delta(1, 180.0, 100.0);
+        let t1 = volley_preview_seek_hold_delta(1, 580.0, 100.0);
+        let t2 = volley_preview_seek_hold_delta(1, 980.0, 100.0);
         assert!((t1 - 2.0 * t0).abs() < 1e-10);
         assert!((t2 - 4.0 * t0).abs() < 1e-10);
         assert_eq!(volley_preview_seek_hold_delta(1, 30_000.0, 100.0), 8.0);

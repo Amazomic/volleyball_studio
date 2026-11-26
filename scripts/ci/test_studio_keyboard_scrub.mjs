@@ -39,8 +39,8 @@ for(const rate of [24,25,29.97,30,59.94,60,120]){
   assert.equal(engine.volley_preview_seek_step(0,-1,60,1),0);
   assert.ok(engine.volley_preview_seek_step(60,1,60,1)<60);
 }
-assert.equal(engine.volley_preview_seek_hold_delta(1,279,100),0);
-assert.equal(engine.volley_preview_seek_hold_delta(1,280,100),0.01);
+assert.equal(engine.volley_preview_seek_hold_delta(1,179,100),0);
+assert.equal(engine.volley_preview_seek_hold_delta(1,180,100),0.1);
 const window={VolleyballUi:{engine},
   addEventListener:(name,handler)=>windowHandlers.set(name,handler)};
 const context={overlay:{presentedTime:null},
@@ -97,7 +97,7 @@ assert.equal(event.stopped,1);
 assert.equal(video.paused,true,"Arrow seek pauses playback immediately");
 key("ArrowRight",{repeat:true});
 assert.equal(seeks.length,1,"OS key-repeat must not cause repeated base seeks");
-advanceTo(240);
+advanceTo(120);
 assert.equal(s.seekAt,firstPosition,"A tap should not start a continuous seek");
 release("ArrowRight");
 advanceTo(600);
@@ -113,7 +113,7 @@ advanceTo(3400);
 const afterLate=s.seekAt;
 const earlyPerSecond=(afterEarly-secondPosition)/(1.2);
 const latePerSecond=(afterLate-afterEarly)/1.5;
-assert.ok(earlyPerSecond>0);
+assert.ok(afterEarly-secondPosition>2,"Holding for 1.2 seconds must already move over two video seconds");
 assert.ok(latePerSecond>earlyPerSecond*2,
   "Holding a direction must accelerate exponentially over time");
 release("ArrowRight");
