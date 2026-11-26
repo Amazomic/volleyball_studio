@@ -1886,8 +1886,9 @@ html:lang(en) #studio-analysis-view .analysis-setting-help:is(:hover,:focus-visi
 @keyframes track-auto-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.track-auto-assign.is-working,.track-auto-assign.is-working::after{animation:none}}
 .studio-sidebar-actions{display:flex;gap:12px;align-items:center;padding:0 12px}
-.studio-sidebar-actions .studio-sidebar-restart,.studio-sidebar-video-toggle{display:grid;place-items:center;flex:0 0 49px;width:49px;height:49px;min-height:49px;padding:8px;border:1px solid #365376;border-radius:11px;background:linear-gradient(155deg,#223957,#101f35);color:#b7d8ff;box-shadow:0 5px 16px #0003}
-.studio-sidebar-actions .studio-sidebar-restart:hover:not(:disabled),.studio-sidebar-video-toggle:hover:not(:disabled),.studio-sidebar-video-toggle[aria-expanded="true"]{border-color:#70b3ff;color:#fff;background:#214773;box-shadow:0 0 13px #2e83e944}
+.studio-sidebar-actions .studio-sidebar-restart,.studio-sidebar-video-toggle,.studio-sidebar-language-toggle{display:grid;place-items:center;flex:0 0 49px;width:49px;height:49px;min-height:49px;padding:8px;border:1px solid #365376;border-radius:11px;background:linear-gradient(155deg,#223957,#101f35);color:#b7d8ff;box-shadow:0 5px 16px #0003}
+.studio-sidebar-actions .studio-sidebar-restart:hover:not(:disabled),.studio-sidebar-video-toggle:hover:not(:disabled),.studio-sidebar-video-toggle[aria-expanded="true"],.studio-sidebar-language-toggle:hover:not(:disabled),.studio-sidebar-language-toggle[aria-pressed="true"]{border-color:#70b3ff;color:#fff;background:#214773;box-shadow:0 0 13px #2e83e944}
+.studio-sidebar-language-toggle{font-size:12px;font-weight:700;white-space:nowrap}
 .studio-sidebar-action-icon{width:30px;height:30px;flex:none}
 .studio-sidebar-video-toggle .studio-sidebar-action-icon{width:34px;height:34px}
 .studio-video-library{position:fixed;z-index:110;right:0;top:86px;bottom:0;width:min(440px,calc(100vw - 56px));display:flex;flex-direction:column;gap:12px;min-height:0;background:#111d2f;border:1px solid #345078;border-right:0;border-radius:12px 0 0 0;box-shadow:-16px 0 36px #0008;padding:18px 16px 15px}
