@@ -2264,5 +2264,6 @@ body[data-ui-theme="light"] #studio-preview-view .rally-team-far .rally-team-lab
 body[data-ui-theme="light"] #studio-preview-view .rally-team-members{color:#425c7b}
 body[data-ui-theme="light"] #studio-preview-view .rally-team-point{color:#216b47}
 
+#studio-preview-view:not(.training-workspace) #studio-timeline-middle,body[data-ui-theme="light"] #studio-preview-view:not(.training-workspace) #studio-timeline-middle{font-size:15px;line-height:16px;transform:translateY(-5px)}
 #studio-preview-view:not(.training-workspace) .viewer-head{align-items:center;gap:12px}
 #studio-preview-view:not(.training-workspace) .viewer-head>strong{flex:0 0 auto;white-space:nowrap}
