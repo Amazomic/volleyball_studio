@@ -479,6 +479,9 @@ fn finalize_model_output(
     });
     if let Some(backend) = backend {
         manifest["decode_backend"] = json!(backend);
+        if backend == "nvdec_zero_copy" {
+            manifest["timeline_origin"] = json!("container_start_time_v2");
+        }
         manifest["decode_pipeline"] = json!(if backend == "nvdec_zero_copy" {
             "gpu_resident_nvdec_primary_v1"
         } else {
