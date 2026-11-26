@@ -921,3 +921,30 @@ async fn montage_library_lists_all_projects_and_deletes_only_selected_output() {
     assert!(code == 400 || code == 404);
     server.close().await;
 }
+
+#[tokio::test]
+async fn agent_capabilities_discovery_is_read_only_and_versioned() {
+    let server = TestServer::spawn(false).await;
+    let (status, body) = server
+        .request("GET", "/api/agent/v1/capabilities", None)
+        .await;
+    assert_eq!(status, 200);
+    let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(doc["schema"], "volley-agent-api/1");
+    assert_eq!(doc["writes_enabled"], false);
+    assert_eq!(
+        doc["operations"]["timeline"]["path"],
+        "/api/cpu/native/rallies/timeline"
+    );
+    assert_eq!(
+        doc["operations"]["render"]["path"],
+        "/api/montage/native/start"
+    );
+    assert_eq!(doc["operations"]["render"]["method"], "POST");
+    assert_eq!(doc["limits"]["analysis_fps"], 30);
+    let (status, _) = server
+        .request("POST", "/api/agent/v1/capabilities", Some("{}"))
+        .await;
+    assert_eq!(status, 405);
+    server.close().await;
+}

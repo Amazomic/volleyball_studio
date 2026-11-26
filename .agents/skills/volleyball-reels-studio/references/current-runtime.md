@@ -1,5 +1,7 @@
 # Действующая Rust Studio
 
+Agent discovery: GET /api/agent/v1/capabilities. See [HTTP API](agent-api.md) and [montage recipes](montage-recipes.md) for ordered Creative clips across videos. These use the existing Rust routes, not MCP.
+
 Проверено по Rust-маршрутам и схемам запросов 17.11.2026. Перед выполнением сверяй актуальный код: этот файл не заменяет сохранённые манифесты конкретного анализа.
 
 ## Запуск и обнаружение
@@ -18,7 +20,7 @@ Rust workspace: rust/Cargo.toml. Python-приложение доступно т
 
 ## Сохранённый анализ и персональный монтаж
 
-Используй вкладку «Монтаж» с профилями «Избранное», «Игрок», «Атаки», «Отчёт». Действующий браузерный адаптер: [studio_montage_builder.js](../../../../rust/volley-app/static/studio_montage_builder.js).
+Используй вкладку «Монтаж» с профилями «Избранное», «Игрок», «Атаки», «Отчёт» и «Творчество». Действующий браузерный адаптер: [studio_montage_builder.js](../../../../rust/volley-app/static/studio_montage_builder.js).
 
 | Операция | Действующий API | Владелец |
 | --- | --- | --- |

@@ -38,8 +38,8 @@ use volley_media::{
     probe,
 };
 
-const MAX_CLIPS: usize = 80;
-const MAX_TOTAL_SECONDS: f64 = 600.0;
+pub(crate) const MAX_CLIPS: usize = 80;
+pub(crate) const MAX_TOTAL_SECONDS: f64 = 600.0;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

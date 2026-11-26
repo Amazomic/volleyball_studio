@@ -1,4 +1,5 @@
 //! Rust-native Studio HTTP application. The replacement is still incomplete.
+mod agent_api;
 mod analysis_management;
 mod analysis_runs;
 #[cfg(test)]
@@ -99,6 +100,7 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
         // This is not /api/health: do not fool the production UI's API gate
         // into believing this partial Rust rewrite is ready.
         .route("/internal/rewrite-status", get(runtime::rewrite_status))
+        .route("/api/agent/v1/capabilities", get(agent_api::capabilities))
         .route("/studio", get(studio_web::index))
         .route(
             "/studio/rust",

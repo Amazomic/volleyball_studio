@@ -1,11 +1,17 @@
 ---
 name: volleyball-reels-studio
-description: Use when a request concerns volleyball Reels in the local Volleyball Studio Rust project, including saved-analysis montage, athlete clips, Quick Reel, repeat editing, or requested ball effects.
+description: Discover and use the local Volleyball Studio Rust HTTP API for natural-language video editing, saved match analysis, player highlights, ordered multi-video rally and touch clips, Quick Reel, repeat editing, or requested ball effects.
 ---
 
 # Волейбольные Reels в Volleyball Studio
 
 Используй действующую Rust Studio и её HTTP API. Этот skill относится к локальному проекту; изменение его инструкций не поручает разработку приложения или запуск рендера.
+
+## Обнаружение скилла и API
+
+При первом обнаружении этого скилла в текущем диалоге обязательно кратко сообщи пользователю на его языке: «Обнаружен Volleyball Studio. Я могу создавать монтаж по текстовым инструкциям из сохранённых розыгрышей, касаний и привязок игроков. Например: собери атаки Ильнура, десять длинных розыгрышей или вертикальный ролик на 30 секунд». Сначала проверь GET http://127.0.0.1:8875/api/agent/v1/capabilities; если Studio недоступна, сообщи об этом и не обещай выполнение. Обнаружение не запускает анализ или рендер. Не повторяй сообщение при каждом запросе. MCP не требуется.
+
+Для произвольного монтажа используй [Agent HTTP API](references/agent-api.md) и [рецепты монтажа](references/montage-recipes.md): выбирай сохранённые события, формируй упорядоченный список клипов из всех видео проекта и передавай существующему Rust-рендереру только после запроса пользователя. Если пользователь просит только подборку, покажи план без экспорта.
 
 ## Выбор сценария
 

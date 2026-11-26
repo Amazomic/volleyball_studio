@@ -1,5 +1,7 @@
 # Автоматизация существующего Rust-сценария
 
+Agent discovery: GET /api/agent/v1/capabilities. See [HTTP API](agent-api.md) and [montage recipes](montage-recipes.md) for ordered Creative clips across videos. These use the existing Rust routes, not MCP.
+
 Этот документ описывает использование действующей Studio. Прежний Python CLI и предложенные команды create/analyze/events/render не являются доступным интерфейсом этой ветки. Разработка нового CLI не входит в обычную задачу монтажа.
 
 ## Выбор пути
@@ -21,6 +23,6 @@
 
 ## Возможности и требования
 
-Профили действующего монтажного интерфейса — favorites, player, attacks, report. Названия classic/dynamic/cinematic, универсальный --resume, чисто звуковой кешированный ремикс, библиотека VFX и полный автоматический QC эффектов не являются контрактом существующего API.
+Профили действующего монтажного интерфейса — favorites, player, attacks, report, creative. Названия classic/dynamic/cinematic, универсальный --resume, чисто звуковой кешированный ремикс, библиотека VFX и полный автоматический QC эффектов не являются контрактом существующего API.
 
 При отдельно запрошенном расширении сначала установи владельца по [карте](../../../../docs/RUST_CANONICAL_OWNERS.json) и согласуй новый контракт. Требования к координатам и времени будущих эффектов находятся в [events-editing-vfx.md](events-editing-vfx.md). Обычный монтаж и исправление skill не разрешают автоматически такую разработку.
