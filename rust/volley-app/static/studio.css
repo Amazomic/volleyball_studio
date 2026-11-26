@@ -765,11 +765,14 @@ body[data-ui-theme="light"] #studio-preview-view .rallies-panel-head select{
 /* Rally entries: information hierarchy first, restrained selected/gold accents.
    The card has a readable rhythm even in a 290px side rail. */
 #studio-preview-view .rally-grid{gap:6px;padding:8px;grid-auto-rows:max-content}
-#studio-preview-view .rally-scroll-region{position:relative;display:flex;flex-direction:column;flex:1 1 auto;min-height:0;min-width:0}
-#studio-preview-view .rally-video-markers{position:absolute;top:4px;bottom:4px;right:var(--rally-scrollbar-width,0px);width:8px;pointer-events:none;z-index:2}
-#studio-preview-view .rally-video-marker{position:absolute;left:0;width:8px;height:7px;transform:translateY(-50%);padding:0;border:1px solid #14243a;border-radius:2px;background:#74aaff;pointer-events:auto}
-#studio-preview-view .rally-video-marker:hover,#studio-preview-view .rally-video-marker:focus-visible{background:#e4efff;outline:1px solid #74aaff;outline-offset:1px}
-body[data-ui-theme="light"] #studio-preview-view .rally-video-marker{background:#286ac2;border-color:#fff}
+#studio-preview-view .rally-grid{--rally-scroll-marker-color:#74aaff;scrollbar-color:auto}
+#studio-preview-view .rally-grid::-webkit-scrollbar{width:12px}
+#studio-preview-view .rally-grid::-webkit-scrollbar-track{background-color:#172235;background-image:var(--rally-video-track,none)}
+#studio-preview-view .rally-grid::-webkit-scrollbar-thumb{background:#61728b;border:2px solid transparent;border-radius:6px;background-clip:padding-box}
+#studio-preview-view .rally-grid::-webkit-scrollbar-thumb:hover{background-color:#91a5bf}
+body[data-ui-theme="light"] #studio-preview-view .rally-grid{--rally-scroll-marker-color:#286ac2}
+body[data-ui-theme="light"] #studio-preview-view .rally-grid::-webkit-scrollbar-track{background-color:#e6edf6}
+body[data-ui-theme="light"] #studio-preview-view .rally-grid::-webkit-scrollbar-thumb{background-color:#8399b4}
 
 #studio-preview-view .rally-card{
   display:grid;grid-template-columns:minmax(0,1fr);
