@@ -375,7 +375,7 @@ impl RallyMask {
             rally_intervals,
             stationary_intervals: motion.stationary,
             unobserved_intervals: motion.unobserved,
-            movement_filter_version: "stationary_ball_min_rally_5s_v3",
+            movement_filter_version: crate::cpu_retrack::ball_track::MOVEMENT_FILTER_VERSION,
             context_seconds: CONTEXT_FRAMES as f64 / 30.0,
             observed_ball_frames,
             ball_stabilizer: RallyBallStabilizer {
@@ -551,6 +551,45 @@ mod tests {
         assert_eq!(mask.merged.len(), 1);
         assert_eq!(mask.merged[0].1, impact.frame);
         assert_eq!(mask.rally_intervals[0].1, impact.frame + 15);
+    }
+
+    #[test]
+    fn recovered_high_flight_remains_subject_to_ground_boundary() {
+        let mut points = vec![None; 330];
+        for (frame, point) in points.iter_mut().enumerate().take(200).skip(20) {
+            let y = if frame < 185 {
+                0.4
+            } else {
+                0.4 - (frame - 184) as f64 * 0.026
+            };
+            *point = Some([0.2 + (frame - 20) as f64 * 0.002, y]);
+        }
+        for (frame, point) in points.iter_mut().enumerate().take(244).skip(230) {
+            *point = Some([
+                0.59 + (frame - 230) as f64 * 0.001,
+                0.02 + (frame - 230) as f64 * 0.02,
+            ]);
+        }
+        let trajectory = StabilizedBallMotion {
+            observed_frames: points.iter().filter(|p| p.is_some()).count(),
+            confidence_frames: points.iter().filter(|p| p.is_some()).count(),
+            interpolated: vec![false; points.len()],
+            rejected_frames: vec![],
+            points,
+        };
+        let mask = RallyMask::from_stabilized(
+            &trajectory,
+            PrimaryRallySettings::default(),
+            BallStabilizerSettings::default(),
+            |_, preliminary| {
+                assert_eq!(preliminary, &[(20, 243)]);
+                Ok(vec![239])
+            },
+        )
+        .unwrap();
+        assert_eq!(mask.merged, vec![(20, 239)]);
+        assert_eq!(mask.rally_intervals, vec![(5, 254)]);
+        assert!(mask.includes(239));
     }
 
     #[test]

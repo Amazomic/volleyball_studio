@@ -161,7 +161,7 @@ fn load_player_frame_scope(
     if selected.is_empty()
         || evidence["schema"] != "volley-primary-rally-mask-evidence/1"
         || mask["schema"] != "volley-primary-rally-mask/1"
-        || mask["movement_filter_version"] != "stationary_ball_min_rally_5s_v3"
+        || !ball_track::movement_filter_supported(mask["movement_filter_version"].as_str())
         || evidence["ball_job_id"] != ball_job_id
         || evidence["original_source"] != fusion["original_source"]
         || evidence["analysis_range"] != fusion["analysis_range"]
