@@ -4839,3 +4839,9 @@ Studio показывает кнопку перехода между debug и re
 - Base ed664928; task 03d8bf18; integration base e6f3b370. Owner rust/volley-app/static/studio.css: replace the orange triangle with a 14x14px diamond using a clipped pseudo-element. Retain line, 8px protrusion, color, seek and numeric labels; training unchanged.
 - RED/GREEN: scripts/ci/test_studio_preview_layout_cache.mjs; DOM IDs, viewport layout PASS. Headless Edge isolated timeline geometry: 48 cases at four window sizes, light/dark, preview/training, 0/50/100% seek PASS. scripts/check-all.ps1 PASS (fmt, clippy, Rust tests, WASM, 116 Node gates). Integrated preview, DOM, viewport and native scrollbar marker tests PASS. git diff --check PASS.
 - Actual match playback NOT TESTED; no detection or saved-analysis changes. Deploy via queue.
+
+### 2026-11-27 - Remove preview footer overflow
+
+- Base 5971e7e7; task 9a700d5cf9c23d33e1b732cbf09b1453e81a77cb; integration base 5971e7e70bf672a778b4c727ca6e4e55ba75600b. Owner rust/volley-app/static/studio.css: hide the shared footer only for the visible non-training preview; remove its text, border, margins and padding from flow, not genuine overflow. Other tabs and the rally rail retain their scrolling.
+- RED/GREEN: scripts/ci/test_studio_viewport_layout.mjs; preview layout/cache and DOM IDs PASS. Edge headless with 50 synthetic rallies: outer overflow 64 -> 0 px at 1920x1080 and 47 -> 0 px at 1440x900; rail scrollTop=100 preserved. At 1280x720 genuine overflow remains (54 px); mobile and training/other tab footer visibility checked. Actual match playback NOT TESTED.
+- scripts/check-all.ps1 PASS: WASM, fmt, clippy, 1110 Rust tests passed (28 existing ignored), 116 Node gates. GPU/real-match/export gates outside this UI change NOT TESTED. Integrated targeted gates and git diff --check required before push. Deploy via queue.
