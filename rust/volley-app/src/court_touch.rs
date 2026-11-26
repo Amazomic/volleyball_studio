@@ -454,6 +454,13 @@ pub(crate) fn annotate(
         let Some(mut evidence) = court.player_evidence(player.bbox_xyxy_norm) else {
             continue;
         };
+        if event.action_prediction.as_ref().is_some_and(|p| {
+            p.kind == ActionKind::Block && p.method == PredictionMethod::CourtPoseMotionV1
+        }) {
+            if let Some(sample) = event.court {
+                evidence = sample;
+            }
+        }
         evidence.side = sides.get(&track_id).copied().unwrap_or(evidence.side);
         event.court = Some(evidence);
         let Some(ref mut prediction) = event.action_prediction else {
@@ -494,6 +501,252 @@ pub(crate) fn annotate(
             prediction.method = PredictionMethod::CourtPoseMotionV1;
         }
     }
+}
+
+pub(crate) fn recognize_jump_block(
+    event: &mut PhysicalTouchCandidate,
+    frames: &[TouchFrame],
+    poses: &[volley_core::touch_pipeline::PoseFrame],
+    court: &CourtTransform,
+    dimensions: (u32, u32),
+    settings: volley_core::touch_pipeline::TouchSettings,
+    eligible: Option<&[u64]>,
+) -> bool {
+    use volley_core::{action_prediction::ActionPrediction, pose_contact::BodyContact};
+    if !event.physical_motion_supported
+        || event.ball_occluded_at_contact
+        || event.direction_change_deg < 75.0
+        || event.velocity_residual_px_frame < 18.0
+        || event
+            .action_prediction
+            .as_ref()
+            .is_some_and(|p| matches!(p.kind, ActionKind::Serve | ActionKind::Block))
+    {
+        return false;
+    }
+    let Some([a, b, _, _]) = court.zones().and_then(|z| z.net_surface) else {
+        return false;
+    };
+    let (w, h) = (f64::from(dimensions.0), f64::from(dimensions.1));
+    if w < 64.0 || h < 64.0 || (b[0] - a[0]).abs() < 0.001 {
+        return false;
+    }
+    let Some(first) = frames.first().map(|f| f.frame_index) else {
+        return false;
+    };
+    let row_at = |f: u64| {
+        f.checked_sub(first)
+            .and_then(|i| frames.get(i as usize))
+            .filter(|r| r.frame_index == f)
+    };
+    let at = event.frame_index;
+    let Some(current) = row_at(at) else {
+        return false;
+    };
+    let ball_point = [event.ball_x_px, event.ball_y_px];
+    if !court.supports_net_contact([ball_point[0] / w, ball_point[1] / h]) {
+        return false;
+    }
+    let observed_ball = |row: &TouchFrame| {
+        let ball = row
+            .selected_ball
+            .as_ref()
+            .filter(|b| b.source_model == "vballnet" && b.score >= settings.min_ball_score)?;
+        let [x1, y1, x2, y2] = ball.bbox_xyxy_norm;
+        let radius = ((x2 - x1) * w + (y2 - y1) * h) * 0.25;
+        (radius.is_finite() && radius > 0.0)
+            .then_some(([(x1 + x2) * w * 0.5, (y1 + y2) * h * 0.5], radius))
+    };
+    let Some((observed, event_radius)) = observed_ball(current) else {
+        return false;
+    };
+    let distance = |p: [f64; 2], q: [f64; 2]| (p[0] - q[0]).hypot(p[1] - q[1]);
+    if distance(observed, ball_point) > event_radius.max(2.0) {
+        return false;
+    }
+    let point = |p: &volley_core::touch_pipeline::PosePlayer, i: usize| {
+        let [x, y, c] = p.keypoints[i];
+        (!p.interpolated
+            && (0.0..=1.0).contains(&x)
+            && (0.0..=1.0).contains(&y)
+            && (settings.pose_min_confidence.max(0.35)..=1.0).contains(&c))
+        .then_some([x * w, y * h])
+    };
+    let midpoint_y = |p: &volley_core::touch_pipeline::PosePlayer, i, j| {
+        Some((point(p, i)?[1] + point(p, j)?[1]) * 0.5)
+    };
+    let near_tape = |p: [f64; 2], height: f64| {
+        let t = (p[0] / w - a[0]) / (b[0] - a[0]);
+        let y = (a[1] + t * (b[1] - a[1])) * h;
+        (-0.05..=1.05).contains(&t) && (-0.35 * height..=0.06 * height).contains(&(p[1] - y))
+    };
+    let mut candidates = BTreeMap::<
+        u64,
+        (
+            f64,
+            u64,
+            BodyContact,
+            ActionPrediction,
+            volley_core::court_geometry::CourtContactEvidence,
+        ),
+    >::new();
+    for sample in poses.iter().filter(|p| p.frame_index.abs_diff(at) <= 1) {
+        let Some(row) = row_at(sample.frame_index) else {
+            continue;
+        };
+        let Some((sample_ball, radius)) = observed_ball(row) else {
+            continue;
+        };
+        if distance(sample_ball, ball_point)
+            > event_radius + 2.0 * event.speed_before_px_frame.max(event.speed_after_px_frame)
+        {
+            continue;
+        }
+        for pose in &sample.players {
+            let id = pose.track_id;
+            if eligible.is_some_and(|ids| !ids.contains(&id))
+                || (event.provisional_track_id != Some(id)
+                    && event.contact_landmark.is_some_and(|p| {
+                        p.joint_indices.iter().all(|i| (7..=10).contains(i))
+                            && p.normalized_distance <= 0.04
+                    }))
+            {
+                continue;
+            }
+            let Some(current_player) = current.players.iter().find(|p| p.track_id == id) else {
+                continue;
+            };
+            let Some(player) = row.players.iter().find(|p| p.track_id == id) else {
+                continue;
+            };
+            let Some(context) = court
+                .player_evidence(player.bbox_xyxy_norm)
+                .filter(|p| p.near_net)
+            else {
+                continue;
+            };
+            if !court
+                .player_evidence(current_player.bbox_xyxy_norm)
+                .is_some_and(|p| p.x_m.abs() <= 2.1 && p.side == context.side)
+            {
+                continue;
+            }
+            let bbox = player.bbox_xyxy_norm;
+            let height = (bbox[3] - bbox[1]) * h;
+            if height < 26.0 || radius > 0.2 * height || event_radius > 0.2 * height {
+                continue;
+            }
+            let arm = |s, e, r| {
+                let (s, e, r) = (point(pose, s)?, point(pose, e)?, point(pose, r)?);
+                let u = [e[0] - s[0], e[1] - s[1]];
+                let v = [r[0] - e[0], r[1] - e[1]];
+                let (l1, l2) = (u[0].hypot(u[1]), v[0].hypot(v[1]));
+                (l1 >= 0.04 * height
+                    && l2 >= 0.04 * height
+                    && e[1] < s[1]
+                    && r[1] < e[1]
+                    && s[1] - r[1] >= 0.20 * height
+                    && (u[0] * v[0] + u[1] * v[1]) / (l1 * l2) >= 0.80
+                    && near_tape(r, height))
+                .then_some(r)
+            };
+            let (Some(left), Some(right)) = (arm(5, 7, 9), arm(6, 8, 10)) else {
+                continue;
+            };
+            if !(0.07 * height..=0.35 * height).contains(&distance(left, right)) {
+                continue;
+            }
+            let (Some(hips), Some(feet)) = (midpoint_y(pose, 11, 12), midpoint_y(pose, 15, 16))
+            else {
+                continue;
+            };
+            let (Some(shoulder_l), Some(shoulder_r)) = (point(pose, 5), point(pose, 6)) else {
+                continue;
+            };
+            if hips - (shoulder_l[1] + shoulder_r[1]) * 0.5 < 0.14 * height
+                || feet - hips < 0.20 * height
+            {
+                continue;
+            }
+            let jumped = poses
+                .iter()
+                .filter(|p| p.frame_index <= at.saturating_sub(8) && at - p.frame_index <= 24)
+                .any(|p| {
+                    let Some(prior) = p
+                        .players
+                        .iter()
+                        .find(|q| q.track_id == id && !q.interpolated)
+                    else {
+                        return false;
+                    };
+                    let Some(prior_player) = row_at(p.frame_index)
+                        .and_then(|r| r.players.iter().find(|q| q.track_id == id))
+                    else {
+                        return false;
+                    };
+                    court
+                        .player_evidence(prior_player.bbox_xyxy_norm)
+                        .is_some_and(|c| c.side == context.side && c.x_m.abs() <= 2.8)
+                        && midpoint_y(prior, 11, 12).is_some_and(|y| y - hips >= 0.07 * height)
+                        && midpoint_y(prior, 15, 16).is_some_and(|y| y - feet >= 0.05 * height)
+                });
+            if !jumped {
+                continue;
+            }
+            let (joint, wrist) = if distance(left, sample_ball) <= distance(right, sample_ball) {
+                (9, left)
+            } else {
+                (10, right)
+            };
+            let sample_distance = distance(wrist, sample_ball);
+            let event_distance = distance(wrist, ball_point);
+            if sample_distance > radius + 0.06 * height
+                || event_distance > event_radius + 0.14 * height
+            {
+                continue;
+            }
+            let contact = BodyContact {
+                joint_indices: [joint, joint],
+                point_px: wrist,
+                distance_px: event_distance,
+                normalized_distance: ((event_distance - event_radius).max(0.0) / height).min(1.0),
+            };
+            let prediction = ActionPrediction {
+                kind: ActionKind::Block,
+                method: PredictionMethod::CourtPoseMotionV1,
+                evidence_score: (event.probability
+                    * pose.keypoints[9][2].min(pose.keypoints[10][2])
+                    * (1.0 - contact.normalized_distance))
+                    .clamp(0.0, 1.0),
+                depth_ratio: ((ball_point[1] - event_radius - bbox[1] * h) / height)
+                    .clamp(-2.0, 3.0),
+                posture_ratio: ((bbox[2] - bbox[0]) * w / height).clamp(0.0, 4.0),
+            };
+            let rank = (sample_distance - radius).max(0.0) / height
+                + 0.01 * sample.frame_index.abs_diff(at) as f64;
+            if prediction.valid()
+                && contact.valid(dimensions.0, dimensions.1)
+                && candidates.get(&id).is_none_or(|old| rank < old.0)
+            {
+                candidates.insert(id, (rank, sample.frame_index, contact, prediction, context));
+            }
+        }
+    }
+    if candidates.len() != 1 {
+        return false;
+    }
+    let Some((id, (_, sample, contact, prediction, context))) = candidates.into_iter().next()
+    else {
+        return false;
+    };
+    event.provisional_track_id = Some(id);
+    event.body_contact_supported = true;
+    event.inferred_body_reach_supported = false;
+    event.contact_landmark = Some(contact);
+    event.contact_pose_sample_frame = Some(sample);
+    event.action_prediction = Some(prediction);
+    event.court = Some(context);
+    true
 }
 
 #[cfg(test)]
@@ -771,5 +1024,194 @@ mod tests {
             events[0].action_prediction.as_ref().unwrap().kind,
             ActionKind::Serve
         );
+    }
+
+    #[test]
+    fn jump_block_overrides_projected_rear_shoulder_only_with_measured_hand_contact() {
+        use volley_core::touch_pipeline::{
+            PoseFrame, PosePlayer, TouchBall, TouchPlayer, TouchSettings,
+        };
+        let court = CourtTransform::new([[0.06, 1.02], [0.34, 0.29], [0.59, 0.28], [0.89, 1.02]])
+            .unwrap()
+            .with_net(Some([[0.245, 0.278], [0.689, 0.272]]))
+            .unwrap();
+        let mut frames = Vec::new();
+        let mut poses = Vec::new();
+        for f in 0..=32 {
+            let at = (19..=21).contains(&f);
+            let bbox = if at {
+                [0.54, 0.277, 0.58, 0.499]
+            } else {
+                [0.53, 0.35, 0.57, 0.535]
+            };
+            let mut k = [[0.0; 3]; 17];
+            let j = if at {
+                [
+                    (5, 0.559, 0.336),
+                    (6, 0.576, 0.333),
+                    (7, 0.559, 0.305),
+                    (8, 0.579, 0.307),
+                    (9, 0.563, 0.280),
+                    (10, 0.578, 0.280),
+                    (11, 0.560, 0.395),
+                    (12, 0.570, 0.394),
+                    (15, 0.557, 0.460),
+                    (16, 0.567, 0.465),
+                ]
+            } else {
+                [
+                    (5, 0.545, 0.386),
+                    (6, 0.563, 0.386),
+                    (7, 0.540, 0.401),
+                    (8, 0.570, 0.400),
+                    (9, 0.539, 0.421),
+                    (10, 0.566, 0.421),
+                    (11, 0.550, 0.439),
+                    (12, 0.560, 0.439),
+                    (15, 0.548, 0.520),
+                    (16, 0.558, 0.520),
+                ]
+            };
+            for (i, x, y) in j {
+                k[i] = [x, y, 0.8];
+            }
+            let ball = if f == 21 {
+                [0.565, 0.281]
+            } else if f <= 20 {
+                [
+                    0.547 - (20 - f) as f64 * 0.004,
+                    0.292 - (20 - f) as f64 * 0.012,
+                ]
+            } else {
+                [0.55, 0.28 - (f - 21) as f64 * 0.015]
+            };
+            frames.push(TouchFrame {
+                frame_index: f,
+                players: vec![
+                    TouchPlayer {
+                        track_id: 62,
+                        score: 0.9,
+                        touch_probability: None,
+                        bbox_xyxy_norm: bbox,
+                    },
+                    TouchPlayer {
+                        track_id: 64,
+                        score: 0.9,
+                        touch_probability: None,
+                        bbox_xyxy_norm: [0.525, 0.248, 0.551, 0.368],
+                    },
+                ],
+                selected_ball: Some(TouchBall {
+                    source_model: "vballnet".into(),
+                    score: 0.9,
+                    bbox_xyxy_norm: [
+                        ball[0] - 0.005,
+                        ball[1] - 0.009,
+                        ball[0] + 0.005,
+                        ball[1] + 0.009,
+                    ],
+                }),
+            });
+            poses.push(PoseFrame {
+                frame_index: f,
+                players: vec![PosePlayer {
+                    track_id: 62,
+                    keypoints: k,
+                    interpolated: false,
+                }],
+            });
+        }
+        let mut hit = event(20);
+        hit.provisional_track_id = Some(64);
+        hit.ball_x_px = 0.547 * 3840.0;
+        hit.ball_y_px = 0.292 * 2160.0;
+        hit.direction_change_deg = 138.0;
+        hit.speed_before_px_frame = 32.0;
+        hit.speed_after_px_frame = 15.0;
+        hit.velocity_residual_px_frame = 45.0;
+        hit.action_prediction = None;
+        hit.body_contact_supported = true;
+        hit.contact_landmark = Some(volley_core::pose_contact::BodyContact {
+            joint_indices: [5, 5],
+            point_px: [2100., 616.],
+            distance_px: 14.,
+            normalized_distance: 0.0,
+        });
+        let original = hit.clone();
+        let settings = TouchSettings::default();
+        assert!(recognize_jump_block(
+            &mut hit,
+            &frames,
+            &poses,
+            &court,
+            (3840, 2160),
+            settings,
+            None
+        ));
+        assert_eq!(hit.provisional_track_id, Some(62));
+        assert_eq!(hit.action_prediction.unwrap().kind, ActionKind::Block);
+        assert!(hit
+            .contact_landmark
+            .unwrap()
+            .joint_indices
+            .iter()
+            .all(|i| (9..=10).contains(i)));
+        let mut no_jump = poses.clone();
+        for p in &mut no_jump {
+            if p.frame_index < 19 {
+                let k = &mut p.players[0].keypoints;
+                for i in [11, 12] {
+                    k[i][1] = 0.395;
+                }
+                for i in [15, 16] {
+                    k[i][1] = 0.462;
+                }
+            }
+        }
+        let mut hit = original.clone();
+        assert!(!recognize_jump_block(
+            &mut hit,
+            &frames,
+            &no_jump,
+            &court,
+            (3840, 2160),
+            settings,
+            None
+        ));
+        let mut hit = original.clone();
+        assert!(!recognize_jump_block(
+            &mut hit,
+            &frames,
+            &poses,
+            &court,
+            (3840, 2160),
+            settings,
+            Some(&[64])
+        ));
+        let mut no_arms = poses.clone();
+        for p in &mut no_arms {
+            p.players[0].keypoints[10][1] = 0.36;
+        }
+        let mut hit = original.clone();
+        assert!(!recognize_jump_block(
+            &mut hit,
+            &frames,
+            &no_arms,
+            &court,
+            (3840, 2160),
+            settings,
+            None
+        ));
+        let mut hit = original;
+        hit.ball_x_px = 0.40 * 3840.0;
+        assert!(!recognize_jump_block(
+            &mut hit,
+            &frames,
+            &poses,
+            &court,
+            (3840, 2160),
+            settings,
+            None
+        ));
     }
 }

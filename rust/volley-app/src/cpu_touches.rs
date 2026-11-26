@@ -1579,6 +1579,7 @@ mod source_track_integrity_tests {
             None,
             &refined,
             &BTreeMap::new(),
+            None,
         )
         .unwrap();
         assert_eq!(events.len(), 1);
@@ -1608,6 +1609,7 @@ mod source_track_integrity_tests {
             None,
             &refined,
             &BTreeMap::new(),
+            None,
         )
         .unwrap();
         assert_eq!(events[0].provisional_track_id, Some(21));
@@ -1976,6 +1978,7 @@ fn refine_pose_events(
         None,
         &BTreeMap::new(),
         &BTreeMap::new(),
+        None,
     )
 }
 
@@ -2400,6 +2403,7 @@ fn refine_pose_events_policy(
     interpolation: Option<bool>,
     refined: &BTreeMap<u64, Vec<PosePlayer>>,
     eligible_tracks: &BTreeMap<u64, Vec<u64>>,
+    court: Option<&CourtTransform>,
 ) -> Result<(), String> {
     let (video_width, video_height) = dimensions;
     if events.is_empty() || frames.is_empty() {
@@ -2557,6 +2561,21 @@ fn refine_pose_events_policy(
                 )
             });
     }
+    if let Some(court) = court {
+        for (index, event) in events.iter_mut().enumerate() {
+            if court_touch::recognize_jump_block(
+                event,
+                frames,
+                &poses,
+                court,
+                dimensions,
+                settings,
+                eligible_tracks.get(&event.frame_index).map(Vec::as_slice),
+            ) {
+                supported[index] = true;
+            }
+        }
+    }
     if settings.require_pose {
         retain_refined_pose_candidates(events, &supported);
     }
@@ -2587,7 +2606,14 @@ fn apply_training(
         return Ok(());
     };
     for event in events {
-        if !event.physical_motion_supported || !event.body_contact_supported {
+        if !event.physical_motion_supported
+            || !event.body_contact_supported
+            || event.action_prediction.as_ref().is_some_and(|p| {
+                p.kind == volley_core::action_prediction::ActionKind::Block
+                    && p.method
+                        == volley_core::action_prediction::PredictionMethod::CourtPoseMotionV1
+            })
+        {
             continue;
         }
         let Some(track_id) = event.provisional_track_id else {
@@ -2922,6 +2948,7 @@ fn detect_stream_with_pose(
                     Some(interpolation),
                     refined,
                     &eligible_tracks,
+                    court,
                 )?;
             }
             resolve_overhead_occlusion(
