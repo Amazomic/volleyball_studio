@@ -13,7 +13,6 @@ assert.match(css,/\.analysis-flow-diagram\{[^}]*container-type:inline-size/);
 assert.match(css,/\.analysis-flow-node\{[^}]*min-height:76px/);
 assert.match(css,/\.analysis-flow-node-stats\{[^}]*font-size:/);
 assert.match(js,/cell\.append\(node,stats\)/);
-assert.match(js,/!!entry&&entry\.finished_ms==null&&entry===stages\.at\(-1\)/);
 const metricsSource=js.slice(js.indexOf("const stageTime="),js.indexOf("const pipelineEdges="));
 assert.ok(metricsSource.startsWith("const stageTime="));
 const metricsContext=vm.createContext({});
@@ -38,6 +37,7 @@ assert.equal(blockHistory[0].finished_ms,3000);
 assert.equal(blockHistory[1].started_ms,1000);
 assert.equal(blockHistory[2].started_ms,2000);
 assert.match(format("pose",blockRun.rally_stage_progress.pose,blockRun,4000,false,true),/20 кадров.*1\/2 розыгр\./);
+assert.match(format("boxes",{rallies_total:2,state:"waiting"},blockRun,4000,false,false),/— Track ID.*Ожидание/);
 const touchRun={status:"running",stage_id:"players",rally_stage_progress:{
   ...blockRun.rally_stage_progress,
   touch_detector:{state:"running",started_ms:1500,finished_ms:null,frames_processed:45,frames_total:100,rallies_completed:1,rallies_total:2,active_duration_ms:30,block_started_ms:3500}
@@ -111,6 +111,7 @@ for(const id of context.stages.map(item=>item[0])){
   assert.ok(icon.children.length>0,"Every stage must render an icon: "+id);
 }
 assert.equal(context.model("ground_detector"),null);
+assert.equal(context.id({id:"pose",name:"Ожидание очереди RTMPose"}),"");
 const legacyGround={id:"ground_detector",name:"Ground Detector",started_ms:1000,finished_ms:4000,duration_ms:3000};
 const legacyRally={id:"rallies",name:"Поиск розыгрышей",started_ms:4000,finished_ms:5000,duration_ms:1000};
 const historical=context.combine([legacyGround,legacyRally]);
@@ -367,6 +368,26 @@ assert.equal(detectorCard.dataset.status,"complete");
 vm.runInContext('updatePipelineGraph(graph,{status:"failed",stage_id:"ball",stages:[{id:"ball",finished_ms:3000}]});',stageContext);
 assert.equal(ballCard.dataset.status,"failed");
 assert.equal(poseCard.dataset.status,"idle");
+const render=run=>{stageContext.testRun=run;vm.runInContext("updatePipelineGraph(graph,testRun)",stageContext);};
+render({status:"running",stage_id:"boxes",stage:"CPU · Связывание рамок игроков",
+  stages:[{id:"ball",finished_ms:1000},{id:"boxes",started_ms:2000}],
+  project_queue:{active:true,videos:[{id:"next",status:"running",stage_id:"ball",video:"next.mp4"}]}});
+assert.equal(ballCard.dataset.status,"running","VBallNet must stay active while another video processes CPU stages");
+assert.equal(ballCard.classList["is-complete"],false);
+render({status:"running",stage_id:"fusion",stage:"Объединение · VBallNet и рамки игроков",
+  project_queue:{active:true,videos:[{id:"next",status:"running",stage_id:"players",video:"next.mp4",
+    rally_stage_progress:{detector_finished_ms:2500,pose:{state:"running"}}}]}});
+assert.equal(ballCard.dataset.status,"idle");
+assert.equal(poseCard.dataset.status,"running","A live pose block from another video must reach the graph");
+render({status:"running",stage_id:"pose",stage:"RTMPose",
+  stages:[{id:"pose",started_ms:2000}],
+  rally_stage_progress:{pose:{state:"complete",rallies_total:1}}});
+assert.equal(poseCard.dataset.status,"running","A completed early pose pass must not mask a new pose pass");
+render({status:"running",stage_id:"other",stage:"Ожидание очереди VBallNet",
+  stages:[{id:"ball",started_ms:1000,finished_ms:2000},{id:"other",started_ms:2000}]});
+assert.equal(ballCard.dataset.status,"complete","Waiting must never animate a completed model");
+render({status:"running",stage_id:"ball",live_stale:true});
+assert.equal(ballCard.dataset.status,"idle","A stale snapshot must stop the activity animation");
 assert.match(js,/analysis-flow-node-device/);
 assert.match(js,/identity:"GPU\/CPU"/);
 assert.match(js,/analysis-flow-node-status/);

@@ -27,7 +27,7 @@
     pipelineId:"",pipelineProject:"",pipelineQueue:"",pipelineTimer:null,
     starting:false,stopRequested:false,polling:false,pollErrors:0,completedId:"",
     logKey:"",logOffset:0,logBusy:false,logLastCall:"",logPending:null,
-    historyRows:[],historyFilter:"all",historyEpoch:0,historyOffset:0,historyProject:"",latestPipeline:null,
+    historyRows:[],historyFilter:"all",historyEpoch:0,historyOffset:0,historyProject:"",latestPipeline:null,lastPipelineStatusAt:null,
     revision:"absent",players:[],mutating:false,playersLoaded:false,
     projectMemberIds:new Set(),trackCoverScope:"",trackCovers:new Map(),playerTrackCounts:null
   };
@@ -516,10 +516,11 @@
     return svg;
   };
   const pipelineId=entry=>{
+    const name=String(typeof entry==="string"?entry:entry?.name||"");
+    if(name.startsWith("Ожидание очереди"))return "";
     if(entry?.id==="ground_detector")return "rallies";
     if(entry?.id==="touch_types")return "touches";
     if(entry?.id&&pipelineNames.has(entry.id))return entry.id;
-    const name=String(typeof entry==="string"?entry:entry?.name||"");
     if(/Проверка исходного видео|Подготовка исходного видео/.test(name))return "video";
     if(/ball_stabilizer|Ball Stabilizer|Интерполяция траектории мяча/.test(name))return "ball_stabilizer";
     if(name==="Ground Detector"||name==="ground_detector"||name==="Rally Detector")return "rallies";
@@ -628,10 +629,11 @@
     if(entry?.rallies_total&&run?.rally_stage_progress&&rallyBlockStages.includes(id)){
       const duration=id==="touch_detector"?touchStageDuration(entry,now):Number.isFinite(entry.finished_ms)?Math.max(0,entry.finished_ms-entry.started_ms):
         Number.isFinite(entry.started_ms)?Math.max(0,now-entry.started_ms):null;
-      const count=id==="pose"?entry.sampled_frames.toLocaleString("ru-RU")+" кадров":
-        id==="touch_detector"?entry.frames_processed.toLocaleString("ru-RU")+" / "+entry.frames_total.toLocaleString("ru-RU")+" кадров":
-        entry.tracks.toLocaleString("ru-RU")+" Track ID";
-      return count+" · "+entry.rallies_completed+"/"+entry.rallies_total+" розыгр. · "+
+      const fmt=value=>Number.isSafeInteger(value)?value.toLocaleString("ru-RU"):"—";
+      const count=id==="pose"?fmt(entry.sampled_frames)+" кадров":
+        id==="touch_detector"?fmt(entry.frames_processed)+" / "+fmt(entry.frames_total)+" кадров":
+        fmt(entry.tracks)+" Track ID";
+      return count+" · "+fmt(entry.rallies_completed)+"/"+fmt(entry.rallies_total)+" розыгр. · "+
         (entry.state==="waiting"?"Ожидание · ":"")+(id==="touch_detector"&&Number.isFinite(duration)&&duration<1000?Math.round(duration)+" мс":stageTime(duration));
     }
     if(id==="pose"&&!entry&&!running&&done){
@@ -643,7 +645,7 @@
       const shared=run?.shared_pose;
       const player=run?.stages?.find(stage=>stage.id==="players");
       const joint=shared?.source_stage_id==="players"||/RF-DETR.*RTMPose/.test(String(player?.name||""));
-      if(!joint)return "Позы сохранены · время не измерено";
+      if(!joint)return running?"Выполняется":"Позы сохранены · время не измерено";
       const duration=Number.isFinite(shared?.duration_ms)?shared.duration_ms:
         running&&Number.isFinite(player?.started_ms)?Math.max(0,now-player.started_ms):
         player?.duration_ms;
@@ -1042,13 +1044,41 @@
     }
     target.append(grid,svg);
   };
+  const pipelineStageActivity=run=>{
+    const stage=String(run?.stage||"");
+    if(run?.live_stale||run?.status!=="running"||stage.startsWith("Ожидание очереди"))
+      return {ids:[],running:false};
+    const id=pipelineId({id:run.stage_id,name:stage});
+    const block=run.rally_stage_progress;
+    if(id==="players"&&block){
+      const ids=Number.isFinite(block.detector_finished_ms)?[]:["players"];
+      for(const key of rallyBlockStages)if(block[key]?.state==="running")ids.push(key);
+      return {ids,running:ids.length>0};
+    }
+    return {ids:id==="players"&&/RTMPose/.test(stage)?[id,"pose"]:id?[id]:[],running:true};
+  };
+  const pipelineStageLabel=run=>{
+    const {ids}=pipelineStageActivity(run);
+    const visible=ids.filter(id=>pipelineStages.some(stage=>stage[0]===id));
+    return visible.length?visible.map(id=>graphLabel(id,run)).join(" + "):String(run?.stage||"");
+  };
   const updatePipelineGraph=(target,run)=>{
     target._graphRun=run;
     if(!target.querySelector(".analysis-flow-grid"))createPipelineGraph(target,run);
     const stages=combineRallyStages(Array.isArray(run?.stages)?run.stages:[]);
     const seen=new Map();
     for(const item of stages){const id=pipelineId(item);if(id)seen.set(id,item);}
-    const active=run&&["queued","running","cancelling"].includes(run.status);
+    const active=pipelineStageActivity(run).ids;
+    const parallel=new Map();
+    if(!run?.live_stale&&run?.project_queue?.active){
+      for(const video of run.project_queue.videos||[]){
+        if(video.id===run.id)continue;
+        for(const id of pipelineStageActivity(video).ids){
+          if(!parallel.has(id))parallel.set(id,[]);
+          parallel.get(id).push(video);
+        }
+      }
+    }
     const currentId=pipelineId({id:run?.stage_id,name:run?.stage});
     const cached=run?.gpu_reused===true;
     const complete=run?.status==="complete";
@@ -1067,36 +1097,41 @@
     for(const node of target.querySelectorAll(".analysis-flow-node")){
       const id=node.dataset.stageId;
       const hasPose=!!run?.gpu_jobs?.pose||run?.primary_tracking?.pose_ready===true||Number(run?.player_tracking_stats?.refined_poses)>0;
-      const entry=rallyStageEntry(id,seen.get(id),run);
-      const blockState=rallyStageState(id,entry,run);
-      const combinedPose=id==="pose"&&currentId==="players"&&
-        /RTMPose/.test(String(run?.stage||""));
-      const running=active&&(blockState!==null?blockState==="running":(id===currentId||combinedPose||
-        !!entry&&entry.finished_ms==null&&entry===stages.at(-1)));
-      const done=blockState!==null?blockState==="complete":!!entry&&(entry.finished_ms!=null||complete&&!running)||
-        (id==="boxes"&&!!run?.primary_tracking?.replay_id&&!running&&!cached)||
-        (id==="pose"&&hasPose&&!running)||
-        (id==="touch_detector"&&!!savedGpu.touch_detector&&!running&&!cached);
-      const reused=!entry&&((cached&&!!savedGpu[id])||(run?.result_reused===true&&!!savedCpu[id]));
+      const focused=active.includes(id);
+      const otherRuns=parallel.get(id)||[];
+      const otherVideos=otherRuns.map(video=>String(video.video||"").split(/[\\/]/).pop()).filter(Boolean);
+      const running=focused||otherRuns.length>0;
+      const recorded=seen.get(id);
+      const currentPass=focused&&id===currentId&&currentId!=="players";
+      const entry=currentPass?recorded:rallyStageEntry(id,recorded,run);
+      const blockState=currentPass?null:rallyStageState(id,entry,run);
+      const done=!running&&(blockState!==null?blockState==="complete":!!entry&&(entry.finished_ms!=null||complete)||
+        (id==="boxes"&&!!run?.primary_tracking?.replay_id&&!cached)||
+        (id==="pose"&&hasPose)||
+        (id==="touch_detector"&&!!savedGpu.touch_detector&&!cached));
+      const reused=!running&&!entry&&((cached&&!!savedGpu[id])||(run?.result_reused===true&&!!savedCpu[id]));
       node.classList.toggle("is-active",!!running);
       node.classList.toggle("is-complete",done);
       node.classList.toggle("is-reused",reused);
       node.classList.toggle("is-skipped",
-        (id==="pose"||id==="touch_detector")&&graphLinkState("pose",run)==="disabled");
+        !running&&(id==="pose"||id==="touch_detector")&&graphLinkState("pose",run)==="disabled");
       node.classList.toggle("is-failed",
-        run?.status==="failed"&&id===currentId||
-        id==="identity"&&run?.completion_quality==="identity_failed");
+        !running&&(run?.status==="failed"&&id===currentId||
+        id==="identity"&&run?.completion_quality==="identity_failed"));
       node.dataset.status=node.classList.contains("is-failed")?"failed":
         node.classList.contains("is-skipped")?"idle":running?"running":done||reused?"complete":"idle";
-      const pct=stageProgressPercent(entry,!!running||blockState==="waiting",done);
+      const pct=stageProgressPercent(running&&!focused?null:entry,running||blockState==="waiting",done);
       node.style.setProperty("--stage-progress",(pct??0)+"%");
       node.classList.toggle("is-progress-unknown",!!running&&pct===null);
       const heading=node.querySelector(".analysis-flow-node-title");
-      const label=graphLabel(id,run);
+      const label=running&&!focused?
+        [...new Set(otherRuns.map(video=>graphLabel(id,video)))].join(" / "):graphLabel(id,run);
       if(heading.textContent!==label)heading.textContent=label;
       const stats=node.nextElementSibling;
       if(stats?.classList.contains("analysis-flow-node-stats")){
-        const statusText=reused&&id!=="pose"?window.VolleyballUi.translate("Из кэша"):
+        const statusText=running&&!focused?
+          window.VolleyballUi.translate("Выполняется")+(otherVideos.length?" · "+otherVideos.join(", "):""):
+          reused&&id!=="pose"?window.VolleyballUi.translate("Из кэша"):
           node.classList.contains("is-skipped")?window.VolleyballUi.translate("Пропущено"):
           stageResultText(id,entry,run,Date.now(),done||reused,running);
         stats.textContent=running&&pct!==null?Math.round(pct)+"% · "+statusText:statusText;
@@ -1117,12 +1152,13 @@
       }
       if(node.title!==(graphHoverDescriptions[id]||label))node.title=graphHoverDescriptions[id]||label;
       const statusLabel={complete:"Завершено",failed:"Ошибка",running:"Выполняется",idle:"Не выполнялось"};
-      node.setAttribute?.("aria-label",label+" · "+graphDevices[id]+" · "+statusLabel[node.dataset.status]);
+      node.setAttribute?.("aria-label",label+" · "+graphDevices[id]+" · "+statusLabel[node.dataset.status]+
+        (otherVideos.length?" · "+otherVideos.join(", "):""));
     }
-    paintGraphEdges(target,run);
+    paintGraphEdges(target,run,active);
     target._scheduleGraphDraw?.();
   };
-  const paintGraphEdges=(target,run)=>{
+  const paintGraphEdges=(target,run,active)=>{
     const nodes=new Map([...target.querySelectorAll(".analysis-flow-node")].map(node=>[node.dataset.stageId,node]));
     const inputs=new Map();
     for(const edge of target.querySelectorAll(".analysis-flow-edge")){
@@ -1135,7 +1171,7 @@
         (edgeSource==="touch_detector"&&edgeTarget==="pose"&&block.touch_detector?.rallies_completed>0));
       const ready=state==="available"&&
         (partial||source.classList.contains("is-complete")||source.classList.contains("is-reused"));
-      const running=ready&&destination.classList.contains("is-active");
+      const running=ready&&destination.classList.contains("is-active")&&(!active||active.includes(edgeTarget));
       edge.dataset.state=state;
       edge.classList.toggle("is-complete",!!ready);
       edge.classList.toggle("is-active",!!running);
@@ -1257,9 +1293,10 @@
       const segment=range?historyDuration(range.start_sec*1000)+" – "+historyDuration(range.end_sec*1000):"Весь файл";
       const rallies=Number.isSafeInteger(video.rallies_total)?" · "+
         (Number.isSafeInteger(video.rallies_completed)?video.rallies_completed+"/":"")+video.rallies_total+" розыгр.":"";
-      const stage=video.status==="running"&&video.stage?" · "+video.stage:"";
+      const stage=queue.live_stale?"":video.status==="running"&&video.stage?" · "+pipelineStageLabel(video):"";
       info.append(make("span","",name+" · "+segment),
-        make("span","",(labels[video.status]||video.status)+stage+rallies+" · "+(Number.isFinite(pct)?pct.toFixed(1)+"%":"—")));
+        make("span","",(queue.live_stale&&["running","queued","cancelling"].includes(video.status)?
+          "Ожидание данных":labels[video.status]||video.status)+stage+rallies+" · "+(Number.isFinite(pct)?pct.toFixed(1)+"%":"—")));
       const progress=make("progress");progress.max=100;
       progress.value=Number.isFinite(pct)?Math.max(0,Math.min(100,pct)):0;
       progress.setAttribute("aria-label",name+" · прогресс");
@@ -1269,10 +1306,12 @@
     }
   };
   const showGraphResult=(source,queue)=>{
-    renderProjectQueue(queue);
+    renderProjectQueue(source?.live_stale&&queue?{...queue,live_stale:true}:queue);
     const target=$("analysis-flow-result");
     if(!target)return;
     clear(target);
+    target.dataset.activity=source&&!source.live_stale&&((queue?.active?queue.videos||[]:[source])
+      .some(run=>pipelineStageActivity(run).running))?"running":"idle";
     if(!source){
       target.append(make("span","analysis-flow-result-muted",
         "После анализа здесь будет виден последний результат."));
@@ -1285,11 +1324,13 @@
     const started=Number(source.started_ms);
     const timestamp=Number.isFinite(started)&&started>0?
       " · "+new Date(started).toLocaleString("ru-RU"):"";
+    const stage=source.status==="running"&&!source.live_stale?pipelineStageLabel(source):"";
     target.append(
-      make("strong","analysis-flow-result-title","Последний запуск · "+mode+" · "+
+      make("strong","analysis-flow-result-title",
+        (stage?stage:"Последний запуск · "+mode)+" · "+
         ([...ui.video.options].find(option=>option.value===source.video)?.textContent||source.video||"—")),
       make("span","analysis-flow-result-status",
-        (source.status==="complete"&&source.completion_quality==="identity_failed"?
+        (source.live_stale?"Ожидание данных":source.status==="complete"&&source.completion_quality==="identity_failed"?
           "Ошибка автопривязки":
          source.status==="complete"&&source.completion_quality==="identity_review_required"?
           "Нужна проверка ID":
@@ -1307,7 +1348,9 @@
     const video=state.formProject===projectId()?ui.video.value:"";
     const latest=liveHistory();
     const active=latest&&(latest.project_queue?.active||["queued","running","cancelling"].includes(latest.status));
-    const source=active?latest:video?(latest?.video===video?latest:
+    const stale=state.pollErrors>=3||
+      state.lastPipelineStatusAt!=null&&Date.now()-state.lastPipelineStatusAt>8000;
+    const source=active?(stale?{...latest,live_stale:true}:latest):video?(latest?.video===video?latest:
       projectHistoryRows().find(row=>row.video===video)||null):null;
     updatePipelineGraph(mainGraph,source);
     showGraphResult(source,latest?.project_queue);
@@ -1557,6 +1600,7 @@
     ui.progress.value=Number.isFinite(percent)?Math.max(0,Math.min(percent,100)):0;
     const active=status.project_queue?.active===true||["queued","running","cancelling"].includes(status.status);
     if(status.status==="cancelling")state.stopRequested=true;
+    state.lastPipelineStatusAt=Date.now();
     const stage=concurrentStageLabel(status)||String(status.stage||"Обработка");
     const project=String(status.project_id||"");
     const mode=["full","gpu","post"].includes(status.mode)?status.mode:"full";
@@ -1768,7 +1812,7 @@
       if(["queued","running","cancelling"].includes(response.status))
         window.dispatchEvent(new CustomEvent("volley:pipeline-status",{detail:response}));
       resetLog();ui.logPanel.open=true;
-      state.latestPipeline=response;
+      state.latestPipeline=response;state.lastPipelineStatusAt=Date.now();state.pollErrors=0;
       renderHistory();
       loadHistory();
       ui.progress.value=0;state.stopRequested=false;

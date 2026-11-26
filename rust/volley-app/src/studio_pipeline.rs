@@ -924,7 +924,10 @@ fn finish_timed_stage(status: &mut Value) {
 }
 
 fn pipeline_stage_id(name: &str) -> &'static str {
-    if name.contains("Проверка исходного видео") || name.contains("Подготовка исходного видео")
+    if name.starts_with("Ожидание очереди") {
+        "other"
+    } else if name.contains("Проверка исходного видео")
+        || name.contains("Подготовка исходного видео")
     {
         "video"
     } else if name.contains("Ball Stabilizer") || name == "ball_stabilizer" {
@@ -2527,11 +2530,6 @@ async fn pipeline(
         json!({"ball_job_id":primary.ball_job_id,"sha256":primary.sha256});
     save(path, status)?;
     let fusion_id = require_id(status, "analysis_id")?;
-    if request.mode == PipelineMode::Post {
-        progress(path, status, "CPU · Track ID", 86.0)?;
-    } else {
-        progress(path, status, "CPU · Связывание рамок игроков", 86.0)?;
-    }
     log_native(
         path,
         "Track ID",
@@ -2554,10 +2552,14 @@ async fn pipeline(
         if !shared_native_pose_supported(true, native.width, native.height) {
             return Err("RTMPose: исходное разрешение превышает предел декодера".into());
         }
+        progress(path, status, "Ожидание очереди RTMPose", 86.0)?;
         Some(acquire_gpu(&app.inference_limit, cancel).await?)
     } else {
         None
     };
+    if request.mode == PipelineMode::Post {
+        progress(path, status, "CPU · Track ID", 86.0)?;
+    }
     let replay_request = cpu_retrack::ReplayRequest {
         project_id: request.project_id.clone(),
         video: request.video.clone(),
@@ -2805,22 +2807,23 @@ async fn pipeline(
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
-    progress(
-        path,
-        status,
-        "Постобработка · автоматическая привязка игроков",
-        98.0,
-    )?;
     let replay_sha = replay["sha256"]
         .as_str()
         .ok_or("У треков отсутствует SHA-256")?;
     let reid_permit = if !status["queue_id"].is_null()
         && request.post.reid_device != volley_inference::reid_openvino::ReidDevice::Cpu
     {
+        progress(path, status, "Ожидание очереди ReID", 98.0)?;
         Some(acquire_gpu(&app.inference_limit, cancel).await?)
     } else {
         None
     };
+    progress(
+        path,
+        status,
+        "Постобработка · автоматическая привязка игроков",
+        98.0,
+    )?;
     let identity_result = crate::native_player_tracks::reid_review_with_crops(
         State(app.clone()),
         HeaderMap::new(),
@@ -3738,6 +3741,8 @@ fn queue_progress(rows: &[Value], active: bool) -> Value {
             json!({"id":row["id"],"video":row["video"],"status":state,"progress_percent":percent,
             "frames_processed":frames,
             "stage":row["stage"],"stage_id":row["stage_id"],
+            "rally_stage_progress":if state == "running" { row["rally_stage_progress"].clone() } else { Value::Null },
+            "profile":{"gpu":{"person_detector":row["profile"]["gpu"]["person_detector"]}},
             "rallies_completed":row["rally_stage_progress"]["pose"]["rallies_completed"],
             "analysis_range":row["analysis_range"],"duration_sec":weight,
             "court_revision":row["queued_court_revision"],"rallies_total":rallies,
@@ -4028,7 +4033,7 @@ mod tests {
             json!({"id":"first","video":"a.mp4","status":"complete","progress_percent":100.0,
                 "queue_weight_sec":20.0,"analysis_frames_processed":100,"rallies_published":30,"gpu_rally_mask":{"merged":[[0,30]]}}),
             json!({"id":"second","video":"b.mp4","status":"running","progress_percent":25.0,
-                "queue_weight_sec":80.0,"stages":[{"id":"ball","frames_processed":200},{"id":"players","frames_processed":40}],"rally_stage_progress":{"pose":{"rallies_total":20}}}),
+                "queue_weight_sec":80.0,"stages":[{"id":"ball","frames_processed":200},{"id":"players","frames_processed":40}],"rally_stage_progress":{"pose":{"rallies_total":20,"state":"running"}}}),
             json!({"id":"third","video":"c.mp4","status":"queued","progress_percent":0.0,
                 "queue_weight_sec":100.0}),
         ];
@@ -4040,9 +4045,14 @@ mod tests {
         assert_eq!(summary["total_videos"], 3);
         assert_eq!(summary["videos"][0]["rallies_total"], 30);
         assert_eq!(summary["videos"][1]["rallies_total"], 20);
+        assert_eq!(
+            summary["videos"][1]["rally_stage_progress"]["pose"]["state"],
+            "running"
+        );
         assert!(summary["videos"][2]["rallies_total"].is_null());
         let interrupted = queue_progress(&rows, false);
         assert_eq!(interrupted["videos"][1]["status"], "interrupted");
+        assert!(interrupted["videos"][1]["rally_stage_progress"].is_null());
         assert_eq!(interrupted["videos"][2]["status"], "interrupted");
         assert_eq!(interrupted["progress_percent"], 20.0);
     }
@@ -4195,6 +4205,8 @@ mod tests {
     #[test]
     fn pipeline_stage_ids_are_stable() {
         assert_eq!(pipeline_stage_id("Проверка исходного видео"), "video");
+        assert_eq!(pipeline_stage_id("Ожидание очереди RTMPose"), "other");
+        assert_eq!(pipeline_stage_id("Ожидание очереди ReID"), "other");
         assert_eq!(
             pipeline_stage_id("GPU · VBallNet: траектория мяча и розыгрыши"),
             "ball"

@@ -132,7 +132,10 @@ await pending;
 assert.equal(state.historyRows.length,0);
 assert.equal(graphSource,null);
 const resultPanel=new Node("div");
-const showGraphResult=runInNewContext(source.slice(
+const activity=source.slice(source.indexOf("  const pipelineStageActivity="),
+  source.indexOf("  const updatePipelineGraph="));
+const graphLabel=source.slice(source.indexOf("  const graphLabel="),source.indexOf("  const graphText="));
+const showGraphResult=runInNewContext(registry+graphLabel+activity+source.slice(
   source.indexOf("  const renderProjectQueue=queue=>{"),
   source.indexOf("  const liveHistory=()=>{")
 )+"\nshowGraphResult",{
@@ -140,12 +143,21 @@ const showGraphResult=runInNewContext(source.slice(
   clear:node=>node.textContent="",
   make:(tag,klass,text)=>new Node(tag,klass,text),
   ui:{video:{options:[{value:"game.mp4",textContent:"game.mp4"}]}},
-  historyDuration:ms=>Math.floor(ms/1000)+" с"
+  window:{VolleyballUi:{translate:text=>text}},historyDuration:ms=>Math.floor(ms/1000)+" с"
 });
 showGraphResult({...finished,elapsed_ms:91000});
 assert.match(resultPanel.textContent,/Последний запуск · 1 фаза.*Завершён · 91 с/);
 assert.equal(resultPanel.querySelector(".analysis-flow-result-title").textContent,
   "Последний запуск · 1 фаза · game.mp4");
+showGraphResult({...finished,status:"running",stage_id:"fusion",stage:"Объединение · VBallNet и рамки игроков"});
+assert.equal(resultPanel.dataset.activity,"running");
+assert.match(resultPanel.textContent,/Объединение · VBallNet и рамки игроков/);
+showGraphResult({...finished,status:"running",stage_id:"other",stage:"Ожидание очереди публикации"});
+assert.equal(resultPanel.dataset.activity,"idle");
+assert.match(resultPanel.textContent,/Ожидание очереди публикации/);
+showGraphResult({...finished,status:"running",stage_id:"ball",stage:"VBallNet",live_stale:true});
+assert.equal(resultPanel.dataset.activity,"idle");
+assert.match(resultPanel.textContent,/Ожидание данных/);
 showGraphResult(null);
 assert.match(resultPanel.textContent,/После анализа здесь будет виден последний результат/);
 console.log("History timeline: compact stage durations, latest result outside history and stable live log");

@@ -58,11 +58,14 @@ class Node{
   setAttribute(name,value){this[name]=value;}
 }
 const target=new Node("div");
-const renderer=runInNewContext(section("  const renderProjectQueue=queue=>{","  const showGraphResult=")+
+const renderer=runInNewContext(section("  const pipelineStages=","  const pipelineEdges=")+
+  section("  const graphLabel=","  const graphText=")+
+  section("  const pipelineStageActivity=","  const updatePipelineGraph=")+
+  section("  const renderProjectQueue=queue=>{","  const showGraphResult=")+
   "\nrenderProjectQueue",{
     $:()=>target,clear:node=>node.children=[],make:(...args)=>new Node(...args),
     ui:{video:{options:[{value:"first.mp4",textContent:"Match A"},{value:"second.mp4",textContent:"Match B"}]}},
-    historyDuration:ms=>String(ms/1000)
+    window:{VolleyballUi:{translate:text=>text}},historyDuration:ms=>String(ms/1000)
   });
 renderer(queue);
 assert.equal(target.hidden,false);
