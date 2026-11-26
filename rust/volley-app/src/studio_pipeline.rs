@@ -5717,7 +5717,7 @@ mod branching_tests {
         for (field, old_value) in [
             (
                 "trajectory_detector_version",
-                json!("piecewise_ballistic_motion_v7"),
+                json!("piecewise_ballistic_motion_v8"),
             ),
             ("initial_serve_attribution_version", Value::Null),
             ("body_trajectory_intersection_required", json!(false)),
