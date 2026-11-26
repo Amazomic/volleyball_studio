@@ -45,7 +45,16 @@ const touchRun={status:"running",stage_id:"players",rally_stage_progress:{
 const touchEntry=blockContext.block("touch_detector",null,touchRun);
 assert.equal(blockContext.state("touch_detector",touchEntry,touchRun),"running");
 assert.equal(touchEntry.frames_processed,45);
-assert.match(format("touch_detector",touchEntry,touchRun,4000,false,true),/45 \/ 100 кадров.*1\/2 розыгр\./);
+assert.equal(format("touch_detector",touchEntry,{...touchRun,touch_detector_count:12},4000,false,true),"12 касаний");
+assert.equal(format("touch_detector",touchEntry,{...touchRun,touch_detector_count:12,project_queue:{touch_detector_count:27}},4000,false,true),"27 касаний");
+assert.equal(format("touch_detector",null,{status:"complete",touch_detector_count:27},5000,true,false),"27 касаний");
+assert.equal(format("touch_detector",null,{status:"complete"},5000,true,false),"—");
+assert.equal(format("touch_detector",null,{status:"running",touch_detector_count:0},0,false,true),"0 касаний");
+assert.equal(format("touch_detector",null,{status:"running",touch_detector_count:1},0,false,true),"1 касание");
+assert.equal(format("touch_detector",null,{status:"running",touch_detector_count:2},0,false,true),"2 касания");
+assert.equal(format("video",{duration_ms:0},runForZero(),0,true,false),"—");
+assert.equal(format("players",{duration_ms:500,frames_processed:10,frames_total:10},runForZero(),0,true,false),"10 / 10 кадров");
+function runForZero(){return {status:"complete"};}
 assert.equal(blockContext.history([{id:"touch_detector",started_ms:9000}],touchRun).filter(e=>e.id==="touch_detector").length,1);
 assert.equal(blockContext.history([{id:"touch_detector",started_ms:9000}],touchRun).find(e=>e.id==="touch_detector").started_ms,1500);
 assert.equal(blockContext.history([{id:"touch_detector",started_ms:9000}],blockRun).find(e=>e.id==="touch_detector").started_ms,9000);
@@ -236,7 +245,8 @@ assert.match(js,/recordHistoryRun\(project,status\.id\)/);
 assert.match(js,/sessionStorage\?\.setItem\("volley:analysis-session-runs:v1:"/);
 assert.match(js,/const rows=projectHistoryRows\(\)\.filter\(row=>/);
 assert.match(timeline,/make\("span","analysis-history-stage-name",pipelineLabel\(entry\)\)/);
-assert.match(js,/updatePipelineGraph\(mainGraph,source\)/);
+assert.match(js,/updatePipelineGraph\(mainGraph,graphSource\)/);
+assert.match(js,/\.\.\.source,project_queue:latest\.project_queue/);
 assert.match(rust,/rows\.push\(json!\(\{"name":stage_name,"id":stage_id/);
 assert.match(rust,/status\["stage_id"\] = json!\(stage_id\)/);
 assert.match(rust,/status\["shared_pose"\] = shared_pose_metrics\(status, &pose\)/);

@@ -391,6 +391,7 @@ fn history_rows(state: &AppState, project_id: &str, offset: usize) -> Result<Val
             "gpu_jobs":status["gpu_jobs"],"cpu_runs":status["cpu_runs"],
             "primary_tracking":status["primary_tracking"],
             "gpu_rally_count":status["gpu_rally_mask"]["merged"].as_array().map(Vec::len),
+            "touch_detector_count":status["touch_detector_count"],
             "shared_pose":status["shared_pose"],
             "pose_frame_progress":status["pose_frame_progress"],
             "rally_stage_progress":status["rally_stage_progress"],
@@ -2164,6 +2165,7 @@ async fn pipeline(
         status["analysis_id"] = source["analysis_id"].clone();
         status["analysis_range"] = source["analysis_range"].clone();
         status["gpu_jobs"] = source["gpu_jobs"].clone();
+        status["touch_detector_count"] = source["touch_detector_count"].clone();
         status["shared_pose"] = source["shared_pose"].clone();
         status["rally_block_pipeline"] = source["rally_block_pipeline"].clone();
         status["pose_frame_progress"] = source["pose_frame_progress"].clone();
@@ -2208,6 +2210,7 @@ async fn pipeline(
         status["shared_pose"] = existing["shared_pose"].clone();
         status["pose_frame_progress"] = existing["pose_frame_progress"].clone();
         status["gpu_rally_mask"] = existing["gpu_rally_mask"].clone();
+        status["touch_detector_count"] = existing["touch_detector_count"].clone();
         status["analysis_frames_processed"] = json!(pipeline_frames_processed(&existing));
         status["gpu_rally_mask_sha256"] = existing["gpu_rally_mask_sha256"].clone();
         status["cpu_runs"] = existing["cpu_runs"].clone();
@@ -2248,6 +2251,7 @@ async fn pipeline(
             status["shared_pose"] = existing["shared_pose"].clone();
             status["pose_frame_progress"] = existing["pose_frame_progress"].clone();
             status["gpu_rally_mask"] = existing["gpu_rally_mask"].clone();
+            status["touch_detector_count"] = existing["touch_detector_count"].clone();
             status["analysis_frames_processed"] = json!(pipeline_frames_processed(&existing));
             status["gpu_rally_mask_sha256"] = existing["gpu_rally_mask_sha256"].clone();
             status["gpu_reused"] = json!(true);
@@ -2377,7 +2381,7 @@ async fn pipeline(
                                 .then(|| shared_reid_crops.clone()),
                         }),
                         cancel,
-                        |fraction, processed, total, rally_mask| {
+                        |fraction, processed, total, data| {
                             if block_mode && fraction >= 0.4 {
                                 status["rally_stage_progress"] =
                                     crate::rally_handoff::update_progress(&rally_progress, |p| {
@@ -2385,13 +2389,26 @@ async fn pipeline(
                                     })?
                                     .map_err(|e| e.to_string())?;
                             }
-                            if let Some((mask, decoded_frames)) = rally_mask {
-                                return publish_primary_rally_mask(
-                                    path,
-                                    status,
+                            match data {
+                                Some(inference_full::JointProgressData::RallyMask(
                                     mask,
                                     decoded_frames,
-                                );
+                                )) => {
+                                    return publish_primary_rally_mask(
+                                        path,
+                                        status,
+                                        mask,
+                                        decoded_frames,
+                                    );
+                                }
+                                Some(inference_full::JointProgressData::TouchCount(count)) => {
+                                    if status["touch_detector_count"].as_u64() == Some(count) {
+                                        return Ok(());
+                                    }
+                                    status["touch_detector_count"] = json!(count);
+                                    return save(path, status);
+                                }
+                                None => {}
                             }
                             let label = if fraction == 0.399999 {
                                 "ball_stabilizer"
@@ -3811,6 +3828,7 @@ fn queue_progress(rows: &[Value], active: bool) -> Value {
     let mut completed = 0;
     let mut frames_processed = 0_u64;
     let mut rallies_total = 0_u64;
+    let mut touch_detector_count = None::<u64>;
     let videos: Vec<Value> = rows
         .iter()
         .map(|row| {
@@ -3857,8 +3875,12 @@ fn queue_progress(rows: &[Value], active: bool) -> Value {
             };
             frames_processed += frames.unwrap_or(0);
             rallies_total += rallies.unwrap_or(0);
+            if let Some(count) = row["touch_detector_count"].as_u64() {
+                touch_detector_count = Some(touch_detector_count.unwrap_or(0).saturating_add(count));
+            }
             json!({"id":row["id"],"video":row["video"],"status":state,"progress_percent":percent,
             "frames_processed":frames,"ball_frames_total":ball_frames_total,
+            "touch_detector_count":row["touch_detector_count"],
             "stage":row["stage"],"stage_id":row["stage_id"],
             "rally_stage_progress":if state == "running" { row["rally_stage_progress"].clone() } else { Value::Null },
             "profile":{"gpu":{"person_detector":row["profile"]["gpu"]["person_detector"]}},
@@ -3871,7 +3893,8 @@ fn queue_progress(rows: &[Value], active: bool) -> Value {
         .collect();
     json!({"active":active,"completed_videos":completed,"total_videos":rows.len(),
         "progress_percent":if total_weight > 0.0 {weighted_progress / total_weight} else {0.0},
-        "frames_processed":frames_processed,"rallies_total":rallies_total,"videos":videos})
+        "frames_processed":frames_processed,"rallies_total":rallies_total,
+        "touch_detector_count":touch_detector_count,"videos":videos})
 }
 
 fn queue_focus(rows: &[Value]) -> Option<&Value> {
@@ -4189,9 +4212,9 @@ mod tests {
     fn queue_progress_uses_video_duration_and_never_completes_pending_video() {
         let rows = vec![
             json!({"id":"first","video":"a.mp4","status":"complete","progress_percent":100.0,
-                "queue_weight_sec":20.0,"analysis_frames_processed":100,"rallies_published":30,"gpu_rally_mask":{"merged":[[0,30]]}}),
+                "queue_weight_sec":20.0,"analysis_frames_processed":100,"rallies_published":30,"touch_detector_count":12,"gpu_rally_mask":{"merged":[[0,30]]}}),
             json!({"id":"second","video":"b.mp4","status":"running","progress_percent":25.0,
-                "queue_weight_sec":80.0,"stage_id":"players","stages":[{"id":"ball","frames_processed":200},{"id":"players","frames_processed":40}],"rally_stage_progress":{"pose":{"rallies_total":20,"state":"running"}}}),
+                "queue_weight_sec":80.0,"stage_id":"players","touch_detector_count":7,"stages":[{"id":"ball","frames_processed":200},{"id":"players","frames_processed":40}],"rally_stage_progress":{"pose":{"rallies_total":20,"state":"running"}}}),
             json!({"id":"third","video":"c.mp4","status":"queued","progress_percent":0.0,
                 "queue_weight_sec":100.0}),
         ];
@@ -4199,6 +4222,10 @@ mod tests {
         assert_eq!(summary["progress_percent"], 20.0);
         assert_eq!(summary["completed_videos"], 1);
         assert_eq!(summary["frames_processed"], 300);
+        assert_eq!(summary["touch_detector_count"], 19);
+        assert_eq!(summary["videos"][0]["touch_detector_count"], 12);
+        assert_eq!(summary["videos"][1]["touch_detector_count"], 7);
+        assert!(summary["videos"][2]["touch_detector_count"].is_null());
         assert_eq!(summary["rallies_total"], 50);
         assert_eq!(summary["total_videos"], 3);
         assert_eq!(summary["videos"][0]["rallies_total"], 30);

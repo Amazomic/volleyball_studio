@@ -237,6 +237,7 @@ impl RallyMask {
         Ok(stabilize_ball_motion(&samples, len, stabilizer_settings)?)
     }
 
+    #[cfg(test)]
     pub(super) fn detect(
         trajectory: &StabilizedBallMotion,
         settings: PrimaryRallySettings,
@@ -244,6 +245,26 @@ impl RallyMask {
         court: Option<&CourtTransform>,
         dimensions: (u32, u32),
         cancelled: &AtomicBool,
+    ) -> Result<RallyDetection, String> {
+        Self::detect_with_touch_progress(
+            trajectory,
+            settings,
+            stabilizer_settings,
+            court,
+            dimensions,
+            cancelled,
+            |_| Ok(()),
+        )
+    }
+
+    pub(super) fn detect_with_touch_progress(
+        trajectory: &StabilizedBallMotion,
+        settings: PrimaryRallySettings,
+        stabilizer_settings: BallStabilizerSettings,
+        court: Option<&CourtTransform>,
+        dimensions: (u32, u32),
+        cancelled: &AtomicBool,
+        mut report_touch_count: impl FnMut(u64) -> Result<(), String>,
     ) -> Result<RallyDetection, String> {
         let mut contacts = Vec::new();
         let mut impacts = None;
@@ -255,8 +276,12 @@ impl RallyMask {
             serve_detector.as_ref(),
             |motion, intervals| {
                 if court.is_some() {
-                    let breaks =
-                        crate::cpu_touches::trajectory_breaks(motion, dimensions, cancelled)?;
+                    let breaks = crate::cpu_touches::trajectory_breaks_report(
+                        motion,
+                        dimensions,
+                        cancelled,
+                        &mut report_touch_count,
+                    )?;
                     contacts = crate::cpu_touches::ground_stage::candidates(
                         motion,
                         &breaks,
@@ -738,12 +763,21 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap();
-        let expected = crate::cpu_touches::trajectory_breaks(
+        let mut counts = Vec::new();
+        let expected = crate::cpu_touches::trajectory_breaks_report(
             &trajectory,
             (3840, 2160),
             &AtomicBool::new(false),
+            |count| {
+                counts.push(count);
+                Ok(())
+            },
         )
         .unwrap();
+        assert_eq!(counts.first(), Some(&0));
+        assert_eq!(counts.last(), Some(&(expected.len() as u64)));
+        assert!(counts.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(counts.len() >= 3);
         assert_eq!(
             impacts
                 .unwrap()

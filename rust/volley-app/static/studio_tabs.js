@@ -566,7 +566,7 @@
   };
   const pipelineLabel=entry=>window.VolleyballUi.translate(pipelineNames.get(pipelineId(entry))||String(entry?.name||"Стадия"));
   const stageTime=ms=>{
-    if(!Number.isFinite(ms)||ms<0)return "—";
+    if(!Number.isFinite(ms)||ms<1000)return "";
     const seconds=Math.floor(ms/1000);
     return String(Math.floor(seconds/3600)).padStart(2,"0")+":"+
       String(Math.floor(seconds/60)%60).padStart(2,"0")+":"+
@@ -627,16 +627,25 @@
     }
     return entries.sort((a,b)=>(a.started_ms??0)-(b.started_ms??0));
   };
+  const withStageTime=(text,duration,suffix="")=>{
+    const time=stageTime(duration);
+    return time?text+" · "+time+suffix:text;
+  };
   const stageResultText=(id,entry,run,now,done,running)=>{
+    if(id==="touch_detector"){
+      const count=run?.project_queue?.touch_detector_count??run?.touch_detector_count;
+      if(!Number.isSafeInteger(count)||count<0)return "—";
+      const noun=count%10===1&&count%100!==11?"касание":
+        count%10>=2&&count%10<=4&&(count%100<12||count%100>14)?"касания":"касаний";
+      return count.toLocaleString("ru-RU")+" "+noun;
+    }
     if(entry?.rallies_total&&run?.rally_stage_progress&&rallyBlockStages.includes(id)){
-      const duration=id==="touch_detector"?touchStageDuration(entry,now):Number.isFinite(entry.finished_ms)?Math.max(0,entry.finished_ms-entry.started_ms):
+      const duration=Number.isFinite(entry.finished_ms)?Math.max(0,entry.finished_ms-entry.started_ms):
         Number.isFinite(entry.started_ms)?Math.max(0,now-entry.started_ms):null;
       const fmt=value=>Number.isSafeInteger(value)?value.toLocaleString("ru-RU"):"—";
-      const count=id==="pose"?fmt(entry.sampled_frames)+" кадров":
-        id==="touch_detector"?fmt(entry.frames_processed)+" / "+fmt(entry.frames_total)+" кадров":
-        fmt(entry.tracks)+" Track ID";
-      return count+" · "+fmt(entry.rallies_completed)+"/"+fmt(entry.rallies_total)+" розыгр. · "+
-        (entry.state==="waiting"?"Ожидание · ":"")+(id==="touch_detector"&&Number.isFinite(duration)&&duration<1000?Math.round(duration)+" мс":stageTime(duration));
+      const count=id==="pose"?fmt(entry.sampled_frames)+" кадров":fmt(entry.tracks)+" Track ID";
+      return withStageTime(count+" · "+fmt(entry.rallies_completed)+"/"+fmt(entry.rallies_total)+" розыгр."+
+        (entry.state==="waiting"?" · Ожидание":""),duration);
     }
     if(id==="pose"&&!entry&&!running&&done){
       const {processed,total}=run?.pose_frame_progress||{};
@@ -654,9 +663,8 @@
       const scoped=Number.isSafeInteger(shared?.eligible_pose_frames);
       const count=scoped?shared.eligible_pose_frames:shared?.sampled_frames,poses=shared?.player_poses;
       if(Number.isSafeInteger(count)&&count>=0&&Number.isSafeInteger(poses)&&poses>=0)
-        return count.toLocaleString("ru-RU")+(scoped?" игровых кадр. · ":" выборок · ")+poses.toLocaleString("ru-RU")+
-          " поз · "+stageTime(duration)+" (общ.)";
-      return "С RF-DETR · "+stageTime(duration);
+        return withStageTime(count.toLocaleString("ru-RU")+(scoped?" игровых кадр. · ":" выборок · ")+poses.toLocaleString("ru-RU")+" поз",duration," (общ.)");
+      return withStageTime("С RF-DETR",duration);
     }
     let result="";
     if(id==="ball_stabilizer"&&entry&&run?.ball_stabilizer){
@@ -671,12 +679,12 @@
         Number.isSafeInteger(entry.frames_total)&&entry.frames_total>0){
       result=entry.frames_processed.toLocaleString("ru-RU")+" / "+
         entry.frames_total.toLocaleString("ru-RU")+" кадров";
-    }else if(done)return stageTime(entry?.duration_ms);
+    }else if(done)return stageTime(entry?.duration_ms)||"—";
     else if(running)result="Выполняется";
     if(!result)return "—";
     const duration=running&&Number.isFinite(entry?.started_ms)&&entry?.finished_ms==null?
       Math.max(0,now-entry.started_ms):entry?.duration_ms;
-    return result+" · "+stageTime(duration);
+    return withStageTime(result,duration);
   };
   const stageProgressPercent=(entry,running,done)=>{
     if(done)return 100;
@@ -1141,13 +1149,14 @@
       if(heading.textContent!==label)heading.textContent=label;
       const stats=node.nextElementSibling;
       if(stats?.classList.contains("analysis-flow-node-stats")){
-        const statusText=inputFrames?stageResultText(id,{...(focused?entry:null),...inputFrames},run,Date.now(),false,true):
+        const statusText=id==="touch_detector"?stageResultText(id,entry,run,Date.now(),done||reused,running):
+          inputFrames?stageResultText(id,{...(focused?entry:null),...inputFrames},run,Date.now(),false,true):
           running&&!focused?
           window.VolleyballUi.translate("Выполняется")+(otherVideos.length?" · "+otherVideos.join(", "):""):
           reused&&id!=="pose"?window.VolleyballUi.translate("Из кэша"):
           node.classList.contains("is-skipped")?window.VolleyballUi.translate("Пропущено"):
           stageResultText(id,entry,run,Date.now(),done||reused,running);
-        stats.textContent=running&&pct!==null?Math.round(pct)+"% · "+statusText:statusText;
+        stats.textContent=id!=="touch_detector"&&running&&pct!==null?Math.round(pct)+"% · "+statusText:statusText;
         const sharedPose=id==="pose"&&!entry&&
           (run?.shared_pose?.source_stage_id==="players"||
             /RF-DETR.*RTMPose/.test(String(seen.get("players")?.name||"")));
@@ -1369,7 +1378,9 @@
       state.lastPipelineStatusAt!=null&&Date.now()-state.lastPipelineStatusAt>8000;
     const source=active?(stale?{...latest,live_stale:true}:latest):video?(latest?.video===video?latest:
       projectHistoryRows().find(row=>row.video===video)||null):null;
-    updatePipelineGraph(mainGraph,source);
+    const graphSource=source&&latest?.project_queue?.videos?.some(row=>row.id===source.id)?
+      {...source,project_queue:latest.project_queue}:source;
+    updatePipelineGraph(mainGraph,graphSource);
     showGraphResult(source,latest?.project_queue);
   };
   const historyVisibleByProject=new Map();
@@ -1459,7 +1470,7 @@
       const line=make("div","analysis-history-stage"+(live?" is-running":""));
       line.append(
         make("span","analysis-history-stage-name",pipelineLabel(entry)),
-        make("span","analysis-history-stage-duration",entry.id==="touch_detector"&&Number.isFinite(elapsed)&&elapsed<1000?Math.round(elapsed)+" мс":historyDuration(elapsed))
+        make("span","analysis-history-stage-duration",entry.id==="touch_detector"&&Number.isFinite(elapsed)&&elapsed>0&&elapsed<1000?Math.round(elapsed)+" мс":Number.isFinite(elapsed)&&elapsed>=1000?historyDuration(elapsed):"")
       );
       target.append(line);
     }

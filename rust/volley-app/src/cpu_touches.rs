@@ -495,6 +495,15 @@ pub(crate) fn trajectory_breaks(
     dimensions: (u32, u32),
     cancel: &AtomicBool,
 ) -> Result<Vec<volley_core::motion::TrajectoryBreak>, String> {
+    trajectory_breaks_report(motion, dimensions, cancel, |_| Ok(()))
+}
+
+pub(crate) fn trajectory_breaks_report(
+    motion: &volley_core::ball_interpolation::StabilizedBallMotion,
+    dimensions: (u32, u32),
+    cancel: &AtomicBool,
+    mut report: impl FnMut(u64) -> Result<(), String>,
+) -> Result<Vec<volley_core::motion::TrajectoryBreak>, String> {
     use volley_core::motion::{trajectory_direction_breaks, BallObservation, DirectionBreakConfig};
 
     let (width, height) = dimensions;
@@ -502,6 +511,7 @@ pub(crate) fn trajectory_breaks(
         return Err("Invalid trajectory analysis video dimensions".into());
     }
     let mut breaks = Vec::new();
+    report(0)?;
     for start in (0..motion.points.len()).step_by(CHUNK) {
         if cancel.load(Ordering::Acquire) {
             return Err("cancelled".into());
@@ -526,6 +536,7 @@ pub(crate) fn trajectory_breaks(
                 .into_iter()
                 .filter(|impact| (start as i64..end as i64).contains(&impact.frame)),
         );
+        report(breaks.len() as u64)?;
     }
     Ok(breaks)
 }

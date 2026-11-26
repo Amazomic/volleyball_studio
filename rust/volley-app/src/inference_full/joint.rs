@@ -281,6 +281,11 @@ fn pose_manifest_identities(
     )
 }
 
+pub(crate) enum JointProgressData<'a> {
+    RallyMask(&'a Value, u64),
+    TouchCount(u64),
+}
+
 /// Both model sessions consume exactly the same nine-frame timeline. The
 /// CUDA arena limit is divided between persistent sessions (not a hard cap on
 /// total GPU allocations). An error or cancellation removes both incomplete
@@ -302,7 +307,7 @@ pub(crate) fn run_joint_pair(
     stabilizer_settings: volley_core::ball_interpolation::BallStabilizerSettings,
     early_pose: Option<EarlyPoseOptions>,
     cancelled: &AtomicBool,
-    mut report: impl FnMut(f64, u64, u64, Option<(&Value, u64)>) -> Result<(), String>,
+    mut report: impl FnMut(f64, u64, u64, Option<JointProgressData<'_>>) -> Result<(), String>,
 ) -> Result<JointPair, String> {
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
@@ -541,13 +546,14 @@ pub(crate) fn run_joint_pair(
             mut mask,
             contacts,
             impacts,
-        } = RallyMask::detect(
+        } = RallyMask::detect_with_touch_progress(
             &trajectory,
             rally_settings,
             stabilizer_settings,
             court.as_ref().and_then(|c| c.transform.as_ref()),
             dimensions,
             cancelled,
+            |count| report(0.3999995, 0, 0, Some(JointProgressData::TouchCount(count))),
         )?;
         let ground_summary = crate::cpu_touches::ground_stage::publish(
             &ball.folder,
@@ -592,12 +598,20 @@ pub(crate) fn run_joint_pair(
             0.3999995,
             ball_scan.decode.decoded_frames,
             total_frames,
-            Some((&mask_value, ball_scan.decode.decoded_frames)),
+            Some(JointProgressData::RallyMask(
+                &mask_value,
+                ball_scan.decode.decoded_frames,
+            )),
         )?;
         report(0.39999975, 0, 0, None)?;
         let impacts = match impacts {
             Some(impacts) => impacts,
-            None => crate::cpu_touches::trajectory_breaks(&trajectory, dimensions, cancelled)?,
+            None => crate::cpu_touches::trajectory_breaks_report(
+                &trajectory,
+                dimensions,
+                cancelled,
+                |count| report(0.39999975, 0, 0, Some(JointProgressData::TouchCount(count))),
+            )?,
         };
 
         let player_total = mask.sampled_frames(person_stride);
