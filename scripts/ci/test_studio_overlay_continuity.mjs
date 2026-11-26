@@ -290,12 +290,34 @@ initOverlay.debugAfter.click();
 assert.equal(initOverlay.trajectoryVariant,"after");
 assert.equal(initOverlay.debugAfter.attributes["aria-pressed"],"true");
 // The actual presented timestamp wins over currentTime while decoding.
-overlay.presentedTime=90/30;
+overlay.presentedTime=90/30-0.0007;
 ui.video.currentTime=180/30;
 overlay.flags.players=true;overlay.flags.touches=false;
 const beforePresented=outlines;
 scope.drawOverlay();
 assert.equal(outlines,beforePresented+1,"Presentation timestamp must control boxes during decode lag");
+
+const savedBallFrames=oldRecord.frames,oldArc=ctx.arc,oldLineTo=ctx.lineTo;
+const marker=[],trail=[];
+oldRecord.frames=[
+  {frame:89,ball:[0.2,0.2],players:[]},
+  {...savedBallFrames.find(row=>row.frame===90),ball:[0.4,0.5]}
+];
+ctx.arc=(px,py)=>marker.push([px,py]);
+ctx.lineTo=(px,py)=>trail.push([px,py]);
+overlay.flags.players=false;overlay.flags.trajectory=true;
+scope.drawOverlay();
+assert.deepEqual(marker,[[40,50]],"Ball marker must use the nearest analyzed sample of the actual presented frame");
+assert.deepEqual(trail,[[40,50]],"Trajectory endpoint must use the same sample as the ball marker");
+overlay.flags.players=true;overlay.flags.trajectory=false;
+oldRecord.frames=savedBallFrames;ctx.arc=oldArc;ctx.lineTo=oldLineTo;
+overlay.presentedTime=null;
+ui.video.currentTime=90/30;ui.video.paused=true;ui.video.requestVideoFrameCallback=()=>{};
+scope.drawOverlay();
+assert.equal(outlines,beforePresented+1,"Do not draw from currentTime while waiting for a paused frame");
+delete ui.video.requestVideoFrameCallback;delete ui.video.paused;
+ui.video.currentTime=180/30;
+
 overlay.presentedTime=null;
 s.videoKey="p:other";
 scope.drawOverlay();
@@ -458,3 +480,40 @@ await flush();
 assert.equal(labelsApi.overlayLabels.names.size,0,
   "Foreign replay hashes must never produce athlete names");
 console.log("Studio preview overlay frame continuity: OK");
+
+const loopStart=js.indexOf("  const startOverlayFrameLoop=");
+const loopEnd=js.indexOf('  window.addEventListener("resize",drawOverlay);',loopStart);
+assert.ok(loopStart>=0&&loopEnd>loopStart);
+const handlers=new Map(),callbacks=new Map();
+let callbackId=0;
+const media={paused:true,seeking:false,currentTime:1.04,
+  addEventListener(name,fn){handlers.set(name,fn);},
+  requestVideoFrameCallback(fn){callbacks.set(++callbackId,fn);return callbackId;},
+  cancelVideoFrameCallback(id){callbacks.delete(id);}
+};
+const clockOverlay={loop:0,presentedTime:null};
+const rendered=[];
+runInNewContext(js.slice(loopStart,loopEnd),{
+  ui:{video:media},overlay:clockOverlay,
+  drawOverlay(){rendered.push(clockOverlay.presentedTime);},
+  updateRallyCardProgress(){},overlayContext(){}
+});
+const emit=name=>handlers.get(name)?.();
+const present=seconds=>{
+  assert.equal(callbacks.size,1,"Exactly one video frame callback must be armed");
+  const [id,callback]=callbacks.entries().next().value;
+  callbacks.delete(id);callback(0,{mediaTime:seconds});
+};
+emit("loadedmetadata");present(1);
+media.paused=false;emit("playing");present(1.033333);
+media.currentTime=1.09;media.paused=true;emit("pause");
+assert.equal(clockOverlay.presentedTime,1.033333,"Pause must preserve the frame actually displayed");
+media.seeking=true;media.currentTime=2.09;emit("seeking");
+assert.equal(clockOverlay.presentedTime,null);
+media.seeking=false;emit("seeked");
+assert.equal(clockOverlay.presentedTime,null,"Do not guess a frame from the seek target");
+present(2.066667);
+assert.equal(clockOverlay.presentedTime,2.066667,"Paused seek must capture presented mediaTime");
+media.seeking=true;emit("seeking");present(3.0);
+media.seeking=false;emit("seeked");
+assert.equal(clockOverlay.presentedTime,3,"Seeked must not discard a frame already presented");

@@ -839,7 +839,7 @@
     drawCourtPreview(box);
     if(!source||(!overlay.raw&&!s.run))return;
     // Until the next decoded frame arrives, keep the canvas transparent.
-    if(!ui.video.paused&&typeof ui.video.requestVideoFrameCallback==="function"&&
+    if(typeof ui.video.requestVideoFrameCallback==="function"&&
        !Number.isFinite(overlay.presentedTime))return;
     if(!overlay.raw&&!overlay.flags.touches&&!overlay.flags.trajectory&&!overlay.flags.players&&
        !overlay.flags.pose&&!showBallCandidates())return;
@@ -849,7 +849,8 @@
       overlay.presentedTime:ui.video.currentTime;
     const localTime=shown-(Number(s.analysisOffset)||0);
     if(localTime<0)return;
-    const frame=Math.max(0,Math.floor(localTime*fps()+0.001));
+    const frame=Math.max(0,Number.isFinite(overlay.presentedTime)?
+      Math.round(localTime*fps()):Math.floor(localTime*fps()+0.001));
     const project=s.project,run=overlaySourceId(),video=s.video;
     if(!run){if(overlay.raw)overlayMessage("Для просмотра сырых данных выберите объединённый GPU-анализ (fusion).");return;}
     const start=overlayWindowStart(frame);
@@ -1146,7 +1147,7 @@
       invalidateOverlayLabels();
       for(const controller of overlay.controllers.values())controller?.abort();
       overlay.controllers.clear();overlay.fetching.clear();
-      overlay.cache.clear();overlay.rawFrames.clear();overlay.failed.clear();overlay.presentedTime=null;
+      overlay.cache.clear();overlay.rawFrames.clear();overlay.failed.clear();
       overlay.canvas.width=overlay.canvas.width;
     }
     drawOverlay();
@@ -2855,36 +2856,46 @@
     }
   }
   const startOverlayFrameLoop=()=>{
-    const token=++overlay.loop;
-    if(typeof ui.video.requestVideoFrameCallback!=="function")return;
+    if(typeof ui.video.requestVideoFrameCallback!=="function"||overlay.frameRequest!=null)return;
+    const token=overlay.loop;
     const tick=(_now,metadata)=>{
-      if(token!==overlay.loop||ui.video.seeking)return;
+      if(token!==overlay.loop)return;
+      overlay.frameRequest=null;
       if(Number.isFinite(metadata?.mediaTime))
         overlay.presentedTime=metadata.mediaTime;
       drawOverlay();updateRallyCardProgress();
-      if(!ui.video.paused)ui.video.requestVideoFrameCallback(tick);
+      startOverlayFrameLoop();
     };
-    ui.video.requestVideoFrameCallback(tick);
+    overlay.frameRequest=ui.video.requestVideoFrameCallback(tick);
+  };
+  const resetOverlayFrameClock=()=>{
+    overlay.loop++;
+    if(overlay.frameRequest!=null)ui.video.cancelVideoFrameCallback?.(overlay.frameRequest);
+    overlay.frameRequest=null;overlay.presentedTime=null;
   };
   ui.video.addEventListener("playing",startOverlayFrameLoop);
   ui.video.addEventListener("pause",()=>{
-    overlay.loop++;overlay.presentedTime=null;drawOverlay();
+    drawOverlay();startOverlayFrameLoop();
   });
   ui.video.addEventListener("seeking",()=>{
     updateRallyCardProgress();
-    overlay.loop++;overlay.presentedTime=null;
+    resetOverlayFrameClock();
     overlayContext(); // Never leave previous-frame boxes on a pending seek.
+    startOverlayFrameLoop();
   });
   ui.video.addEventListener("seeked",()=>{
-    overlay.presentedTime=null;drawOverlay();updateRallyCardProgress();
-    if(!ui.video.paused)startOverlayFrameLoop();
+    drawOverlay();updateRallyCardProgress();
+    startOverlayFrameLoop();
   });
   ui.video.addEventListener("timeupdate",()=>{
     if(typeof ui.video.requestVideoFrameCallback!=="function"&&!ui.video.seeking)
       drawOverlay();
   });
+  ui.video.addEventListener("emptied",()=>{
+    resetOverlayFrameClock();overlayContext();
+  });
   ui.video.addEventListener("loadedmetadata",()=>{
-    overlay.presentedTime=null;drawOverlay();
+    resetOverlayFrameClock();startOverlayFrameLoop();drawOverlay();
   });
   window.addEventListener("resize",drawOverlay);
   const wipe=node=>{while(node.firstChild)node.firstChild.remove();};
@@ -4237,7 +4248,6 @@
       Math.max(s.clipStart,Math.min(s.clipEnd-1/fps(),requestedTime)):s.clipStart;
     rallyCardProgresses.get(s.current)?.progress.style.setProperty("--rally-progress",
       (100*(s.seekAt-s.clipStart)/(s.clipEnd-s.clipStart))+"%");
-    overlay.presentedTime=null;
     setOverlaySource(item);
     prefetchOverlayAtFrame(Math.max(0,Math.floor((s.seekAt-(Number(s.analysisOffset)||0))*fps())));
     let deferredPlay=false;
