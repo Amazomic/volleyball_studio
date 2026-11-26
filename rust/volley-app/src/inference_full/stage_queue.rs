@@ -4,8 +4,40 @@ use tokio::sync::{oneshot, Semaphore, SemaphorePermit};
 
 const CANCEL_INTERVAL: Duration = Duration::from_millis(100);
 
+pub(crate) struct IndependentStages {
+    pub(crate) players: Semaphore,
+    pub(crate) pose: Semaphore,
+}
+
+impl Default for IndependentStages {
+    fn default() -> Self {
+        Self {
+            players: Semaphore::new(1),
+            pose: Semaphore::new(1),
+        }
+    }
+}
+
+pub(crate) fn acquire_stage<'a>(
+    semaphore: &'a Semaphore,
+    cancel: &AtomicBool,
+    stop: &AtomicBool,
+) -> Result<SemaphorePermit<'a>, String> {
+    loop {
+        if cancel.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        match semaphore.try_acquire() {
+            Ok(permit) => return Ok(permit),
+            Err(tokio::sync::TryAcquireError::Closed) => return Err("GPU stage closed".into()),
+            Err(tokio::sync::TryAcquireError::NoPermits) => std::thread::sleep(CANCEL_INTERVAL),
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct VideoTurn {
+    pub(crate) independent: Option<std::sync::Arc<IndependentStages>>,
     detector_before: Option<oneshot::Receiver<()>>,
     detector_after: Option<oneshot::Sender<()>>,
     publish_before: Option<oneshot::Receiver<()>>,
@@ -90,6 +122,23 @@ pub(crate) async fn acquire_gpu<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_model_queues_have_separate_slots_and_cancel_safely() {
+        let queues = IndependentStages::default();
+        let cancel = AtomicBool::new(false);
+        let stop = AtomicBool::new(false);
+        let detector = acquire_stage(&queues.players, &cancel, &stop).unwrap();
+        let pose = acquire_stage(&queues.pose, &cancel, &stop).unwrap();
+        assert!(queues.players.try_acquire().is_err());
+        assert!(queues.pose.try_acquire().is_err());
+        drop(detector);
+        assert!(queues.players.try_acquire().is_ok());
+        cancel.store(true, Ordering::Release);
+        assert!(acquire_stage(&queues.pose, &cancel, &stop).is_err());
+        drop(pose);
+        assert!(queues.pose.try_acquire().is_ok());
+    }
 
     #[tokio::test]
     async fn next_ball_waits_for_detector_but_not_for_publication() {

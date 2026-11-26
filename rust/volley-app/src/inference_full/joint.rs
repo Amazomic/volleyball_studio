@@ -282,6 +282,7 @@ fn pose_manifest_identities(
 }
 
 pub(crate) enum JointProgressData<'a> {
+    BallFinished,
     RallyMask(&'a Value, u64),
     TouchCount(u64),
 }
@@ -519,7 +520,7 @@ pub(crate) fn run_joint_pair(
             0.399999,
             ball_scan.decode.decoded_frames,
             total_frames,
-            None,
+            Some(JointProgressData::BallFinished),
         )?;
         let dimension = |key: &str| {
             original_provenance["video"][key]
@@ -621,6 +622,19 @@ pub(crate) fn run_joint_pair(
         if cancelled.load(Ordering::Acquire) {
             return Err("cancelled".into());
         }
+        let queues = early_pose
+            .as_ref()
+            .and_then(|options| options.independent.clone());
+        let player_slot = queues
+            .as_ref()
+            .map(|queues| {
+                crate::inference_full::stage_queue::acquire_stage(
+                    &queues.players,
+                    cancelled,
+                    cancelled,
+                )
+            })
+            .transpose()?;
         let mut person_engine = PersonEngine::load_for_primary_gpu_evidence(
             &state.repository_root,
             cpu_threads,
@@ -811,6 +825,8 @@ pub(crate) fn run_joint_pair(
         {
             return Err("Primary ball and people scans disagree on video timeline".into());
         }
+        drop(person_engine);
+        drop(player_slot);
         people_scan
     };
     if cancelled.load(Ordering::Acquire) {

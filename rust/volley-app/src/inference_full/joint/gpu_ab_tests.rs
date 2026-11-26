@@ -1120,6 +1120,7 @@ fn phase1_checkpoint_cuda_resume() -> Result<(), String> {
             },
             Default::default(),
             Some(EarlyPoseOptions {
+                independent: None,
                 court: None,
                 sampling: Default::default(),
                 tracking: Default::default(),

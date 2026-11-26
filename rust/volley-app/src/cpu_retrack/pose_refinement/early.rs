@@ -37,6 +37,7 @@ impl CompletedRallies {
 }
 
 pub(crate) struct EarlyPoseOptions {
+    pub independent: Option<Arc<crate::inference_full::stage_queue::IndependentStages>>,
     pub sampling: PoseSampling,
     pub tracking: TrackingOptions,
     pub court: Option<crate::video_edits::CourtSnapshot>,
@@ -662,6 +663,7 @@ fn run(
     let mut track_count = 0;
     let mut groups = 0;
     let mut sampled_frames = 0;
+    let mut pose_slot = None;
     let mut engine = None;
     let mut done = false;
     let shared_reid = input.options.reid_crops.as_ref().filter(|buffer| {
@@ -807,6 +809,13 @@ fn run(
             let mut measured = Vec::new();
             for group in crops.chunks(8) {
                 if engine.is_none() {
+                    if let Some(queues) = &input.options.independent {
+                        pose_slot = Some(crate::inference_full::stage_queue::acquire_stage(
+                            &queues.pose,
+                            &input.options.cancelled,
+                            stop,
+                        )?);
+                    }
                     engine = Some(PoseEngine::load(
                         &input.repository,
                         Device::Cuda,
@@ -894,6 +903,8 @@ fn run(
     flush(&mut poses)?;
     drop(tracks);
     drop(poses);
+    drop(engine);
+    drop(pose_slot);
     Ok(CompletedRallies {
         scratch,
         track_sha: format!("{:x}", track_hash.finalize()),
