@@ -12,6 +12,10 @@ const tick=async()=>{for(let i=0;i<8;i++)await new Promise(r=>setImmediate(r));}
 const markup=readFileSync(join(root,"rust/volley-app/static/studio.html"),"utf8");
 const navMarkup=markup.match(/<nav class="menu">([\s\S]*?)<\/nav>/)?.[1]||"";
 const navOrder=[...navMarkup.matchAll(/id="studio-nav-([^"]+)"/g)].map(row=>row[1]);
+const sidebarActions=markup.match(/<div class="studio-sidebar-actions">([\s\S]*?)<\/div>/)?.[1]||"";
+assert.deepEqual([...sidebarActions.matchAll(/<button[^>]*id="([^"]+)"/g)].map(row=>row[1]),
+  ["studio-language-toggle","studio-restart","studio-video-library-toggle"]);
+assert.match(sidebarActions,/<button[^>]*id="studio-language-toggle"[^>]*>ru\\en<\/button>/);
 // Project roster stays beside the gallery at desktop widths and must precede
 // it when the responsive grid collapses (not land at the page bottom).
 const playersCss=readFileSync(join(root,"rust/volley-app/static/studio.css"),"utf8");
@@ -253,9 +257,19 @@ assert.equal(a.runtime.get("tab"),0);
 assert.equal(a.nodes.get("studio-preview-view").classList.contains("hidden"),false);
 assert.equal(a.nodes.get("studio-analysis-view").classList.contains("hidden"),true);
 assert.equal(a.runtime.translate("Монтаж"),"Монтаж");
-assert.equal(a.runtime.set("locale",1),true);
+const languageToggle=a.nodes.get("studio-language-toggle");
+assert.equal(languageToggle.disabled,false);
+assert.equal(languageToggle.getAttribute("aria-pressed"),"false");
+languageToggle.dispatch("click");
 assert.equal(a.runtime.translate("Монтаж"),"Montage");
 assert.equal(a.document.documentElement.lang,"en");
+assert.equal(languageToggle.getAttribute("aria-pressed"),"true");
+assert.equal(a.location.hash,"#preview");
+languageToggle.dispatch("click");
+assert.equal(a.runtime.translate("Монтаж"),"Монтаж");
+assert.equal(a.document.documentElement.lang,"ru");
+assert.equal(languageToggle.getAttribute("aria-pressed"),"false");
+languageToggle.dispatch("click");
 assert.equal(a.nodes.has("studio-ui-settings-label"),false,
   "Removed settings must not be present in the browser UI");
 assert.equal(a.runtime.set("theme",1),true);
@@ -426,6 +440,7 @@ assert.equal(removedDebug.runtime.navigate("training"),"preview","Removed tab ca
 const b=createTestEnvironment("#players");
 await b.runtime.ready;await tick();
 assert.equal(b.runtime.get("locale"),1,"Language persisted across reload");
+assert.equal(b.nodes.get("studio-language-toggle").getAttribute("aria-pressed"),"true");
 assert.equal(b.runtime.get("theme"),1,"Theme persisted across reload");
 assert.equal(b.runtime.get("density"),1,"Density persisted across reload");
 assert.equal(b.runtime.get("tab"),2,"Deep-link route set by WASM");

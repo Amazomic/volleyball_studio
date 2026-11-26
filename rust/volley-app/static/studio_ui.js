@@ -182,6 +182,7 @@
 (()=>{
   const tabs=["preview","analysis","players","montage","quick","report"];
   const $=id=>document.getElementById(id);
+  const languageToggle=$("studio-language-toggle");
   const KEY="volley.rust.ui.preferences.v1";
   const KEYS={tab:0,locale:1,theme:2,density:3,reduced_motion:4};
   const textNodes=new WeakMap();
@@ -336,6 +337,8 @@
     const locale=output.get("locale"),theme=output.get("theme"),
       density=output.get("density"),motion=output.get("reduced_motion");
     document.documentElement.lang=locale===1?"en":"ru";
+    languageToggle?.setAttribute("aria-pressed",String(locale===1));
+    walk(document.querySelector("title"));
     for(const label of document.querySelectorAll("#studio-analysis-view .analysis-setting-help")){
       const description=locale===1?label.dataset.analysisHintEn:label.dataset.analysisHint;
       if(description)label.setAttribute("aria-description",description);
@@ -403,6 +406,10 @@
       }
     });    observer.observe(document.body,{subtree:true,childList:true,characterData:true});
     apply();
+    if(languageToggle){
+      languageToggle.addEventListener("click",()=>output.set("locale",output.get("locale")===1?0:1));
+      languageToggle.disabled=false;
+    }
     return output;
   }
   output.ready=boot().catch(error=>{
