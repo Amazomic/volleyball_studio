@@ -176,7 +176,7 @@ pub struct StabilizedBallMotion {
     pub observed_frames: usize,
 }
 
-pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v11";
+pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v12";
 
 fn reject_preexisting_remote_ball(
     points: &[Option<[f64; 2]>],
@@ -409,6 +409,23 @@ fn reject_unlinked_motion(
                     last_point,
                     settings.max_step_fraction,
                 ) {
+                    let mut idle_end = last_frame;
+                    for idle_frame in (0..=last_frame).rev() {
+                        let Some(idle_point) = points[idle_frame] else {
+                            if idle_end - idle_frame > settings.max_gap_frames {
+                                break;
+                            }
+                            continue;
+                        };
+                        if (idle_point[0] - last_point[0]).hypot(idle_point[1] - last_point[1])
+                            > 0.025
+                        {
+                            break;
+                        }
+                        points[idle_frame] = None;
+                        rejected.push(idle_frame);
+                        idle_end = idle_frame;
+                    }
                     previous = None;
                     latest = Some((frame, point));
                     continue;
@@ -1165,6 +1182,30 @@ mod tests {
         assert!((8..=10).all(|frame| result.rejected_frames.contains(&frame)));
         assert!(result.points[15].is_some());
     }
+    #[test]
+    fn idle_source_switch_removes_remote_prefix_without_losing_flight() {
+        let samples = (0..100)
+            .map(|frame| ScoredBallSample {
+                frame,
+                point: if frame < 60 {
+                    [0.93 + (frame % 3) as f64 * 0.002, 0.58]
+                } else {
+                    [
+                        0.41 + (frame - 60) as f64 * 0.002,
+                        0.90 - (frame - 60) as f64 * 0.012,
+                    ]
+                },
+                confidence: 0.9,
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 100, BallStabilizerSettings::default()).unwrap();
+        assert!(result.points[..60].iter().all(Option::is_none));
+        assert!(result.rejected_frames.contains(&59));
+        assert!(result.points[60..].iter().all(Option::is_some));
+        assert!(!result.interpolated[..60].iter().any(|&v| v));
+    }
+
     #[test]
     fn idle_lock_rejects_remote_motion_that_returns_to_original_ball() {
         let samples = (0..100)

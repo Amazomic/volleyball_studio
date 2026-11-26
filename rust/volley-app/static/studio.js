@@ -607,7 +607,7 @@
       while(overlay.cache.size>16)overlay.cache.delete(overlay.cache.keys().next().value);
       if(isRaw&&overlay.stabilizerView){
         const stats=value.ball_stabilizer;
-        if(!["ball_stabilizer_v3","ball_stabilizer_v4","ball_stabilizer_v5","ball_stabilizer_v6","ball_stabilizer_v7","ball_stabilizer_v8","ball_stabilizer_v9","ball_stabilizer_v10","ball_stabilizer_v11"].includes(stats?.version)||
+        if(!["ball_stabilizer_v3","ball_stabilizer_v4","ball_stabilizer_v5","ball_stabilizer_v6","ball_stabilizer_v7","ball_stabilizer_v8","ball_stabilizer_v9","ball_stabilizer_v10","ball_stabilizer_v11","ball_stabilizer_v12"].includes(stats?.version)||
            value.frames.some(row=>!Object.hasOwn(row,"stabilized_ball")||
              typeof row.ball_interpolated!=="boolean"||typeof row.ball_rejected!=="boolean"))
           throw Error("Нет результата Ball Stabilizer");
