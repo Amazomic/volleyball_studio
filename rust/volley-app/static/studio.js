@@ -4556,6 +4556,7 @@
       previewCache.drop(path=>path.startsWith("/api/cpu/native/rallies/marks?"));
       const target=s.projectRallies.get(run);
       if(target){target.marked=new Set((raw.candidate_ids||[]).filter(valid));target.revision=String(raw.revision);}
+      window.dispatchEvent(new CustomEvent("volley:montage-marks-change",{detail:{project_id:project,rally_run_id:run}}));
       if(s.run===run)await loadMarks(s.generation);
       message(marking?"Добавлено в избранное.":"Удалено из избранного.","ok");
     }catch(error){failed(error);}
