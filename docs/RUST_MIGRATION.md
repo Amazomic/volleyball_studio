@@ -4809,3 +4809,9 @@ Studio показывает кнопку перехода между debug и re
 - Base 6ac64ec5; integration base def344af; owner rust/volley-app/static/studio.js with studio.html and studio.css. Native scrollbar retained; clickable markers locate first displayed rally per source video using actual card geometry, refresh after filter or resize, and do not change playback.
 - RED: node scripts/ci/test_studio_rally_scroll_markers.mjs (missing marker rail); GREEN: new marker test, rally card regression and preview tests. scripts/check-all.ps1 PASS: fmt, clippy, 1107 Rust tests passed (28 ignored by existing suite), 116 Node gates; transient CUDA NV12 test failure passed in isolation and on full rerun. Integration: 116 Node gates PASS; base changes only JS/CSS/tests/docs, WASM and Rust unchanged; git diff --check PASS.
 - Isolated Edge DOM fixture PASS at 1440x900, 1920x1080, 800x900, 480x812. Real project playback, GPU inference and export NOT TESTED. Deploy via queue.
+
+### 2026-11-27 - Faster preview keyboard scrub
+
+- Base def344af739c3f41192ee67d2cd8746261f49af3; task d65a05a792cb060c3a6fdf597fd2a4f21a9e9aa4; integration base 5bd9e20e7d6e33d8a1edf1ae8341424c03a29cab. Owner rust/volley-web/src/preview_scrub.rs: hold threshold 280 to 180 ms, initial velocity 0.1 to 1 video second/s, doubling interval 650 to 400 ms. Preserve exact 100 ms tap, 80 s/s cap, frame clamp and keyboard cancellation.
+- RED: rustc --test preview_scrub.rs (2 expected failures); GREEN: all 4 policy tests, real WASM keyboard integration PASS. scripts/check-all.ps1 PASS (1107 Rust tests passed, 28 ignored; 115 Node gates; fmt/clippy/WASM). Integrated keyboard, DOM IDs, viewport, WASM and scroll-marker checks PASS. git diff --check PASS.
+- Actual browser playback and GPU/export NOT TESTED. Apply through deployment queue.
