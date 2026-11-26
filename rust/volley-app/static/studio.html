@@ -534,13 +534,22 @@
                   <label class="field-label" for="studio-montage-creative-source">Исходное видео</label>
                   <select id="studio-montage-creative-source"></select>
                   <video id="studio-montage-creative-video" controls playsinline preload="metadata" aria-label="Исходное видео"></video>
-                  <div class="montage-creative-field">
-                    <div class="montage-creative-heading"><h3>Добавление фрагмента в монтаж</h3><button id="studio-montage-creative-add" class="primary" type="button" disabled>Добавить в монтаж</button></div>
+                  <div id="studio-montage-creative-drop" class="montage-creative-field">
+                    <div class="montage-creative-heading"><h3>Добавление фрагмента в монтаж</h3><button id="studio-montage-creative-play" class="secondary" type="button" disabled>Смотреть подборку</button><button id="studio-montage-creative-add" class="primary" type="button" disabled>Добавить в монтаж</button></div>
+                    <p id="studio-montage-creative-play-status" class="panel-note" role="status">Перетащите фрагменты сюда</p>
                     <div id="studio-montage-creative-list" class="montage-creative-list"></div>
                   </div>
                   <div class="montage-creative-field">
                     <h3>Выбор фрагмента</h3>
-                    <div class="montage-creative-range">
+                    <label class="field-label" for="studio-montage-creative-kind">Тип фрагмента</label>
+                    <select id="studio-montage-creative-kind"><option value="rallies">Розыгрыши</option><option value="favorites">Избранное</option><option value="touches">Касания</option><option value="manual">Вручную</option></select>
+                    <div id="studio-montage-creative-filters" class="montage-creative-range hidden">
+                      <div><label class="field-label" for="studio-montage-creative-touch-kind">Тип касания</label><select id="studio-montage-creative-touch-kind"><option value="">Любой</option><option value="attack">Атаки</option><option value="block">Блоки</option><option value="serve">Подачи</option><option value="dig">Приёмы</option><option value="overhead_pass">Верхние передачи</option><option value="low_touch">Касание снизу</option><option value="unknown_touch">Касание</option></select></div>
+                      <div><label class="field-label" for="studio-montage-creative-touch-player">Игрок</label><select id="studio-montage-creative-touch-player"><option value="">Любой</option></select></div>
+                    </div>
+                    <div id="studio-montage-creative-catalog" class="montage-creative-catalog"></div>
+                    <p id="studio-montage-creative-catalog-status" class="panel-note" role="status"></p>
+                    <div id="studio-montage-creative-manual" class="montage-creative-range hidden">
                       <div><label class="field-label" for="studio-montage-creative-start">Начало, сек.</label><input id="studio-montage-creative-start" type="number" min="0" step="0.1"><button id="studio-montage-creative-in" class="secondary" type="button">Отметить начало</button></div>
                       <div><label class="field-label" for="studio-montage-creative-end">Конец, сек.</label><input id="studio-montage-creative-end" type="number" min="0" step="0.1"><button id="studio-montage-creative-out" class="secondary" type="button">Отметить конец</button></div>
                     </div>

@@ -4055,6 +4055,7 @@
       previewCache.drop(path=>path.startsWith("/api/cpu/native/rallies/marks?"));
       s.gold=new Set((Array.isArray(raw.candidate_ids)?raw.candidate_ids:[]).filter(valid));
       s.revision=String(raw.revision);s.marksLoaded=true;
+      window.dispatchEvent(new CustomEvent("volley:montage-marks-change",{detail:{project_id:project,rally_run_id:run}}));
       const source=s.projectRallies?.get(run);
       if(source)source.marked=s.gold;
       syncFavoritesSelection();drawTimeline();
@@ -5129,6 +5130,7 @@
     void loadTimeline().catch(failed);
     try{await loadPage();}catch(e){failed(e);}
   });
+  window.VolleyballMontageSources=()=>({project_id:s.project,sources:projectRallyRuns(s.chain,s.projectVideos,s.run,s.analysis)});
   window.addEventListener("volley:refresh-projects",()=>{invalidateCatalog();projects().catch(failed);});
   window.addEventListener("volley:refresh-chain",()=>{invalidateCatalog();projects().catch(failed);});
   const refreshQueueRallies=status=>{

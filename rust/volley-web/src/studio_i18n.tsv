@@ -750,3 +750,15 @@ ReID · сопоставление на CPU	ReID · matching on CPU
 Выберите произвольные фрагменты исходных видео.	Select custom clips from source videos.
 Монтаж сохраняет порядок добавленных фрагментов.	Montage preserves the order of added clips.
 Отметьте начало и конец фрагмента.	Mark the start and end of the clip.
+Тип фрагмента	Fragment type
+Любой	Any
+Вручную	Manual
+Смотреть подборку	Preview selection
+Смотреть	Preview
+Перетащите фрагменты сюда	Drag clips here
+Предпросмотр фрагмента	Clip preview
+Фрагмент завершён	Clip finished
+Просмотр подборки завершён	Sequence preview finished
+Нет подходящих фрагментов.	No matching clips.
+Загрузка фрагментов…	Loading clips…
+Касание снизу	Low contact

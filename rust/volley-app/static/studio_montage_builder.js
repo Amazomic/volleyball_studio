@@ -30,13 +30,19 @@
     creativeVideo:$("studio-montage-creative-video"),creativeStart:$("studio-montage-creative-start"),
     creativeEnd:$("studio-montage-creative-end"),creativeIn:$("studio-montage-creative-in"),
     creativeOut:$("studio-montage-creative-out"),creativeAdd:$("studio-montage-creative-add"),
-    creativeList:$("studio-montage-creative-list"),creativeStatus:$("studio-montage-creative-status")
+    creativeList:$("studio-montage-creative-list"),creativeStatus:$("studio-montage-creative-status"),
+    creativeKind:$("studio-montage-creative-kind"),creativeFilters:$("studio-montage-creative-filters"),
+    creativeTouchKind:$("studio-montage-creative-touch-kind"),creativeTouchPlayer:$("studio-montage-creative-touch-player"),
+    creativeCatalog:$("studio-montage-creative-catalog"),creativeCatalogStatus:$("studio-montage-creative-catalog-status"),
+    creativeManual:$("studio-montage-creative-manual"),creativePlay:$("studio-montage-creative-play"),
+    creativeDrop:$("studio-montage-creative-drop"),creativePlayStatus:$("studio-montage-creative-play-status")
   };
   if(!ui.profile)return;
   const st={project:"",token:0,busy:false,runs:new Map(),available:new Map(),fingerprint:"",key:"",
     jobId:"",timer:null,audioSeconds:null,audioURL:"",
     sourceKey:"",favoriteItems:[],order:[],previewIndex:-1,playEpoch:0,
-    mediaVideo:"",advancing:false,finished:false,creativeClips:[],creativeVideos:[],creativeProject:""};
+    mediaVideo:"",advancing:false,finished:false,creativeClips:[],creativeVideos:[],creativeProject:"",creativeRows:[],creativeLoadEpoch:0,creativeDrag:null,
+    creativePlayEpoch:0,creativePlayback:null,creativeMedia:"",creativeMediaPending:null};
   const option=(label,value)=>{const node=document.createElement("option");
     node.textContent=String(label);node.value=String(value);return node;};
   const validRun=value=>typeof value==="string"&&/^[a-f0-9]{32}$/.test(value);
@@ -92,7 +98,7 @@
     ui.sources.classList.toggle("hidden",favorite||creative);
     ui.creative.classList.toggle("hidden",!creative);
     ui.durationField.classList.toggle("hidden",creative);
-    if(!creative)ui.creativeVideo.pause();
+    if(!creative)cancelCreativePlayback();
     syncCreative();
     ui.statisticsField.classList.toggle("hidden",mode()!=="report");
     ui.favorites.classList.toggle("hidden",!favorite);
@@ -118,7 +124,146 @@
     if(ui.audioFit.checked&&st.audioSeconds)ui.duration.value=String(
       Math.max(8,Math.min(600,Math.round(st.audioSeconds))));
     invalidate();sync();
-    if(mode()==="creative"&&ui.creativeSource.value&&!ui.creativeVideo.src)void openCreativeSource();
+    if(mode()==="creative"){
+      if(ui.creativeSource.value&&!st.creativeMedia)void openCreativeSource();
+      void loadCreativeCatalog();
+    }
+  };
+  const clipStart=clip=>(clip.analysis_offset_sec||0)+clip.start_frame/30;
+  const clipEnd=clip=>(clip.analysis_offset_sec||0)+(clip.end_frame+1)/30;
+  const creativeLabel=clip=>clip.video+" · "+clipStart(clip).toFixed(1)+" – "+clipEnd(clip).toFixed(1)+" сек.";
+  const creativeButton=(label,action)=>{
+    const node=document.createElement("button");node.type="button";node.className="secondary";node.textContent=label;
+    node.addEventListener("click",action);return node;
+  };
+  const cancelCreativePlayback=()=>{
+    st.creativePlayEpoch++;st.creativePlayback=null;ui.creativeVideo.pause();
+    ui.creativePlayStatus.textContent=st.creativeClips.length?"Фрагментов: "+st.creativeClips.length:"Перетащите фрагменты сюда";
+  };
+  const ensureCreativeMedia=async(video,start=0)=>{
+    if(st.creativeMedia===video){
+      if(st.creativeMediaPending)await st.creativeMediaPending;
+      return;
+    }
+    const media=ui.creativeVideo,project=st.project;
+    st.creativeMedia=video;
+    const pending=(async()=>{
+      if(window.VolleyballBrowserVideo?.load)await window.VolleyballBrowserVideo.load(media,project,video,{seek:start,autoplay:false});
+      else{media.src="/api/video-media?"+new URLSearchParams({project_id:project,video});media.load();}
+    })();
+    st.creativeMediaPending=pending;
+    try{await pending;}catch(error){if(st.creativeMediaPending===pending)st.creativeMedia="";throw error;}
+    finally{if(st.creativeMediaPending===pending)st.creativeMediaPending=null;}
+  };
+  const playCreative=async(clip,index=null)=>{
+    const epoch=++st.creativePlayEpoch,project=st.project;
+    st.creativePlayback=null;ui.creativeVideo.pause();
+    const start=clipStart(clip),end=clipEnd(clip),media=ui.creativeVideo;
+    if(!st.creativeVideos.includes(clip.video))return;
+    ui.creativeSource.value=clip.video;
+    ui.creativeStart.value=ui.creativeEnd.value="";
+    try{
+      await ensureCreativeMedia(clip.video,start);
+      if(epoch!==st.creativePlayEpoch||project!==st.project||mode()!=="creative")return;
+      if(media.readyState<1)await new Promise((resolve,reject)=>{
+          const loaded=()=>{cleanup();resolve();},failed=()=>{cleanup();reject(Error("Не удалось открыть исходное видео."));};
+          const cleanup=()=>{clearTimeout(timer);media.removeEventListener("loadedmetadata",loaded);media.removeEventListener("error",failed);};
+          const timer=setTimeout(failed,15000);
+          media.addEventListener("loadedmetadata",loaded);media.addEventListener("error",failed);
+          if(media.readyState>=1)loaded();
+      });
+      if(epoch!==st.creativePlayEpoch||project!==st.project||mode()!=="creative")return;
+      media.currentTime=start;
+      st.creativePlayback={clip,index,end};
+      ui.creativePlayStatus.textContent=index===null?"Предпросмотр фрагмента":(index+1)+" / "+st.creativeClips.length;
+      await media.play();
+    }catch(error){if(epoch===st.creativePlayEpoch){st.creativeMedia="";st.creativePlayback=null;show(error.message,true);}}
+  };
+  const addCreative=clip=>{
+    if(st.busy||!clip||!st.creativeVideos.includes(clip.video))return;
+    if(st.creativeClips.length>=80||creativeFrames()+clip.end_frame-clip.start_frame+1>18000){
+      show("Монтаж поддерживает до 80 фрагментов и 600 секунд.",true);return;
+    }
+    cancelCreativePlayback();st.creativeClips.push({...clip});renderCreative();invalidate();
+  };
+  const catalogClip=(raw,start,end)=>{
+    if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end<start||end>=raw.total_frames)return null;
+    const offset=Number(raw.analysis_offset_sec)||0;
+    return {video:raw.video,start_frame:start,end_frame:end,...(offset?{analysis_offset_sec:offset}:{})};
+  };
+  const renderCreativeCatalog=()=>{
+    const kind=ui.creativeKind.value||"rallies",manual=kind==="manual";
+    ui.creativeFilters.classList.toggle("hidden",kind!=="touches");
+    ui.creativeManual.classList.toggle("hidden",!manual);
+    ui.creativeCatalog.classList.toggle("hidden",manual);
+    ui.creativeCatalogStatus.classList.toggle("hidden",manual);
+    ui.creativeAdd.classList.toggle("hidden",!manual);
+    ui.creativeStatus.classList.toggle("hidden",!manual);
+    ui.creativeCatalog.replaceChildren();
+    if(manual)return;
+    const rows=st.creativeRows.filter(row=>kind==="touches"?row.kind==="touch"&&
+      (!ui.creativeTouchKind.value||row.action===ui.creativeTouchKind.value)&&
+      (!ui.creativeTouchPlayer.value||row.player===ui.creativeTouchPlayer.value):
+      row.kind==="rally"&&(kind!=="favorites"||row.favorite));
+    for(const row of rows){
+      const card=document.createElement("article");card.className="montage-creative-card";card.draggable=true;
+      const image=document.createElement("img");image.loading="lazy";image.alt="";image.draggable=false;
+      image.src="/api/video-preview?"+new URLSearchParams({video:row.clip.video,time:String(clipStart(row.clip)),width:"320"});
+      const label=document.createElement("span");label.textContent=row.label+" · "+creativeLabel(row.clip);
+      const actions=document.createElement("div");actions.className="montage-creative-card-actions";
+      actions.append(creativeButton("Смотреть",()=>void playCreative(row.clip)),creativeButton("Добавить",()=>addCreative(row.clip)));
+      card.append(image,label,actions);
+      card.addEventListener("dblclick",()=>void playCreative(row.clip));
+      card.addEventListener("dragstart",event=>{st.creativeDrag={row,project:st.project};event.dataTransfer?.setData("text/plain","creative-fragment");});
+      card.addEventListener("dragend",()=>{st.creativeDrag=null;});
+      ui.creativeCatalog.append(card);
+    }
+    ui.creativeCatalogStatus.textContent=rows.length?"Фрагментов: "+rows.length:"Нет подходящих фрагментов.";
+  };
+  const loadCreativeCatalog=async()=>{
+    const epoch=++st.creativeLoadEpoch,project=st.project;
+    const selection=window.VolleyballMontageSources?.();
+    const sources=selection?.project_id===project?selection.sources:[...st.runs].map(([video,run])=>({video,run}));
+    const valid=()=>epoch===st.creativeLoadEpoch&&project===st.project&&mode()==="creative";
+    st.creativeRows=[];renderCreativeCatalog();
+    if(!sources?.length)return;
+    ui.creativeCatalogStatus.textContent="Загрузка фрагментов…";
+    const rows=[],players=new Map();let failures=0;
+    const actions={attack:"Атака",block:"Блок",serve:"Подача",dig:"Приём",overhead_pass:"Верхняя передача",low_touch:"Касание снизу",unknown_touch:"Касание"};
+    for(let i=0;i<sources.length;i+=4){
+      const results=await Promise.allSettled(sources.slice(i,i+4).map(async source=>{
+        const query=new URLSearchParams({project_id:project,rally_run_id:source.run});
+        const [raw,marks]=await Promise.all([
+          api("/api/cpu/native/rallies/timeline?"+query),api("/api/cpu/native/rallies/marks?"+query).catch(()=>null)
+        ]);
+        if(raw.schema!=="volley-native-rally-timeline/1"||raw.project_id!==project||raw.rally_run_id!==source.run||
+          raw.video!==source.video||raw.fps!==30||!st.creativeVideos.includes(raw.video)||!Number.isSafeInteger(raw.total_frames))
+          throw Error("Некорректный источник фрагментов");
+        const marked=new Set(marks?.candidate_ids||[]);
+        for(const rally of raw.rallies||[]){
+          const clip=catalogClip(raw,rally.start_frame,rally.end_frame);
+          if(clip)rows.push({kind:"rally",clip,favorite:marked.has(rally.candidate_id),label:"Розыгрыш"});
+        }
+        for(const event of raw.touch_annotations||[]){
+          if(!event.touch_attributed||!Number.isSafeInteger(event.frame_index)||event.frame_index<0||event.frame_index>=raw.total_frames)continue;
+          const clip=catalogClip(raw,Math.max(0,event.frame_index-30),Math.min(raw.total_frames-1,event.frame_index+30));
+          const action=(event.reviewed_action?.action_verified===true?event.reviewed_action.action_kind:null)||event.kind||"unknown_touch";
+          const player=event.player_id||"",name=event.player_name||"";
+          if(player&&name)players.set(player,name);
+          if(clip)rows.push({kind:"touch",clip,action,player,label:(actions[action]||actions.unknown_touch)+(name?" · "+name:"")});
+        }
+        if(!marks)failures++;
+      }));
+      if(!valid())return;
+      failures+=results.filter(result=>result.status==="rejected").length;
+    }
+    if(!valid())return;
+    st.creativeRows=rows.sort((a,b)=>st.creativeVideos.indexOf(a.clip.video)-st.creativeVideos.indexOf(b.clip.video)||clipStart(a.clip)-clipStart(b.clip));
+    const selected=ui.creativeTouchPlayer.value;
+    ui.creativeTouchPlayer.replaceChildren(option("Любой",""),...[...players].sort((a,b)=>a[1].localeCompare(b[1])).map(([id,name])=>option(name,id)));
+    ui.creativeTouchPlayer.value=players.has(selected)?selected:"";
+    renderCreativeCatalog();
+    if(failures)ui.creativeCatalogStatus.textContent+=" · Часть источников недоступна.";
   };
   const creativeBounds=()=>{
     const video=ui.creativeSource.value,duration=ui.creativeVideo.duration;
@@ -133,6 +278,7 @@
   const syncCreative=()=>{
     const clip=creativeBounds(),ready=Number.isFinite(ui.creativeVideo.duration)&&ui.creativeVideo.duration>0;
     ui.creativeIn.disabled=ui.creativeOut.disabled=st.busy||!ready;
+    ui.creativePlay.disabled=st.busy||!st.creativeClips.length;
     ui.creativeAdd.disabled=st.busy||!clip||st.creativeClips.length>=80||creativeFrames()+(clip?clip.end_frame-clip.start_frame+1:0)>18000;
     ui.creativeStatus.textContent=clip?
       "Длительность фрагмента: "+((clip.end_frame-clip.start_frame+1)/30).toFixed(1)+" сек.":
@@ -140,23 +286,33 @@
   };
   const openCreativeSource=async()=>{
     ui.creativeStart.value=ui.creativeEnd.value="";
-    ui.creativeVideo.pause();
+    cancelCreativePlayback();
     const video=ui.creativeSource.value;
     if(!st.creativeVideos.includes(video))return;
-    try{
-      if(window.VolleyballBrowserVideo?.load)await window.VolleyballBrowserVideo.load(ui.creativeVideo,st.project,video,{autoplay:false});
-      else{ui.creativeVideo.src="/api/video-media?"+new URLSearchParams({project_id:st.project,video});ui.creativeVideo.load();}
-    }catch(e){show(e.message,true);}
+    try{await ensureCreativeMedia(video);}catch(e){show(e.message,true);}
     syncCreative();
   };
   const renderCreative=()=>{
     ui.creativeList.replaceChildren();
+    ui.creativePlayStatus.textContent=st.creativeClips.length?"Фрагментов: "+st.creativeClips.length:"Перетащите фрагменты сюда";
     st.creativeClips.forEach((clip,index)=>{
       const row=document.createElement("div");row.className="montage-creative-row";
-      const label=document.createElement("span");label.textContent=(index+1)+". "+clip.video+" · "+(clip.start_frame/30).toFixed(1)+" – "+((clip.end_frame+1)/30).toFixed(1)+" сек.";
+      row.draggable=true;
+      row.addEventListener("dragstart",event=>{st.creativeDrag={index,project:st.project};event.dataTransfer?.setData("text/plain","creative-order");});
+      row.addEventListener("dragend",()=>{st.creativeDrag=null;});
+      row.addEventListener("dragover",event=>event.preventDefault());
+      row.addEventListener("drop",event=>{
+        if(st.creativeDrag?.project!==st.project||!Number.isInteger(st.creativeDrag.index)||st.busy)return;
+        event.preventDefault();event.stopPropagation();
+        const from=st.creativeDrag.index;st.creativeDrag=null;
+        if(from===index)return;
+        cancelCreativePlayback();const [moved]=st.creativeClips.splice(from,1);if(moved)st.creativeClips.splice(index,0,moved);
+        renderCreative();invalidate();
+      });
+      const label=document.createElement("span");label.textContent=(index+1)+". "+creativeLabel(clip);
       const remove=document.createElement("button");remove.type="button";remove.className="secondary";remove.textContent="Удалить";
-      remove.addEventListener("click",()=>{if(st.busy)return;st.creativeClips.splice(index,1);renderCreative();invalidate();});
-      row.append(label,remove);ui.creativeList.append(row);
+      remove.addEventListener("click",()=>{if(st.busy)return;cancelCreativePlayback();st.creativeClips.splice(index,1);renderCreative();invalidate();});
+      row.append(label,creativeButton("Смотреть",()=>void playCreative(clip)),remove);ui.creativeList.append(row);
     });
     syncCreative();
   };
@@ -401,7 +557,8 @@
     const token=++st.token;st.project=ui.project.value;st.runs.clear();
     st.available.clear();
     if(st.creativeProject!==st.project){
-      st.creativeProject=st.project;st.creativeClips=[];st.creativeVideos=[];
+      cancelCreativePlayback();st.creativeLoadEpoch++;st.creativeMedia="";st.creativeMediaPending=null;st.creativeRows=[];st.creativeDrag=null;
+      st.creativeProject=st.project;st.creativeClips=[];st.creativeVideos=[];renderCreativeCatalog();
       ui.creativeSource.replaceChildren();ui.creativeStart.value=ui.creativeEnd.value="";
       if(window.VolleyballBrowserVideo?.cancel)window.VolleyballBrowserVideo.cancel(ui.creativeVideo);
       else{ui.creativeVideo.pause();ui.creativeVideo.removeAttribute("src");ui.creativeVideo.load();}
@@ -453,7 +610,7 @@
       show("Найдено CPU-версий: "+selectedRuns().length+
         "; игроков: "+players.length+". Можно создавать варианты монтажа.");
     }catch(e){if(token===st.token)show(e.message,true);}
-    finally{if(token===st.token){st.busy=false;sync();}}
+    finally{if(token===st.token){st.busy=false;sync();if(mode()==="creative")void loadCreativeCatalog();}}
   };
   const payload=(operation)=>{
     const value={
@@ -662,16 +819,37 @@
     };
     audio.onerror=()=>{ui.audioLength.textContent="Не удалось прочитать длительность музыки.";};
   };
+  ui.creativeKind.value="rallies";
+  ui.creativeKind.addEventListener("change",()=>{renderCreativeCatalog();if(ui.creativeKind.value==="favorites")void loadCreativeCatalog();});
+  ui.creativeTouchKind.addEventListener("change",renderCreativeCatalog);
+  ui.creativeTouchPlayer.addEventListener("change",renderCreativeCatalog);
+  ui.creativeDrop.addEventListener("dragover",event=>{if(st.creativeDrag?.project===st.project){event.preventDefault();ui.creativeList.classList.add("drag-over");}});
+  ui.creativeDrop.addEventListener("dragleave",()=>ui.creativeList.classList.remove("drag-over"));
+  ui.creativeDrop.addEventListener("drop",event=>{
+    event.preventDefault();ui.creativeList.classList.remove("drag-over");
+    const drag=st.creativeDrag;st.creativeDrag=null;
+    if(drag?.project===st.project&&drag.row)addCreative(drag.row.clip);
+  });
+  ui.creativePlay.addEventListener("click",()=>{if(st.creativeClips.length)void playCreative(st.creativeClips[0],0);});
+  const advanceCreative=()=>{
+    const current=st.creativePlayback;if(!current)return;
+    st.creativePlayback=null;
+    if(current.index!==null&&current.index+1<st.creativeClips.length)void playCreative(st.creativeClips[current.index+1],current.index+1);
+    else{ui.creativeVideo.pause();ui.creativeVideo.currentTime=Math.min(current.end,ui.creativeVideo.duration);
+      ui.creativePlayStatus.textContent=current.index===null?"Фрагмент завершён":"Просмотр подборки завершён";}
+  };
+  ui.creativeVideo.addEventListener("timeupdate",()=>{if(st.creativePlayback&&ui.creativeVideo.currentTime>=st.creativePlayback.end-0.02)advanceCreative();});
+  ui.creativeVideo.addEventListener("ended",advanceCreative);
   ui.creativeSource.addEventListener("change",openCreativeSource);
   ui.creativeVideo.addEventListener("loadedmetadata",syncCreative);
   ui.creativeVideo.addEventListener("emptied",syncCreative);
-  ui.creativeVideo.addEventListener("error",()=>show("Не удалось открыть исходное видео.",true));
+  ui.creativeVideo.addEventListener("error",()=>{st.creativeMedia="";cancelCreativePlayback();show("Не удалось открыть исходное видео.",true);});
   for(const field of [ui.creativeStart,ui.creativeEnd])field.addEventListener("input",syncCreative);
   ui.creativeIn.addEventListener("click",()=>{ui.creativeStart.value=ui.creativeVideo.currentTime.toFixed(3);syncCreative();});
   ui.creativeOut.addEventListener("click",()=>{ui.creativeEnd.value=ui.creativeVideo.currentTime.toFixed(3);syncCreative();});
   ui.creativeAdd.addEventListener("click",()=>{
     const clip=creativeBounds();if(ui.creativeAdd.disabled||!clip)return;
-    st.creativeClips.push(clip);renderCreative();invalidate();
+    addCreative(clip);
   });
   ui.profile.addEventListener("change",()=>chooseProfile(ui.profile.value));
   for(const input of [ui.player,ui.action,ui.context,ui.duration,ui.layout,ui.encoder,
@@ -695,6 +873,7 @@
   ui.project.addEventListener("change",load);
   window.addEventListener("volley:postprocessing-change",event=>{
     if(event.detail?.project_id!==st.project)return;
+    if(mode()==="creative")void loadCreativeCatalog();
     const run=event.detail.rally_run_id;
     if(!validRun(run)){
       st.runs.clear();invalidate();show("Выберите CPU-версию в верхней панели.");return;
@@ -705,6 +884,9 @@
       st.runs.clear();st.runs.set(video,run);
       invalidate();show("CPU-версия изменена, проверьте подборку.");
     }
+  });
+  window.addEventListener("volley:montage-marks-change",event=>{
+    if(event.detail?.project_id===st.project&&mode()==="creative")void loadCreativeCatalog();
   });
   window.addEventListener("volley:project-ready",()=>{if(ui.project.value!==st.project)load();});
   window.addEventListener("pagehide",()=>{
