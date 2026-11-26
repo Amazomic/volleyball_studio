@@ -56,7 +56,7 @@ struct SavedWindow {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SavedDetection {
+pub(super) struct SavedDetection {
     frame_index: u64,
     class_name: String,
     score: f32,
@@ -64,6 +64,23 @@ struct SavedDetection {
     query_index: Option<usize>,
     touch_probability: Option<f32>,
     head_point_norm: Option<[f32; 2]>,
+}
+
+impl SavedDetection {
+    pub(super) fn into_raw(self, class: &'static str) -> Result<RawDetection, String> {
+        if self.class_name != class {
+            return Err("Detector checkpoint class mismatch".into());
+        }
+        Ok(RawDetection {
+            frame_index: self.frame_index,
+            class_name: class,
+            score: self.score,
+            bbox_xyxy_norm: self.bbox_xyxy_norm,
+            query_index: self.query_index,
+            touch_probability: self.touch_probability,
+            head_point_norm: self.head_point_norm,
+        })
+    }
 }
 
 pub(super) struct DetectionJournal {
@@ -169,20 +186,7 @@ impl DetectionJournal {
                 .map_err(|e| format!("Invalid detector checkpoint observations: {e}"))?;
             let records = rows
                 .into_iter()
-                .map(|row| {
-                    if row.class_name != self.class {
-                        return Err("Detector checkpoint class mismatch".to_owned());
-                    }
-                    Ok(RawDetection {
-                        frame_index: row.frame_index,
-                        class_name: self.class,
-                        score: row.score,
-                        bbox_xyxy_norm: row.bbox_xyxy_norm,
-                        query_index: row.query_index,
-                        touch_probability: row.touch_probability,
-                        head_point_norm: row.head_point_norm,
-                    })
-                })
+                .map(|row| row.into_raw(self.class))
                 .collect::<Result<Vec<_>, String>>()?;
             self.validate(first_frame, &records)?;
             self.valid_bytes += line.len() as u64;

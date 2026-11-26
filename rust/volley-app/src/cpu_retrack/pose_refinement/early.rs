@@ -37,6 +37,7 @@ impl CompletedRallies {
 }
 
 pub(crate) struct EarlyPoseOptions {
+    pub parallel_rally_poses: bool,
     pub tracking: TrackingOptions,
     pub interpolate_players: bool,
     pub threads: usize,
