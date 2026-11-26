@@ -82,9 +82,6 @@ pub(crate) fn candidates(
             .filter_map(|(offset, point)| {
                 let frame = first + offset;
                 let [x, y] = (*point)?;
-                if motion.interpolated.get(frame).copied().unwrap_or(true) {
-                    return None;
-                }
                 Some(volley_core::motion::BallObservation {
                     frame: frame as i64,
                     x: x * f64::from(width),
@@ -92,8 +89,37 @@ pub(crate) fn candidates(
                 })
             })
             .collect::<Vec<_>>();
+        let observed = points
+            .iter()
+            .copied()
+            .filter(|point| {
+                !motion
+                    .interpolated
+                    .get(point.frame as usize)
+                    .copied()
+                    .unwrap_or(true)
+            })
+            .collect::<Vec<_>>();
+        let terminal =
+            volley_core::motion::terminal_ground_contacts(&points, court, width, height, end)
+                .into_iter()
+                .filter(|contact| {
+                    let frame = contact.frame as usize;
+                    let measured = |i: usize| {
+                        motion.points.get(i).is_some_and(Option::is_some)
+                            && !motion.interpolated.get(i).copied().unwrap_or(true)
+                    };
+                    measured(frame)
+                        && (frame.saturating_sub(4)..frame)
+                            .filter(|&i| measured(i))
+                            .count()
+                            >= 2
+                        && (frame + 1..=frame + 14).filter(|&i| measured(i)).count() >= 2
+                });
         for contact in
-            volley_core::motion::rolling_ground_contacts(&points, court, width, height, end)
+            volley_core::motion::rolling_ground_contacts(&observed, court, width, height, end)
+                .into_iter()
+                .chain(terminal)
         {
             if !(start..=end).contains(&contact.frame) {
                 continue;
@@ -528,6 +554,39 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn short_roll_uses_interpolated_descent_but_requires_measured_tail() {
+        let court = CourtTransform::new([[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]]).unwrap();
+        let mut motion = volley_core::ball_interpolation::StabilizedBallMotion {
+            points: vec![None; 300],
+            interpolated: vec![false; 300],
+            rejected_frames: vec![],
+            confidence_frames: 8,
+            observed_frames: 7,
+        };
+        for frame in 100..=104 {
+            motion.points[frame] = Some([0.51, 0.52 + (frame - 100) as f64 * 0.03]);
+        }
+        motion.interpolated[102] = true;
+        motion.points[105] = Some([0.508, 0.644]);
+        motion.points[107] = Some([0.505, 0.644]);
+        motion.points[170] = Some([0.4, 0.3]);
+        let cancel = AtomicBool::new(false);
+        let run = |motion: &volley_core::ball_interpolation::StabilizedBallMotion| {
+            candidates(motion, &[], &[(0, 239)], Some(&court), 1000, 1000, &cancel).unwrap()
+        };
+        let contacts = run(&motion);
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].frame, 104);
+        motion.interpolated[105] = true;
+        motion.interpolated[107] = true;
+        assert!(run(&motion).is_empty());
+        motion.interpolated[105] = false;
+        motion.interpolated[107] = false;
+        motion.points[110] = Some([0.505, 0.58]);
+        assert!(run(&motion).is_empty());
     }
 
     #[test]

@@ -5,7 +5,8 @@
 mod ground_detector;
 mod touch_detector;
 pub use ground_detector::{
-    classify_ground_contact, rolling_ground_contacts, GroundContact, GROUND_DETECTOR_VERSION,
+    classify_ground_contact, rolling_ground_contacts, terminal_ground_contacts, GroundContact,
+    GROUND_DETECTOR_VERSION,
 };
 pub use touch_detector::{
     downward_to_upward_breaks, trajectory_breaks, trajectory_breaks_configured,

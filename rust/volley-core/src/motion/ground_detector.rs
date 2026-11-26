@@ -1,7 +1,7 @@
 use super::{BallObservation, TrajectoryBreak};
 use crate::court_geometry::CourtTransform;
 
-pub const GROUND_DETECTOR_VERSION: &str = "court_ball_roll_v7";
+pub const GROUND_DETECTOR_VERSION: &str = "court_ball_roll_v8";
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroundContact {
@@ -274,6 +274,128 @@ pub fn rolling_ground_contacts(
     contacts
 }
 
+pub fn terminal_ground_contacts(
+    points: &[BallObservation],
+    court: &CourtTransform,
+    width: u32,
+    height: u32,
+    rally_end_frame: u64,
+) -> Vec<GroundContact> {
+    if width == 0
+        || height == 0
+        || points.windows(2).any(|p| p[0].frame >= p[1].frame)
+        || points.iter().any(|p| {
+            p.frame < 0 || p.frame > i32::MAX as i64 || !p.x.is_finite() || !p.y.is_finite()
+        })
+    {
+        return Vec::new();
+    }
+    let mut contacts: Vec<GroundContact> = Vec::new();
+    for split in 5..points.len() {
+        let before = &points[split - 5..split];
+        if points[split].frame - before[4].frame > 6
+            || before.windows(2).any(|p| p[1].frame - p[0].frame > 2)
+        {
+            continue;
+        }
+        if let Some(contact) = terminal_rolling_transition(
+            before,
+            &points[split..],
+            court,
+            width,
+            height,
+            rally_end_frame,
+        ) {
+            if contacts
+                .last()
+                .is_none_or(|prior| contact.frame.saturating_sub(prior.frame) > 12)
+            {
+                contacts.push(contact);
+            }
+        }
+    }
+    contacts
+}
+
+fn terminal_rolling_transition(
+    before: &[BallObservation],
+    following: &[BallObservation],
+    court: &CourtTransform,
+    width: u32,
+    height: u32,
+    rally_end_frame: u64,
+) -> Option<GroundContact> {
+    let [w, h] = [f64::from(width), f64::from(height)];
+    let first = before[0];
+    let impact = *before.last()?;
+    let span = (impact.frame - first.frame) as f64;
+    let descent = (impact.y - first.y) / h;
+    let incoming_speed = ((impact.x - first.x) / w).hypot(descent) / span;
+    if descent < 0.075
+        || descent / span < 0.012
+        || before.windows(2).any(|p| p[1].y + h * 0.003 < p[0].y)
+    {
+        return None;
+    }
+    let mut previous = impact;
+    let mut count = 0;
+    for point in following {
+        if point.frame - previous.frame > 6 {
+            break;
+        }
+        let speed = ((point.x - previous.x) / w).hypot((point.y - previous.y) / h)
+            / (point.frame - previous.frame) as f64;
+        if point.frame - impact.frame > 14
+            || point.y > impact.y + h * 0.006
+            || point.y < impact.y - h * 0.025
+            || speed > incoming_speed * 0.5
+        {
+            return None;
+        }
+        previous = *point;
+        count += 1;
+    }
+    if count < 2
+        || previous.frame - impact.frame < 3
+        || ((previous.x - impact.x) / w).hypot((previous.y - impact.y) / h)
+            / (previous.frame - impact.frame) as f64
+            > incoming_speed * 0.35
+        || following.get(count).map_or_else(
+            || rally_end_frame.saturating_sub(previous.frame as u64) < 15,
+            |next| next.frame - previous.frame < 16,
+        )
+    {
+        return None;
+    }
+    let position = [impact.x / w, impact.y / h];
+    let zones = court.zones()?;
+    let top = zones
+        .near_half
+        .iter()
+        .chain(&zones.far_half)
+        .map(|p| p[1])
+        .reduce(f64::min)?;
+    if position[1] < top + 0.12 {
+        return None;
+    }
+    let [x, y] = court.to_court(position)?;
+    let distance = (x.abs() - crate::court_geometry::COURT_LENGTH_M / 2.0)
+        .max(y.abs() - crate::court_geometry::COURT_WIDTH_M / 2.0);
+    if distance > 0.8 {
+        return None;
+    }
+    let landing = if distance.abs() <= 0.25 {
+        "line_uncertain"
+    } else {
+        court.tentative_landing(position)?
+    };
+    Some(GroundContact {
+        frame: impact.frame as u64,
+        position,
+        landing: landing.to_owned(),
+    })
+}
+
 fn rolling_transition(
     before: &[BallObservation],
     after: &[BallObservation],
@@ -514,6 +636,48 @@ mod tests {
             p.y -= (p.frame - 4) as f64 * 16.0;
         }
         assert!(rolling_ground_contacts(&points, &court(), 1000, 1000, 30).is_empty());
+    }
+
+    #[test]
+    fn short_damped_tail_before_tracking_loss_ends_merged_rally() {
+        let c = court();
+        for tail in [
+            vec![(5, 508.0, 644.0), (7, 505.0, 644.0)],
+            vec![
+                (8, 491.0, 627.0),
+                (9, 490.0, 625.0),
+                (10, 489.0, 625.0),
+                (11, 487.0, 626.0),
+                (12, 484.0, 625.0),
+                (13, 483.0, 627.0),
+                (14, 478.0, 631.0),
+                (15, 476.0, 632.0),
+            ],
+        ] {
+            let mut points = (0..5)
+                .map(|frame| BallObservation {
+                    frame,
+                    x: 510.0,
+                    y: 520.0 + frame as f64 * 30.0,
+                })
+                .collect::<Vec<_>>();
+            points.extend(
+                tail.into_iter()
+                    .map(|(frame, x, y)| BallObservation { frame, x, y }),
+            );
+            points.push(BallObservation {
+                frame: 70,
+                x: 400.0,
+                y: 300.0,
+            });
+            let contacts = terminal_ground_contacts(&points, &c, 1000, 1000, 100);
+            assert_eq!(contacts.len(), 1);
+            assert_eq!(contacts[0].frame, 4);
+            for p in &mut points[5..] {
+                p.y = 640.0 - (p.frame - 4) as f64 * 22.0;
+            }
+            assert!(terminal_ground_contacts(&points, &c, 1000, 1000, 100).is_empty());
+        }
     }
 
     #[test]

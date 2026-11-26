@@ -272,13 +272,29 @@ impl RallyMask {
         ground_frames.dedup();
         let detected = motion.detected;
         let mut grounded_intervals = Vec::new();
+        let mut short_grounded = Vec::new();
+        let minimum = crate::cpu_retrack::ball_track::MIN_RALLY_FRAMES;
+        let preroll = u64::from(
+            settings
+                .padding_before_ms
+                .min(PrimaryRallySettings::default().padding_before_ms),
+        ) * 30
+            / 1000;
         for (mut start, end) in motion.merged {
+            let initial_start = start;
             loop {
                 let index = ground_frames.partition_point(|&frame| frame < start);
                 let Some(&ground) = ground_frames.get(index).filter(|&&frame| frame <= end) else {
                     grounded_intervals.push((start, end));
                     break;
                 };
+                let length = ground - start + 1;
+                if start == initial_start
+                    && length < minimum
+                    && length + start.min(preroll) >= minimum
+                {
+                    short_grounded.push((start, ground));
+                }
                 grounded_intervals.push((start, ground));
                 let next = detected.partition_point(|&(left, _)| left <= ground);
                 let Some(&(next_start, _)) = detected.get(next).filter(|&&(left, _)| left <= end)
@@ -288,7 +304,22 @@ impl RallyMask {
                 start = next_start;
             }
         }
-        let merged = crate::cpu_retrack::ball_track::filter_short_rallies(grounded_intervals);
+        let mut merged = crate::cpu_retrack::ball_track::filter_short_rallies(grounded_intervals);
+        merged.extend(short_grounded);
+        merged.sort_unstable();
+        let padded = pad_rally_intervals(
+            &merged,
+            frames,
+            settings.padding_before_ms,
+            settings.padding_after_ms,
+        );
+        let merged = merged
+            .into_iter()
+            .zip(padded)
+            .filter_map(|((start, end), (padded_start, _))| {
+                (end - padded_start + 1 >= minimum).then_some((start, end))
+            })
+            .collect::<Vec<_>>();
         let rally_intervals = pad_rally_intervals(
             &merged,
             frames,
@@ -610,6 +641,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mask.merged, vec![(80, 240), (500, 710)]);
+    }
+
+    #[test]
+    fn ground_closed_rally_can_keep_short_deficit_from_configured_preroll() {
+        let samples = moving_samples(80, 330);
+        for (before_ms, expected) in [(500, vec![(80, 224)]), (0, vec![])] {
+            let settings = PrimaryRallySettings {
+                padding_before_ms: before_ms,
+                ..PrimaryRallySettings::default()
+            };
+            let (mask, _) = RallyMask::with_ball_stabilizer(
+                &samples,
+                900,
+                settings,
+                BallStabilizerSettings::default(),
+                |_, preliminary| {
+                    assert_eq!(preliminary, &[(80, 321)]);
+                    Ok(vec![224])
+                },
+            )
+            .unwrap();
+            assert_eq!(mask.merged, expected);
+            if before_ms != 0 {
+                assert_eq!(mask.rally_intervals, vec![(65, 239)]);
+            }
+        }
+        let (mask, _) = RallyMask::with_ball_stabilizer(
+            &samples,
+            900,
+            PrimaryRallySettings {
+                padding_before_ms: 60_000,
+                ..PrimaryRallySettings::default()
+            },
+            BallStabilizerSettings::default(),
+            |_, _| Ok(vec![180]),
+        )
+        .unwrap();
+        assert!(mask.merged.is_empty());
     }
 
     #[test]
