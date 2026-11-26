@@ -209,6 +209,7 @@
   const gpuProfile=()=>({
       stride:9,
       person_detector:$("studio-gpu-person-detector").value,
+      parallel_rally_poses:$("studio-gpu-parallel-rally-poses").checked,
       gpu_memory_limit_mb:inputValue("studio-gpu-memory"),
       cpu_threads:inputValue("studio-gpu-threads"),
       pose_enabled:$("studio-gpu-pose-enabled").value==="1",
@@ -724,7 +725,7 @@
     ball:["#studio-gpu-stride","#studio-gpu-memory","#studio-gpu-threads"],
     ball_stabilizer:["#studio-post-ball-stabilizer-gap","#studio-post-ball-stabilizer-step"],
     rallies:["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds","#studio-gpu-rally-stationary-ms","#studio-gpu-rally-padding-before-ms","#studio-gpu-rally-padding-after-ms"],
-    players:["#studio-gpu-person-detector","#studio-gpu-person-stride"],
+    players:["#studio-gpu-person-detector","#studio-gpu-person-stride","#studio-gpu-parallel-rally-poses"],
     pose:["#studio-gpu-pose-enabled","#studio-gpu-interpolate-pose"],
     boxes:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap","#studio-post-nms"],
     tracking:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap",

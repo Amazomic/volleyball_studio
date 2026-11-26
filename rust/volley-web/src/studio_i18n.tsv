@@ -394,6 +394,7 @@ RTMPose-M · плавные точки (между измерениями — и
 VBallNet определяет мяч.	VBallNet detects the ball.
 Детектор игроков + RTMPose	Player detector + RTMPose
 Детектор игроков	Player detector
+Обрабатывать позы для розыгрышей параллельно	Process rally poses in parallel
 VBallNet определяет мяч. Выбранный RF-DETR и RTMPose определяют игроков и скелеты. Результат сохраняется для повторной постобработки.	VBallNet detects the ball. The selected RF-DETR and RTMPose detect players and body landmarks. The result is saved for post-processing.
 определяет игроков и скелеты. Результат сохраняется для повторной постобработки.	detects players and skeletons. Results are saved for repeated postprocessing.
 Исходное видео	Source video

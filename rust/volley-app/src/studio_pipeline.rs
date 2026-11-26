@@ -448,6 +448,7 @@ pub async fn history(
 #[serde(default, deny_unknown_fields)]
 pub struct GpuProfile {
     person_detector: DetectorVariant,
+    parallel_rally_poses: bool,
     stride: usize,
     gpu_memory_limit_mb: u64,
     cpu_threads: usize,
@@ -469,6 +470,7 @@ impl Default for GpuProfile {
     fn default() -> Self {
         Self {
             person_detector: DetectorVariant::default(),
+            parallel_rally_poses: true,
             stride: 9,
             gpu_memory_limit_mb: 0,
             cpu_threads: 0,
@@ -2333,6 +2335,7 @@ async fn pipeline(
                         request.gpu.primary_rallies,
                         request.post.ball_stabilizer,
                         block_mode.then(|| cpu_retrack::EarlyPoseOptions {
+                            parallel_rally_poses: request.gpu.parallel_rally_poses,
                             tracking: request.post.tracking,
                             interpolate_players: request.post.interpolate_players,
                             threads: request.gpu.cpu_threads,
@@ -5305,6 +5308,14 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(profile.gpu.stride, 9);
+        assert!(profile.gpu.parallel_rally_poses);
+        let sequential: StartRequest = serde_json::from_value(json!({
+            "project_id":"abc123def456","video":"match.mp4",
+            "gpu":{"parallel_rally_poses":false}
+        }))
+        .unwrap();
+        assert!(!sequential.gpu.parallel_rally_poses);
+        assert_eq!(json!(sequential.gpu)["parallel_rally_poses"], false);
         assert_eq!(profile.gpu.cpu_threads, 0);
         assert_eq!(profile.gpu.gpu_memory_limit_mb, 0);
         let manual: StartRequest = serde_json::from_value(json!({
