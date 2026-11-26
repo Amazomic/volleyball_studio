@@ -87,8 +87,8 @@ const running={...current,status:"running",queue_id:id,project_queue:{active:tru
 result.updateLiveHistory(running);
 assert.equal(ui.historyList.children.length,0);
 state.historyRows=[
-  {id,mode:"full",video:"match.mp4",status:"complete",stages:[],started_ms:1000},
-  {id:"b".repeat(32),mode:"gpu",video:"older.mp4",status:"complete",stages:[],started_ms:500}
+  {id,project_id:project,mode:"full",video:"match.mp4",status:"complete",stages:[],started_ms:1000},
+  {id:"b".repeat(32),project_id:"aaaabbbbcccc",mode:"gpu",video:"older.mp4",status:"complete",stages:[],started_ms:500}
 ];
 result.renderHistory();
 assert.equal(ui.historyList.children.length,1,"Active queue must remain hidden even after its first video completes");
@@ -97,9 +97,9 @@ assert.strictEqual(progress.parent,host);
 assert.strictEqual(logPanel.parent,host);
 const completed={...running,status:"complete",id:secondId,project_queue:{active:false}};
 result.updateLiveHistory(completed);
-state.historyRows=[{id,mode:"full",status:"complete",started_ms:1000,duration_ms:5000,
-  videos:[{id,video:"match.mp4",status:"complete",stages:[]},
-    {id:secondId,video:"second.mp4",status:"complete",stages:[]}]}];
+state.historyRows=[{id,project_id:project,mode:"full",status:"complete",started_ms:1000,duration_ms:5000,
+  videos:[{id,project_id:project,video:"match.mp4",status:"complete",stages:[]},
+    {id:secondId,project_id:project,video:"second.mp4",status:"complete",stages:[]}]}];
 result.renderHistory();
 assert.equal(ui.historyList.children.length,1,"One archive entry for both videos");
 let row=ui.historyList.children[0];
@@ -125,8 +125,8 @@ const restoredHost=new Node("div");restoredHost.append(restoredUi.progress,resto
 const restoredState={
   latestPipeline:null,
   historyRows:[
-    {id,mode:"post",video:"match.mp4",status:"complete",duration_ms:90000,stages:[]},
-    {id:"b".repeat(32),mode:"gpu",video:"older.mp4",status:"complete",stages:[]}
+    {id,project_id:"aaaabbbbcccc",mode:"post",video:"match.mp4",status:"complete",duration_ms:90000,stages:[]},
+    {id:"b".repeat(32),project_id:"aaaabbbbcccc",mode:"gpu",video:"older.mp4",status:"complete",stages:[]}
   ],
   historyFilter:"all",historyOffset:0,historyProject:"aaaabbbbcccc"
 };

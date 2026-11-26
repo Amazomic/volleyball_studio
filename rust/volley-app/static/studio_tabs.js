@@ -1359,7 +1359,11 @@
     const status=state.latestPipeline;
     return status&&status.project_id===projectId()&&status.id&&status.status!=="idle"?status:null;
   };
-  const projectHistoryRows=()=>state.historyProject===projectId()?state.historyRows:[];
+  const projectHistoryRows=()=>{
+    const project=projectId();
+    return project&&state.historyProject===project?state.historyRows.filter(row=>
+      row?.project_id===project&&(!Array.isArray(row.videos)||row.videos.every(video=>video?.project_id===project))):[];
+  };
   const renderGraphSummary=()=>{
     if(!mainGraph||typeof mainGraph.querySelector!=="function")return;
     const video=state.formProject===projectId()?ui.video.value:"";
@@ -1497,7 +1501,12 @@
     renderGraphSummary();
   };
   const loadHistory=async(append=false)=>{
-    const project=projectId(),epoch=++state.historyEpoch,offset=append?state.historyOffset:0;
+    const project=projectId();
+    if(state.historyProject!==project){
+      state.historyProject=project;state.historyRows=[];state.historyOffset=0;append=false;
+      renderHistory();
+    }
+    const epoch=++state.historyEpoch,offset=append?state.historyOffset:0;
     if(!append)state.historyOffset=0;
     ui.historyMore.classList.add("hidden");
     if(!project){ui.historyList.textContent="Выберите проект.";return;}
@@ -1514,7 +1523,7 @@
       state.historyOffset=data.next_offset;
       ui.historyMore.classList[data.has_more?"remove":"add"]("hidden");
       renderHistory();
-    }catch(error){if(epoch===state.historyEpoch){
+    }catch(error){if(epoch===state.historyEpoch&&project===projectId()){
       if(append)ui.historyMore.classList.remove("hidden");
       else if(liveHistory())renderHistory();
       else ui.historyList.textContent="Не удалось загрузить историю: "+String(error.message||error);
