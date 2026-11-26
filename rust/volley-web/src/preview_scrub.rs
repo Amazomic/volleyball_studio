@@ -1,10 +1,10 @@
 //! Pure, deterministic keyboard-scrub policy for the browser's video player.
 //! DOM events and HTMLVideoElement.currentTime stay in the JS platform adapter.
 
-const TAP_SECONDS: f64 = 0.1;
+const TAP_SECONDS: f64 = 0.001;
 const HOLD_DELAY_MS: f64 = 280.0;
 const HOLD_DOUBLING_MS: f64 = 650.0;
-const INITIAL_SECONDS_PER_SECOND: f64 = 2.5;
+const INITIAL_SECONDS_PER_SECOND: f64 = 0.1;
 const MAX_SECONDS_PER_SECOND: f64 = 80.0;
 const MAX_FRAME_MS: f64 = 200.0;
 
@@ -16,7 +16,7 @@ fn signed_direction(direction: i32) -> f64 {
     }
 }
 
-/// One discrete arrow-key press: exactly one tenth of a second in either direction.
+/// One discrete arrow-key press: exactly one millisecond in either direction.
 #[no_mangle]
 pub extern "C" fn volley_preview_seek_tap(direction: i32) -> f64 {
     signed_direction(direction) * TAP_SECONDS
@@ -51,9 +51,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tap_is_always_one_tenth_of_a_second() {
-        assert_eq!(volley_preview_seek_tap(-1), -0.1);
-        assert_eq!(volley_preview_seek_tap(1), 0.1);
+    fn tap_is_always_one_millisecond() {
+        assert_eq!(volley_preview_seek_tap(-1), -0.001);
+        assert_eq!(volley_preview_seek_tap(1), 0.001);
         assert_eq!(volley_preview_seek_tap(0), 0.0);
         assert_eq!(volley_preview_seek_tap(7), 0.0);
     }
@@ -63,8 +63,8 @@ mod tests {
         for held in [0.0, 16.0, 279.99] {
             assert_eq!(volley_preview_seek_hold_delta(1, held, 100.0), 0.0);
         }
-        assert_eq!(volley_preview_seek_hold_delta(1, 280.0, 100.0), 0.25);
-        assert_eq!(volley_preview_seek_hold_delta(-1, 280.0, 100.0), -0.25);
+        assert_eq!(volley_preview_seek_hold_delta(1, 280.0, 100.0), 0.01);
+        assert_eq!(volley_preview_seek_hold_delta(-1, 280.0, 100.0), -0.01);
     }
 
     #[test]

@@ -23,7 +23,7 @@ assert.match(css,/#studio-preview-view \.video-playback-mode\{\s*position:absolu
 assert.match(css,/grid-template-areas:"player list" "timeline timeline"/);
 assert.match(js,/ui\.video\.play\(\)\.catch\(error=>\s*message/);
 assert.match(js,/document\.addEventListener\("keydown",event=>\{[\s\S]*?event\.stopPropagation\(\);[\s\S]*?toggleVideoPlayback\(\);\s*\},true\)/);
-assert.match(js,/\["INPUT","TEXTAREA","SELECT"\]\.includes\(event\.target\?\.tagName\)/);
+assert.match(js,/isTypingSpaceTarget\(event\.target\)/);
 
 const start=js.indexOf('  const nextRally=()=>{');
 const end=js.indexOf('  ui.video.addEventListener("timeupdate"',start);

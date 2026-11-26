@@ -3042,7 +3042,8 @@
       Number.isFinite(ui.video.currentTime)&&s.videoKey===s.project+":"+s.video?
         ui.video.currentTime:s.seekAt));
     timeline.playhead.style.left=duration?(100*position/duration)+"%":"0%";
-    timeline.middle.textContent=timeLabel(Math.floor(position*10+0.5)/10)+"."+String(Math.floor(position*10+0.5)%10);
+    const milliseconds=Math.round(position*1000);
+    timeline.middle.textContent=timeLabel(milliseconds/1000)+"."+String(milliseconds%1000).padStart(3,"0");
     timeline.track.setAttribute("aria-valuemax",String(Math.ceil(duration)));
     timeline.track.setAttribute("aria-valuenow",String(Math.floor(position)));
     timeline.track.setAttribute("aria-valuetext",
@@ -3209,7 +3210,7 @@
         actual.length+" касаний (CPU) · "+floorContacts(raw).length+" касаний пола · "+
         attacks+" атак · "+blocks+" блоков";
       const duration=timelineDuration();
-      timeline.middle.textContent="00:00.0";
+      timeline.middle.textContent="00:00.000";
       timeline.end.textContent=timeLabel(duration);
       drawTimeline();syncFavoritesSelection();drawOverlay();
       refreshRallyCardTouchTicks();updateRallyCardProgress();
@@ -3311,13 +3312,21 @@
     if(event.detail?.video===ui.video&&event.detail?.state==="failed")
       schedulePreviewRecovery(s.project+":"+s.video);
   });
-  const seekTimeline=seconds=>{
-    if((!overlay.raw&&!timeline.data)||!s.video||(!overlay.raw&&!s.run))return;
+  const seekTimeline=(seconds,keyboard=false)=>{
+    if(!s.video||(!keyboard&&((!overlay.raw&&!timeline.data)||(!overlay.raw&&!s.run))))return;
     const duration=timelineDuration();
     if(!duration)return;
-    const position=Math.max(0,Math.min(Math.max(0,duration-0.05),seconds));
-    s.stopAt=null;s.clipStart=null;s.clipEnd=null;s.seekAt=position;
+    const position=Math.max(0,Math.min(keyboard?duration:Math.max(0,duration-0.05),seconds));
+    if(!keyboard)s.keyboardRallyAnchor=null;
+    s.seekAt=position;
     timeline.playhead.style.left=(100*position/duration)+"%";
+    if(keyboard&&s.current&&s.clipStart!==null&&s.clipEnd!==null&&
+       position>=s.clipStart&&position<s.clipEnd){
+      s.stopAt=s.playbackMode==="free"?null:s.clipEnd;
+      if(ui.video.readyState>=1)try{ui.video.currentTime=position;}catch{}
+      drawTimeline();return;
+    }
+    s.stopAt=null;s.clipStart=null;s.clipEnd=null;
     if(s.current){s.current="";cards();}
     // Preserve player boxes and trajectory when seeking outside the selected card.
     if(!overlay.source)setOverlaySource({motion_events:[]});
@@ -4189,10 +4198,17 @@
       ui.events.append(pill);
     }
   };
+  const alignActiveRally=()=>{
+    const active=ui.list.querySelector(".rally-card.active");
+    if(!active)return;
+    const top=active.getBoundingClientRect().top-ui.list.getBoundingClientRect().top;
+    ui.list.scrollTop=Math.max(0,ui.list.scrollTop+top-ui.list.clientTop);
+  };
   const view=(item,requestedTime=null)=>{
     if(!s.project||!s.video)return;
+    s.keyboardRallyAnchor=null;
     if(s.current!==item.candidate_id){
-      s.current=item.candidate_id;cards();
+      s.current=item.candidate_id;cards();alignActiveRally();
     }
     // Full timeline entries may not belong to the currently loaded (or sorted) card page.
     const {start,end}=rallyClipFrames(item);
@@ -4355,6 +4371,7 @@
         const card=make("article","rally-card "+(byBall?"training-ball":"training-touch")+
           (s.current===id?" active":""));
         card.tabIndex=0;card.setAttribute("role","button");
+        card.setAttribute("data-rally-id",id);
         const open=()=>view(candidate);
         card.setAttribute("aria-label",(byBall?"Розыгрыш по мячу":"Объединённый CPU-розыгрыш")+
           " · "+second(start+(Number(s.analysisOffset)||0)*fps())+
@@ -4393,6 +4410,7 @@
       const card=make("article","rally-card"+(gold?" gold":"")+
         (s.current===id?" active":"")+(trainingList?" training-touch":""));
       card.tabIndex=0;card.setAttribute("role","button");
+      card.setAttribute("data-rally-id",id);
       card.setAttribute("aria-label","Просмотр розыгрыша "+clock(item.detected_start_frame+(Number(s.analysisOffset)||0)*fps()));
       card.addEventListener("click",e=>{
         if(!e.target.closest(".rally-card-progress,button,label,input"))view(item);
@@ -4468,7 +4486,7 @@
       });
       progress.addEventListener("keydown",event=>{
         const key=event.key;
-        if(!["ArrowLeft","ArrowRight","Home","End","PageUp","PageDown","Enter"," "].includes(key))return;
+        if(!["Home","End","PageUp","PageDown","Enter"," "].includes(key))return;
         event.preventDefault();event.stopPropagation();
         if(key==="Enter"||key===" "){
           view(item,s.current===id&&Number.isFinite(ui.video.currentTime)?ui.video.currentTime:(Number(s.analysisOffset)||0)+start/fps());
@@ -4479,7 +4497,7 @@
         const duration=(end-start+1)/fps();
         const fraction=key==="Home"?0:key==="End"?1:
           (current-(Number(s.analysisOffset)||0)-start/fps()+(
-            key==="ArrowRight"||key==="PageUp"?1:-1
+            key==="PageUp"?1:-1
           )*(key==="PageUp"||key==="PageDown"||event.shiftKey?5:1))/duration;
         playFromFraction(fraction);
       });
@@ -4529,30 +4547,38 @@
   };
   // Fetch next rally pages when the right-hand list is scrolled to its end.
   const loadMore=async()=>{
-    if(reference.active||s.loadingMore||!s.canLoadMore||!s.project||!s.run||
+    if(s.loadingMore)return s.loadingMore;
+    if(reference.active||!s.canLoadMore||!s.project||!s.run||
        (training.active&&!timelineRallyLayers.touches.checked))return;
-    s.loadingMore=true;
     const token=s.generation,project=s.project,run=s.run;
     const offset=s.items.length;
-    try{
-      const raw=await previewCache.load(url("/api/cpu/native/rallies/preview",{
-        project_id:project,rally_run_id:run,offset,limit:s.limit,
-        ...rallyListQuery()
-      }),900000,true);
-      if(token!==s.generation||project!==s.project||run!==s.run)return;
-      if(raw.schema!=="volley-native-rally-preview/1"||
-        !validSurfaceContacts(raw)||raw.authoritative_game_events!==false||
-        raw.automatic_montage_eligible!==false||
-        !Array.isArray(raw.items))
-        throw Error("Неподдерживаемая версия предварительного CPU-анализа");
-      s.items.push(...raw.items);
-      s.canLoadMore=raw.items.length>0&&s.items.length<s.filtered;
-      cards();
-      drawTimeline();
-    }catch(error){
-      if(token===s.generation)
-        message("Не удалось догрузить розыгрыши: "+String(error?.message||error),"error");
-    }finally{s.loadingMore=false;}
+    const pending=(async()=>{
+      try{
+        const raw=await previewCache.load(url("/api/cpu/native/rallies/preview",{
+          project_id:project,rally_run_id:run,offset,limit:s.limit,
+          ...rallyListQuery()
+        }),900000,true);
+        if(token!==s.generation||project!==s.project||run!==s.run)return;
+        if(raw.schema!=="volley-native-rally-preview/1"||
+          !validSurfaceContacts(raw)||raw.authoritative_game_events!==false||
+          raw.automatic_montage_eligible!==false||
+          !Array.isArray(raw.items))
+          throw Error("Неподдерживаемая версия предварительного CPU-анализа");
+        s.items.push(...raw.items);
+        s.canLoadMore=raw.items.length>0&&s.items.length<s.filtered;
+        const active=ui.list.querySelector(".rally-card.active");
+        const bounds=ui.list.getBoundingClientRect();
+        const align=s.current&&(!active||(active.getBoundingClientRect().top>=bounds.top&&
+          active.getBoundingClientRect().top<bounds.bottom));
+        cards();if(align)alignActiveRally();
+        drawTimeline();
+      }catch(error){
+        if(token===s.generation)
+          message("Не удалось догрузить розыгрыши: "+String(error?.message||error),"error");
+      }
+    })();
+    s.loadingMore=pending;
+    try{await pending;}finally{if(s.loadingMore===pending)s.loadingMore=false;}
   };
   const uploadAudio=async()=>{
     const file=ui.music.files&&ui.music.files[0];
@@ -4988,7 +5014,7 @@
     }catch{}
     const duration=timelineDuration();
     if(duration){
-      timeline.middle.textContent="00:00.0";
+      timeline.middle.textContent="00:00.000";
       timeline.end.textContent=timeLabel(duration);
     }
     drawTimeline();updateRallyCardProgress();
@@ -5025,7 +5051,7 @@
   };
   ui.video.addEventListener("timeupdate",()=>{
     updateTimelineProgress();updateRallyCardProgress();
-    if(s.stopAt!==null&&ui.video.currentTime>=s.stopAt)
+    if(!ui.video.paused&&s.stopAt!==null&&ui.video.currentTime>=s.stopAt)
       onRallyBoundary();
   });
   // Media can end before the rounded final-frame boundary; loop must still repeat.
@@ -5069,6 +5095,7 @@
   };
   const toggleVideoPlayback=()=>{
     if(!s.videoKey||!previewIsVisible())return;
+    stopArrowScrub();
     if(ui.video.paused){
       if(ui.video.error){
         // A failed byte-range request must not permanently poison this player.
@@ -5078,7 +5105,8 @@
       }
       // Replay a completed selection from its beginning, not a fraction past its end.
       if(s.playbackMode!=="free"&&s.clipStart!==null&&s.clipEnd!==null&&
-         (ui.video.ended||ui.video.currentTime>=s.clipEnd-0.04)){
+         (ui.video.ended||ui.video.currentTime>=s.clipEnd||
+          (s.stopAt===null&&ui.video.currentTime>=s.clipEnd-0.04))){
         s.seekAt=s.clipStart;s.stopAt=s.clipEnd;
         try{ui.video.currentTime=s.clipStart;}catch{}
       }
@@ -5108,9 +5136,9 @@
   });
   ui.video.addEventListener("click",toggleVideoPlayback);
   // Left/right arrows scrub the one source-wide timeline, including raw GPU.
-  // Rust/WASM owns the precise 0.5 s tap and exponential hold acceleration.
+  // Rust/WASM owns the precise 1 ms tap and exponential hold acceleration.
   // JS only adapts keyboard events, requestAnimationFrame and media seeking.
-  const arrowScrub={direction:0,startedAt:0,lastSeekAt:0,frame:0};
+  const arrowScrub={direction:0,startedAt:0,lastSeekAt:0,frame:0,key:"",generation:0,navigation:0};
   const stopArrowScrub=()=>{
     arrowScrub.direction=0;
     if(arrowScrub.frame)cancelAnimationFrame(arrowScrub.frame);
@@ -5119,35 +5147,64 @@
   const tickArrowScrub=timestamp=>{
     arrowScrub.frame=0;
     if(!arrowScrub.direction)return;
-    if(!previewIsVisible()||s.videoKey!==s.project+":"+s.video||
-       !timelineDuration()){stopArrowScrub();return;}
+    if(!previewIsVisible()||s.videoKey!==arrowScrub.key||s.generation!==arrowScrub.generation||
+       s.videoKey!==s.project+":"+s.video||!timelineDuration()){stopArrowScrub();return;}
     if(timestamp-arrowScrub.lastSeekAt>=85){
       const delta=window.VolleyballUi.engine.volley_preview_seek_hold_delta(
         arrowScrub.direction,timestamp-arrowScrub.startedAt,
         timestamp-arrowScrub.lastSeekAt);
-      if(delta)seekTimeline(s.seekAt+delta);
+      if(delta)seekTimeline(s.seekAt+delta,true);
       arrowScrub.lastSeekAt=timestamp;
     }
     arrowScrub.frame=requestAnimationFrame(tickArrowScrub);
   };
+  const navigateRally=async direction=>{
+    const mounted=()=>Array.from(ui.list.querySelectorAll(".rally-card[data-rally-id]"));
+    const id=card=>card.getAttribute("data-rally-id");
+    const navigation=++arrowScrub.navigation;
+    const anchor=s.keyboardRallyAnchor;
+    const current=s.current||(anchor?.key===s.videoKey&&anchor.generation===s.generation?anchor.id:"");
+    let rows=mounted();
+    const index=rows.findIndex(card=>id(card)===current);
+    const next=index<0?0:index+direction;
+    if(next<0)return;
+    if(next>=rows.length&&direction>0&&s.canLoadMore){
+      const generation=s.generation,key=s.videoKey,selected=s.current;
+      await loadMore();
+      if(arrowScrub.navigation!==navigation||!previewIsVisible()||s.generation!==generation||s.videoKey!==key||s.current!==selected)return;
+      rows=mounted();
+    }
+    if(!rows[next])return;
+    s.keyboardRallyAnchor=null;
+    rows[next].click();
+  };
   document.addEventListener("keydown",event=>{
-    if(event.key!=="ArrowLeft"&&event.key!=="ArrowRight")return;
+    if(!["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].includes(event.key))return;
     if(event.altKey||event.ctrlKey||event.metaKey||event.isComposing||
-       event.target?.closest?.(".rally-card-progress")||
-       ["INPUT","TEXTAREA","SELECT"].includes(event.target?.tagName)||
-       event.target?.isContentEditable||!s.videoKey||!previewIsVisible()||
-       s.videoKey!==s.project+":"+s.video||!timelineDuration())return;
+       isTypingSpaceTarget(event.target)||event.target?.closest?.("dialog[open]")||
+       !s.videoKey||!previewIsVisible()||s.videoKey!==s.project+":"+s.video)return;
+    const horizontal=event.key==="ArrowLeft"||event.key==="ArrowRight";
+    if(horizontal&&!timelineDuration())return;
     event.preventDefault();
-    event.stopPropagation(); // No duplicate seek from the focused timeline slider.
+    event.stopPropagation();
+    if(!horizontal){
+      stopArrowScrub();
+      if(!event.repeat)void navigateRally(event.key==="ArrowDown"?1:-1);
+      return;
+    }
     const direction=event.key==="ArrowRight"?1:-1;
-    if(arrowScrub.direction===direction)return;
+    if(event.repeat||arrowScrub.direction===direction)return;
     stopArrowScrub();
+    arrowScrub.navigation++;
+    if(s.current)s.keyboardRallyAnchor={id:s.current,key:s.videoKey,generation:s.generation};
+    ui.video.pause();
     arrowScrub.direction=direction;
+    arrowScrub.key=s.videoKey;arrowScrub.generation=s.generation;
     arrowScrub.startedAt=performance.now();
     arrowScrub.lastSeekAt=arrowScrub.startedAt;
-    const current=Number.isFinite(ui.video.currentTime)?
+    const current=ui.video.seeking?s.seekAt:Number.isFinite(ui.video.currentTime)?
       ui.video.currentTime:s.seekAt;
-    seekTimeline(current+window.VolleyballUi.engine.volley_preview_seek_tap(direction));
+    seekTimeline(current+window.VolleyballUi.engine.volley_preview_seek_tap(direction),true);
     arrowScrub.frame=requestAnimationFrame(tickArrowScrub);
   },true);
   document.addEventListener("keyup",event=>{
@@ -5156,6 +5213,7 @@
       stopArrowScrub();
   },true);
   window.addEventListener("blur",stopArrowScrub);
+  window.addEventListener("volley:tab-change",stopArrowScrub);
   document.addEventListener("visibilitychange",()=>{
     if(document.hidden)stopArrowScrub();
   });

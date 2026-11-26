@@ -11,7 +11,7 @@ const shortcutEnd=source.indexOf('  ui.video.addEventListener("keydown"',shortcu
 assert.ok(playbackStart>0&&playbackEnd>playbackStart);
 assert.ok(shortcutStart>playbackEnd&&shortcutEnd>shortcutStart);
 
-let visible=true,plays=0,pauses=0;
+let visible=true,plays=0,pauses=0,scrubStops=0;
 const s={videoKey:"p:match.mp4",playbackMode:"free",clipStart:null,clipEnd:null};
 const video={
   paused:true,error:null,ended:false,currentTime:12,
@@ -21,6 +21,7 @@ const video={
 const handlers=[];
 const context={
   s,ui:{video},overlay:{presentedTime:null},previewIsVisible:()=>visible,
+  stopArrowScrub(){scrubStops++;},
   loadPreviewVideo(){throw Error("Unexpected media recovery");},
   message(error){throw Error(error);},
   document:{addEventListener:(type,handler,capture)=>handlers.push({type,handler,capture})}
@@ -102,5 +103,15 @@ assert.equal(pauses,4);
 assert.equal(press().prevented,1);
 assert.equal(video.paused,false,"Another Space press resumes playback");
 assert.equal(plays,5);
+
+s.playbackMode="once";s.clipStart=10;s.clipEnd=20;s.stopAt=20;
+video.paused=true;video.currentTime=19.999;
+press();
+assert.equal(video.currentTime,19.999,"Space resumes a paused millisecond seek near the rally end");
+assert.equal(video.paused,false);
+assert.ok(scrubStops>0,"Playback toggle cancels any active arrow hold");
+video.paused=true;s.stopAt=null;video.currentTime=20;
+press();
+assert.equal(video.currentTime,10,"A completed rally still replays from the start");
 
 console.log("Preview Space: pause/resume over focused controls, text/dialog guards and key-repeat suppression: OK");

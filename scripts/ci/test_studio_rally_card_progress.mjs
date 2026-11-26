@@ -168,8 +168,8 @@ assert.equal(viewContext.ui.video.currentTime,10,
   "Clicking the card body should still start at the beginning");
 assert.equal(playCalls,3);
 assert.equal(drawnPosition,10,"Click must immediately align the playhead with detected start");
-assert.ok(source.includes('event.target?.closest?.(".rally-card-progress")'),
-  "Global media shortcuts must defer to the focused card slider");
+assert.ok(!source.includes('event.target?.closest?.(".rally-card-progress")'),
+  "Focused card sliders must not override global arrows");
 const nextStart=source.indexOf("  const nextRally=()=>{");
 const nextEnd=source.indexOf("  const onRallyBoundary=()=>{",nextStart);
 assert.ok(nextStart>0&&nextEnd>nextStart);
