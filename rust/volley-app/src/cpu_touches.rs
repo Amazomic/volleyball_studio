@@ -1727,6 +1727,87 @@ mod source_track_integrity_tests {
     }
 }
 
+fn previous_touch_side(
+    previous: Option<(u64, Option<volley_core::court_geometry::CourtSide>)>,
+    current: u64,
+    windows: &[(u64, u64)],
+    rally_starts: &[u64],
+    ground_contacts: &[volley_core::motion::GroundContact],
+) -> Option<volley_core::court_geometry::CourtSide> {
+    previous.and_then(|(frame, side)| {
+        let between = |boundary: u64| frame < boundary && boundary <= current;
+        (frame < current
+            && windows
+                .iter()
+                .any(|&(first, last)| first <= frame && current <= last)
+            && !rally_starts.iter().copied().any(between)
+            && !ground_contacts.iter().any(|ground| between(ground.frame)))
+        .then_some(side)
+        .flatten()
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn block_context_never_crosses_rally_or_ground_boundaries() {
+    use volley_core::{court_geometry::CourtSide, motion::GroundContact};
+    let prior = Some((10, Some(CourtSide::Near)));
+    let windows = [(0, 40)];
+    assert_eq!(
+        previous_touch_side(prior, 30, &windows, &[0], &[]),
+        Some(CourtSide::Near)
+    );
+    assert_eq!(
+        previous_touch_side(prior, 30, &[(0, 20), (25, 40)], &[], &[]),
+        None
+    );
+    assert_eq!(previous_touch_side(prior, 30, &windows, &[20], &[]), None);
+    let ground = GroundContact {
+        frame: 20,
+        position: [0.5, 0.5],
+        landing: "out".into(),
+    };
+    assert_eq!(
+        previous_touch_side(prior, 30, &windows, &[], &[ground]),
+        None
+    );
+    assert_eq!(
+        previous_touch_side(Some((10, None)), 30, &windows, &[], &[]),
+        None
+    );
+}
+
+#[expect(clippy::too_many_arguments)]
+fn emit_contextual_touch(
+    writer: &mut BufWriter<std::fs::File>,
+    hash: &mut Sha256,
+    mut event: PhysicalTouchCandidate,
+    previous: &mut Option<(u64, Option<volley_core::court_geometry::CourtSide>)>,
+    windows: &[(u64, u64)],
+    rally_starts: &[u64],
+    ground_contacts: &[volley_core::motion::GroundContact],
+    court: Option<&CourtTransform>,
+    net: Option<[[f64; 2]; 2]>,
+    dimensions: (u32, u32),
+) -> Result<(), String> {
+    let prior_side = previous_touch_side(
+        *previous,
+        event.frame_index,
+        windows,
+        rally_starts,
+        ground_contacts,
+    );
+    let ball_point = [
+        event.ball_x_px / f64::from(dimensions.0),
+        event.ball_y_px / f64::from(dimensions.1),
+    ];
+    let net_contact = court.is_some_and(|c| c.supports_net_contact(ball_point))
+        && volley_core::court_geometry::observed_net_contact(net, ball_point);
+    court_touch::reconcile_block_origin(&mut event, prior_side, net_contact);
+    *previous = Some((event.frame_index, event.court.map(|c| c.side)));
+    emit_record(writer, hash, &event)
+}
+
 fn emit_record(
     writer: &mut BufWriter<std::fs::File>,
     hash: &mut Sha256,
@@ -2776,6 +2857,7 @@ fn detect_stream_with_pose(
     let mut emitted: u64 = 0;
     let mut motion_candidates: u64 = 0;
     let mut pending: Option<PhysicalTouchCandidate> = None;
+    let mut previous_touch = None;
     let mut initial_serves = Vec::<InitialServeProposal>::new();
     let mut ground_contacts = Vec::<volley_core::motion::GroundContact>::new();
     let separation = (settings.min_interval_sec * 30.0).round().max(1.0) as u64;
@@ -3121,7 +3203,18 @@ fn detect_stream_with_pose(
                 motion_candidates += 1;
 
                 if let Some(last) = select_pending_touch(&mut pending, event, separation) {
-                    emit_record(&mut writer, &mut output_hash, &last)?;
+                    emit_contextual_touch(
+                        &mut writer,
+                        &mut output_hash,
+                        last,
+                        &mut previous_touch,
+                        windows,
+                        rally_starts,
+                        &ground_contacts,
+                        court,
+                        net,
+                        (width, height),
+                    )?;
                     emitted += 1;
                 }
             }
@@ -3254,7 +3347,18 @@ fn detect_stream_with_pose(
         return Err("CPU replay SHA-256 changed while reading Touch input".into());
     }
     if let Some(last) = pending {
-        emit_record(&mut writer, &mut output_hash, &last)?;
+        emit_contextual_touch(
+            &mut writer,
+            &mut output_hash,
+            last,
+            &mut previous_touch,
+            windows,
+            rally_starts,
+            &ground_contacts,
+            court,
+            net,
+            (width, height),
+        )?;
         emitted += 1;
     }
     writer

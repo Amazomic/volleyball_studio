@@ -25,7 +25,7 @@ pub(crate) fn filter_on_court(frames: &[TouchFrame], court: &CourtTransform) -> 
         .collect()
 }
 
-pub(crate) const TOUCH_SIDE_ATTRIBUTION_VERSION: &str = "observed_serve_side_v2";
+pub(crate) const TOUCH_SIDE_ATTRIBUTION_VERSION: &str = "block_opponent_side_v3";
 
 pub(crate) fn pre_crossing_tracks(
     events: &[PhysicalTouchCandidate],
@@ -466,25 +466,6 @@ pub(crate) fn annotate(
         let Some(ref mut prediction) = event.action_prediction else {
             continue;
         };
-        // Original Python: above the head AND within 1.6 m of net -> block.
-        if evidence.near_net
-            && matches!(
-                prediction.method,
-                PredictionMethod::PoseKeypointsMotionV1 | PredictionMethod::LearnedPoseV1
-            )
-            && matches!(
-                prediction.kind,
-                ActionKind::Attack | ActionKind::OverheadPass
-            )
-            && prediction.depth_ratio < -0.05
-            && frame.selected_ball.as_ref().is_none_or(|ball| {
-                let [x1, y1, x2, y2] = ball.bbox_xyxy_norm;
-                court.supports_net_contact([(x1 + x2) * 0.5, (y1 + y2) * 0.5])
-            })
-        {
-            prediction.kind = ActionKind::Block;
-            prediction.method = PredictionMethod::CourtPoseMotionV1;
-        }
         // Original Python: serving zone alone is not enough to call a serve.
         // There must be preparation, source-frame reach, and acceleration.
         if (evidence.in_serve_zone || serve_origin_seen(frames, event.frame_index, track_id, court))
@@ -500,6 +481,45 @@ pub(crate) fn annotate(
             prediction.kind = ActionKind::Serve;
             prediction.method = PredictionMethod::CourtPoseMotionV1;
         }
+    }
+}
+
+pub(crate) fn reconcile_block_origin(
+    event: &mut PhysicalTouchCandidate,
+    previous_side: Option<CourtSide>,
+    net_contact: bool,
+) {
+    let Some(prediction) = event.action_prediction.as_mut() else {
+        return;
+    };
+    let sides = previous_side.zip(event.court.map(|c| c.side));
+    let incoming_opponent = sides.is_some_and(|(previous, current)| previous != current);
+    if prediction.kind == ActionKind::Block {
+        if net_contact && incoming_opponent {
+            return;
+        }
+        if sides.is_some_and(|(previous, current)| previous == current) {
+            prediction.kind = ActionKind::OverheadPass;
+        } else {
+            event.action_prediction = None;
+        }
+        return;
+    }
+    if incoming_opponent
+        && net_contact
+        && event.court.is_some_and(|c| c.near_net)
+        && matches!(
+            prediction.method,
+            PredictionMethod::PoseKeypointsMotionV1 | PredictionMethod::LearnedPoseV1
+        )
+        && matches!(
+            prediction.kind,
+            ActionKind::Attack | ActionKind::OverheadPass
+        )
+        && prediction.depth_ratio < -0.05
+    {
+        prediction.kind = ActionKind::Block;
+        prediction.method = PredictionMethod::CourtPoseMotionV1;
     }
 }
 
@@ -949,6 +969,12 @@ mod tests {
         let frames = (0..60).map(|i| frame(i, 0.5, false)).collect::<Vec<_>>();
         let mut events = vec![event(30)];
         annotate(&mut events, &frames, &court());
+        let side = events[0].court.unwrap().side;
+        let other = match side {
+            CourtSide::Near => CourtSide::Far,
+            CourtSide::Far => CourtSide::Near,
+        };
+        reconcile_block_origin(&mut events[0], Some(other), true);
         assert_eq!(
             events[0].action_prediction.as_ref().unwrap().kind,
             ActionKind::Block
@@ -957,10 +983,73 @@ mod tests {
         let far = (0..60).map(|i| frame(i, 0.2, false)).collect::<Vec<_>>();
         let mut events = vec![event(30)];
         annotate(&mut events, &far, &court());
+        let other = match events[0].court.unwrap().side {
+            CourtSide::Near => CourtSide::Far,
+            CourtSide::Far => CourtSide::Near,
+        };
+        reconcile_block_origin(&mut events[0], Some(other), true);
         assert_eq!(
             events[0].action_prediction.as_ref().unwrap().kind,
             ActionKind::Attack
         );
+    }
+
+    #[test]
+    fn block_requires_opponent_contact_in_same_rally() {
+        let frames = (0..60).map(|i| frame(i, 0.5, false)).collect::<Vec<_>>();
+        let mut events = vec![event(30)];
+        annotate(&mut events, &frames, &court());
+        let attack = events.pop().unwrap();
+        let side = attack.court.unwrap().side;
+        let other = match side {
+            CourtSide::Near => CourtSide::Far,
+            CourtSide::Far => CourtSide::Near,
+        };
+        let mut same_attack = attack.clone();
+        reconcile_block_origin(&mut same_attack, Some(side), true);
+        assert_eq!(
+            same_attack.action_prediction.unwrap().kind,
+            ActionKind::Attack
+        );
+        let mut pass = attack.clone();
+        pass.action_prediction.as_mut().unwrap().kind = ActionKind::OverheadPass;
+        let mut same = pass.clone();
+        reconcile_block_origin(&mut same, Some(side), true);
+        assert_eq!(
+            same.action_prediction.unwrap().kind,
+            ActionKind::OverheadPass
+        );
+        let mut opposite = pass.clone();
+        reconcile_block_origin(&mut opposite, Some(other), true);
+        assert_eq!(opposite.action_prediction.unwrap().kind, ActionKind::Block);
+        let mut far = pass.clone();
+        reconcile_block_origin(&mut far, Some(other), false);
+        assert_eq!(
+            far.action_prediction.unwrap().kind,
+            ActionKind::OverheadPass
+        );
+        let mut unknown = pass.clone();
+        reconcile_block_origin(&mut unknown, None, true);
+        assert_eq!(
+            unknown.action_prediction.unwrap().kind,
+            ActionKind::OverheadPass
+        );
+        let mut jump = pass;
+        jump.action_prediction.as_mut().unwrap().kind = ActionKind::Block;
+        let mut own_jump = jump.clone();
+        reconcile_block_origin(&mut own_jump, Some(side), true);
+        assert_eq!(
+            own_jump.action_prediction.unwrap().kind,
+            ActionKind::OverheadPass
+        );
+        let mut opponent_jump = jump.clone();
+        reconcile_block_origin(&mut opponent_jump, Some(other), true);
+        assert_eq!(
+            opponent_jump.action_prediction.unwrap().kind,
+            ActionKind::Block
+        );
+        reconcile_block_origin(&mut jump, None, true);
+        assert!(jump.action_prediction.is_none());
     }
 
     #[test]
