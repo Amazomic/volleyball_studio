@@ -49,6 +49,40 @@ pub struct TimelineQuery {
     pub rally_run_id: String,
 }
 
+fn apply_legacy_preview_timing(
+    state: &AppState,
+    run: &crate::native_rally_evidence::ValidatedRun,
+    value: &mut Value,
+) {
+    let Some(folder) = run.rally_file.parent() else {
+        return;
+    };
+    let Ok(rally) = crate::native_rally_evidence::read_manifest(folder, "rally") else {
+        return;
+    };
+    let nominal = run.analysis_range.map_or(0.0, |range| range.start_sec);
+    let root = crate::projects::project_root(state).join(&run.project_id);
+    let offset = crate::native_rally_evidence::preview_ball_offset(
+        &root,
+        &run.project_source,
+        &rally,
+        &rally["primary_ball_job_id"],
+        None,
+        nominal,
+    );
+    if offset != nominal {
+        value["analysis_offset_sec"] = json!(offset);
+        value["legacy_preroll_correction_sec"] = json!(offset - nominal);
+        if let Some(items) = value["items"].as_array_mut() {
+            for item in items {
+                if item["manual_clip"].is_object() {
+                    item["manual_clip"]["analysis_offset_sec"] = json!(offset);
+                }
+            }
+        }
+    }
+}
+
 /// Complete, compact whole-video index, without paged cards or frame overlays.
 pub async fn timeline(
     State(state): State<Arc<AppState>>,
@@ -56,7 +90,9 @@ pub async fn timeline(
 ) -> ApiResult<Value> {
     let result = tokio::task::spawn_blocking(move || -> Result<Value, ApiError> {
         let run = inspect_project(&state, &query.project_id, &query.rally_run_id)?;
-        montage_material(&state, &run)
+        let mut value = montage_material(&state, &run)?;
+        apply_legacy_preview_timing(&state, &run, &mut value);
+        Ok(value)
     })
     .await
     .map_err(|e| storage::internal(format!("Native rally timeline task: {e}")))??;
@@ -356,6 +392,7 @@ pub async fn preview(
         if fill_saved_initial_serves(&run, &mut page).is_err() {
             page["rally_metadata_status"] = json!("unavailable");
         }
+        apply_legacy_preview_timing(&state, &run, &mut page);
         Ok(page)
     })
     .await

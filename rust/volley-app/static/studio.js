@@ -576,7 +576,7 @@
          overlaySourceId()!==run)return;
       if(isRaw){
         const offset=Number(value.analysis_offset_sec??0);
-        if(!Number.isFinite(offset)||offset<0)throw Error("Недостоверная граница GPU-отрезка");
+        if(!Number.isFinite(offset)||offset< -3600)throw Error("Недостоверная граница GPU-отрезка");
         const sourceKey=[project,run,video].join(":");
         overlay.rawOffsets=overlay.rawOffsets||new Map();
         const previous=overlay.rawOffsets.get(sourceKey);

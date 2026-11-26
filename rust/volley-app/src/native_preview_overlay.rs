@@ -1416,6 +1416,14 @@ fn inspect_gpu_source(
             .validate(dimensions.duration_sec)
             .map_err(storage::bad_request)?;
     }
+    let analysis_offset = crate::native_rally_evidence::preview_ball_offset(
+        &root,
+        &plan.source,
+        &manifest,
+        &manifest["sources"]["vballnet"]["job_id"],
+        manifest["sources"]["vballnet"].get("sha256"),
+        range.map_or(0.0, |r| r.start_sec),
+    );
     Ok((
         path,
         sha,
@@ -1424,7 +1432,7 @@ fn inspect_gpu_source(
         dimensions.height,
         root,
         person_detector,
-        range.map_or(0.0, |r| r.start_sec),
+        analysis_offset,
     ))
 }
 
