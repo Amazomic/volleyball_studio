@@ -1,7 +1,7 @@
 use super::{BallObservation, TrajectoryBreak};
 use crate::court_geometry::CourtTransform;
 
-pub const GROUND_DETECTOR_VERSION: &str = "court_ball_roll_v8";
+pub const GROUND_DETECTOR_VERSION: &str = "court_ball_roll_v9";
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroundContact {
@@ -144,7 +144,7 @@ fn distant_sand_rebound(
         .chain(&zones.far_half)
         .map(|p| p[1])
         .reduce(f64::min)?;
-    if !(top - 0.005..=top + 0.06).contains(&position[1]) {
+    if !(top - 0.005..=top + 0.12).contains(&position[1]) {
         return None;
     }
     let [x, y] = court.to_court(position)?;
@@ -752,6 +752,20 @@ mod tests {
             }
         }
         assert!(classify_ground_contact(&points, &impact, &court, 1000, 1000, 200).is_none());
+    }
+
+    #[test]
+    fn out_sand_damped_rebound_below_far_edge_ends_rally() {
+        let (mut points, mut impact, court) = distant_sand_samples();
+        for p in &mut points {
+            p.x += 45.0;
+            p.y += 80.0;
+        }
+        impact.position[0] += 45.0;
+        impact.position[1] += 80.0;
+        let contact = classify_ground_contact(&points, &impact, &court, 1000, 1000, 200)
+            .expect("damped out rebound below the far edge");
+        assert_eq!(contact.landing, "out");
     }
 
     #[test]

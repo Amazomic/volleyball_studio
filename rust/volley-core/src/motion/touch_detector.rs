@@ -285,7 +285,9 @@ fn smooth_gravity_apex_near(points: &[BallObservation], frame: i64, max_fit_erro
     let Some(flight) = fit(window, points[apex].frame) else {
         return false;
     };
-    if flight.error > 1.5 * max_fit_error_px || flight.y[2] <= 0.0 || 2.0 * flight.x[2].abs() > 0.8
+    if flight.error > 1.5 * max_fit_error_px
+        || flight.y[2] <= 0.0
+        || 2.0 * flight.x[2].abs() > 0.8_f64.max(flight.y[2])
     {
         return false;
     }
@@ -409,7 +411,7 @@ fn occluded_vertical_rebounds(
     let mut results = Vec::new();
     for (index, boundary) in points.windows(2).enumerate() {
         let missing = boundary[1].frame - boundary[0].frame - 1;
-        if !(5..=10).contains(&missing) || index < 4 || index + 5 >= points.len() {
+        if !(3..=10).contains(&missing) || index < 4 || index + 5 >= points.len() {
             continue;
         }
         let before = &points[index - 4..=index];
@@ -453,6 +455,40 @@ fn occluded_vertical_rebounds(
         let anchor = *before.last().unwrap();
         let first_outbound = after[0];
         if (first_outbound.x - anchor.x).abs() > (3.0 * config.max_join_error_px).max(85.0) {
+            continue;
+        }
+        if missing <= 4 {
+            let span = (first_outbound.frame - anchor.frame) as f64;
+            let elapsed =
+                (first_outbound.y - anchor.y - outgoing[1] * span) / (incoming[1] - outgoing[1]);
+            if !(1.0..=span - 1.0).contains(&elapsed) {
+                continue;
+            }
+            let inbound_x = anchor.x + incoming[0] * elapsed;
+            let outbound_x = first_outbound.x - outgoing[0] * (span - elapsed);
+            let mismatch = (inbound_x - outbound_x).abs();
+            if mismatch > config.max_join_error_px {
+                continue;
+            }
+            let frame = anchor.frame + elapsed.round() as i64;
+            results.push(TrajectoryBreak {
+                frame,
+                position: [
+                    (inbound_x + outbound_x) * 0.5,
+                    anchor.y + incoming[1] * elapsed,
+                ],
+                motion: MotionEvidence {
+                    motion_frame: frame,
+                    speed_before: before_speed,
+                    speed_after: after_speed,
+                    angle,
+                    residual,
+                },
+                fit_error: mismatch,
+                before_frames: before.iter().map(|sample| sample.frame).collect(),
+                after_frames: after.iter().map(|sample| sample.frame).collect(),
+                contact_observed: false,
+            });
             continue;
         }
         let impact_frame = anchor.frame + 1;
@@ -935,6 +971,52 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn short_occlusion_preserves_late_vertical_rebound() {
+        let points: Vec<_> = (0..=30)
+            .filter(|frame| !(12..=15).contains(frame))
+            .map(|frame| {
+                let t = (frame - 15) as f64;
+                BallObservation {
+                    frame,
+                    x: 900.0 + 4.0 * t,
+                    y: 1000.0 + if t < 0.0 { 40.0 * t } else { -45.0 * t },
+                }
+            })
+            .collect();
+        let events = trajectory_direction_breaks(&points, DirectionBreakConfig::default());
+        assert!(
+            events
+                .iter()
+                .any(|e| (14..=16).contains(&e.frame) && !e.contact_observed),
+            "{events:?}"
+        );
+        let mut switched = points.clone();
+        for p in &mut switched {
+            if p.frame >= 16 {
+                p.x += 250.0;
+            }
+        }
+        assert!(trajectory_direction_breaks(&switched, DirectionBreakConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn perspective_curvature_on_quantized_gravity_arc_is_not_contact() {
+        let points: Vec<_> = (0..=24)
+            .map(|frame| {
+                let t = (frame - 10) as f64;
+                let quantize = |v: f64| (v / 7.5).round() * 7.5;
+                BallObservation {
+                    frame,
+                    x: quantize(1800.0 + 18.0 * t - 0.65 * t * t),
+                    y: quantize(400.0 + 1.8 * t * t - if frame == 10 { 7.5 } else { 0.0 }),
+                }
+            })
+            .collect();
+        assert!(smooth_gravity_apex_near(&points, 10, 4.0));
+        assert!(trajectory_direction_breaks(&points, DirectionBreakConfig::default()).is_empty());
     }
 
     #[test]
