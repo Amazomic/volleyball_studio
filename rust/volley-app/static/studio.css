@@ -715,6 +715,7 @@ body[data-ui-theme="light"] #studio-preview-view #studio-timeline-middle{color:#
 }
 
 /* Preview workspace: keep the video dominant and rallies in a narrow, scrollable right rail. */
+#studio-preview-view:not(.hidden):not(.training-workspace) ~ .footer{display:none}
 #studio-preview-view .viewer-layout{
   display:grid;grid-template-columns:minmax(0,1fr) clamp(290px,27%,365px);
   grid-template-areas:"player list" "timeline timeline";
