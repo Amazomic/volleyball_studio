@@ -6,7 +6,7 @@ const js=readFileSync(new URL("../../rust/volley-app/static/studio.js",import.me
 const html=readFileSync(new URL("../../rust/volley-app/static/studio.html",import.meta.url),"utf8");
 assert.ok(!html.includes('id="studio-preview-video"'));
 const from=js.indexOf("  const projectRallyRuns=");
-const to=js.indexOf("  const projectRallyCard=",from);
+const to=js.indexOf("  const refreshProjectCardNames=",from);
 assert.ok(from>=0&&to>from);
 
 const itemA={candidate_id:"a".repeat(24),start_frame:60,end_frame:90,motion_event_count:3};
@@ -26,7 +26,11 @@ const context={s,ui,cards(){},valid:id=>/^[a-f0-9]{24}$/.test(id),message:value=
   previewCache:{load:async query=>{
     requests.push(query);
     const first=query.rally_run_id==="run-a",item=first?itemA:itemB;
-    if(query.path.endsWith("/marks"))return {candidate_ids:first?[item.candidate_id]:[]};
+    if(query.path.endsWith("/marks"))return {candidate_ids:first?[item.candidate_id]:[],writable:true,revision:"rev"};
+    if(query.path.endsWith("/preview"))return {schema:"volley-native-rally-preview/1",project_id:query.project_id,
+      rally_run_id:query.rally_run_id,video:first?"a.mp4":"b.mp4",
+      items:[{...item,detected_start_frame:item.start_frame,detected_end_frame:item.end_frame,
+        metadata:{team_1:[first?4:42],team_2:[]},estimated_action_counts:{dig:1}}]};
     return {schema:"volley-native-rally-timeline/1",project_id:query.project_id,
       rally_run_id:query.rally_run_id,video:first?"a.mp4":"b.mp4",
       fps:30,analysis_offset_sec:first?17:80,rallies:[item]};
@@ -41,19 +45,23 @@ const api=runInNewContext(js.slice(from,to)+
   "\n({projectRallyRuns,refreshProjectRallies,projectRallyEntries,openProjectRally,advanceProjectRally})",context);
 await api.refreshProjectRallies();
 assert.deepEqual([...s.projectRallies.keys()],["run-a","run-b"]);
-assert.equal(requests.length,4);
+assert.equal(requests.length,6);
 assert.equal(messages.length,0);
 await api.refreshProjectRallies();
-assert.equal(requests.length,4,"Repainting does not reload unchanged sources");
+assert.equal(requests.length,6,"Repainting does not reload unchanged sources");
 const entries=(filter="all")=>Array.from(api.projectRallyEntries(
   s.projectRallies.values(),s.run,[{...itemA,detail:true}],null,filter));
 assert.deepEqual(entries().map(row=>row.item.candidate_id),[itemA.candidate_id,itemB.candidate_id]);
+assert.equal(entries()[1].item.metadata.team_1[0],42,"Inactive video uses verified detailed card data");
+assert.equal(entries()[1].item.estimated_action_counts.dig,1);
+assert.ok(entries().every(row=>row.detail));
 assert.deepEqual(entries("marked").map(row=>row.item.candidate_id),[itemA.candidate_id]);
 assert.deepEqual(entries("unmarked").map(row=>row.item.candidate_id),[itemB.candidate_id]);
 assert.deepEqual(entries("touches_desc").map(row=>row.item.candidate_id),[itemB.candidate_id,itemA.candidate_id]);
-await api.openProjectRally(entries()[1].source,itemB);
+await api.openProjectRally(entries()[1].source,itemB,false,81.5);
 assert.equal(opened[0].run,"run-b");
 assert.equal(opened[0].video,"b.mp4");
+assert.equal(opened[0].requestedTime,81.5,"Cross-video card seek is passed into playback");
 assert.equal(opened[0].analysis,"launch-a","Switching video must not change the selected project analysis");
 assert.equal(opened[0].offset+itemB.start_frame/opened[0].fps,81);
 assert.equal(ui.list.scrollTop,24);
@@ -131,7 +139,7 @@ console.log("PASS: project rally list, per-source versions, filters and cross-vi
     block("  const setRuns=async(","  const selectReferenceEntry=")+
     block("  const view=(item,requestedTime=null)=>{","  const renderReferenceCards=")+
     block("  const loadTimeline=async()=>{","  const rallyAtTimelineTime=")+
-    block("  const openProjectRally=async(","  const projectRallyCard=")+
+    block("  const openProjectRally=async(","  const refreshProjectCardNames=")+
     "\n({advanceProjectRally})",runtime);
   await entry.advanceProjectRally();
   await new Promise(resolve=>setImmediate(resolve));

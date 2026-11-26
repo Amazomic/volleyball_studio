@@ -203,3 +203,29 @@ assert.equal(list.children.length,1,
   "Ordinary preview keeps CPU rally cards even when training filters are off");
 assert.equal(list.children[0].klass,"rally-card");
 console.log("Studio rally cards: trajectory-only training, seek, and existing standard preview: OK");
+
+const remote={...s.items[0],candidate_id:"c".repeat(24),detected_start_frame:30,detected_end_frame:59,metadata:{team_1:[42],team_2:[43],touches:[]}};
+const remoteSource={run:"other",video:"other.mp4",fps:30,offset:80,marked:new Set(),writable:true};
+s.run="r";s.projectRallies=new Map([["other",remoteSource]]);
+context.projectRallyEntries=()=>[{kind:"touch",source:remoteSource,item:remote,detail:false}];
+context.render();
+const remoteCard=list.children[0];
+assert.ok(remoteCard.children.some(node=>node.klass==="rally-card-teams"),"Inactive source must use full card");
+assert.ok(remoteCard.children.some(node=>node.klass==="rally-card-progress"),"Inactive source must show timeline");
+assert.ok(remoteCard.children.some(node=>node.klass==="rally-card-foot"),"Inactive source must show favorite and stats");
+assert.match(values(remoteCard).join(" "),/ID 42/);
+
+
+const remoteCalls=[];
+context.openProjectRally=async(...args)=>remoteCalls.push(args);
+context.failed=error=>{throw error;};
+const remoteProgress=remoteCard.children.find(node=>node.klass==="rally-card-progress");
+remoteProgress.listeners.click({clientX:200,stopPropagation(){}});
+assert.equal(remoteCalls[0][0],remoteSource);
+assert.equal(remoteCalls[0][1],remote);
+assert.equal(remoteCalls[0][3],81.5);
+const favoriteCalls=[];
+context.toggleProjectGold=(...args)=>favoriteCalls.push(args);
+remoteCard.children.find(node=>node.klass==="rally-card-foot").children[1].children[0]
+  .listeners.click({stopPropagation(){}});
+assert.deepEqual(favoriteCalls[0],[remoteSource,remote.candidate_id]);

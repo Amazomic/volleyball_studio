@@ -3684,7 +3684,7 @@
     // already-resolved header and source chain on that independent operation.
     if(rally&&s.run===rally.run&&s.video===rally.video){
       s.analysisOffset=rally.offset;s.fps=rally.fps;
-      view(rally.item);
+      view(rally.item,rally.requestedTime);
     }
     if(s.projectRallies)void refreshProjectRallies().catch(failed);
     if(s.run){
@@ -3971,7 +3971,7 @@
     s.revision=typeof raw.revision==="string"?raw.revision:"absent";
     s.writable=raw.writable===true;s.marksLoaded=true;
     const source=s.projectRallies?.get(s.run);
-    if(source)source.marked=s.gold;
+    if(source){source.marked=s.gold;source.revision=s.revision;source.writable=s.writable;}
     syncFavoritesSelection();drawTimeline();
   };
   const rallyListQuery=()=>{
@@ -4057,7 +4057,7 @@
       s.revision=String(raw.revision);s.marksLoaded=true;
       window.dispatchEvent(new CustomEvent("volley:montage-marks-change",{detail:{project_id:project,rally_run_id:run}}));
       const source=s.projectRallies?.get(run);
-      if(source)source.marked=s.gold;
+      if(source){source.marked=s.gold;source.revision=s.revision;source.writable=s.writable;}
       syncFavoritesSelection();drawTimeline();
       if(ui.filter.value==="marked"||ui.filter.value==="unmarked"){
         await loadPage();
@@ -4098,18 +4098,21 @@
       item.manual_clip?.end_frame??0)
   });
   const refreshRallyCardTouchTicks=()=>{
-    const data=timeline.data;
-    const validTimeline=Boolean(data)&&data.project_id===s.project&&
-      data.rally_run_id===s.run&&data.video===s.video&&
-      Array.isArray(data.touch_annotations);
-    const serves=validTimeline&&!overlay.raw&&overlay.flags.touches&&
-      overlay.actionFlags.serve&&Array.isArray(data.serve_proposals)?
-      data.serve_proposals:[];
-    const touches=validTimeline&&(typeof training==="undefined"||!training.active)&&
-      !overlay.raw&&overlay.flags.touches?data.touch_annotations.filter(event=>
-      overlay.actionFlags[cpuTouchKind(event.kind)]):[];
-    const ground=validTimeline&&!overlay.raw&&overlay.flags.touches?floorContacts(data):[];
-    for(const {progress,markers,start,end} of rallyCardProgresses.values()){
+    for(const {progress,markers,start,end,source} of rallyCardProgresses.values()){
+      const run=source?.run||s.run,video=source?.video||s.video;
+      const data=run===s.run&&timeline.data?.rally_run_id===run&&timeline.data?.video===video?
+        timeline.data:source?.timeline;
+      const rate=source?.fps||fps();
+      const formatTime=frame=>source?(frame/rate+(source.offset||0)).toLocaleString("ru-RU",{minimumFractionDigits:1,maximumFractionDigits:1}):second(frame);
+      const validTimeline=Boolean(data)&&data.project_id===s.project&&
+        data.rally_run_id===run&&data.video===video&&Array.isArray(data.touch_annotations);
+      const serves=validTimeline&&!overlay.raw&&overlay.flags.touches&&
+        overlay.actionFlags.serve&&Array.isArray(data.serve_proposals)?
+        data.serve_proposals:[];
+      const touches=validTimeline&&(typeof training==="undefined"||!training.active)&&
+        !overlay.raw&&overlay.flags.touches?data.touch_annotations.filter(event=>
+        overlay.actionFlags[cpuTouchKind(event.kind)]):[];
+      const ground=validTimeline&&!overlay.raw&&overlay.flags.touches?floorContacts(data):[];
       wipe(markers);
       if(!validTimeline){
         progress.setAttribute("aria-label","Шкала розыгрыша. Ожидание касаний CPU");
@@ -4124,7 +4127,7 @@
         tick.style.left=(100*(event.frame_index-start)/duration)+"%";
         tick.style.backgroundColor=color;
         tick.style.color=color;
-        tick.title=second(event.frame_index)+" с · "+label.replace(/^≈ /,"");
+        tick.title=formatTime(event.frame_index)+" с · "+label.replace(/^≈ /,"");
         tick.setAttribute("aria-hidden","true");
         markers.append(tick);
         count++;
@@ -4135,7 +4138,7 @@
         tick.style.left=(100*(event.frame_index-start)/duration)+"%";
         tick.style.backgroundColor=floorContactColor;
         tick.style.color=floorContactColor;
-        tick.title=second(event.frame_index)+" с · "+floorContactLabel(event.outcome);
+        tick.title=formatTime(event.frame_index)+" с · "+floorContactLabel(event.outcome);
         tick.setAttribute("aria-hidden","true");
         markers.append(tick);
       }
@@ -4146,7 +4149,7 @@
         tick.style.left=(100*(frame-start)/duration)+"%";
         tick.style.backgroundColor="#f3a350";
         tick.style.color="#f3a350";
-        tick.title=second(frame)+" с · ≈ Подача"+
+        tick.title=formatTime(frame)+" с · ≈ Подача"+
           (Number.isSafeInteger(serve.provisional_track_id)?
             " · Track ID "+serve.provisional_track_id:" · игрок пока не определён");
         tick.setAttribute("aria-hidden","true");
@@ -4159,7 +4162,8 @@
   const updateRallyCardProgress=()=>{
     const active=rallyCardProgresses.get(s.current);
     if(!active)return;
-    const {progress,start,end}=active;
+    const {progress,start,end,source}=active;
+    if(source&&source.run!==s.run)return;
     const current=s.videoKey===s.project+":"+s.video&&
       Number.isFinite(ui.video.currentTime)?
         (Number.isFinite(overlay.presentedTime)&&!ui.video.paused?
@@ -4398,6 +4402,22 @@
     }
     return videos.map(video=>choices.get(video)).filter(Boolean);
   };
+  const loadProjectRallyNames=async(project,source,sha)=>{
+    const names=new Map();
+    if(typeof sha!=="string")return names;
+    const labels=await previewCache.load(url("/api/cpu/native/rallies/overlay-player-labels",{
+      project_id:project,rally_run_id:source.run
+    }),7000,false,true).catch(()=>null);
+    if(labels?.schema==="volley-native-preview-player-labels/1"&&labels.project_id===project&&
+       labels.rally_run_id===source.run&&labels.video===source.video&&
+       labels.source_replay_sha256===sha&&
+       ["manual","manual_and_automatic"].includes(labels.identity_source)){
+      for(const [id,name] of Object.entries(labels.names||{}))
+        if(/^[1-9]\d*$/.test(id)&&typeof name==="string"&&name.trim()&&name.length<=150)
+          names.set(id,name.trim());
+    }
+    return names;
+  };
   const loadProjectRallySource=async(project,source)=>{
     const query={project_id:project,rally_run_id:source.run};
     const [raw,marks]=await Promise.all([
@@ -4410,8 +4430,26 @@
        !raw.rallies.every(item=>valid(item.candidate_id)&&Number.isSafeInteger(item.start_frame)&&
          Number.isSafeInteger(item.end_frame)&&item.start_frame>=0&&item.end_frame>=item.start_frame))
       throw Error("Некорректные розыгрыши проекта");
-    return {...source,rows:raw.rallies,fps:raw.fps,offset:Number(raw.analysis_offset_sec)||0,
-      marked:marks?new Set(marks.candidate_ids||[]):null};
+    const details=new Map();
+    for(let offset=0;offset<raw.rallies.length;offset+=80){
+      const page=await previewCache.load(url("/api/cpu/native/rallies/preview",{
+        ...query,offset,limit:80,gold_filter:"all",sort_by:"time"
+      }),900000,true);
+      if(page.schema!=="volley-native-rally-preview/1"||page.project_id!==project||
+         page.rally_run_id!==source.run||page.video!==source.video||!Array.isArray(page.items)||
+         page.items.length!==Math.min(80,raw.rallies.length-offset))
+        throw Error("Некорректные данные карточек розыгрышей проекта");
+      for(const item of page.items){
+        const row=raw.rallies[details.size];
+        if(!row||row.candidate_id!==item.candidate_id||
+           row.start_frame!==item.detected_start_frame||row.end_frame!==item.detected_end_frame)
+          throw Error("Карточки розыгрышей не соответствуют шкале видео");
+        details.set(item.candidate_id,item);
+      }
+    }
+    const names=await loadProjectRallyNames(project,source,raw.source_replay_sha256);
+    return {...source,rows:raw.rallies,details,timeline:raw,names,fps:raw.fps,offset:Number(raw.analysis_offset_sec)||0,
+      marked:marks?new Set(marks.candidate_ids||[]):null,writable:marks?.writable===true,revision:marks?.revision??"absent"};
   };
   const refreshProjectRallies=async()=>{
     const project=s.project,choices=projectRallyRuns(s.chain,s.projectVideos,s.run,s.analysis);
@@ -4447,7 +4485,7 @@
         const id=row.candidate_id;
         if(filter==="marked"&&!(marked?.has(id)||active&&!marked&&detailed.has(id)))continue;
         if(filter==="unmarked"&&(marked?.has(id)||!marked&&!active))continue;
-        const detail=active?detailed.get(id):null;
+        const detail=(active?detailed.get(id):null)||source.details?.get(id);
         entries.push({kind:"touch",source,item:detail||row,detail:Boolean(detail)});
       }
     }
@@ -4462,13 +4500,13 @@
       (b.item.motion_event_count||0)-(a.item.motion_event_count||0));
     return entries;
   };
-  const openProjectRally=async(source,item,follow=false)=>{
+  const openProjectRally=async(source,item,follow=false,requestedTime=null)=>{
     if(source.analysis!==s.analysis||!s.chain?.byAnalysis.get(source.analysis)?.some(row=>row.rally_run_id===source.run))return;
-    if(source.run===s.run){view(item);if(follow)void followSequenceRally();return;}
+    if(source.run===s.run){view(item,requestedTime);if(follow)void followSequenceRally();return;}
     const scroll=ui.list.scrollTop;
     ui.analysis.value=source.analysis;
     refreshPicker(ui.analysis);
-    await setAnalysis(source.run,true,"",{...source,item});
+    await setAnalysis(source.run,true,"",{...source,item,requestedTime});
     if(s.run===source.run&&s.current===item.candidate_id){
       ui.list.scrollTop=scroll;
       if(follow)void followSequenceRally();
@@ -4492,35 +4530,43 @@
       if(first){await openProjectRally(source,first,true);return;}
     }
   };
-  const projectRallyCard=({source,item})=>{
-    const id=item.candidate_id;
-    const active=source.run===s.run&&s.current===id;
-    const card=make("article","rally-card"+(active?" active":"")+
-      ((source.run===s.run?s.gold:source.marked)?.has(id)?" gold":""));
-    card.tabIndex=0;
-    card.setAttribute("role","button");
-    card.setAttribute("data-rally-id",id);
-    const {start,end}=rallyClipFrames(item),rate=source.fps||30,offset=source.offset||0;
-    const range=timeLabel(offset+start/rate)+" – "+timeLabel(offset+end/rate);
-    card.setAttribute("aria-label","Просмотр розыгрыша "+range);
-    const head=make("div","card-top");
-    head.append(make("span","id-label","ID "+id.slice(0,6)),make("strong","rally-card-time-value",range));
-    const stats=make("div","card-stats");
-    for(const [label,value] of [
-      ["Длительность",((end-start+1)/rate).toFixed(1)+" с"],
-      ["Касаний",item.motion_event_count??"—"],["Игроков",rallyPlayerCount(item)??"—"]
-    ]){
-      const stat=make("div","rally-card-stat");
-      stat.append(make("span","",label),make("strong","",value));
-      stats.append(stat);
+  const refreshProjectCardNames=()=>{
+    const project=s.project;
+    for(const source of s.projectRallies?.values()||[]){
+      if(!source.timeline)continue;
+      source.names=new Map();
+      const token=source.names;
+      void loadProjectRallyNames(project,source,source.timeline.source_replay_sha256).then(names=>{
+        if(s.project!==project||s.projectRallies.get(source.run)!==source||source.names!==token)return;
+        source.names=names;cards();
+      });
     }
-    card.append(head,stats);
-    const open=()=>void openProjectRally(source,item).catch(failed);
-    card.addEventListener("click",open);
-    card.addEventListener("keydown",event=>{
-      if(event.key==="Enter"||event.key===" "){event.preventDefault();open();}
-    });
-    return card;
+    cards();
+  };
+  const toggleProjectGold=async(source,id)=>{
+    if(!source.writable||source.busy||s.busy||!valid(id))return;
+    const project=s.project,run=source.run,marking=!source.marked?.has(id);
+    source.busy=true;cards();
+    try{
+      const raw=await post("/api/cpu/native/rallies/marks",{
+        project_id:project,rally_run_id:run,candidate_id:id,marked:marking,expected_revision:source.revision
+      });
+      if(s.project!==project)return;
+      invalidatePreviewRun(project,run);
+      previewCache.drop(path=>path.startsWith("/api/cpu/native/rallies/marks?"));
+      const target=s.projectRallies.get(run);
+      if(target){target.marked=new Set((raw.candidate_ids||[]).filter(valid));target.revision=String(raw.revision);}
+      if(s.run===run)await loadMarks(s.generation);
+      message(marking?"Добавлено в избранное.":"Удалено из избранного.","ok");
+    }catch(error){failed(error);}
+    finally{
+      source.busy=false;
+      if(s.project===project){
+        const target=s.projectRallies.get(run);
+        if(target)target.busy=false;
+        cards();
+      }
+    }
   };
   const cards=()=>{
     const previousScroll=ui.list.scrollTop;
@@ -4606,38 +4652,43 @@
         ui.list.append(card);
         continue;
       }
-      if(entry.source&&!entry.detail){ui.list.append(projectRallyCard(entry));continue;}
-      const item=entry.item;
+      const item=entry.item,source=entry.source;
       const id=item.candidate_id;
       if(!valid(id))continue;
-      const gold=s.gold.has(id);
+      const sameSource=!source||source.run===s.run;
+      const rate=source?.fps||fps(),offset=source?.offset??(Number(s.analysisOffset)||0);
+      const {start,end}=rallyClipFrames(item);
+      const formatTime=frame=>source?(frame/rate).toLocaleString("ru-RU",{minimumFractionDigits:1,maximumFractionDigits:1}):second(frame);
+      const range=formatTime(start+offset*rate)+"–"+formatTime(end+offset*rate)+" с";
+      const open=(time=null)=>sameSource?view(item,time):void openProjectRally(source,item,false,time).catch(failed);
+      const mark=()=>sameSource?toggleGold(id):toggleProjectGold(source,id);
+      const gold=(sameSource?(s.marksLoaded?s.gold:source?.marked||s.gold):source.marked)?.has(id);
       const card=make("article","rally-card"+(gold?" gold":"")+
-        (s.current===id?" active":"")+(trainingList?" training-touch":""));
+        (sameSource&&s.current===id?" active":"")+(trainingList?" training-touch":""));
       card.tabIndex=0;card.setAttribute("role","button");
       card.setAttribute("data-rally-id",id);
-      card.setAttribute("aria-label","Просмотр розыгрыша "+clock(item.detected_start_frame+(Number(s.analysisOffset)||0)*fps()));
+      card.setAttribute("aria-label","Просмотр розыгрыша "+range);
       card.addEventListener("click",e=>{
-        if(!e.target.closest(".rally-card-progress,button,label,input"))view(item);
+        if(!e.target.closest(".rally-card-progress,button,label,input"))open();
       });
       card.addEventListener("keydown",e=>{
         if((e.key==="Enter"||e.key===" ")&&e.target===card){
-          e.preventDefault();view(item);
+          e.preventDefault();open();
         }
       });
-      card.addEventListener("contextmenu",e=>{e.preventDefault();toggleGold(id);});
+      card.addEventListener("contextmenu",e=>{e.preventDefault();mark();});
       const top=make("div","card-top");
       const idLabel=make("span","id-label","ID "+id.slice(0,6));
       idLabel.title="Полный ID: "+id;
       if(trainingList)idLabel.append(make("span","rally-source-label","По касаниям"));
       const duration=make("div","rally-card-duration");
-      duration.title="Длительность: "+length(item);
-      duration.append(make("span","","Длительность"),make("strong","",length(item)));
+      const durationText=source?((end-start+1)/rate).toFixed(1)+" с":length(item);
+      duration.title="Длительность: "+durationText;
+      duration.append(make("span","","Длительность"),make("strong","",durationText));
       top.append(idLabel);
       const when=make("div","rally-card-time-range");
-      when.append(make("strong","rally-card-time-value",
-        second(item.detected_start_frame+(Number(s.analysisOffset)||0)*fps())+"–"+second(item.detected_end_frame+(Number(s.analysisOffset)||0)*fps())+" с"));
-      when.title="На видео: "+second(item.detected_start_frame+(Number(s.analysisOffset)||0)*fps())+"–"+
-        second(item.detected_end_frame+(Number(s.analysisOffset)||0)*fps())+" с";
+      when.append(make("strong","rally-card-time-value",range));
+      when.title="На видео: "+range;
       top.append(when);
       const stats=make("div","card-stats");
       const touches=make("div","rally-card-stat");
@@ -4656,8 +4707,8 @@
       favorite.title=gold?"Убрать из избранного":"Добавить в избранное";
       favorite.setAttribute("aria-pressed",String(gold));
       favorite.setAttribute("aria-label",favorite.title);
-      favorite.disabled=!s.writable||s.busy;
-      favorite.addEventListener("click",e=>{e.stopPropagation();toggleGold(id);});
+      favorite.disabled=sameSource?!s.writable||s.busy:!source.writable||source.busy===true;
+      favorite.addEventListener("click",e=>{e.stopPropagation();mark();});
       const predictions=(Array.isArray(item.motion_events)?item.motion_events:[])
         .map(event=>event.rally_context ? event.rally_context.estimated_kind : event.action_prediction?.kind).filter(kind=>typeof kind==="string");
       if(predictions.length)card.title="Автоклассификация (предварительная): "+
@@ -4667,19 +4718,18 @@
       foot.append(stats,bottom);
       const types=make("div","rally-card-techniques",estimatedTypes(item));
       types.title="Автоматические оценки по всем кандидатам касаний в розыгрыше; не подтверждены человеком";
-      const {start,end}=rallyClipFrames(item);
       const progress=make("div","rally-card-progress");
       progress.tabIndex=0;
       progress.setAttribute("role","slider");
       progress.setAttribute("aria-orientation","horizontal");
       progress.setAttribute("aria-valuemin","0");
-      progress.setAttribute("aria-valuemax",((end-start+1)/fps()).toFixed(1));
+      progress.setAttribute("aria-valuemax",((end-start+1)/rate).toFixed(1));
       progress.setAttribute("aria-valuenow","0");
       progress.setAttribute("aria-label","Переход к моменту розыгрыша");
       progress.title="Нажмите, чтобы воспроизвести розыгрыш с выбранного момента";
       const playFromFraction=fraction=>{
         const bounded=Math.max(0,Math.min(1,fraction));
-        view(item,(Number(s.analysisOffset)||0)+(start+bounded*(end-start+1))/fps());
+        open(offset+(start+bounded*(end-start+1))/rate);
         // Clicking the timeline inside an already selected card retains focus.
       };
       progress.addEventListener("click",event=>{
@@ -4693,14 +4743,14 @@
         if(!["Home","End","PageUp","PageDown","Enter"," "].includes(key))return;
         event.preventDefault();event.stopPropagation();
         if(key==="Enter"||key===" "){
-          view(item,s.current===id&&Number.isFinite(ui.video.currentTime)?ui.video.currentTime:(Number(s.analysisOffset)||0)+start/fps());
+          open(sameSource&&s.current===id&&Number.isFinite(ui.video.currentTime)?ui.video.currentTime:offset+start/rate);
           return;
         }
-        const current=s.current===id&&Number.isFinite(ui.video.currentTime)?
-          ui.video.currentTime:(Number(s.analysisOffset)||0)+start/fps();
-        const duration=(end-start+1)/fps();
+        const current=sameSource&&s.current===id&&Number.isFinite(ui.video.currentTime)?
+          ui.video.currentTime:offset+start/rate;
+        const duration=(end-start+1)/rate;
         const fraction=key==="Home"?0:key==="End"?1:
-          (current-(Number(s.analysisOffset)||0)-start/fps()+(
+          (current-offset-start/rate+(
             key==="PageUp"?1:-1
           )*(key==="PageUp"||key==="PageDown"||event.shiftKey?5:1))/duration;
         playFromFraction(fraction);
@@ -4710,7 +4760,7 @@
       const head=make("span","rally-card-progress-head");
       for(const part of [filled,markers,head])part.setAttribute("aria-hidden","true");
       progress.append(filled,markers,head);
-      rallyCardProgresses.set(id,{progress,markers,start,end});
+      rallyCardProgresses.set(id,{progress,markers,start,end,source});
       const result=make("div","rally-card-teams");
       const metadata=item.metadata;
       const winner=metadata?.winning_team;
@@ -4729,7 +4779,7 @@
         if(!ids.length)members.append(document.createTextNode("Не определена"));
         ids.forEach((id,index)=>{
           if(index)members.append(document.createTextNode(", "));
-          const name=(typeof overlayLabels!=="undefined"&&overlayLabels.loaded&&overlayLabels.key.startsWith([s.project,s.run,s.video].join(":")+":")?overlayLabels.names.get(String(id)):null)||"ID "+id;
+          const name=(sameSource&&typeof overlayLabels!=="undefined"&&overlayLabels.loaded&&overlayLabels.key.startsWith([s.project,s.run,s.video].join(":")+":")?overlayLabels.names.get(String(id)):source?.names?.get(String(id)))||"ID "+id;
           if(serveIds.has(id)){
             const member=make("span","rally-serving-member");
             const palm=make("span","rally-serve-icon");
@@ -5533,6 +5583,14 @@
     wasmReady=false;
     failed(new Error("Модуль выбора фрагментов недоступен: "+String(e.message||e)));
     renderSelection();cards();
+  });
+  window.addEventListener("volley:track-assignments-updated",event=>{
+    if(event.detail?.project_id===s.project)refreshProjectCardNames();
+  });
+  for(const eventName of ["volley:player-library-updated","volley:roster-updated"])
+    window.addEventListener(eventName,refreshProjectCardNames);
+  window.addEventListener("volley:tab-change",event=>{
+    if(event.detail?.tab==="preview"&&s.projectRallies?.size)refreshProjectCardNames();
   });
   projects().catch(failed);
 })();

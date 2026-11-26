@@ -223,3 +223,19 @@ await moreContext.loadMore();
 assert.equal(moreState.items.length,1);
 assert.equal(rail.scrollTop,230,"Loading another page must not move the selected rally to the top");
 }
+
+{
+  const remoteMarkers=make("span","rally-card-progress-markers");
+  const remoteProgress=make("div","rally-card-progress");
+  const remoteSource={run:"cpu-b",video:"other.mp4",fps:20,offset:80,timeline:{
+    project_id:"proj",rally_run_id:"cpu-b",video:"other.mp4",
+    touch_annotations:[{frame_index:125,kind:"attack"}]
+  }};
+  overlay.raw=false;overlay.flags.touches=true;overlay.actionFlags.attack=true;
+  rallyCardProgresses.set("remote",{progress:remoteProgress,markers:remoteMarkers,start:100,end:149,source:remoteSource});
+  refreshRallyCardTouchTicks();
+  assert.equal(remoteMarkers.children.length,1,"Inactive card has its own video markers");
+  assert.equal(remoteMarkers.children[0].style.left,"50%");
+  assert.equal(remoteMarkers.children[0].style.backgroundColor,cpuTouchStyle.attack[0]);
+  assert.match(remoteMarkers.children[0].title,/86,3/,"Inactive timeline uses source FPS and offset");
+}

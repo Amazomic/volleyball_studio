@@ -31,7 +31,7 @@ const start=js.indexOf('  const nextRally=()=>{');
 const end=js.indexOf('  ui.video.addEventListener("timeupdate"',start);
 assert.ok(start>=0&&end>start,"Rally boundary logic must be present");
 const advanceStart=js.indexOf("  const advanceProjectRally=async()=>");
-const advanceEnd=js.indexOf("  const projectRallyCard=",advanceStart);
+const advanceEnd=js.indexOf("  const refreshProjectCardNames=",advanceStart);
 assert.ok(advanceStart>=0&&advanceEnd>advanceStart);
 const script=js.slice(advanceStart,advanceEnd)+js.slice(start,end)+"\nthis.nextRally=nextRally;this.onRallyBoundary=onRallyBoundary;";
 const rallies=[
