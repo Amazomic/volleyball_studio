@@ -3311,7 +3311,7 @@
       const mid=(left+right)>>>1;
       if(rows[mid].start_frame<=frame)left=mid+1;else right=mid;
     }
-    return left>0&&rows[left-1].end_frame>=frame?rows[left-1]:null;
+    return left>0&&frame<rows[left-1].end_frame+1?rows[left-1]:null;
   };
   const schedulePreviewRecovery=key=>{
     if(s.videoKey!==key||previewLoad.key!==key||previewLoad.pending||
@@ -3379,7 +3379,7 @@
     if(event.detail?.video===ui.video&&event.detail?.state==="failed")
       schedulePreviewRecovery(s.project+":"+s.video);
   });
-  const seekTimeline=(seconds,keyboard=false)=>{
+  const seekTimeline=(seconds,keyboard=false,reveal=false)=>{
     if(!s.video||(!keyboard&&((!overlay.raw&&!timeline.data)||(!overlay.raw&&!s.run))))return;
     const duration=timelineDuration();
     if(!duration)return;
@@ -3395,11 +3395,36 @@
       if(ui.video.readyState>=1)try{ui.video.currentTime=position;}catch{}
       drawTimeline();return;
     }
+    const rally=rallyAtTimelineTime(position);
+    if(rally?.candidate_id){
+      const changed=s.current!==rally.candidate_id;
+      const {start,end}=rallyClipFrames(rally);
+      const offset=Number(s.analysisOffset)||0;
+      s.clipStart=offset+start/fps();
+      s.clipEnd=offset+(end+1)/fps();
+      s.stopAt=s.playbackMode==="free"?null:s.clipEnd;
+      if(changed){
+        s.current=rally.candidate_id;
+        cards();
+        renderRallyTouches(rally,start,end);
+      }
+      ui.viewTitle.textContent="Розыгрыш · "+timeLabel(s.clipStart)+" – "+timeLabel(s.clipEnd);
+      ui.videoTime.textContent=timeLabel(position)+" / "+timeLabel(duration);
+      ui.emptyVideo.classList.add("hidden");
+      if(!overlay.source)setOverlaySource({motion_events:[]});
+      if(s.videoKey!==s.project+":"+s.video){
+        s.videoKey=s.project+":"+s.video;
+        loadPreviewVideo();
+      }else if(ui.video.readyState>=1)try{ui.video.currentTime=position;}catch{}
+      drawTimeline();
+      if(changed||reveal)void followSequenceRally(true);
+      return;
+    }
+    s.sequenceFollow=null;
     s.stopAt=null;s.clipStart=null;s.clipEnd=null;
     if(s.current){s.current="";cards();}
     // Preserve player boxes and trajectory when seeking outside the selected card.
     if(!overlay.source)setOverlaySource({motion_events:[]});
-    const rally=rallyAtTimelineTime(position);
     ui.viewTitle.textContent=rally?
       "Розыгрыш · "+timeLabel(rally.start_frame/fps())+" – "+
         timeLabel(rally.end_frame/fps()):
@@ -3429,7 +3454,7 @@
     timeline.contextPress={x:event.clientX,y:event.clientY,moved:false};
     if(training.active)hideAnnotationContext();
     timeline.track.setPointerCapture?.(event.pointerId);
-    seekTimeline(timelinePosition(event));
+    seekTimeline(timelinePosition(event),false,true);
   });
   timeline.track.addEventListener("pointermove",event=>{
     if(timeline.dragging){
@@ -4281,12 +4306,12 @@
     const top=active.getBoundingClientRect().top-ui.list.getBoundingClientRect().top;
     ui.list.scrollTop=Math.max(0,ui.list.scrollTop+top-ui.list.clientTop);
   };
-  const followSequenceRally=async()=>{
+  const followSequenceRally=async(fromTimeline=false)=>{
     const token={},current=s.current,generation=s.generation,key=s.videoKey;
     s.sequenceFollow=token;
     const valid=()=>s.sequenceFollow===token&&s.current===current&&
       s.generation===generation&&s.videoKey===key&&
-      s.playbackMode==="sequence"&&previewIsVisible();
+      (fromTimeline||s.playbackMode==="sequence")&&previewIsVisible();
     if(!valid())return;
     const list=ui.list;
     let active=list.querySelector(".rally-card.active");

@@ -248,6 +248,49 @@ seekContext.timeline.data=null;state.run="";
 seekContext.seekTimeline(0.001,true);
 assert.equal(media.currentTime,0.001,"Keyboard works without CPU results");
 
+state.run="r";seekContext.timeline.data={};state.analysisOffset=2;
+let follows=0,redraws=0;
+seekContext.cards=()=>{redraws++;};
+seekContext.rallyClipFrames=row=>({start:row.start_frame,end:row.end_frame});
+seekContext.renderRallyTouches=()=>{};
+seekContext.followSequenceRally=async manual=>{assert.equal(manual,true);follows++;};
+seekContext.rallyAtTimelineTime=position=>position>=12&&position<14?
+  {candidate_id:"b",start_frame:300,end_frame:359}:null;
+seekContext.seekTimeline(12.5);
+assert.equal(state.current,"b","Pointer seek selects the rally containing the playhead");
+assert.equal(state.clipStart,12,"Clip boundaries use analysis offset");
+assert.equal(state.clipEnd,14);
+assert.equal(state.stopAt,14);
+assert.equal(media.currentTime,12.5,"Selection does not jump to the beginning");
+assert.equal(media.paused,true,"Seeking does not start paused video");
+assert.equal(follows,1);
+seekContext.seekTimeline(13);
+assert.equal(redraws,1,"Dragging within a rally must not rebuild the cards");
+assert.equal(follows,1);
+seekContext.seekTimeline(13.1,false,true);
+assert.equal(redraws,1);
+assert.equal(follows,2,"A fresh pointer press reveals even the already selected card");
+seekContext.seekTimeline(14.1);
+assert.equal(state.current,"","A gap clears the active rally");
+assert.equal(state.stopAt,null);
+state.playbackMode="free";
+seekContext.seekTimeline(12.1,true);
+assert.equal(state.current,"b","Keyboard crossing into a rally selects it");
+assert.equal(state.stopAt,null,"Free playback remains unrestricted");
+assert.equal(follows,3);
+
+const lookupStart=js.indexOf("  const rallyAtTimelineTime=");
+const lookupEnd=js.indexOf("  const schedulePreviewRecovery=",lookupStart);
+const lookupContext={s:{analysisOffset:2},training:{active:false},fps:()=>30,
+  timeline:{data:{rallies:[{candidate_id:"b",start_frame:300,end_frame:359},
+    {candidate_id:"c",start_frame:360,end_frame:419}]}}};
+runInNewContext(js.slice(lookupStart,lookupEnd)+"\nthis.lookup=rallyAtTimelineTime;",lookupContext);
+assert.equal(lookupContext.lookup(11.999),null);
+assert.equal(lookupContext.lookup(12).candidate_id,"b");
+assert.equal(lookupContext.lookup(13.999).candidate_id,"b","Last frame remains selected for its full duration");
+assert.equal(lookupContext.lookup(14).candidate_id,"c","Adjacent rally starts at its exact boundary");
+assert.equal(lookupContext.lookup(16),null);
+
 const alignStart=js.indexOf("  const alignActiveRally=");
 const alignEnd=js.indexOf("  const view=",alignStart);
 const rail={scrollTop:50,clientTop:1,getBoundingClientRect:()=>({top:100}),

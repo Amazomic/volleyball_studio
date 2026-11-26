@@ -81,7 +81,7 @@ assert.equal(paused,3);
 console.log("Studio playback modes and controls: OK");
 
 
-const followStart=js.indexOf("  const followSequenceRally=async()=>");
+const followStart=js.indexOf("  const followSequenceRally=async(fromTimeline=false)=>");
 const followEnd=js.indexOf("  const view=",followStart);
 assert.ok(followStart>=0&&followEnd>followStart);
 let mounted=true,cardTop=210,cardHeight=100,loads=0;
@@ -123,4 +123,7 @@ assert.equal(rail.scrollTop,531);
 state.marksLoaded=true;state.gold=new Set();scrollContext.ui.filter.value="marked";
 await scrollContext.follow();
 assert.equal(loads,4,"Preserve an explicit filter that excludes the playing card");
+state.playbackMode="once";state.marksLoaded=false;mounted=true;cardTop=460;
+await scrollContext.follow(true);
+assert.equal(rail.scrollTop,670,"Manual timeline seek follows the card in once mode");
 console.log("Sequence follow: nearest-edge scrolling, pagination, cancellation and filter preservation: OK");
