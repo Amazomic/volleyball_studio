@@ -32,6 +32,7 @@ pub(super) fn locate_refined(
     mask_sha: Option<&str>,
     crop_profile: Option<(&volley_core::tracker::TrackingOptions, bool)>,
     requested_sampling: Option<&Value>,
+    court_revision: Option<&str>,
 ) -> Result<Option<Snapshot>, String> {
     let parent = root.join("native_cpu_replays");
     match fs::symlink_metadata(&parent) {
@@ -69,6 +70,7 @@ pub(super) fn locate_refined(
             || record["source_fusion_sha256"] != fusion_sha
             || record["player_frame_scope_sha256"].as_str() != mask_sha
             || record["track_association_version"] != TRACK_ASSOCIATION_VERSION
+            || record["court_revision"].as_str() != court_revision
             || record["pose_refinement_policy"] != POSE_REFINEMENT_POLICY
             || record["refined_pose_model_sha256"] != volley_inference::pose::MODEL_SHA256
             || record["refined_pose_source_replay_id"] != id
@@ -372,17 +374,19 @@ mod tests {
         let path = folder.join("manifest.json");
         let requested = super::super::pose_sampling_contract(Default::default());
         fs::write(&path, manifest.to_string()).unwrap();
-        assert!(locate_refined(&root, "fusion", &sha, None, None, None)
-            .unwrap()
-            .is_some());
         assert!(
-            locate_refined(&root, "fusion", &sha, None, None, Some(&requested))
+            locate_refined(&root, "fusion", &sha, None, None, None, None)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            locate_refined(&root, "fusion", &sha, None, None, Some(&requested), None)
                 .unwrap()
                 .is_none()
         );
         manifest["pose_sampling"] = requested.clone();
         fs::write(&path, manifest.to_string()).unwrap();
-        let actual = locate_refined(&root, "fusion", &sha, None, None, Some(&requested))
+        let actual = locate_refined(&root, "fusion", &sha, None, None, Some(&requested), None)
             .unwrap()
             .unwrap();
         assert_eq!(actual.sampling, requested);

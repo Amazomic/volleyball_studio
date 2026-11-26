@@ -35,7 +35,7 @@ use volley_core::{
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const OUTPUT_FILE: &str = "tracked_frames.jsonl";
-pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_pose_gap_v25";
+pub(crate) const TRACK_ASSOCIATION_VERSION: &str = "bytetrack_rally_pose_gap_v26";
 pub(crate) mod ball_track;
 mod gap_interpolation;
 mod occlusion;
@@ -201,6 +201,10 @@ struct ReplayTotals {
     short_track_detections: u64,
     static_tracks: u64,
     static_track_detections: u64,
+    #[serde(default)]
+    outside_tracks: u64,
+    #[serde(default)]
+    outside_track_detections: u64,
     duplicate_track_ids_merged: u64,
     identity_turnover_splits: u64,
     identity_handoff_splits: u64,
@@ -247,6 +251,7 @@ fn replay_frames_with_pose(
         expected_sha,
         pose,
         ReplayOptions {
+            court_filter: None,
             phase: ReplayPhase::Normal,
             interpolate_players: true,
             scope: None,
@@ -267,6 +272,7 @@ struct ReplayOptions<'a> {
     phase: ReplayPhase,
     interpolate_players: bool,
     scope: Option<&'a PlayerFrameScope>,
+    court_filter: Option<track_stitch::CourtFilter<'a>>,
     cancel: Option<&'a AtomicBool>,
 }
 
@@ -503,6 +509,7 @@ fn replay_frames_verified(
     let ReplayOptions {
         interpolate_players,
         scope,
+        court_filter,
         cancel,
         phase,
     } = options;
@@ -760,15 +767,20 @@ fn replay_frames_verified(
             &stitched_sha,
             count,
             config.min_track_observations,
+            court_filter.as_ref(),
             cancel,
         )?;
         totals.unconfirmed_tracks += pruned.short_tracks;
         totals.short_track_detections += pruned.short_detections;
         totals.static_tracks = pruned.static_tracks;
         totals.static_track_detections = pruned.static_detections;
+        totals.outside_tracks = pruned.outside_tracks;
+        totals.outside_track_detections = pruned.outside_detections;
         totals.detections = totals
             .detections
-            .checked_sub(pruned.short_detections + pruned.static_detections)
+            .checked_sub(
+                pruned.short_detections + pruned.static_detections + pruned.outside_detections,
+            )
             .ok_or("Too many pruned detections")?;
         pruned.sha
     } else {
@@ -816,7 +828,7 @@ fn replay_frames_verified(
         .checked_sub(
             merged
                 + if phase == ReplayPhase::StablePlan {
-                    totals.unconfirmed_tracks + totals.static_tracks
+                    totals.unconfirmed_tracks + totals.static_tracks + totals.outside_tracks
                 } else {
                     0
                 },
@@ -844,9 +856,18 @@ pub(crate) fn has_refined_pose(
     fusion_id: &str,
     fusion_sha: &str,
     mask_sha: Option<&str>,
+    court_revision: Option<&str>,
 ) -> Result<bool, String> {
-    pose_source::locate_refined(project, fusion_id, fusion_sha, mask_sha, None, None)
-        .map(|s| s.is_some())
+    pose_source::locate_refined(
+        project,
+        fusion_id,
+        fusion_sha,
+        mask_sha,
+        None,
+        None,
+        court_revision,
+    )
+    .map(|s| s.is_some())
 }
 
 pub(crate) fn process(state: &AppState, req: &ReplayRequest) -> Result<Value, ApiError> {
@@ -1030,6 +1051,8 @@ fn process_inner(
         load_player_frame_scope(&project_root, &manifest, frames).map_err(storage::bad_request)?;
     // Pose evidence was measured on actual GPU RGB frames and bound to the
     // selected fusion SHA. Legacy fusions without RTMPose remain readable.
+    let court_snapshot = crate::video_edits::court_snapshot(state, &req.project_id, &req.video)?;
+    let court_revision = court_snapshot.as_ref().map(|c| c.revision.as_str());
     let requested_sampling = refinement
         .as_ref()
         .map(|r| pose_sampling_contract(r.ball_stabilizer));
@@ -1042,6 +1065,7 @@ fn process_inner(
             .map(|scope| scope.mask_sha256.as_str()),
         Some((&settings, req.interpolate_players)),
         requested_sampling.as_ref(),
+        court_revision,
     )
     .map_err(storage::bad_request)?;
     let root = project_root.join("native_cpu_replays");
@@ -1149,6 +1173,15 @@ fn process_inner(
                 expected,
                 None,
                 ReplayOptions {
+                    court_filter: court_snapshot
+                        .as_ref()
+                        .and_then(|c| c.transform.as_ref())
+                        .zip(player_scope.as_ref())
+                        .map(|(court, scope)| track_stitch::CourtFilter {
+                            court,
+                            scope,
+                            serve_points: None,
+                        }),
                     phase: if player_scope.is_some() {
                         ReplayPhase::StablePlan
                     } else {
@@ -1287,7 +1320,7 @@ fn process_inner(
             "frames":totals.frames,
             "tracked_player_detections":totals.detections,
             "raw_player_detections":totals.raw_player_detections,
-            "discarded_player_detections":totals.rejected + totals.short_track_detections + totals.static_track_detections,
+            "discarded_player_detections":totals.rejected + totals.short_track_detections + totals.static_track_detections + totals.outside_track_detections,
             "discarded_short_track_detections":totals.short_track_detections,
             "discarded_short_track_ids":totals.unconfirmed_tracks,
             "tentative_track_count":totals.tentative_tracks,
@@ -1312,6 +1345,9 @@ fn process_inner(
         record["interpolated_pose_count"] = json!(interpolated_poses);
         record["discarded_static_track_ids"] = json!(totals.static_tracks);
         record["discarded_static_track_detections"] = json!(totals.static_track_detections);
+        record["court_revision"] = json!(court_revision);
+        record["discarded_outside_track_ids"] = json!(totals.outside_tracks);
+        record["discarded_outside_track_detections"] = json!(totals.outside_track_detections);
         record["unassigned_rally_boxes"] = json!(totals.unassigned_rally_boxes);
         let has_refined = refine_pose || saved_refined.is_some();
         record["pose_refinement_policy"] = json!(has_refined.then_some(POSE_REFINEMENT_POLICY));
@@ -1456,6 +1492,7 @@ mod tests {
             &format!("{:x}", Sha256::digest(&bytes)),
             None,
             ReplayOptions {
+                court_filter: None,
                 interpolate_players: true,
                 scope: None,
                 cancel: None,
@@ -1511,6 +1548,7 @@ mod tests {
             &hash,
             None,
             ReplayOptions {
+                court_filter: None,
                 phase: ReplayPhase::Normal,
                 interpolate_players: true,
                 scope: Some(&scope),
@@ -1567,6 +1605,7 @@ mod tests {
             &bad_hash,
             None,
             ReplayOptions {
+                court_filter: None,
                 phase: ReplayPhase::Normal,
                 interpolate_players: false,
                 scope: Some(&scope),
@@ -1616,6 +1655,7 @@ mod tests {
             &format!("{:x}", Sha256::digest(&input)),
             None,
             ReplayOptions {
+                court_filter: None,
                 phase: ReplayPhase::StablePlan,
                 interpolate_players: true,
                 scope: Some(&scope),
@@ -1695,6 +1735,7 @@ mod tests {
             "no-sha",
             None,
             ReplayOptions {
+                court_filter: None,
                 phase: ReplayPhase::Normal,
                 interpolate_players: false,
                 scope: None,
@@ -2353,6 +2394,7 @@ mod tests {
             &fusion_sha,
             Some(&snapshot),
             ReplayOptions {
+                court_filter: None,
                 phase: ReplayPhase::Refined,
                 interpolate_players: true,
                 scope: None,
@@ -2432,6 +2474,7 @@ mod tests {
             &fusion_sha,
             Some(&snapshot),
             ReplayOptions {
+                court_filter: None,
                 phase: ReplayPhase::Normal,
                 interpolate_players: false,
                 scope: None,

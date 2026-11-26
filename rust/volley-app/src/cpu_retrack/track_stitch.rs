@@ -9,12 +9,20 @@ use std::{
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
 };
-use volley_core::fusion::Candidate;
+use volley_core::{
+    court_geometry::{
+        CourtTransform, COURT_LENGTH_M, COURT_WIDTH_M, ON_COURT_LENGTH_MARGIN_M,
+        SERVE_ZONE_MARGIN_M,
+    },
+    fusion::Candidate,
+};
 
 #[derive(Deserialize)]
 struct Frame {
     frame_index: u64,
     tracked_players: Vec<Observation>,
+    #[serde(default)]
+    selected_ball: Value,
 }
 
 #[derive(Deserialize)]
@@ -976,6 +984,52 @@ pub(super) fn reconcile_rally_rosters(
     }
     result
 }
+pub(super) struct CourtFilter<'a> {
+    pub court: &'a CourtTransform,
+    pub scope: &'a PlayerFrameScope,
+    pub serve_points: Option<(&'a BTreeMap<u64, [f64; 2]>, u64)>,
+}
+
+impl CourtFilter<'_> {
+    fn serve_score(&self, frame: u64, bbox: [f64; 4], ball: &Value) -> Option<(u64, f64)> {
+        let index = self
+            .scope
+            .rallies
+            .partition_point(|&(start, _)| start <= frame);
+        let &(start, end) = self.scope.rallies.get(index.checked_sub(1)?)?;
+        if frame > end
+            || frame
+                >= start
+                    + crate::cpu_touches::INITIAL_SERVE_SEARCH_FRAMES
+                    + crate::cpu_touches::INITIAL_SERVE_CONTACT_FRAMES
+        {
+            return None;
+        }
+        let [x1, y1, x2, y2] = bbox;
+        let width = x2 - x1;
+        let height = y2 - y1;
+        let score = |[x, y]: [f64; 2]| {
+            let dx = (x - (x1 + x2) * 0.5).abs() / width;
+            let dy = (y - (y1 + height * 0.25)).abs() / height;
+            (dx <= 1.0 && dy <= 0.85).then_some(dx.hypot(dy))
+        };
+        let best = if let Some((points, offset)) = self.serve_points {
+            let frame = frame + offset;
+            points
+                .range(frame.saturating_sub(10)..=frame + 10)
+                .filter_map(|(_, &point)| score(point))
+                .min_by(f64::total_cmp)
+        } else if ball["source_model"] == "vballnet" {
+            let [a, b, c, d]: [f64; 4] =
+                serde_json::from_value(ball["detection"]["bbox_xyxy_norm"].clone()).ok()?;
+            score([(a + c) * 0.5, (b + d) * 0.5])
+        } else {
+            None
+        };
+        best.map(|value| (start, value))
+    }
+}
+
 struct TrackShape {
     first: u64,
     last: u64,
@@ -983,6 +1037,8 @@ struct TrackShape {
     min_edges: [f64; 4],
     max_edges: [f64; 4],
     max_aspect: f64,
+    court_observations: u64,
+    inside_court: bool,
 }
 
 impl TrackShape {
@@ -994,6 +1050,8 @@ impl TrackShape {
             min_edges: bbox,
             max_edges: bbox,
             max_aspect: 0.0,
+            court_observations: 0,
+            inside_court: false,
         }
     }
 
@@ -1028,6 +1086,8 @@ pub(super) struct PrunedTracks {
     pub short_detections: u64,
     pub static_tracks: u64,
     pub static_detections: u64,
+    pub outside_tracks: u64,
+    pub outside_detections: u64,
 }
 
 pub(super) fn prune_unreliable(
@@ -1035,20 +1095,45 @@ pub(super) fn prune_unreliable(
     expected_sha: &str,
     frames: u64,
     minimum: u64,
+    court_filter: Option<&CourtFilter<'_>>,
     cancel: Option<&AtomicBool>,
 ) -> Result<PrunedTracks, String> {
     let mut counts = BTreeMap::<u64, TrackShape>::new();
+    let mut servers = BTreeMap::<u64, (u64, f64)>::new();
     let mut reader = BoundedReader::open(source)?;
     for frame in 0..frames {
         if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             return Err("cancelled".into());
         }
-        for player in observed_row(&mut reader, frame)?.tracked_players {
+        let row = observed_row(&mut reader, frame)?;
+        for player in row.tracked_players {
             let bbox = player.detection.bbox_xyxy_norm;
-            counts
+            let shape = counts
                 .entry(player.track_id)
-                .or_insert_with(|| TrackShape::new(frame, bbox))
-                .observe(frame, bbox);
+                .or_insert_with(|| TrackShape::new(frame, bbox));
+            shape.observe(frame, bbox);
+            if let Some(filter) = court_filter {
+                let feet = [(bbox[0] + bbox[2]) * 0.5, bbox[3]];
+                if let Some([x, y]) = filter.court.to_court(feet) {
+                    const LINE_MARGIN_M: f64 = 0.35;
+                    shape.court_observations += 1;
+                    shape.inside_court |= x.abs() <= COURT_LENGTH_M / 2.0 + LINE_MARGIN_M
+                        && y.abs() <= COURT_WIDTH_M / 2.0 + LINE_MARGIN_M;
+                    if x.abs() >= COURT_LENGTH_M / 2.0 - SERVE_ZONE_MARGIN_M
+                        && x.abs() <= COURT_LENGTH_M / 2.0 + ON_COURT_LENGTH_MARGIN_M
+                        && y.abs() <= COURT_WIDTH_M / 2.0 + LINE_MARGIN_M
+                    {
+                        if let Some((start, score)) =
+                            filter.serve_score(frame, bbox, &row.selected_ball)
+                        {
+                            let best = servers.entry(start).or_insert((player.track_id, score));
+                            if score < best.1 {
+                                *best = (player.track_id, score);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     if reader.line()?.is_some() || reader.finish() != expected_sha {
@@ -1064,14 +1149,32 @@ pub(super) fn prune_unreliable(
         .filter(|(id, shape)| !short.contains(id) && shape.stationary_post())
         .map(|(&id, _)| id)
         .collect::<BTreeSet<_>>();
+    let server_ids = servers.values().map(|(id, _)| *id).collect::<BTreeSet<_>>();
+    let outside = counts
+        .iter()
+        .filter(|(id, shape)| {
+            !short.contains(id)
+                && !stationary.contains(id)
+                && !server_ids.contains(id)
+                && shape.court_observations >= 3
+                && !shape.inside_court
+        })
+        .map(|(&id, _)| id)
+        .collect::<BTreeSet<_>>();
     let mut pruned = PrunedTracks {
         sha: expected_sha.to_owned(),
         short_tracks: short.len() as u64,
         short_detections: short.iter().map(|id| counts[id].count).sum(),
         static_tracks: stationary.len() as u64,
         static_detections: stationary.iter().map(|id| counts[id].count).sum(),
+        outside_tracks: outside.len() as u64,
+        outside_detections: outside.iter().map(|id| counts[id].count).sum(),
     };
-    let rejected = short.union(&stationary).copied().collect::<BTreeSet<_>>();
+    let rejected = short
+        .union(&stationary)
+        .copied()
+        .chain(outside.iter().copied())
+        .collect::<BTreeSet<_>>();
     if rejected.is_empty() {
         return Ok(pruned);
     }
@@ -1128,7 +1231,8 @@ pub(super) fn prune_unreliable(
         writer.flush().map_err(|e| e.to_string())?;
         writer.get_ref().sync_all().map_err(|e| e.to_string())?;
         drop(writer);
-        if removed != pruned.short_detections + pruned.static_detections {
+        if removed != pruned.short_detections + pruned.static_detections + pruned.outside_detections
+        {
             return Err("Pruned Track ID counts changed".into());
         }
         fs::rename(&tmp, source).map_err(|e| e.to_string())?;
@@ -1356,6 +1460,7 @@ mod tests {
             180,
             12,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(pruned.static_tracks, 2);
@@ -1372,6 +1477,64 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(ids, vec![4, 7, 8]);
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prune_persistent_spectator_but_keep_player_excursion_and_server() {
+        let root = std::env::temp_dir().join(format!("volley-court-filter-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("tracks.jsonl");
+        let mut bytes = Vec::new();
+        for frame in 0..90 {
+            let players = [
+                (1, [0.46, 0.3, 0.52, if frame > 60 { 0.83 } else { 0.6 }]),
+                (2, [0.46, 0.69, 0.52, 0.93]),
+                (3, [0.04, 0.35, 0.10, 0.6]),
+                (4, [0.04, 0.65, 0.10, 0.93]),
+            ]
+            .into_iter()
+            .map(|(id, bbox)| json!({"track_id":id,"detection":candidate(frame,bbox,None)}))
+            .collect::<Vec<_>>();
+            serde_json::to_writer(&mut bytes, &json!({
+                "frame_index":frame,"tracked_players":players,
+                "selected_ball":if frame == 0 { json!({"source_model":"vballnet","detection":{"bbox_xyxy_norm":[0.05,0.31,0.07,0.33]}}) } else { Value::Null },
+                "raw_player_candidates":[candidate(frame,[0.46,0.69,0.52,0.93],None)]
+            })).unwrap();
+            bytes.push(b'\n');
+        }
+        fs::write(&source, &bytes).unwrap();
+        let court = CourtTransform::new([[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]]).unwrap();
+        let scope = rally_scope(vec![(0, 89)]);
+        let filter = CourtFilter {
+            court: &court,
+            scope: &scope,
+            serve_points: None,
+        };
+        let pruned = prune_unreliable(
+            &source,
+            &format!("{:x}", Sha256::digest(&bytes)),
+            90,
+            12,
+            Some(&filter),
+            None,
+        )
+        .unwrap();
+        assert_eq!(pruned.outside_tracks, 2);
+        assert_eq!(pruned.outside_detections, 180);
+        let result = fs::read_to_string(&source).unwrap();
+        for line in result.lines() {
+            let row: Value = serde_json::from_str(line).unwrap();
+            let ids = row["tracked_players"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["track_id"].as_u64().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(ids, vec![1, 3]);
+            assert_eq!(row["raw_player_candidates"].as_array().unwrap().len(), 1);
+        }
+        assert_eq!(pruned.short_tracks, 0);
         fs::remove_dir_all(root).unwrap();
     }
 

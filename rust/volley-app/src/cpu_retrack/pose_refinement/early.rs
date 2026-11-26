@@ -39,6 +39,7 @@ impl CompletedRallies {
 pub(crate) struct EarlyPoseOptions {
     pub parallel_rally_poses: bool,
     pub tracking: TrackingOptions,
+    pub court: Option<crate::video_edits::CourtSnapshot>,
     pub interpolate_players: bool,
     pub threads: usize,
     pub cancelled: Arc<AtomicBool>,
@@ -275,6 +276,15 @@ fn build_local_plan(
         None,
         ReplayOptions {
             phase: ReplayPhase::StablePlan,
+            court_filter: options
+                .court
+                .as_ref()
+                .and_then(|c| c.transform.as_ref())
+                .map(|court| crate::cpu_retrack::track_stitch::CourtFilter {
+                    court,
+                    scope: &scope,
+                    serve_points: Some((serve_points, window.left)),
+                }),
             interpolate_players: options.interpolate_players,
             scope: Some(&scope),
             cancel: Some(stop),
@@ -424,6 +434,8 @@ fn add_totals(total: &mut ReplayTotals, block: &ReplayTotals) {
         short_track_detections,
         static_tracks,
         static_track_detections,
+        outside_tracks,
+        outside_track_detections,
         duplicate_track_ids_merged,
         identity_turnover_splits,
         identity_handoff_splits,
