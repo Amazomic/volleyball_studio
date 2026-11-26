@@ -764,6 +764,12 @@ pub(super) fn validated(raw: Option<&[u8]>, ctx: &Inputs) -> Result<Value, Strin
             }
         }
     }
+    if doc["automatic_assignments"]
+        .as_object()
+        .is_some_and(|links| !links.is_empty())
+    {
+        doc["automatic_binding_policy"] = json!("preserve_existing_v1");
+    }
     Ok(doc)
 }
 pub(super) fn gallery_photo_hints(doc: &Value) -> Value {
@@ -1719,9 +1725,7 @@ fn persist_photo_comparison(
         &req.replay_id,
         req.rally_run_id.as_deref(),
     )?;
-    if !auto_assign {
-        preserve_links_for_photo_refresh(state, &ctx, &mut doc)?;
-    }
+    preserve_links_for_photo_refresh(state, &ctx, &mut doc)?;
     let matches = &comparison["player_matches"];
     let threshold = if return_automatic_result {
         req.auto_threshold_percent

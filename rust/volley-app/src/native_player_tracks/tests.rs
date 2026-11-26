@@ -2080,6 +2080,22 @@ fn isolated_project_edits_reject_stale_revision_reassignment_and_excluded_track(
         source_sha
     );
     assert_eq!(original["evidence_source"]["frame_rate"]["numerator"], 30);
+    let legacy_ctx = source(&state, id, video, replay).unwrap();
+    let mut legacy = base_document(&legacy_ctx);
+    legacy["automatic_assignments"] = json!({"7":"abcdef012345","8":"fedcba654321"});
+    legacy["automatic_identity_evidence"] = json!({"model_fingerprint":"outdated"});
+    storage::write_json_atomic(&legacy_ctx.sidecar, &legacy).unwrap();
+    let retained = read_internal(&state, &query).unwrap();
+    assert_eq!(retained["automatic_link_health"]["saved_count"], 2);
+    assert_eq!(retained["automatic_link_health"]["effective_count"], 2);
+    assert_eq!(retained["assigned_count"], 2);
+    assert_eq!(retained["unassigned_track_ids"], json!([]));
+    assert!(automatic_links_revision(&state, id, video, replay)
+        .unwrap()
+        .is_some());
+    let unchanged: Value = serde_json::from_slice(&fs::read(&legacy_ctx.sidecar).unwrap()).unwrap();
+    assert_eq!(unchanged, legacy);
+    fs::remove_file(&legacy_ctx.sidecar).unwrap();
     let assign = TrackEdit {
         project_id: id.into(),
         video: video.into(),
@@ -2773,6 +2789,43 @@ fn refreshing_photo_scores_revalidates_old_automatic_links_without_assigning_new
     doc["automatic_identity_evidence"]["matches"]["7"][0]["samples_used"] = json!(1);
     reconcile_saved_automatic_photo_links(&ctx, &mut doc).unwrap();
     assert_eq!(doc["automatic_assignments"], json!({}));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn legacy_saved_automatic_links_survive_stale_photo_evidence() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    let mut next = ctx.tracks[&7].clone();
+    next.first += 100;
+    next.last += 100;
+    next.visible_spans = vec![(next.first, next.last)];
+    next.observed_pairs.clear();
+    ctx.tracks.insert(8, next);
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8]).unwrap();
+    let mut doc = base_document(&ctx);
+    doc["automatic_assignments"] = json!({"7":"abcdef012345"});
+    doc["automatic_identity_evidence"] = json!({
+        "model_fingerprint":"old_model",
+        "photo_sample_policy":"three_observations_v1",
+        "matches":{}
+    });
+    let encoded = serde_json::to_vec(&doc).unwrap();
+    let mut loaded = validated(Some(&encoded), &ctx).unwrap();
+    reconcile_automatic_photo_links(&ctx, &mut loaded).unwrap();
+    assert_eq!(loaded["automatic_assignments"], json!({"7":"abcdef012345"}));
+    assert_eq!(loaded["assignments"], json!({}));
+    let view = filtered_page(&ctx, &loaded, "rev", 0, 10, Some("unassigned"), None).unwrap();
+    assert_eq!(view["unassigned_track_ids"], json!([8]));
+    let matches = json!({"7":[{"player_id":"abcdef012345","cosine_similarity":0.1}],
+        "8":[{"player_id":"abcdef012345","cosine_similarity":0.95,"samples_used":5}]});
+    let (updated, chosen) = refresh_automatic_photo_links(&ctx, &loaded, &matches, 0.75).unwrap();
+    assert_eq!(chosen, BTreeMap::from([(8, "abcdef012345".into())]));
+    assert_eq!(
+        updated["automatic_assignments"],
+        json!({"7":"abcdef012345","8":"abcdef012345"})
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
