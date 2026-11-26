@@ -176,7 +176,7 @@ pub struct StabilizedBallMotion {
     pub observed_frames: usize,
 }
 
-pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v12";
+pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v13";
 
 fn reject_preexisting_remote_ball(
     points: &[Option<[f64; 2]>],
@@ -212,7 +212,20 @@ fn reject_preexisting_remote_ball(
         }
         let impossible_switch = latest.is_some_and(|(last_frame, last_point)| {
             let dt = frame - last_frame;
-            dt <= 4 && distance(point, last_point) > max_step_fraction * dt as f64
+            dt <= 4
+                && distance(point, last_point) > max_step_fraction * dt as f64
+                && (last_frame.saturating_sub(4)..last_frame)
+                    .filter(|&prior_frame| {
+                        points[prior_frame].is_some_and(|prior| {
+                            distance(prior, last_point)
+                                <= max_step_fraction * (last_frame - prior_frame) as f64
+                        }) && rejected
+                            .last()
+                            .is_none_or(|&rejected_frame| rejected_frame < prior_frame)
+                    })
+                    .take(2)
+                    .count()
+                    == 2
         });
         if impossible_switch {
             let begin = frame.saturating_sub(HISTORY_FRAMES);
@@ -1202,6 +1215,29 @@ mod tests {
             stabilize_ball_motion(&samples, 100, BallStabilizerSettings::default()).unwrap();
         assert!(result.points[..60].iter().all(Option::is_none));
         assert!(result.rejected_frames.contains(&59));
+        assert!(result.points[60..].iter().all(Option::is_some));
+        assert!(!result.interpolated[..60].iter().any(|&v| v));
+    }
+
+    #[test]
+    fn idle_source_switch_survives_two_frame_remote_glitch() {
+        let samples = (0..100)
+            .map(|frame| ScoredBallSample {
+                frame,
+                point: match frame {
+                    35..=36 => [0.25, 0.82],
+                    0..=59 => [0.93 + (frame % 3) as f64 * 0.002, 0.58],
+                    _ => [
+                        0.41 + (frame - 60) as f64 * 0.002,
+                        0.90 - (frame - 60) as f64 * 0.012,
+                    ],
+                },
+                confidence: 0.9,
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 100, BallStabilizerSettings::default()).unwrap();
+        assert!(result.points[..60].iter().all(Option::is_none));
         assert!(result.points[60..].iter().all(Option::is_some));
         assert!(!result.interpolated[..60].iter().any(|&v| v));
     }
