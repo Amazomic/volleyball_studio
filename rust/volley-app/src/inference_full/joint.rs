@@ -235,6 +235,8 @@ fn new_context(
         analysis_range: range,
         config,
         person_detector,
+        person_batch_size: 1,
+        person_tf32: true,
         stride: 9,
         person_stride,
         folder,
@@ -341,9 +343,8 @@ pub(crate) fn run_joint_pair(
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
-    let mut person_engine = PersonEngine::load_for_gpu_evidence_with_detector(
+    let mut person_engine = PersonEngine::load_for_primary_gpu_evidence(
         &state.repository_root,
-        Device::Cuda,
         cpu_threads,
         session_memory,
         person_detector,
@@ -363,7 +364,7 @@ pub(crate) fn run_joint_pair(
         1,
     )?;
     pending.paths.push(ball.folder.clone());
-    let players = new_context(
+    let mut players = new_context(
         state,
         project_id,
         video,
@@ -376,6 +377,9 @@ pub(crate) fn run_joint_pair(
         person_stride,
     )?;
     pending.paths.push(players.folder.clone());
+    players.person_batch_size = person_engine.batch_size();
+    players.person_tf32 =
+        person_detector != volley_inference::person::DetectorVariant::RfDetrMedium;
 
     let mut ball_writer = EvidenceWriter::create(&ball.folder)?;
     let mut person_writer = EvidenceWriter::create(&players.folder)?;
@@ -408,10 +412,7 @@ pub(crate) fn run_joint_pair(
     let checkpoint_dir = checkpoint_root.map(|root| {
         let options = early_pose.as_ref().ok_or("Missing rally checkpoint settings")?;
         let ball_model = "VballNetV4c_seq9_grayscale_20260908_213829.onnx";
-        let detector_model = format!("rf-detr-{}.onnx", match person_detector {
-            volley_inference::person::DetectorVariant::RfDetrMedium => "medium",
-            volley_inference::person::DetectorVariant::RfDetrLarge => "large",
-        });
+        let detector_model = person_engine.model_file();
         let identity = json!({
             "schema":"volley-phase1-checkpoint/1",
             "build":env!("VOLLEY_BUILD_GIT_SHA"),
@@ -419,9 +420,10 @@ pub(crate) fn run_joint_pair(
             "source":original_provenance,"stamp":[before.0,before.1],
             "range":range,"duration":duration,"backend":backend_tag,
             "person_stride":person_stride,"person_detector":person_detector,
+            "person_batch_size":players.person_batch_size,"person_tf32":players.person_tf32,
             "ball_model_sha256":checkpoint::model_digest(&state.repository_root, ball_model)?,
             "ball_sidecar_sha256":checkpoint::model_digest(&state.repository_root, "VballNetV4c_seq9_grayscale_20260908_213829.json")?,
-            "person_model_sha256":checkpoint::model_digest(&state.repository_root, &detector_model)?,
+            "person_model_sha256":checkpoint::model_digest(&state.repository_root, detector_model)?,
             "pose_model_sha256":checkpoint::model_digest(&state.repository_root, volley_inference::pose::MODEL_FILE)?,
             "rally_settings":rally_settings,"stabilizer_settings":stabilizer_settings,
             "tracking":options.tracking,"interpolate_players":options.interpolate_players,
@@ -656,6 +658,7 @@ pub(crate) fn run_joint_pair(
                     return Err("No confirmed rally work windows".into());
                 }
                 update_rally_progress(&options.progress, |p| p.initialize(&windows))?;
+                let selected = windows.iter().map(|w| (w.left, w.right)).collect();
                 let handoff = RallyHandoff::new(windows, frames)?;
                 let (worker, sender) = EarlyPoseWorker::start(
                     options,
@@ -663,6 +666,7 @@ pub(crate) fn run_joint_pair(
                     state.repository_root.clone(),
                     range,
                     decoded_frames,
+                    selected,
                     trajectory,
                     rallies,
                     dimensions,
@@ -732,12 +736,13 @@ pub(crate) fn run_joint_pair(
                     });
                     let mut persons = match person_writer.cached(batch.first_frame)? {
                         Some(records) => records,
-                        None if selected => detect_player_window(
+                        None if selected => detect_selected_player_window(
                             &mut person_engine,
                             &batch.rgb,
                             batch.first_frame,
                             person_stride as u64,
                             cancelled,
+                            |frame| mask.includes(frame),
                         )?,
                         None => Vec::new(),
                     };

@@ -128,9 +128,29 @@ function Install-RfDetrLarge {
         if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}
     }
 }
+function Install-RfDetrMediumBatch4 {
+    $target=Join-Path $repo "models\rf-detr-medium-batch4.onnx"
+    $expected="9055ef9b1b76b79412069590654baf913cd173972be4ff4686c1535bb021e1f6"
+    if((Test-Path -LiteralPath $target -PathType Leaf) -and
+       (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -eq $expected){return}
+    $source=Join-Path $repo "models\rf-detr-medium.onnx"
+    if(-not (Test-Path -LiteralPath $source -PathType Leaf)){throw "RF-DETR Medium source model missing: $source"}
+    if(-not (Get-Command python -ErrorAction SilentlyContinue)){throw "Python is required once to prepare the verified RF-DETR Batch 4 model"}
+    $deps=Join-Path $runtime "rfdetr-export-deps"
+    $previous=$env:PYTHONPATH
+    try {
+        $env:PYTHONPATH=$deps
+        & python -m pip install --disable-pip-version-check --target $deps "onnx==1.23.2" "numpy==2.4.6" "protobuf==7.36.2" "ml_dtypes==0.7.0"
+        if($LASTEXITCODE -ne 0){throw "RF-DETR export dependency installation failed"}
+        & python (Join-Path $PSScriptRoot "prepare-rfdetr-batch4.py") $source $target
+        if($LASTEXITCODE -ne 0){throw "RF-DETR Batch 4 export failed"}
+        if((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $expected){throw "RF-DETR Batch 4 SHA-256 mismatch"}
+    }finally{$env:PYTHONPATH=$previous}
+}
 function Build-Windows {
     Confirm-Source
     Install-RfDetrLarge
+    Install-RfDetrMediumBatch4
     Push-Location (Join-Path $repo "rust")
     try {
         & cargo build -p volley-web --target wasm32-unknown-unknown --release --offline --locked
@@ -160,6 +180,7 @@ function Test-NativeDependencies {
     foreach($name in @(
         "models\VballNetV4c_seq9_grayscale_20260908_213829.onnx",
         "models\rf-detr-medium.onnx",
+        "models\rf-detr-medium-batch4.onnx",
         "models\rf-detr-large.onnx",
         "models\RTMPose-M-Body7.onnx",
         "models\openvino\person-reidentification-retail-0287.xml"

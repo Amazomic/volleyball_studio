@@ -502,10 +502,22 @@ pub fn decode_full_video_in_range(
     })
 }
 
-fn configure_original_rgb_output(ff: &mut Command, prefix: &str, expected_frames: u64) {
+fn configure_original_rgb_output(
+    ff: &mut Command,
+    prefix: &str,
+    expected_frames: u64,
+    selection: Option<&str>,
+) {
+    let filter = match selection {
+        Some(expression) => format!("{prefix}fps=30,select='{expression}',format=rgb24"),
+        None => format!("{prefix}fps=30,format=rgb24"),
+    };
+    if selection.is_some() {
+        ff.args(["-fps_mode", "passthrough"]);
+    }
     ff.args(["-map", "0:v:0", "-an", "-sn", "-dn"])
         .args(["-filter_threads", "2"])
-        .args(["-vf", &format!("{prefix}fps=30,format=rgb24")])
+        .args(["-vf", &filter])
         .args(["-frames:v", &expected_frames.to_string()])
         .args(["-threads:v", "1"])
         .args(["-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]);
@@ -524,6 +536,43 @@ pub fn decode_original_frames_in_range(
     source: &Path,
     expected_frames: u64,
     range: Option<AnalysisRange>,
+    cancelled: &AtomicBool,
+    consume: impl FnMut(u64, &[u8], usize, usize) -> Result<(), String>,
+) -> Result<(), String> {
+    decode_original_frames_impl(source, expected_frames, range, None, cancelled, consume)
+}
+
+pub fn decode_original_frames_selected_in_range(
+    source: &Path,
+    expected_frames: u64,
+    range: Option<AnalysisRange>,
+    selected: &[(u64, u64)],
+    cancelled: &AtomicBool,
+    consume: impl FnMut(u64, &[u8], usize, usize) -> Result<(), String>,
+) -> Result<(), String> {
+    if selected.is_empty()
+        || selected
+            .iter()
+            .any(|&(left, right)| left > right || right >= expected_frames)
+        || selected.windows(2).any(|pair| pair[0].1 >= pair[1].0)
+    {
+        return Err("Invalid original RGB selection".into());
+    }
+    decode_original_frames_impl(
+        source,
+        expected_frames,
+        range,
+        Some(selected),
+        cancelled,
+        consume,
+    )
+}
+
+fn decode_original_frames_impl(
+    source: &Path,
+    expected_frames: u64,
+    range: Option<AnalysisRange>,
+    selected: Option<&[(u64, u64)]>,
     cancelled: &AtomicBool,
     mut consume: impl FnMut(u64, &[u8], usize, usize) -> Result<(), String>,
 ) -> Result<(), String> {
@@ -546,7 +595,23 @@ pub fn decode_original_frames_in_range(
         range.validate(info.duration_sec)?;
     }
     let (mut ff, prefix) = auto_decode_input_in_range(source, cancelled, range)?;
-    configure_original_rgb_output(&mut ff, &prefix, expected_frames);
+    let expression = selected.filter(|ranges| ranges.len() <= 256).map(|ranges| {
+        ranges
+            .iter()
+            .map(|(left, right)| format!("between(n,{left},{right})"))
+            .collect::<Vec<_>>()
+            .join("+")
+    });
+    let output_count = if expression.is_some() {
+        selected
+            .unwrap_or_default()
+            .iter()
+            .map(|&(left, right)| right - left + 1)
+            .sum()
+    } else {
+        expected_frames
+    };
+    configure_original_rgb_output(&mut ff, &prefix, output_count, expression.as_deref());
     ff.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -592,9 +657,18 @@ pub fn decode_original_frames_in_range(
                 if cancelled.load(Ordering::Acquire) {
                     return Err("cancelled".into());
                 }
+                let included = selected.is_none_or(|ranges| {
+                    let i = ranges.partition_point(|&(left, _)| left <= index);
+                    i > 0 && index <= ranges[i - 1].1
+                });
+                if expression.is_some() && !included {
+                    continue;
+                }
                 pipe.read_exact(&mut frame)
                     .map_err(|error| format!("Original RGB frame {index}: {error}"))?;
-                consume(index, &frame, width, height)?;
+                if included {
+                    consume(index, &frame, width, height)?;
+                }
             }
             let mut extra = [0_u8; 1];
             if pipe.read(&mut extra).map_err(|error| error.to_string())? != 0 {
@@ -738,6 +812,92 @@ mod tests {
     }
 
     #[test]
+    fn selected_original_rgb_preserves_exact_pixels_and_global_frame_indices() {
+        let root = std::env::temp_dir().join(format!(
+            "volley-select-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("input.mp4");
+        let output = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=25:duration=4",
+                "-c:v",
+                "libx264",
+                "-y",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let cancel = AtomicBool::new(false);
+        let range = Some(AnalysisRange {
+            start_sec: 0.37,
+            end_sec: 2.37,
+        });
+        let selected = [(3, 8), (21, 25), (44, 58)];
+        let mut expected = Vec::new();
+        decode_original_frames_in_range(&source, 60, range, &cancel, |index, pixels, _, _| {
+            if selected
+                .iter()
+                .any(|&(left, right)| (left..=right).contains(&index))
+            {
+                expected.push((index, pixels.to_vec()));
+            }
+            Ok(())
+        })
+        .unwrap();
+        let mut actual = Vec::new();
+        decode_original_frames_selected_in_range(
+            &source,
+            60,
+            range,
+            &selected,
+            &cancel,
+            |index, pixels, _, _| {
+                actual.push((index, pixels.to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(actual.len(), 26);
+        assert_eq!(actual, expected);
+        assert!(decode_original_frames_selected_in_range(
+            &source,
+            60,
+            range,
+            &[(5, 8), (7, 9)],
+            &cancel,
+            |_, _, _, _| Ok(())
+        )
+        .is_err());
+        assert!(decode_original_frames_selected_in_range(
+            &source,
+            60,
+            range,
+            &[(59, 60)],
+            &cancel,
+            |_, _, _, _| Ok(())
+        )
+        .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn invalid_ranges_fail_closed_before_decode() {
         let duration = 3600.0;
         for invalid in [
@@ -808,7 +968,7 @@ mod tests {
                 "-i",
             ])
             .arg(&source);
-        configure_original_rgb_output(&mut command, "", 60);
+        configure_original_rgb_output(&mut command, "", 60, None);
         let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

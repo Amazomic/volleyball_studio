@@ -1,5 +1,14 @@
 use super::*;
 use std::sync::Arc;
+use volley_inference::cuda_input::CudaInput;
+mod frame_queue;
+use frame_queue::FrameQueue;
+
+struct PersonBatch {
+    input: CudaInput,
+    frames: Vec<u64>,
+}
+
 use volley_inference::gpu_preprocess::{GpuBuffer, GpuPreprocessor, Nv12View};
 use volley_media::nvdec::{
     closest_display_frame, decode_video_file_window_with_map_ranges, keyframe_window,
@@ -98,6 +107,113 @@ pub(super) fn run(
     ball_engine: &mut Engine,
     person_engine: &mut PersonEngine,
     pose: Option<&GpuPoseStage>,
+    ball_writer: Option<&mut EvidenceWriter>,
+    person_writer: Option<&mut EvidenceWriter>,
+    pass: ScanPass<'_>,
+    ball: &JobContext,
+    players: &JobContext,
+    person_stride: usize,
+    duration: f64,
+    cancelled: &AtomicBool,
+    report: impl FnMut(f64, u64) -> Result<(), String>,
+) -> Result<DecodeSummary, String> {
+    if matches!(pass, ScanPass::PlayersOnly(_)) {
+        let batch_size = person_engine.batch_size();
+        let allocate = || -> Result<PersonBatch, String> {
+            Ok(PersonBatch {
+                input: person_engine.allocate_cuda_input()?,
+                frames: Vec::with_capacity(batch_size),
+            })
+        };
+        let buffers = [allocate()?, allocate()?];
+        return std::thread::scope(|scope| {
+            let mut binding = None;
+            let (mut queue, worker) = FrameQueue::start(scope, buffers, move |_, batch| {
+                if cancelled.load(Ordering::Acquire) {
+                    return Err("cancelled".into());
+                }
+                if binding.is_none() {
+                    volley_inference::gpu_preprocess::bind_cuda_thread()?;
+                    binding = Some(person_engine.create_cuda_detector_binding()?);
+                }
+                let found = person_engine.detect_cuda_batch_bound(
+                    &batch.input,
+                    binding.as_mut().ok_or("Missing RF-DETR binding")?,
+                    batch.frames.len(),
+                )?;
+                Ok(found
+                    .into_iter()
+                    .zip(batch.frames.iter().copied())
+                    .flat_map(|(items, frame_index)| {
+                        items
+                            .into_iter()
+                            .enumerate()
+                            .map(move |(index, candidate)| RawDetection {
+                                frame_index,
+                                class_name: "player",
+                                score: candidate.score,
+                                bbox_xyxy_norm: candidate.bbox.map(|value| value as f32),
+                                query_index: Some(index),
+                                touch_probability: None,
+                                head_point_norm: candidate
+                                    .head
+                                    .map(|point| point.map(|value| value as f32)),
+                            })
+                    })
+                    .collect())
+            });
+            let result = run_inner(
+                original,
+                source,
+                range,
+                ball_engine,
+                Some(&mut queue),
+                batch_size,
+                pose,
+                ball_writer,
+                person_writer,
+                pass,
+                ball,
+                players,
+                person_stride,
+                duration,
+                cancelled,
+                report,
+            );
+            drop(queue);
+            worker.join().map_err(|_| "RF-DETR worker panicked")??;
+            result
+        });
+    }
+    run_inner(
+        original,
+        source,
+        range,
+        ball_engine,
+        None,
+        1,
+        pose,
+        ball_writer,
+        person_writer,
+        pass,
+        ball,
+        players,
+        person_stride,
+        duration,
+        cancelled,
+        report,
+    )
+}
+
+#[expect(clippy::too_many_arguments)]
+fn run_inner(
+    original: &Path,
+    source: ZeroCopySource,
+    range: Option<volley_media::raw_decoder::AnalysisRange>,
+    ball_engine: &mut Engine,
+    mut person_queue: Option<&mut FrameQueue<PersonBatch, Vec<RawDetection>>>,
+    batch_size: usize,
+    pose: Option<&GpuPoseStage>,
     mut ball_writer: Option<&mut EvidenceWriter>,
     mut person_writer: Option<&mut EvidenceWriter>,
     pass: ScanPass<'_>,
@@ -115,10 +231,8 @@ pub(super) fn run(
     let ball_input = (!matches!(pass, ScanPass::PlayersOnly(_)))
         .then(|| ball_engine.allocate_cuda_clip_input())
         .transpose()?;
-    let people_input = (!matches!(pass, ScanPass::BallOnly))
-        .then(|| person_engine.allocate_cuda_input())
-        .transpose()?;
     let mut observations = Vec::<RawDetection>::new();
+    let mut prepared: Option<PersonBatch> = None;
     let mut cached_window: Option<Vec<RawDetection>> = None;
     let mut sampled_frames: Vec<Option<Arc<GpuBuffer>>> = Vec::with_capacity(9);
     let mut expected_index = 0u64;
@@ -149,6 +263,9 @@ pub(super) fn run(
                              width: usize,
                              height: usize|
      -> Result<(), String> {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
         let frame_slot = (frame_index % 9) as usize;
         if frame_slot == 0 {
             cached_window = match pass {
@@ -177,25 +294,33 @@ pub(super) fn run(
             player_samples += 1;
         }
         if cached_window.is_none()
+            && frame_index < target_frames / 9 * 9
             && include_person
             && frame_index.is_multiple_of(person_stride as u64)
         {
             let model_view = view.ok_or("Missing selected NVDEC player frame")?;
-            let input = people_input.as_ref().ok_or("Missing GPU person input")?;
-            gpu.person_input(model_view, input, source.matrix)?;
-            gpu.finish()?;
+            let queue = person_queue
+                .as_deref_mut()
+                .ok_or("Missing RF-DETR inference queue")?;
+            if prepared.is_none() {
+                let (mut batch, completed) = queue.acquire()?;
+                if let Some((_, mut found)) = completed {
+                    observations.append(&mut found);
+                }
+                batch.frames.clear();
+                prepared = Some(batch);
+            }
+            let batch = prepared.as_mut().ok_or("Missing RF-DETR prepared batch")?;
+            let preparation =
+                gpu.person_input_slot(model_view, &batch.input, source.matrix, batch.frames.len());
+            let completion = gpu.finish();
+            preparation?;
+            completion?;
             needs_finish = false;
-            let found = person_engine.detect_cuda_input(input)?;
-            for (index, candidate) in found.into_iter().enumerate() {
-                observations.push(RawDetection {
-                    frame_index,
-                    class_name: "player",
-                    score: candidate.score,
-                    bbox_xyxy_norm: candidate.bbox.map(|value| value as f32),
-                    query_index: Some(index),
-                    touch_probability: None,
-                    head_point_norm: candidate.head.map(|point| point.map(|value| value as f32)),
-                });
+            batch.frames.push(frame_index);
+            if batch.frames.len() == batch_size {
+                let batch = prepared.take().ok_or("Missing full RF-DETR batch")?;
+                queue.submit(batch.frames[0], batch)?;
             }
         }
         if keep_pose && include_person && frame_index.is_multiple_of(person_stride as u64) {
@@ -226,6 +351,16 @@ pub(super) fn run(
                     .push(first, &balls)?;
             }
             if let Some(writer) = person_writer.as_deref_mut() {
+                if let Some(queue) = person_queue.as_deref_mut() {
+                    if let Some(batch) = prepared.take() {
+                        gpu.pad_person_input(&batch.input, batch.frames.len())?;
+                        queue.submit(batch.frames[0], batch)?;
+                    }
+                    while queue.pending() > 0 {
+                        let (_, mut found) = queue.receive()?;
+                        observations.append(&mut found);
+                    }
+                }
                 if let Some(records) = cached_window.take() {
                     observations = records;
                 }
@@ -398,7 +533,11 @@ pub(super) fn run(
         return Err("cancelled".into());
     }
 
-    drop(people_input);
+    if let Some(queue) = person_queue {
+        while queue.pending() > 0 {
+            queue.receive()?;
+        }
+    }
     drop(ball_input);
     Ok(DecodeSummary {
         first_frame: 0,

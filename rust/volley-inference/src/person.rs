@@ -4,6 +4,8 @@ use crate::{
 };
 use ort::{
     execution_providers::{CPUExecutionProvider, CUDAExecutionProvider, ExecutionProvider},
+    io_binding::IoBinding,
+    memory::{Allocator, MemoryInfo},
     session::Session,
     value::Tensor,
 };
@@ -22,6 +24,9 @@ fn is_observation_frame(frame: u64, period: u64) -> bool {
 pub const RFDETR_MEDIUM_FILE: &str = "rf-detr-medium.onnx";
 pub const RFDETR_MEDIUM_SHA256: &str =
     "18250b5a3a9552ae117d592f8e8c27fe52438d70c914a77a8913fc45d8f29e69";
+pub const RFDETR_MEDIUM_BATCH4_FILE: &str = "rf-detr-medium-batch4.onnx";
+pub const RFDETR_MEDIUM_BATCH4_SHA256: &str =
+    "9055ef9b1b76b79412069590654baf913cd173972be4ff4686c1535bb021e1f6";
 const RFDETR_LARGE_FILE: &str = "rf-detr-large.onnx";
 const RFDETR_LARGE_SHA256: &str =
     "da7f1bc118c6071b48096149b5df01eb1caeb3bb60a262949ac0e41f7c96f705";
@@ -165,6 +170,7 @@ fn skeleton_box_with_threshold(
 
 pub struct PersonEngine {
     detector: Session,
+    batch: usize,
     variant: DetectorVariant,
     pose: Option<PoseEngine>,
 }
@@ -213,6 +219,8 @@ impl PersonEngine {
             memory_mb,
             variant,
             variant.needs_pose_in_gpu_evidence(),
+            1,
+            true,
         )
     }
 
@@ -224,9 +232,54 @@ impl PersonEngine {
         memory_mb: u64,
         variant: DetectorVariant,
     ) -> Result<Self, String> {
-        Self::load_with_pose_policy(repo, device, threads, memory_mb, variant, true)
+        Self::load_with_pose_policy(repo, device, threads, memory_mb, variant, true, 1, true)
     }
 
+    pub fn primary_batch_size(variant: DetectorVariant, memory_mb: u64) -> usize {
+        if variant == DetectorVariant::RfDetrMedium && (memory_mb == 0 || memory_mb >= 3072) {
+            4
+        } else {
+            1
+        }
+    }
+
+    pub fn load_for_primary_gpu_evidence(
+        repo: &Path,
+        threads: usize,
+        memory_mb: u64,
+        variant: DetectorVariant,
+    ) -> Result<Self, String> {
+        Self::load_with_pose_policy(
+            repo,
+            Device::Cuda,
+            threads,
+            memory_mb,
+            variant,
+            false,
+            Self::primary_batch_size(variant, memory_mb),
+            variant != DetectorVariant::RfDetrMedium,
+        )
+    }
+
+    pub fn batch_size(&self) -> usize {
+        self.batch
+    }
+
+    pub fn model_file(&self) -> &'static str {
+        if self.batch == 4 {
+            RFDETR_MEDIUM_BATCH4_FILE
+        } else {
+            self.variant.file()
+        }
+    }
+
+    fn input_shape(&self) -> [i64; 4] {
+        let mut shape = self.variant.input_shape();
+        shape[0] = self.batch as i64;
+        shape
+    }
+
+    #[expect(clippy::too_many_arguments)]
     fn load_with_pose_policy(
         repo: &Path,
         device: Device,
@@ -234,6 +287,8 @@ impl PersonEngine {
         memory_mb: u64,
         variant: DetectorVariant,
         with_pose: bool,
+        batch: usize,
+        tf32: bool,
     ) -> Result<Self, String> {
         if threads > 128 || memory_mb > 131072 {
             return Err("Invalid person inference resource settings".into());
@@ -242,8 +297,13 @@ impl PersonEngine {
             .join("models")
             .canonicalize()
             .map_err(|e| format!("Models root: {e}"))?;
+        let (filename, sha) = if batch == 4 {
+            (RFDETR_MEDIUM_BATCH4_FILE, RFDETR_MEDIUM_BATCH4_SHA256)
+        } else {
+            (variant.file(), variant.sha256())
+        };
         let path = models
-            .join(variant.file())
+            .join(filename)
             .canonicalize()
             .map_err(|e| format!("Person detector {} not installed: {e}", variant.file()))?;
         let size = path
@@ -256,7 +316,7 @@ impl PersonEngine {
                 variant.file()
             ));
         }
-        crate::verify_model_sha(&path, variant.sha256())?;
+        crate::verify_model_sha(&path, sha)?;
         // Both GPU sessions explicitly require CUDA; never silently fall back.
         #[cfg(any(target_os = "linux", windows))]
         let _ = crate::runtime_library(device)?;
@@ -271,7 +331,14 @@ impl PersonEngine {
                 .map_err(|e| e.to_string())?;
         }
         if device == Device::Cuda {
-            let mut cuda = CUDAExecutionProvider::default().with_device_id(0);
+            let mut cuda = CUDAExecutionProvider::default()
+                .with_device_id(0)
+                .with_tf32(tf32);
+            if !tf32 {
+                cuda = cuda.with_conv_algorithm_search(
+                    ort::execution_providers::cuda::CuDNNConvAlgorithmSearch::Heuristic,
+                );
+            }
             if memory_mb > 0 {
                 cuda = cuda.with_memory_limit((memory_mb * 1024 * 1024) as usize);
             }
@@ -290,10 +357,16 @@ impl PersonEngine {
             .commit_from_file(path)
             .map_err(|e| format!("Open person detector: {e}"))?;
         let required_outputs = variant.output_names();
-        if !detector.inputs.iter().any(|i| i.name == "input")
-            || required_outputs
-                .iter()
-                .any(|expected| !detector.outputs.iter().any(|o| o.name == *expected))
+        let mut expected_shape = variant.input_shape();
+        expected_shape[0] = batch as i64;
+        if !detector.inputs.iter().any(|i| {
+            i.name == "input"
+                && i.input_type
+                    .tensor_shape()
+                    .is_some_and(|s| s.as_ref() == expected_shape)
+        }) || required_outputs
+            .iter()
+            .any(|expected| !detector.outputs.iter().any(|o| o.name == *expected))
         {
             return Err(format!(
                 "Unexpected person detector ONNX tensor ABI: {}",
@@ -307,13 +380,99 @@ impl PersonEngine {
         };
         Ok(Self {
             detector,
+            batch,
             variant,
             pose,
         })
     }
 
     pub fn allocate_cuda_input(&self) -> Result<crate::cuda_input::CudaInput, String> {
-        crate::cuda_input::allocate(&self.detector, &self.variant.input_shape(), 0)
+        crate::cuda_input::allocate(&self.detector, &self.input_shape(), 0)
+    }
+
+    pub fn create_cuda_detector_binding(&self) -> Result<IoBinding, String> {
+        let mut binding = self
+            .detector
+            .create_binding()
+            .map_err(|e| format!("Create RF-DETR binding: {e}"))?;
+        let allocator = Allocator::default();
+        for name in self.variant.output_names() {
+            let shape = self
+                .detector
+                .outputs
+                .iter()
+                .find(|output| output.name == name)
+                .and_then(|output| output.output_type.tensor_shape());
+            if let Some(shape) = shape.filter(|shape| {
+                shape.len() == 3
+                    && shape[0] == self.batch as i64
+                    && (1..=1024).contains(&shape[1])
+                    && matches!(shape[2], 4 | 91)
+            }) {
+                let tensor = Tensor::<f32>::new(&allocator, shape.to_vec())
+                    .map_err(|e| format!("Allocate RF-DETR output {name}: {e}"))?;
+                binding
+                    .bind_output(name, tensor)
+                    .map_err(|e| format!("Bind RF-DETR output {name}: {e}"))?;
+            } else {
+                binding
+                    .bind_output_to_device(name, &MemoryInfo::default())
+                    .map_err(|e| format!("Bind RF-DETR output {name}: {e}"))?;
+            }
+        }
+        Ok(binding)
+    }
+
+    pub fn detect_cuda_input_bound(
+        &mut self,
+        input: &Tensor<f32>,
+        binding: &mut IoBinding,
+    ) -> Result<Vec<PersonObservation>, String> {
+        if self.batch != 1 {
+            return Err("RF-DETR single-frame binding requires batch one".into());
+        }
+        Ok(self.detect_cuda_batch_bound(input, binding, 1)?.remove(0))
+    }
+
+    pub fn detect_cuda_batch_bound(
+        &mut self,
+        input: &Tensor<f32>,
+        binding: &mut IoBinding,
+        count: usize,
+    ) -> Result<Vec<Vec<PersonObservation>>, String> {
+        if self.pose.is_some() {
+            return Err("CUDA detector-only input cannot substitute RTMPose source pixels".into());
+        }
+        crate::cuda_input::validate(input, &self.input_shape(), 0)?;
+        let [box_name, logit_name] = self.variant.output_names();
+        binding
+            .bind_input("input", input)
+            .map_err(|e| format!("Bind RF-DETR input: {e}"))?;
+        let result = (|| {
+            let outputs = self
+                .detector
+                .run_binding(binding)
+                .map_err(|e| format!("Run bound RF-DETR: {e}"))?;
+            let (box_shape, boxes) = outputs
+                .get(box_name)
+                .ok_or("CUDA RF-DETR boxes missing")?
+                .try_extract_tensor::<f32>()
+                .map_err(|e| format!("RF-DETR boxes: {e}"))?;
+            let (logit_shape, logits) = outputs
+                .get(logit_name)
+                .ok_or("CUDA RF-DETR logits missing")?
+                .try_extract_tensor::<f32>()
+                .map_err(|e| format!("RF-DETR logits: {e}"))?;
+            decode_detector_batch(
+                box_shape.as_ref(),
+                boxes,
+                logit_shape.as_ref(),
+                logits,
+                count,
+            )
+        })();
+        binding.clear_inputs();
+        result
     }
 
     pub fn detect_cuda_input(
@@ -340,22 +499,20 @@ impl PersonEngine {
             .iter()
             .find(|tensor| tensor.name == logit_name)
             .ok_or("CUDA RF-DETR logits missing")?;
-        if boxes.dimensions.len() != 3
-            || boxes.dimensions[0] != 1
-            || boxes.dimensions[2] != 4
-            || logits.dimensions.len() != 3
-            || logits.dimensions[0] != 1
-            || logits.dimensions[1] != boxes.dimensions[1]
-            || logits.dimensions[2] != 91
-        {
-            return Err("CUDA RF-DETR output dimensions are incompatible".into());
-        }
-        let proposals = decode_rfdetr(&boxes.data, &logits.data)?;
-        Ok(rfdetr_detector_observations(proposals))
+        decode_detector_output(
+            &boxes.dimensions,
+            &boxes.data,
+            &logits.dimensions,
+            &logits.data,
+        )
     }
 
     pub fn detect(&mut self, rgb: &[u8]) -> Result<Vec<PersonObservation>, String> {
-        self.detect_rfdetr(rgb)
+        if self.batch == 1 {
+            self.detect_rfdetr(rgb)
+        } else {
+            Ok(self.detect_rgb_batch(&[rgb])?.remove(0))
+        }
     }
 
     pub fn detect_frames(
@@ -368,7 +525,7 @@ impl PersonEngine {
             return Err("Person detector expects complete RGB24 frames".into());
         }
         for (index, frame) in frames.chunks_exact(frame_bytes).enumerate() {
-            consume(index, self.detect_rfdetr(frame)?)?;
+            consume(index, self.detect(frame)?)?;
         }
         Ok(())
     }
@@ -382,6 +539,17 @@ impl PersonEngine {
         frames: &[u8],
         first_frame: u64,
         sample_every: u64,
+        consume: impl FnMut(usize, Vec<PersonObservation>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.detect_frames_selected(frames, first_frame, sample_every, |_| true, consume)
+    }
+
+    pub fn detect_frames_selected(
+        &mut self,
+        frames: &[u8],
+        first_frame: u64,
+        sample_every: u64,
+        selected: impl Fn(u64) -> bool,
         mut consume: impl FnMut(usize, Vec<PersonObservation>) -> Result<(), String>,
     ) -> Result<(), String> {
         let frame_bytes = W * H * 3;
@@ -391,14 +559,74 @@ impl PersonEngine {
         {
             return Err("Invalid sampled person inference input".into());
         }
-        for (index, frame) in frames.chunks_exact(frame_bytes).enumerate() {
-            if is_observation_frame(first_frame + index as u64, sample_every) {
-                consume(index, self.detect(frame)?)?;
+        let indices: Vec<_> = (0..frames.len() / frame_bytes)
+            .filter(|&i| {
+                let frame = first_frame + i as u64;
+                is_observation_frame(frame, sample_every) && selected(frame)
+            })
+            .collect();
+        let mut next = 0;
+        for group in indices.chunks(self.batch) {
+            let images: Vec<_> = group
+                .iter()
+                .map(|&i| &frames[i * frame_bytes..(i + 1) * frame_bytes])
+                .collect();
+            let found = if self.batch == 1 {
+                vec![self.detect_rfdetr(images[0])?]
             } else {
-                consume(index, Vec::new())?;
+                self.detect_rgb_batch(&images)?
+            };
+            for (&i, observations) in group.iter().zip(found) {
+                while next < i {
+                    consume(next, Vec::new())?;
+                    next += 1;
+                }
+                consume(i, observations)?;
+                next = i + 1;
             }
         }
+        while next < frames.len() / frame_bytes {
+            consume(next, Vec::new())?;
+            next += 1;
+        }
         Ok(())
+    }
+
+    fn detect_rgb_batch(
+        &mut self,
+        frames: &[&[u8]],
+    ) -> Result<Vec<Vec<PersonObservation>>, String> {
+        if frames.is_empty() || frames.len() > self.batch || self.pose.is_some() {
+            return Err("Invalid RF-DETR RGB batch".into());
+        }
+        let shape = self.input_shape();
+        let mut values = Vec::new();
+        for frame in frames {
+            values.extend(preprocess_rfdetr(frame, shape[2] as usize)?);
+        }
+        let count = frames.len();
+        let slot = 3 * shape[2] as usize * shape[3] as usize;
+        for _ in count..self.batch {
+            values.extend_from_within((count - 1) * slot..count * slot);
+        }
+        let tensor = Tensor::from_array((shape.to_vec(), values))
+            .map_err(|e| format!("RF-DETR batch tensor: {e}"))?;
+        let [box_name, logit_name] = self.variant.output_names();
+        let outputs = self
+            .detector
+            .run(ort::inputs!["input"=>tensor])
+            .map_err(|e| format!("RF-DETR batch inference: {e}"))?;
+        let (bs, boxes) = outputs
+            .get(box_name)
+            .ok_or("RF-DETR boxes missing")?
+            .try_extract_tensor::<f32>()
+            .map_err(|e| e.to_string())?;
+        let (ls, logits) = outputs
+            .get(logit_name)
+            .ok_or("RF-DETR logits missing")?
+            .try_extract_tensor::<f32>()
+            .map_err(|e| e.to_string())?;
+        decode_detector_batch(bs.as_ref(), boxes, ls.as_ref(), logits, count)
     }
 
     fn detect_rfdetr(&mut self, rgb: &[u8]) -> Result<Vec<PersonObservation>, String> {
@@ -547,6 +775,46 @@ fn rfdetr_detector_observations(mut candidates: Vec<(f32, [f64; 4])>) -> Vec<Per
 
 /// Decode the vetted RF-DETR Medium sparse COCO head: 300 cxcywh boxes
 /// and 91 raw category logits, with COCO person in column 1.
+fn decode_detector_output(
+    box_shape: &[i64],
+    boxes: &[f32],
+    logit_shape: &[i64],
+    logits: &[f32],
+) -> Result<Vec<PersonObservation>, String> {
+    if box_shape.first() != Some(&1) {
+        return Err("RF-DETR expected one frame".into());
+    }
+    Ok(decode_detector_batch(box_shape, boxes, logit_shape, logits, 1)?.remove(0))
+}
+
+fn decode_detector_batch(
+    box_shape: &[i64],
+    boxes: &[f32],
+    logit_shape: &[i64],
+    logits: &[f32],
+    count: usize,
+) -> Result<Vec<Vec<PersonObservation>>, String> {
+    let batch = box_shape.first().copied().unwrap_or_default();
+    if !matches!(batch, 1 | 4)
+        || count == 0
+        || count > batch as usize
+        || box_shape != [batch, 300, 4]
+        || logit_shape != [batch, 300, 91]
+        || boxes.len() != batch as usize * 1200
+        || logits.len() != batch as usize * 27300
+    {
+        return Err("CUDA RF-DETR output dimensions are incompatible".into());
+    }
+    boxes
+        .as_chunks::<1200>()
+        .0
+        .iter()
+        .zip(logits.as_chunks::<27300>().0.iter())
+        .take(count)
+        .map(|(b, l)| Ok(rfdetr_detector_observations(decode_rfdetr(b, l)?)))
+        .collect()
+}
+
 fn decode_rfdetr(boxes: &[f32], logits: &[f32]) -> Result<Vec<(f32, [f64; 4])>, String> {
     if boxes.len() != 300 * 4 || logits.len() != 300 * 91 {
         return Err(format!(
@@ -726,6 +994,303 @@ mod tests {
             assert!((actual - expected).abs() < 1e-5);
         }
         assert!(decode_rfdetr(&boxes[..8], &logits).is_err());
+    }
+
+    #[test]
+    fn batch_four_decodes_each_frame_independently() {
+        let mut boxes = vec![0.0; 4 * 300 * 4];
+        let mut logits = vec![-20.0; 4 * 300 * 91];
+        for frame in 0..4 {
+            let x = 0.15 + frame as f32 * 0.2;
+            boxes[frame * 1200..frame * 1200 + 4].copy_from_slice(&[x, 0.5, 0.1, 0.4]);
+            logits[frame * 27300 + 1] = 5.0;
+        }
+        let result =
+            decode_detector_batch(&[4, 300, 4], &boxes, &[4, 300, 91], &logits, 3).unwrap();
+        assert_eq!(result.len(), 3);
+        for (frame, observations) in result.iter().enumerate() {
+            assert_eq!(observations.len(), 1);
+            assert!((observations[0].bbox[0] - (0.1 + frame as f64 * 0.2)).abs() < 1e-6);
+        }
+        assert!(decode_detector_batch(&[4, 300, 4], &boxes, &[4, 300, 91], &logits, 5).is_err());
+        assert!(
+            decode_detector_batch(&[4, 300, 4], &boxes[..1200], &[4, 300, 91], &logits, 1).is_err()
+        );
+    }
+
+    #[test]
+    fn primary_batch_respects_memory_limits_and_variant() {
+        assert_eq!(
+            PersonEngine::primary_batch_size(DetectorVariant::RfDetrMedium, 0),
+            4
+        );
+        assert_eq!(
+            PersonEngine::primary_batch_size(DetectorVariant::RfDetrMedium, 3072),
+            4
+        );
+        assert_eq!(
+            PersonEngine::primary_batch_size(DetectorVariant::RfDetrMedium, 2048),
+            1
+        );
+        assert_eq!(
+            PersonEngine::primary_batch_size(DetectorVariant::RfDetrLarge, 0),
+            1
+        );
+    }
+
+    #[test]
+    #[ignore = "requires verified batch model, CUDA and repository fixture"]
+    fn primary_rfdetr_batch4_fp32_matches_single_frame_cuda() -> Result<(), String> {
+        use crate::gpu_preprocess::{GpuBuffer, GpuPreprocessor};
+        let root = std::path::PathBuf::from(
+            std::env::var("VOLLEY_AB_MODEL_ROOT").map_err(|e| e.to_string())?,
+        );
+        let video = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(root.join("examples/output.gif"))
+            .args([
+                "-vf",
+                "fps=5,scale=640:360,format=nv12",
+                "-frames:v",
+                "11",
+                "-threads:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ])
+            .output()
+            .map_err(|e| e.to_string())?;
+        let bytes = W * H * 3 / 2;
+        assert!(video.status.success());
+        assert_eq!(video.stdout.len(), 11 * bytes);
+        let gpu = GpuPreprocessor::new()?;
+        let driver = mini_cuda::driver::try_init_driver().ok_or("CUDA driver unavailable")?;
+        let source = GpuBuffer::allocate(bytes)?;
+        let view = source.view(W, W, H)?;
+        let upload = |pixels: &[u8]| {
+            assert_eq!(
+                unsafe { (driver.cuMemcpyHtoD_v2)(view.ptr, pixels.as_ptr().cast(), bytes) },
+                mini_cuda::CUresult::CUDA_SUCCESS
+            );
+            assert_eq!(
+                unsafe { (driver.cuStreamSynchronize)(std::ptr::null_mut()) },
+                mini_cuda::CUresult::CUDA_SUCCESS
+            );
+        };
+        let download = |ptr: u64| {
+            let mut values = vec![0.0f32; 3 * 576 * 576];
+            assert_eq!(
+                unsafe {
+                    (driver.cuMemcpyDtoH_v2)(values.as_mut_ptr().cast(), ptr, values.len() * 4)
+                },
+                mini_cuda::CUresult::CUDA_SUCCESS
+            );
+            values
+        };
+        let mut expected_inputs = Vec::new();
+        let mut reference = Vec::new();
+        {
+            let mut single = PersonEngine::load_for_primary_gpu_evidence(
+                &root,
+                2,
+                2048,
+                DetectorVariant::RfDetrMedium,
+            )?;
+            let input = single.allocate_cuda_input()?;
+            for pixels in video.stdout.chunks_exact(bytes) {
+                upload(pixels);
+                gpu.person_input(view, &input, 1)?;
+                gpu.finish()?;
+                expected_inputs.push(download(input.data_ptr() as u64));
+                reference.push(single.detect_cuda_input(&input)?);
+            }
+        }
+        let mut batched = PersonEngine::load_for_primary_gpu_evidence(
+            &root,
+            2,
+            0,
+            DetectorVariant::RfDetrMedium,
+        )?;
+        assert_eq!(batched.batch_size(), 4);
+        let mut input = batched.allocate_cuda_input()?;
+        let mut actual = Vec::new();
+        let mut on_main = Vec::new();
+        let mut offset = 0usize;
+        let mut binding = batched.create_cuda_detector_binding()?;
+        for chunk in video.stdout.chunks(4 * bytes) {
+            let count = chunk.len() / bytes;
+            for (slot, pixels) in chunk.chunks_exact(bytes).enumerate() {
+                upload(pixels);
+                gpu.person_input_slot(view, &input, 1, slot)?;
+                gpu.finish()?;
+            }
+            gpu.pad_person_input(&input, count)?;
+            for slot in 0..count {
+                let actual_input =
+                    download(input.data_ptr() as u64 + (slot * 3 * 576 * 576 * 4) as u64);
+                let differing = actual_input
+                    .iter()
+                    .zip(&expected_inputs[offset + slot])
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert_eq!(
+                    differing,
+                    0,
+                    "GPU tensor differs for frame {}",
+                    offset + slot
+                );
+            }
+            offset += count;
+            let serial = batched.detect_cuda_batch_bound(&input, &mut binding, count)?;
+            on_main.extend(serial);
+            let detections = std::thread::scope(|scope| {
+                let input = &mut input;
+                let batched = &mut batched;
+                let binding = &mut binding;
+                scope
+                    .spawn(move || {
+                        crate::gpu_preprocess::bind_cuda_thread()?;
+                        batched.detect_cuda_batch_bound(input, binding, count)
+                    })
+                    .join()
+                    .map_err(|_| "Batch CUDA worker panicked".to_owned())?
+            })?;
+            assert_eq!(detections.len(), count);
+            actual.extend(detections);
+        }
+        assert_eq!(actual.len(), reference.len());
+        assert!(
+            format!("{actual:?}") == format!("{on_main:?}"),
+            "cross-thread binding changed predictions"
+        );
+        let mut max_box_error = 0.0f64;
+        let mut max_score_error = 0.0f32;
+        let mut mismatched_counts = 0usize;
+        assert!(reference.iter().any(|x| !x.is_empty()));
+        let mut matched = 0;
+        for (frame, (expected, observed)) in reference.iter().zip(actual.iter()).enumerate() {
+            if expected.len() != observed.len() {
+                println!(
+                    "COUNT frame={frame} expected={} actual={}",
+                    expected.len(),
+                    observed.len()
+                );
+                mismatched_counts += 1;
+                continue;
+            }
+            let mut used = vec![false; observed.len()];
+            for a in expected {
+                let (i, b) = observed
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !used[*i])
+                    .max_by(|(_, a1), (_, b1)| {
+                        let error = |item: &PersonObservation| {
+                            a.bbox
+                                .iter()
+                                .zip(item.bbox)
+                                .map(|(l, r)| (l - r).abs())
+                                .fold(0.0, f64::max)
+                        };
+                        error(b1).total_cmp(&error(a1))
+                    })
+                    .ok_or("Missing paired RF-DETR box")?;
+                used[i] = true;
+                let error = a
+                    .bbox
+                    .iter()
+                    .zip(b.bbox)
+                    .map(|(l, r)| (l - r).abs())
+                    .fold(0.0, f64::max);
+                max_box_error = max_box_error.max(error);
+                max_score_error = max_score_error.max((a.score - b.score).abs());
+                matched += 1;
+            }
+        }
+        println!("Batch 4 FP32: {matched} matching native CUDA boxes; max_box_error={max_box_error} max_score_error={max_score_error} mismatched_counts={mismatched_counts}");
+        assert!(max_box_error < 0.002 && max_score_error < 0.01 && mismatched_counts == 0);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires local CUDA/ORT and repository model fixture"]
+    fn reused_rfdetr_cuda_binding_matches_fresh_binding() {
+        let root = std::path::PathBuf::from(std::env::var("VOLLEY_AB_MODEL_ROOT").unwrap());
+        let rgb = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(root.join("examples/output.gif"))
+            .args([
+                "-vf",
+                "fps=5,scale=640:360,format=rgb24",
+                "-frames:v",
+                "3",
+                "-threads:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            rgb.status.success(),
+            "{}",
+            String::from_utf8_lossy(&rgb.stderr)
+        );
+        assert_eq!(rgb.stdout.len(), 3 * W * H * 3);
+        crate::gpu_preprocess::bind_cuda_thread().unwrap();
+        let driver = mini_cuda::driver::try_init_driver().unwrap();
+        let mut engine = PersonEngine::load_for_gpu_evidence_with_detector(
+            &root,
+            Device::Cuda,
+            2,
+            0,
+            DetectorVariant::RfDetrMedium,
+        )
+        .unwrap();
+        let inputs = [
+            engine.allocate_cuda_input().unwrap(),
+            engine.allocate_cuda_input().unwrap(),
+        ];
+        let prepared = rgb
+            .stdout
+            .as_chunks::<{ W * H * 3 }>()
+            .0
+            .iter()
+            .map(|frame| preprocess_rfdetr(frame, 576).unwrap())
+            .collect::<Vec<_>>();
+        let upload = |input: &crate::cuda_input::CudaInput, data: &[f32]| {
+            assert_eq!(
+                unsafe {
+                    (driver.cuMemcpyHtoD_v2)(
+                        input.data_ptr() as u64,
+                        data.as_ptr().cast(),
+                        std::mem::size_of_val(data),
+                    )
+                },
+                mini_cuda::CUresult::CUDA_SUCCESS
+            );
+            assert_eq!(
+                unsafe { (driver.cuStreamSynchronize)(std::ptr::null_mut()) },
+                mini_cuda::CUresult::CUDA_SUCCESS
+            );
+        };
+        let mut expected = Vec::new();
+        for (i, data) in prepared.iter().enumerate() {
+            let input = &inputs[i % 2];
+            upload(input, data);
+            expected.push(engine.detect_cuda_input(input).unwrap());
+        }
+        assert!(expected.iter().any(|frame| !frame.is_empty()));
+        let mut binding = engine.create_cuda_detector_binding().unwrap();
+        for (i, data) in prepared.iter().enumerate().rev() {
+            let input = &inputs[i % 2];
+            upload(input, data);
+            let actual = engine.detect_cuda_input_bound(input, &mut binding).unwrap();
+            assert_eq!(format!("{actual:?}"), format!("{:?}", expected[i]));
+        }
+        println!("RF-DETR fresh/reused binding: identical detections for three distinct frames and two reused CUDA tensors");
     }
 
     #[test]

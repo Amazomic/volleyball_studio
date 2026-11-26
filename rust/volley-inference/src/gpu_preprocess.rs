@@ -353,10 +353,20 @@ impl GpuPreprocessor {
         tensor: &Tensor<f32>,
         matrix: u8,
     ) -> Result<(), String> {
+        self.person_input_slot(frame, tensor, matrix, 0)
+    }
+
+    pub fn person_input_slot(
+        &self,
+        frame: Nv12View,
+        tensor: &Tensor<f32>,
+        matrix: u8,
+        slot: usize,
+    ) -> Result<(), String> {
         frame.validate()?;
         let side = match tensor.dtype().tensor_shape().map(|v| v.as_ref()) {
-            Some([1, 3, 576, 576]) => 576,
-            Some([1, 3, 704, 704]) => 704,
+            Some([batch @ (1 | 4), 3, 576, 576]) if slot < *batch as usize => 576,
+            Some([1, 3, 704, 704]) if slot == 0 => 704,
             _ => return Err("RF-DETR CUDA input shape is invalid".into()),
         };
         let rgb = &self.rgb_scratch;
@@ -375,7 +385,8 @@ impl GpuPreprocessor {
             (&mut matrix as *mut i32).cast(),
         ];
         self.launch(self.rgb, 640, 360, 1, &mut args)?;
-        let mut dst = tensor.data_ptr() as u64;
+        let mut dst =
+            tensor.data_ptr() as u64 + (slot * 3 * side as usize * side as usize * 4) as u64;
         let mut side_arg = side as i32;
         let mut args: [*mut c_void; 3] = [
             (&mut rgb_ptr as *mut u64).cast(),
@@ -383,6 +394,39 @@ impl GpuPreprocessor {
             (&mut side_arg as *mut i32).cast(),
         ];
         self.launch(self.person, side, side, 1, &mut args)
+    }
+
+    pub fn pad_person_input(&self, tensor: &Tensor<f32>, count: usize) -> Result<(), String> {
+        let (batch, side) = match tensor.dtype().tensor_shape().map(|s| s.as_ref()) {
+            Some([batch @ (1 | 4), 3, 576, 576]) => (*batch as usize, 576usize),
+            Some([1, 3, 704, 704]) => (1, 704),
+            _ => return Err("RF-DETR padding input shape is invalid".into()),
+        };
+        if count == 0 || count > batch {
+            return Err("Invalid RF-DETR batch padding".into());
+        }
+        let driver = ensure()?;
+        let bytes = 3 * side * side * 4;
+        let ptr = tensor.data_ptr() as u64;
+        for i in count..batch {
+            cuda(
+                unsafe {
+                    (driver.cuMemcpy)(
+                        ptr + (i * bytes) as u64,
+                        ptr + ((count - 1) * bytes) as u64,
+                        bytes,
+                    )
+                },
+                "Pad RF-DETR input",
+            )?;
+        }
+        if count < batch {
+            cuda(
+                unsafe { (driver.cuStreamSynchronize)(ptr::null_mut()) },
+                "Complete RF-DETR padding",
+            )?;
+        }
+        Ok(())
     }
 
     pub fn pose_input(

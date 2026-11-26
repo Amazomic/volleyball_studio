@@ -322,6 +322,8 @@ struct JobContext {
     analysis_range: Option<AnalysisRange>,
     config: Config,
     person_detector: volley_inference::person::DetectorVariant,
+    person_batch_size: usize,
+    person_tf32: bool,
     stride: usize,
     person_stride: usize,
     folder: PathBuf,
@@ -353,8 +355,19 @@ fn detect_player_window(
     stride: u64,
     cancelled: &AtomicBool,
 ) -> Result<Vec<RawDetection>, String> {
+    detect_selected_player_window(engine, data, first_frame, stride, cancelled, |_| true)
+}
+
+fn detect_selected_player_window(
+    engine: &mut PersonEngine,
+    data: &[u8],
+    first_frame: u64,
+    stride: u64,
+    cancelled: &AtomicBool,
+    selected: impl Fn(u64) -> bool,
+) -> Result<Vec<RawDetection>, String> {
     let mut detections = Vec::new();
-    engine.detect_frames_sampled(data, first_frame, stride, |offset, poses| {
+    engine.detect_frames_selected(data, first_frame, stride, selected, |offset, poses| {
         if cancelled.load(Ordering::Acquire) {
             return Err("cancelled".into());
         }
@@ -433,12 +446,18 @@ fn finalize_model_output(
         "model":context.config.model,
         "person_pipeline":if context.config.model == ModelKind::Players {
             Some(match context.person_detector {
+                volley_inference::person::DetectorVariant::RfDetrMedium if context.person_batch_size == 4 =>
+                    "rfdetr_medium_9055ef9b_batch4_fp32_detector_boxes_pose_deferred_sampled_bytetrack_lowconf_v5",
+                volley_inference::person::DetectorVariant::RfDetrMedium if !context.person_tf32 =>
+                    "rfdetr_medium_18250b5a_batch1_fp32_detector_boxes_pose_deferred_sampled_bytetrack_lowconf_v5",
                 volley_inference::person::DetectorVariant::RfDetrMedium =>
                     "rfdetr_medium_18250b5a_detector_boxes_pose_deferred_sampled_bytetrack_lowconf_v4",
                 volley_inference::person::DetectorVariant::RfDetrLarge =>
                     "rfdetr_large_da7f1bc1_detector_boxes_pose_deferred_sampled_bytetrack_lowconf_v4",
             })
         } else { None },
+        "person_batch_size":if context.config.model == ModelKind::Players {Some(context.person_batch_size)} else {None},
+        "person_tf32":if context.config.model == ModelKind::Players && context.config.device == Device::Cuda {Some(context.person_tf32)} else {None},
         "person_sampling_period_frames":if context.config.model == ModelKind::Players {
             context.person_stride
         } else { 1 },
@@ -726,6 +745,8 @@ async fn start_internal(
         analysis_range: request.analysis_range,
         config,
         person_detector,
+        person_batch_size: 1,
+        person_tf32: true,
         stride: request.stride,
         person_stride: request.person_stride,
         folder,

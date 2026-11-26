@@ -57,6 +57,7 @@ struct WorkerInput {
     repository: PathBuf,
     range: Option<AnalysisRange>,
     decoded_frames: u64,
+    selected: Vec<(u64, u64)>,
     motion: StabilizedBallMotion,
     rallies: Vec<(u64, u64)>,
     dimensions: (u32, u32),
@@ -73,6 +74,7 @@ impl EarlyPoseWorker {
         repository: PathBuf,
         range: Option<AnalysisRange>,
         decoded_frames: u64,
+        selected: Vec<(u64, u64)>,
         motion: StabilizedBallMotion,
         rallies: Vec<(u64, u64)>,
         dimensions: (u32, u32),
@@ -84,6 +86,7 @@ impl EarlyPoseWorker {
             repository,
             range,
             decoded_frames,
+            selected,
             motion,
             rallies,
             dimensions,
@@ -616,10 +619,11 @@ fn run(
             .bind(&input.original, input.range.map_or(0.0, |r| r.start_sec))
             .is_ok()
     });
-    let outcome = decode_original_frames_in_range(
+    let outcome = volley_media::raw_decoder::decode_original_frames_selected_in_range(
         &input.original,
         input.decoded_frames,
         input.range,
+        &input.selected,
         stop,
         |index, pixels, width, height| {
             if input.options.cancelled.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
