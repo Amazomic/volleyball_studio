@@ -44,8 +44,9 @@ mod pose_source;
 mod track_stitch;
 pub(crate) use pose_refinement::{
     sampling_contract as pose_sampling_contract, CompletedRallies, EarlyPoseOptions,
-    EarlyPoseWorker, Refinement as PoseRefinement, LEGACY_POLICY as LEGACY_POSE_REFINEMENT_POLICY,
-    POLICY as POSE_REFINEMENT_POLICY, PREVIOUS_POLICY as PREVIOUS_POSE_REFINEMENT_POLICY,
+    EarlyPoseWorker, RallyWorkerSender, Refinement as PoseRefinement,
+    LEGACY_POLICY as LEGACY_POSE_REFINEMENT_POLICY, POLICY as POSE_REFINEMENT_POLICY,
+    PREVIOUS_POLICY as PREVIOUS_POSE_REFINEMENT_POLICY,
     PREVIOUS_TRACKED_CROP_POLICY as PREVIOUS_TRACKED_CROP_REFINEMENT_POLICY,
     PRIOR_CROP_POLICY as PRIOR_CROP_REFINEMENT_POLICY,
     REJECTED_LEADING_POLICY as HISTORICAL_LEADING_CROP_POLICY,

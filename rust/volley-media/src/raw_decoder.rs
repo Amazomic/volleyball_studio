@@ -502,6 +502,21 @@ pub fn decode_full_video_in_range(
     })
 }
 
+fn balanced_selection_expression(ranges: &[(u64, u64)]) -> String {
+    match ranges {
+        [] => "0".into(),
+        [(left, right)] => format!("between(n,{left},{right})"),
+        _ => {
+            let (left, right) = ranges.split_at(ranges.len() / 2);
+            format!(
+                "({}+{})",
+                balanced_selection_expression(left),
+                balanced_selection_expression(right)
+            )
+        }
+    }
+}
+
 fn configure_original_rgb_output(
     ff: &mut Command,
     prefix: &str,
@@ -595,13 +610,9 @@ fn decode_original_frames_impl(
         range.validate(info.duration_sec)?;
     }
     let (mut ff, prefix) = auto_decode_input_in_range(source, cancelled, range)?;
-    let expression = selected.filter(|ranges| ranges.len() <= 256).map(|ranges| {
-        ranges
-            .iter()
-            .map(|(left, right)| format!("between(n,{left},{right})"))
-            .collect::<Vec<_>>()
-            .join("+")
-    });
+    let expression = selected
+        .filter(|ranges| ranges.len() <= 256)
+        .map(balanced_selection_expression);
     let output_count = if expression.is_some() {
         selected
             .unwrap_or_default()
@@ -895,6 +906,70 @@ mod tests {
         )
         .is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn many_rally_intervals_decode_without_expression_depth_failure() {
+        let root = std::env::temp_dir().join(format!("volley-select-many-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("input.mp4");
+        let output = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=30:duration=18",
+                "-c:v",
+                "libx264",
+                "-y",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let range = Some(AnalysisRange {
+            start_sec: 0.37,
+            end_sec: 17.37,
+        });
+        let selected: Vec<(u64, u64)> = (0..119).map(|i| (i * 4, i * 4 + 1)).collect();
+        let cancel = AtomicBool::new(false);
+        let mut expected = Vec::new();
+        decode_original_frames_in_range(&source, 510, range, &cancel, |index, pixels, _, _| {
+            if selected
+                .iter()
+                .any(|&(left, right)| (left..=right).contains(&index))
+            {
+                expected.push((index, pixels.to_vec()));
+            }
+            Ok(())
+        })
+        .unwrap();
+        let mut actual = Vec::new();
+        let result = decode_original_frames_selected_in_range(
+            &source,
+            510,
+            range,
+            &selected,
+            &cancel,
+            |index, pixels, _, _| {
+                actual.push((index, pixels.to_vec()));
+                Ok(())
+            },
+        );
+        fs::remove_dir_all(root).unwrap();
+        result.unwrap();
+        assert_eq!(actual.len(), 238);
+        assert!(
+            actual == expected,
+            "Selected RGB pixels and source frame indices differ"
+        );
     }
 
     #[test]

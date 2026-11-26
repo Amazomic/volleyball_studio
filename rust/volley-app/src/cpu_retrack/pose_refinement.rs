@@ -12,7 +12,7 @@ use volley_core::{bbox_iou, fusion::Candidate, tracker::PoseEvidence};
 use volley_inference::{pose::PoseEngine, Device};
 use volley_media::raw_decoder::{decode_original_frames_in_range, AnalysisRange};
 mod early;
-pub(crate) use early::{CompletedRallies, EarlyPoseOptions, EarlyPoseWorker};
+pub(crate) use early::{CompletedRallies, EarlyPoseOptions, EarlyPoseWorker, RallyWorkerSender};
 
 pub(crate) const POLICY: &str = "original_rgb_stable_track_pose_attachment_v6";
 pub(crate) const REJECTED_LEADING_POLICY: &str = "original_rgb_stabilized_track_crops_v4";

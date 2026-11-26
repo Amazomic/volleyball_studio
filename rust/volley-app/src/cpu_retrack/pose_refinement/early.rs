@@ -66,6 +66,44 @@ struct WorkerInput {
 
 type Packet = CompletedRally<RawDetection>;
 
+pub(crate) struct RallyWorkerSender {
+    sender: mpsc::SyncSender<Packet>,
+    error: Arc<Mutex<Option<String>>>,
+}
+
+impl RallyWorkerSender {
+    pub(crate) fn send(&self, packet: Packet) -> Result<(), String> {
+        self.sender.send(packet).map_err(|_| {
+            self.error
+                .lock()
+                .ok()
+                .and_then(|error| error.clone())
+                .unwrap_or_else(|| {
+                    "Rally processing worker stopped without a recorded cause".into()
+                })
+        })
+    }
+}
+
+fn run_with_worker_error<T>(
+    error: &Mutex<Option<String>>,
+    run: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|panic| {
+            let message = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            Err(format!("Rally processing worker panicked: {message}"))
+        });
+    if let Err(cause) = &result {
+        *error.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(cause.clone());
+    }
+    result
+}
+
 impl EarlyPoseWorker {
     #[expect(clippy::too_many_arguments)]
     pub(crate) fn start(
@@ -79,7 +117,7 @@ impl EarlyPoseWorker {
         rallies: Vec<(u64, u64)>,
         dimensions: (u32, u32),
         memory_mb: u64,
-    ) -> Result<(Self, mpsc::SyncSender<Packet>), String> {
+    ) -> Result<(Self, RallyWorkerSender), String> {
         let input = WorkerInput {
             options,
             original,
@@ -95,16 +133,20 @@ impl EarlyPoseWorker {
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
+        let error = Arc::new(Mutex::new(None));
+        let worker_error = error.clone();
         let handle = thread::Builder::new()
             .name("volley-early-rally-pose".into())
-            .spawn(move || run(input, receiver, &worker_stop))
+            .spawn(move || {
+                run_with_worker_error(&worker_error, || run(input, &receiver, &worker_stop))
+            })
             .map_err(|e| format!("Spawn rally pose worker: {e}"))?;
         Ok((
             Self {
                 stop,
                 handle: Some(handle),
             },
-            sender,
+            RallyWorkerSender { sender, error },
         ))
     }
 
@@ -575,7 +617,7 @@ fn replay_checkpoint_rows(
 
 fn run(
     input: WorkerInput,
-    receiver: mpsc::Receiver<Packet>,
+    receiver: &mpsc::Receiver<Packet>,
     stop: &AtomicBool,
 ) -> Result<CompletedRallies, String> {
     let global_frames = input.decoded_frames / 9 * 9;
@@ -630,7 +672,7 @@ fn run(
                 return Err("cancelled".into());
             }
             while plan.is_none() && !done {
-                let Some(packet) = receive(&receiver, stop, &input.options.cancelled)? else {
+                let Some(packet) = receive(receiver, stop, &input.options.cancelled)? else {
                     if windows.is_empty() {
                         return Err("Missing first rally packet".into());
                     }
@@ -822,7 +864,7 @@ fn run(
         outcome?;
         if plan.is_some()
             || !recovered_reid.is_empty()
-            || receive(&receiver, stop, &input.options.cancelled)?.is_some()
+            || receive(receiver, stop, &input.options.cancelled)?.is_some()
         {
             return Err("Rally pipeline ended with unfinished windows".into());
         }
@@ -957,6 +999,44 @@ impl CompletedRallies {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disconnected_worker_preserves_original_error_and_panic() {
+        for panic in [false, true] {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let error = Arc::new(Mutex::new(None));
+            let producer = RallyWorkerSender {
+                sender,
+                error: error.clone(),
+            };
+            let worker = thread::spawn(move || {
+                let result = run_with_worker_error::<()>(&error, || {
+                    if panic {
+                        panic!("decoder panic");
+                    }
+                    Err("Original RGB frame 516: FFmpeg filter initialization failed".into())
+                });
+                drop(receiver);
+                result
+            });
+            let result = worker.join().unwrap().unwrap_err();
+            let packet = CompletedRally {
+                window: RallyWindow {
+                    left: 0,
+                    right: 8,
+                    start: 0,
+                    end: 8,
+                },
+                observations: vec![],
+            };
+            assert_eq!(producer.send(packet).unwrap_err(), result);
+            assert!(result.contains(if panic {
+                "decoder panic"
+            } else {
+                "FFmpeg filter initialization failed"
+            }));
+        }
+    }
 
     #[test]
     fn rally_checkpoint_recovers_only_committed_rows_and_checks_identity() {

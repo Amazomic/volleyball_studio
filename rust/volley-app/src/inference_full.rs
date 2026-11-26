@@ -232,7 +232,7 @@ struct EvidenceWriter {
     ball_samples: Option<Vec<RawDetection>>,
     rally_handoff: Option<(
         crate::rally_handoff::RallyHandoff<RawDetection>,
-        std::sync::mpsc::SyncSender<crate::rally_handoff::CompletedRally<RawDetection>>,
+        crate::cpu_retrack::RallyWorkerSender,
     )>,
 }
 impl EvidenceWriter {
@@ -285,9 +285,7 @@ impl EvidenceWriter {
         self.count += 1;
         if let Some((mut handoff, sender)) = self.rally_handoff.take() {
             for rally in handoff.push(frame, records, |row| row.frame_index)? {
-                sender
-                    .send(rally)
-                    .map_err(|_| "Rally processing worker stopped")?;
+                sender.send(rally)?;
             }
             self.rally_handoff = Some((handoff, sender));
         }
