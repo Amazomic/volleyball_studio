@@ -365,7 +365,7 @@ impl GpuPreprocessor {
     ) -> Result<(), String> {
         frame.validate()?;
         let side = match tensor.dtype().tensor_shape().map(|v| v.as_ref()) {
-            Some([batch @ (1 | 4), 3, 576, 576]) if slot < *batch as usize => 576,
+            Some([batch @ (1 | 4 | 8), 3, 576, 576]) if slot < *batch as usize => 576,
             Some([1, 3, 704, 704]) if slot == 0 => 704,
             _ => return Err("RF-DETR CUDA input shape is invalid".into()),
         };
@@ -398,7 +398,7 @@ impl GpuPreprocessor {
 
     pub fn pad_person_input(&self, tensor: &Tensor<f32>, count: usize) -> Result<(), String> {
         let (batch, side) = match tensor.dtype().tensor_shape().map(|s| s.as_ref()) {
-            Some([batch @ (1 | 4), 3, 576, 576]) => (*batch as usize, 576usize),
+            Some([batch @ (1 | 4 | 8), 3, 576, 576]) => (*batch as usize, 576usize),
             Some([1, 3, 704, 704]) => (1, 704),
             _ => return Err("RF-DETR padding input shape is invalid".into()),
         };

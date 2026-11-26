@@ -445,6 +445,8 @@ fn finalize_model_output(
         "model":context.config.model,
         "person_pipeline":if context.config.model == ModelKind::Players {
             Some(match context.person_detector {
+                volley_inference::person::DetectorVariant::RfDetrMedium if context.person_batch_size == 8 =>
+                    "rfdetr_medium_f6b2a35e_batch8_fp16_detector_boxes_pose_deferred_sampled_bytetrack_lowconf_v6",
                 volley_inference::person::DetectorVariant::RfDetrMedium if context.person_batch_size == 4 =>
                     "rfdetr_medium_9055ef9b_batch4_fp32_detector_boxes_pose_deferred_sampled_bytetrack_lowconf_v5",
                 volley_inference::person::DetectorVariant::RfDetrMedium if !context.person_tf32 =>

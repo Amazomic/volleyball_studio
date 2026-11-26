@@ -128,29 +128,33 @@ function Install-RfDetrLarge {
         if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}
     }
 }
-function Install-RfDetrMediumBatch4 {
-    $target=Join-Path $repo "models\rf-detr-medium-batch4.onnx"
-    $expected="9055ef9b1b76b79412069590654baf913cd173972be4ff4686c1535bb021e1f6"
+function Install-RfDetrMediumBatch([string]$mode) {
+    $isFp16=$mode -eq "8-fp16"
+    $target=Join-Path $repo $(if($isFp16){"models\rf-detr-medium-batch8-fp16.onnx"}else{"models\rf-detr-medium-batch4.onnx"})
+    $expected=if($isFp16){"f6b2a35ee7f157d7f7d7a0d93f5a16e5e32dd05975ab05553464257456057b6e"}else{"9055ef9b1b76b79412069590654baf913cd173972be4ff4686c1535bb021e1f6"}
     if((Test-Path -LiteralPath $target -PathType Leaf) -and
        (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -eq $expected){return}
     $source=Join-Path $repo "models\rf-detr-medium.onnx"
     if(-not (Test-Path -LiteralPath $source -PathType Leaf)){throw "RF-DETR Medium source model missing: $source"}
-    if(-not (Get-Command python -ErrorAction SilentlyContinue)){throw "Python is required once to prepare the verified RF-DETR Batch 4 model"}
-    $deps=Join-Path $runtime "rfdetr-export-deps"
+    if(-not (Get-Command python -ErrorAction SilentlyContinue)){throw "Python is required once to prepare the verified RF-DETR batch model"}
+    $deps=Join-Path $runtime $(if($isFp16){"rfdetr-fp16-export-deps"}else{"rfdetr-export-deps"})
     $previous=$env:PYTHONPATH
     try {
         $env:PYTHONPATH=$deps
-        & python -m pip install --disable-pip-version-check --target $deps "onnx==1.23.2" "numpy==2.4.6" "protobuf==7.36.2" "ml_dtypes==0.7.0"
+        $packages=@("onnx==1.23.2","numpy==2.4.6","protobuf==7.36.2","ml_dtypes==0.7.0")
+        if($isFp16){$packages+= "onnxruntime-gpu==1.31.1"}
+        & python -m pip install --disable-pip-version-check --target $deps @packages
         if($LASTEXITCODE -ne 0){throw "RF-DETR export dependency installation failed"}
-        & python (Join-Path $PSScriptRoot "prepare-rfdetr-batch4.py") $source $target
-        if($LASTEXITCODE -ne 0){throw "RF-DETR Batch 4 export failed"}
-        if((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $expected){throw "RF-DETR Batch 4 SHA-256 mismatch"}
+        & python (Join-Path $PSScriptRoot "prepare-rfdetr-batch4.py") $source $target $mode
+        if($LASTEXITCODE -ne 0){throw "RF-DETR batch export failed"}
+        if((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $expected){throw "RF-DETR batch SHA-256 mismatch"}
     }finally{$env:PYTHONPATH=$previous}
 }
 function Build-Windows {
     Confirm-Source
     Install-RfDetrLarge
-    Install-RfDetrMediumBatch4
+    Install-RfDetrMediumBatch "4"
+    Install-RfDetrMediumBatch "8-fp16"
     Push-Location (Join-Path $repo "rust")
     try {
         & cargo build -p volley-web --target wasm32-unknown-unknown --release --offline --locked
@@ -181,6 +185,7 @@ function Test-NativeDependencies {
         "models\VballNetV4c_seq9_grayscale_20260908_213829.onnx",
         "models\rf-detr-medium.onnx",
         "models\rf-detr-medium-batch4.onnx",
+        "models\rf-detr-medium-batch8-fp16.onnx",
         "models\rf-detr-large.onnx",
         "models\RTMPose-M-Body7.onnx",
         "models\openvino\person-reidentification-retail-0287.xml"

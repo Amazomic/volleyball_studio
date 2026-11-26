@@ -27,6 +27,9 @@ pub const RFDETR_MEDIUM_SHA256: &str =
 pub const RFDETR_MEDIUM_BATCH4_FILE: &str = "rf-detr-medium-batch4.onnx";
 pub const RFDETR_MEDIUM_BATCH4_SHA256: &str =
     "9055ef9b1b76b79412069590654baf913cd173972be4ff4686c1535bb021e1f6";
+pub const RFDETR_MEDIUM_BATCH8_FP16_FILE: &str = "rf-detr-medium-batch8-fp16.onnx";
+pub const RFDETR_MEDIUM_BATCH8_FP16_SHA256: &str =
+    "f6b2a35ee7f157d7f7d7a0d93f5a16e5e32dd05975ab05553464257456057b6e";
 const RFDETR_LARGE_FILE: &str = "rf-detr-large.onnx";
 const RFDETR_LARGE_SHA256: &str =
     "da7f1bc118c6071b48096149b5df01eb1caeb3bb60a262949ac0e41f7c96f705";
@@ -236,7 +239,9 @@ impl PersonEngine {
     }
 
     pub fn primary_batch_size(variant: DetectorVariant, memory_mb: u64) -> usize {
-        if variant == DetectorVariant::RfDetrMedium && (memory_mb == 0 || memory_mb >= 3072) {
+        if variant == DetectorVariant::RfDetrMedium && (memory_mb == 0 || memory_mb >= 4096) {
+            8
+        } else if variant == DetectorVariant::RfDetrMedium && memory_mb >= 3072 {
             4
         } else {
             1
@@ -266,7 +271,9 @@ impl PersonEngine {
     }
 
     pub fn primary_model_file(variant: DetectorVariant, memory_mb: u64) -> &'static str {
-        if Self::primary_batch_size(variant, memory_mb) == 4 {
+        if Self::primary_batch_size(variant, memory_mb) == 8 {
+            RFDETR_MEDIUM_BATCH8_FP16_FILE
+        } else if Self::primary_batch_size(variant, memory_mb) == 4 {
             RFDETR_MEDIUM_BATCH4_FILE
         } else {
             variant.file()
@@ -297,7 +304,12 @@ impl PersonEngine {
             .join("models")
             .canonicalize()
             .map_err(|e| format!("Models root: {e}"))?;
-        let (filename, sha) = if batch == 4 {
+        let (filename, sha) = if batch == 8 {
+            (
+                RFDETR_MEDIUM_BATCH8_FP16_FILE,
+                RFDETR_MEDIUM_BATCH8_FP16_SHA256,
+            )
+        } else if batch == 4 {
             (RFDETR_MEDIUM_BATCH4_FILE, RFDETR_MEDIUM_BATCH4_SHA256)
         } else {
             (variant.file(), variant.sha256())
@@ -795,7 +807,7 @@ fn decode_detector_batch(
     count: usize,
 ) -> Result<Vec<Vec<PersonObservation>>, String> {
     let batch = box_shape.first().copied().unwrap_or_default();
-    if !matches!(batch, 1 | 4)
+    if !matches!(batch, 1 | 4 | 8)
         || count == 0
         || count > batch as usize
         || box_shape != [batch, 300, 4]
@@ -1019,14 +1031,47 @@ mod tests {
     }
 
     #[test]
+    fn batch_eight_decodes_independent_frames_and_partial_tail() {
+        let mut boxes = vec![0.0; 8 * 300 * 4];
+        let mut logits = vec![-20.0; 8 * 300 * 91];
+        for frame in 0..8 {
+            let x = 0.1 + frame as f32 * 0.1;
+            boxes[frame * 1200..frame * 1200 + 4].copy_from_slice(&[x, 0.5, 0.1, 0.4]);
+            logits[frame * 27300 + 1] = 5.0;
+        }
+        for count in [1, 6, 8] {
+            let result =
+                decode_detector_batch(&[8, 300, 4], &boxes, &[8, 300, 91], &logits, count).unwrap();
+            assert_eq!(result.len(), count);
+            for (frame, observations) in result.iter().enumerate() {
+                assert_eq!(observations.len(), 1);
+                assert!((observations[0].bbox[0] - (0.05 + frame as f64 * 0.1)).abs() < 1e-6);
+            }
+        }
+        assert!(decode_detector_batch(&[8, 300, 4], &boxes, &[8, 300, 91], &logits, 9).is_err());
+        assert_eq!(
+            PersonEngine::primary_model_file(DetectorVariant::RfDetrMedium, 0),
+            RFDETR_MEDIUM_BATCH8_FP16_FILE
+        );
+        assert_eq!(
+            PersonEngine::primary_model_file(DetectorVariant::RfDetrMedium, 3072),
+            RFDETR_MEDIUM_BATCH4_FILE
+        );
+    }
+
+    #[test]
     fn primary_batch_respects_memory_limits_and_variant() {
         assert_eq!(
             PersonEngine::primary_batch_size(DetectorVariant::RfDetrMedium, 0),
-            4
+            8
         );
         assert_eq!(
             PersonEngine::primary_batch_size(DetectorVariant::RfDetrMedium, 3072),
             4
+        );
+        assert_eq!(
+            PersonEngine::primary_batch_size(DetectorVariant::RfDetrMedium, 4096),
+            8
         );
         assert_eq!(
             PersonEngine::primary_batch_size(DetectorVariant::RfDetrMedium, 2048),
@@ -1109,7 +1154,7 @@ mod tests {
         let mut batched = PersonEngine::load_for_primary_gpu_evidence(
             &root,
             2,
-            0,
+            3072,
             DetectorVariant::RfDetrMedium,
         )?;
         assert_eq!(batched.batch_size(), 4);

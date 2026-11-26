@@ -1560,7 +1560,7 @@ fn cpu_lineage_valid(
 // Changing the original-video 30 FPS source and detector-to-pose alignment
 // together must invalidate both earlier GPU evidence versions.
 const RFDETR_GPU_MODEL_STACK: &str =
-    "vballnet_rfdetr_medium_9055ef9b_adaptive_batch_fp32_original30_native_pose_pixels_bytetrack_lowconf_v8";
+    "vballnet_rfdetr_medium_f6b2a35e_adaptive_batch_fp16_fp32_original30_native_pose_pixels_bytetrack_lowconf_v9";
 
 fn zero_copy_requested() -> bool {
     matches!(

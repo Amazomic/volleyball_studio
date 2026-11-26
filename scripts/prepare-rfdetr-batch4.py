@@ -3,7 +3,10 @@ import hashlib, onnx, numpy as np, copy, sys, os
 from onnx import numpy_helper as nh, helper as H
 SRC=Path(sys.argv[1])
 TARGET=Path(sys.argv[2])
-EXPECTED="9055ef9b1b76b79412069590654baf913cd173972be4ff4686c1535bb021e1f6"
+MODE=sys.argv[3] if len(sys.argv)==4 else "4"
+if MODE not in ("4","8-fp16"):
+    raise ValueError("Expected 4 or 8-fp16")
+EXPECTED={"4":"9055ef9b1b76b79412069590654baf913cd173972be4ff4686c1535bb021e1f6","8-fp16":"f6b2a35ee7f157d7f7d7a0d93f5a16e5e32dd05975ab05553464257456057b6e"}[MODE]
 if hashlib.sha256(SRC.read_bytes()).hexdigest()!="18250b5a3a9552ae117d592f8e8c27fe52438d70c914a77a8913fc45d8f29e69":
     raise RuntimeError("RF-DETR source model SHA-256 mismatch")
 if TARGET.exists() and hashlib.sha256(TARGET.read_bytes()).hexdigest()==EXPECTED:
@@ -54,12 +57,32 @@ def build(b):
     onnx.checker.check_model(g)
     path=TARGET.with_name(TARGET.name+".tmp-"+str(os.getpid()))
     try:
+        if MODE=="8-fp16":
+            from onnxruntime.transformers.float16 import convert_float_to_float16
+            g=convert_float_to_float16(g,keep_io_types=True)
+            available={v.name for v in g.graph.input}|{v.name for v in g.graph.initializer}|{""}
+            pending=list(g.graph.node)
+            ordered=[]
+            while pending:
+                remaining=[]
+                for node in pending:
+                    if all(name in available for name in node.input):
+                        ordered.append(node)
+                        available.update(node.output)
+                    else:
+                        remaining.append(node)
+                if len(remaining)==len(pending):
+                    raise RuntimeError("FP16 graph contains unresolved dependencies")
+                pending=remaining
+            del g.graph.node[:]
+            g.graph.node.extend(ordered)
+            onnx.checker.check_model(g)
         onnx.save(g,path)
         if hashlib.sha256(path.read_bytes()).hexdigest()!=EXPECTED:
-            raise RuntimeError("RF-DETR Batch 4 export SHA-256 differs from verified model")
+            raise RuntimeError("RF-DETR export SHA-256 differs from verified model: "+hashlib.sha256(path.read_bytes()).hexdigest())
         os.replace(path,TARGET)
     finally:
         if path.exists():
             path.unlink()
     print(TARGET, flush=True)
-build(4)
+build(8 if MODE=="8-fp16" else 4)

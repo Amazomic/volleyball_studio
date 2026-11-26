@@ -1,0 +1,18 @@
+{
+    "model":  "RF-DETR Medium",
+    "io_precision":  "fp32",
+    "tf32":  false,
+    "precision":  "fp16",
+    "source_sha256":  "18250b5a3a9552ae117d592f8e8c27fe52438d70c914a77a8913fc45d8f29e69",
+    "input_shape":  [
+                        8,
+                        3,
+                        576,
+                        576
+                    ],
+    "outputs":  [
+                    "pred_boxes",
+                    "pred_logits"
+                ],
+    "sha256":  "f6b2a35ee7f157d7f7d7a0d93f5a16e5e32dd05975ab05553464257456057b6e"
+}
