@@ -19,7 +19,8 @@ assert.doesNotMatch(js, /ui\.(?:total|goldCount)\.textContent/,
   "Removed preview counters must not be updated by JavaScript");
 assert.ok(preview.indexOf('class="viewer-panel"')<preview.indexOf('class="rallies-panel"'),
   "Large player must precede the rally rail on the right");
-assert.match(css, /#studio-preview-view:not\(\.training-workspace\) \.video-timeline-playhead\{[^}]*top:-8px;[^}]*z-index:4/, "The playhead must protrude above the preview timeline");
+assert.match(css, /#studio-preview-view:not\(\.training-workspace\) \.video-timeline-playhead\{[^}]*top:-8px;[^}]*z-index:4;[^}]*background:#ff7900/, "The playhead must protrude above the preview timeline and be bright orange");
+assert.match(css, /#studio-preview-view:not\(\.training-workspace\) \.video-timeline-playhead::before\{[^}]*border-width:9px 7px 0;[^}]*border-top-color:#ff7900/, "The orange playhead must have a larger triangular pointer");
 assert.match(css, /#studio-preview-view:not\(\.training-workspace\) \.video-timeline-track\{[^}]*overflow:visible/, "The protruding playhead must not be clipped");
 assert.doesNotMatch(css, /#studio-preview-view:not\(\.training-workspace\) #studio-timeline-middle/, "The numeric time label must keep its original styling");
 assert.equal((preview.match(/id="studio-video"/g)||[]).length,1);
