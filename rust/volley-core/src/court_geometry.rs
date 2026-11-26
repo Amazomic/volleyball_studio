@@ -373,6 +373,8 @@ pub struct TeamSideVotes {
     near: u64,
     far: u64,
     observed: u64,
+    clear_near: u64,
+    clear_far: u64,
 }
 
 impl TeamSideVotes {
@@ -383,6 +385,12 @@ impl TeamSideVotes {
                 match evidence.side {
                     CourtSide::Near => self.near += 1,
                     CourtSide::Far => self.far += 1,
+                }
+            }
+            if evidence.x_m.abs() >= 0.75 {
+                match evidence.side {
+                    CourtSide::Near => self.clear_near += 1,
+                    CourtSide::Far => self.clear_far += 1,
                 }
             }
         }
@@ -398,7 +406,16 @@ impl TeamSideVotes {
         } else if self.far * 3 >= total * 2 {
             Some(CourtSide::Far)
         } else {
-            None
+            let clear_total = self.clear_near + self.clear_far;
+            if clear_total < 3 || clear_total * 10 < self.observed {
+                None
+            } else if self.clear_near * 3 >= clear_total * 2 {
+                Some(CourtSide::Near)
+            } else if self.clear_far * 3 >= clear_total * 2 {
+                Some(CourtSide::Far)
+            } else {
+                None
+            }
         }
     }
 }
@@ -462,7 +479,51 @@ mod tests {
             near,
             far,
             observed,
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn disputed_net_side_prefers_repeated_clear_geometry_over_roster_balance() {
+        let court = CourtTransform::new(QUAD).unwrap();
+        for sign in [1.0, -1.0] {
+            let mut disputed = TeamSideVotes::default();
+            for (x, count) in [(-0.65, 126), (0.50, 71), (0.85, 39), (0.0, 135)] {
+                let [x, y] = court.floor_to_image([sign * x, 0.0]).unwrap();
+                for _ in 0..count {
+                    disputed.observe(&court, [x - 0.02, y - 0.1, x + 0.02, y]);
+                }
+            }
+            let expected = if sign > 0.0 {
+                CourtSide::Far
+            } else {
+                CourtSide::Near
+            };
+            assert_eq!(disputed.side(), Some(expected));
+            let sides = resolve_team_sides(BTreeMap::from([
+                (1, vote(10, 0, 10)),
+                (2, vote(10, 0, 10)),
+                (3, vote(10, 0, 10)),
+                (4, vote(0, 10, 10)),
+                (5, vote(0, 10, 10)),
+                (6, vote(0, 10, 10)),
+                (14, disputed),
+            ]));
+            assert_eq!(sides[&14], expected);
+        }
+    }
+
+    #[test]
+    fn rare_clear_frames_do_not_override_disputed_net_evidence() {
+        let court = CourtTransform::new(QUAD).unwrap();
+        let mut disputed = TeamSideVotes::default();
+        for (x, count) in [(-0.5, 50), (0.5, 50), (0.85, 3)] {
+            let [x, y] = court.floor_to_image([x, 0.0]).unwrap();
+            for _ in 0..count {
+                disputed.observe(&court, [x - 0.02, y - 0.1, x + 0.02, y]);
+            }
+        }
+        assert_eq!(disputed.side(), None);
     }
 
     #[test]

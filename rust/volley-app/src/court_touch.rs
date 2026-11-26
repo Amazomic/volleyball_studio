@@ -25,7 +25,7 @@ pub(crate) fn filter_on_court(frames: &[TouchFrame], court: &CourtTransform) -> 
         .collect()
 }
 
-pub(crate) const TOUCH_SIDE_ATTRIBUTION_VERSION: &str = "block_opponent_side_v3";
+pub(crate) const TOUCH_SIDE_ATTRIBUTION_VERSION: &str = "block_opponent_side_v4";
 
 pub(crate) fn pre_crossing_tracks(
     events: &[PhysicalTouchCandidate],

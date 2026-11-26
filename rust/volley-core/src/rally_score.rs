@@ -1,6 +1,6 @@
 use crate::court_geometry::{CourtSide, CourtTransform};
 
-pub const RALLY_SCORE_VERSION: &str = "court_line_half_v2";
+pub const RALLY_SCORE_VERSION: &str = "court_line_half_team_evidence_v3";
 
 pub fn scoring_landing<'a>(
     landing: &'a str,
