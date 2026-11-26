@@ -39,6 +39,11 @@
     const n=Math.max(0,Math.round(Number(value)||0));
     return String(Math.floor(n/60)).padStart(2,"0")+":"+String(n%60).padStart(2,"0");
   };
+  const openPlayer=(url,title)=>{
+    ui.title.textContent=title;
+    ui.media.src=url;
+    if(!ui.player.open)ui.player.showModal();
+  };
   const closePlayer=()=>{ui.media.pause();ui.media.removeAttribute("src");
     ui.media.load();ui.player.close();};
   ui.playerClose.addEventListener("click",closePlayer);
@@ -131,8 +136,7 @@
         details.append(apply);
         const actions=document.createElement("div");actions.className="studio-video-entry-actions";
         actions.append(button("play","Открыть видео",()=>{
-          ui.title.textContent=(item.project_name||project)+" · "+(item.label||"Видео");
-          ui.media.src=item.url;ui.player.showModal();
+          openPlayer(item.url,(item.project_name||project)+" · "+(item.label||"Видео"));
         }));
         const download=document.createElement("a");
         download.href=item.download_url||item.url;
@@ -159,5 +163,14 @@
   };
   ui.search.addEventListener("input",draw);
   window.addEventListener("volley:project-ready",()=>{if(opened)void refresh();});
-  window.addEventListener("volley:montage-complete",()=>{if(opened)void refresh();});
+  window.addEventListener("volley:montage-complete",event=>{
+    if(opened)void refresh();
+    const result=event.detail;
+    if(!result||result.project_id!==$("studio-project")?.value||
+      !/^[a-f0-9]{12}$/.test(result.project_id||"")||
+      !/^montage_[a-f0-9]{32}$/.test(result.id||""))return;
+    const url="/api/montage/native/media?project_id="+result.project_id+"&job_id="+result.id;
+    if(result.media_url!==url)return;
+    openPlayer(url,"Готовое видео");
+  });
 })();

@@ -4798,18 +4798,23 @@
     if(!s.jobId)return;
     try{
       const result=await request("/api/montage/native/status");
-      if(result.id&&result.id!==s.jobId){
-        stopPoll();ui.job.textContent="Запущен другой монтаж.";return;
+      if(result.id!==s.jobId){
+        stopPoll();ui.cancel.classList.add("hidden");ui.render.disabled=false;
+        ui.job.textContent=result.state==="idle"?
+          "Монтаж не найден на сервере. Запустите его повторно.":"Запущен другой монтаж.";return;
       }
       const percentage=Number(result.overall_percent);
       ui.job.textContent=(result.stage||result.state||"Монтаж")+
         " · "+(Number.isFinite(percentage)?percentage.toFixed(0)+"%":"—");
       if(["complete","completed","done"].includes(result.state)){
         stopPoll();ui.cancel.classList.add("hidden");ui.render.disabled=false;
-        window.dispatchEvent(new Event("volley:montage-complete"));
         if(typeof result.media_url==="string"&&
           result.media_url.startsWith("/api/montage/native/media?")){
           ui.download.href=result.media_url;ui.download.classList.remove("hidden");
+          window.dispatchEvent(new CustomEvent("volley:montage-complete",{detail:result}));
+        }else{
+          ui.job.textContent="Монтаж завершён, но сервер не вернул готовое видео.";
+          message(ui.job.textContent,"error");return;
         }
         const archive=document.getElementById("studio-download-archive");
         if(archive&&typeof result.archive_url==="string"&&
@@ -4817,7 +4822,7 @@
           result.archive_url.endsWith("&archive=1")){
           archive.href=result.archive_url;archive.classList.remove("hidden");
         }
-        message("Монтаж завершён. Видео доступно для скачивания.","ok");
+        message("Монтаж завершён. Видео доступно для просмотра и скачивания.","ok");
       }else if(["cancelled","failed","error"].includes(result.state)){
         stopPoll();ui.cancel.classList.add("hidden");ui.render.disabled=false;
         message(result.error||"Ошибка монтажа.","error");
@@ -4828,7 +4833,10 @@
     const ids=window.VolleyballMontageDraft?.ids(s.project,s.run)||[];
     if(!wasmReady||s.busy||!s.run||!s.marksLoaded||!s.gold.size||
       s.gold.size>80||s.selected.size!==s.gold.size||!ids.length||
-      ids.some(id=>!s.selected.has(id)))return;
+      ids.some(id=>!s.selected.has(id))){
+      ui.job.textContent="Монтаж не запущен: проверьте монтажную ленту и выбранный анализ.";
+      return;
+    }
     const project=s.project,run=s.run;
     s.busy=true;ui.render.disabled=true;ui.download.classList.add("hidden");
     document.getElementById("studio-download-archive")?.classList.add("hidden");

@@ -460,7 +460,7 @@
       if(!/^[a-f0-9]{64}$/.test(result.source_fingerprint||"")||
         result.project_id!==st.project)throw Error("Неверный источник подборки");
       const hasClips=drawPlan(result);
-      st.fingerprint=result.source_fingerprint;st.key=key;
+      st.fingerprint=hasClips?result.source_fingerprint:"";st.key=hasClips?key:"";
       return hasClips;
     }finally{st.busy=false;sync();}
   };
@@ -483,16 +483,21 @@
     if(!st.jobId)return;
     try{
       const status=await api("/api/montage/native/status");
-      if(status.id!==st.jobId){stopPoll();ui.job.textContent="Запущен другой монтаж.";return;}
+      if(status.id!==st.jobId){
+        stopPoll();ui.cancel.classList.add("hidden");
+        ui.job.textContent=status.state==="idle"?
+          "Монтаж не найден на сервере. Запустите его повторно.":"Запущен другой монтаж.";return;
+      }
       ui.job.textContent=(status.stage||status.state||"Монтаж")+" · "+
         Math.round(Number(status.overall_percent)||0)+"%";
       if(status.state==="complete"){
         stopPoll();ui.cancel.classList.add("hidden");
-        if(typeof window.dispatchEvent==="function")
-          window.dispatchEvent(new Event("volley:montage-complete"));
         if(typeof status.media_url==="string"&&
           status.media_url.startsWith("/api/montage/native/media?")){
           ui.download.href=status.media_url;ui.download.classList.remove("hidden");
+          window.dispatchEvent(new CustomEvent("volley:montage-complete",{detail:status}));
+        }else{
+          ui.job.textContent="Монтаж завершён, но сервер не вернул готовое видео.";
         }
         if(typeof status.archive_url==="string"&&
           status.archive_url.startsWith("/api/montage/native/media?")&&
@@ -509,11 +514,17 @@
   const start=async()=>{
     if(st.busy)return;
     if(mode()==="favorites"){
-      if(ui.legacyStart.disabled){show("Отметьте розыгрыши в предпросмотре.",true);return;}
+      if(ui.legacyStart.disabled){
+        ui.job.textContent="Монтаж не запущен. Добавьте избранные розыгрыши в монтажную ленту.";
+        show(ui.job.textContent,true);return;
+      }
       ui.legacyStart.click();return;
     }
     if(!st.fingerprint||st.key!==snapshot()){
-      try{if(!await preview())return;}catch(e){show(e.message,true);return;}
+      try{if(!await preview()){
+        ui.job.textContent="Монтаж не запущен: нет подходящих фрагментов.";
+        return;
+      }}catch(e){ui.job.textContent=e.message;show(e.message,true);return;}
     }
     if(!st.fingerprint||st.key!==snapshot())return;
     st.busy=true;sync();ui.download.classList.add("hidden");

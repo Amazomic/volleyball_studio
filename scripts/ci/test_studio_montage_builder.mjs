@@ -74,7 +74,7 @@ const fetch=async(url,options={})=>{
       selected_manually_reviewed_actions:1,statistics:["Athlete 1: 3"],selected_content_sec:25});
   }
   if(url==="/api/montage/native/status")return reply({id:job,state:jobState,
-    overall_percent:45,media_url:"/api/montage/native/media?job_id="+job,
+    project_id:"1234abcdef01",overall_percent:45,media_url:"/api/montage/native/media?project_id=1234abcdef01&job_id="+job,
     archive_url:jobState==="complete"?"/api/montage/native/media?job_id="+job+"&archive=1":null});
   if(url==="/api/montage/native/cancel") {
     assert.equal(body.job_id,job);jobState="cancelled";return reply({cancel_requested:true});
@@ -149,6 +149,8 @@ for(const failure of ["empty","fingerprint","project","server"]) {
   wrongProject=failure==="project";failPreview=failure==="server";
   await montage("action").fire("change");const before=starts().length;
   await montage("start").fire("click");assert.equal(starts().length,before,failure+" must prevent launch");
+  assert.ok(get("studio-job").textContent,"Failed launch must explain why");
+  if(failure==="empty"){await montage("start").fire("click");assert.equal(starts().length,before,"Empty selection cannot launch on retry");}
 }
 clips=2;invalidFingerprint=false;wrongProject=false;failPreview=false;
 await choose("report");
@@ -170,6 +172,10 @@ await montage("recognition").fire("change");
 await montage("start").fire("click");
 assert.equal(starts().at(-1).body.include_recognition_data,true);
 jobState="complete";await pollTimer();
+const completed=events.filter(e=>e.type==="volley:montage-complete").at(-1);
+assert.equal(completed.detail.media_url,"/api/montage/native/media?project_id=1234abcdef01&job_id="+job);
+assert.equal(completed.detail.project_id,"1234abcdef01");
+assert.equal(completed.detail.id,job);
 assert.equal(get("studio-download").classList.contains("hidden"),false);
 assert.equal(get("studio-download-archive").classList.contains("hidden"),false);
 assert.ok(get("studio-download-archive").href.endsWith("&archive=1"));
@@ -220,3 +226,19 @@ window.dispatchEvent(new context.CustomEvent("volley:montage-favorites",{detail:
 assert.deepEqual([...window.VolleyballMontageDraft.ids("1234abcdef01",run)],[],
   "Draft order must be scoped to a specific CPU run");
 console.log("Live montage builder: profiles, fingerprint, audio, sequenced preview, reordered export IDs, cleanup and source isolation passed");
+
+const libListeners=new Map();
+const dialog=get("studio-video-library-player");
+dialog.showModal=function(){this.open=true;};
+dialog.close=function(){this.open=false;};
+const libContext={document:{getElementById:get,addEventListener(){}},
+  window:{addEventListener:(name,fn)=>libListeners.set(name,fn)},URLSearchParams};
+vm.runInNewContext(text("rust/volley-app/static/studio_video_library.js"),libContext);
+libListeners.get("volley:montage-complete")({detail:completed.detail});
+assert.equal(dialog.open,true,"Completed montage opens the video player");
+assert.equal(get("studio-video-player-media").src,completed.detail.media_url);
+dialog.close();
+libListeners.get("volley:montage-complete")({detail:{...completed.detail,project_id:"abcdef123456"}});
+assert.equal(dialog.open,false,"Other project must not open a player");
+libListeners.get("volley:montage-complete")({detail:{...completed.detail,media_url:"/api/montage/native/media?project_id=1234abcdef01&job_id=montage_"+"2".repeat(32)}});
+assert.equal(dialog.open,false,"Mismatched media URL must not open");
