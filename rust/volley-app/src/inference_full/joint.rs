@@ -303,7 +303,6 @@ pub(crate) fn run_joint_pair(
     stabilizer_settings: volley_core::ball_interpolation::BallStabilizerSettings,
     early_pose: Option<EarlyPoseOptions>,
     cancelled: &AtomicBool,
-    mut stages: Option<stage_queue::GpuStages<'_>>,
     mut report: impl FnMut(f64, u64, u64, Option<(&Value, u64)>) -> Result<(), String>,
 ) -> Result<JointPair, String> {
     if cancelled.load(Ordering::Acquire) {
@@ -513,9 +512,6 @@ pub(crate) fn run_joint_pair(
             return Err("cancelled".into());
         }
         drop(ball_engine);
-        if let Some(stages) = stages.as_mut() {
-            stages.finish_ball();
-        }
         report(
             0.399999,
             ball_scan.decode.decoded_frames,

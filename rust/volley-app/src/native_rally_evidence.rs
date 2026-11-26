@@ -699,6 +699,7 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
                 "candidate_id":item.candidate_id.clone(),
                 "start_frame":start,
                 "end_frame":end,
+                "motion_event_count":item.motion_supported_touch_proposals,
             });
             if let Some(count) = item.stable_track_count {
                 row["stable_track_count"] = json!(count);

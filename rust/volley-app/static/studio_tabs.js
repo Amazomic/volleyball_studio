@@ -1235,7 +1235,11 @@
     const percent=Number(queue.progress_percent);
     const summary=make("div","analysis-project-queue-summary");
     summary.append(make("strong","","Проект · "+queue.completed_videos+"/"+queue.total_videos+" видео"),
-      make("span","",Number.isFinite(percent)?percent.toFixed(1)+"%":"—"));
+      make("span","",[
+        Number.isSafeInteger(queue.frames_processed)?queue.frames_processed.toLocaleString("ru-RU")+" кадров":"",
+        Number.isSafeInteger(queue.rallies_total)?queue.rallies_total.toLocaleString("ru-RU")+" розыгр.":"",
+        Number.isFinite(percent)?percent.toFixed(1)+"%":"—"
+      ].filter(Boolean).join(" · ")));
     const aggregate=make("progress","analysis-project-queue-total");
     aggregate.max=100;aggregate.value=Number.isFinite(percent)?Math.max(0,Math.min(100,percent)):0;
     aggregate.setAttribute("aria-label","Оценка общего прогресса по длительности отрезков");
@@ -1595,7 +1599,7 @@
       state.completedId=status.id;
       window.dispatchEvent(new CustomEvent("volley:pipeline-complete",{
         detail:{project_id:status.project_id,video:status.video,
-          analysis_id:status.analysis_id,postprocessing_id:status.postprocessing_id,pipeline_id:status.id}
+          analysis_id:status.analysis_id,postprocessing_id:status.postprocessing_id,pipeline_id:status.id,project_queue:status.project_queue}
       }));
     }
     state.historyStatusAt=Date.now();

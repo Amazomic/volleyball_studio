@@ -9,7 +9,7 @@ const section=(from,to)=>{
   return source.slice(start,end);
 };
 const project="a".repeat(12),first="b".repeat(32),second="c".repeat(32);
-const queue={active:true,completed_videos:0,total_videos:2,progress_percent:10,
+const queue={active:true,completed_videos:0,total_videos:2,progress_percent:10,frames_processed:300,rallies_total:50,
   videos:[{id:first,video:"first.mp4",status:"running",progress_percent:50,
     rallies_total:33,rallies_completed:12,stage:"RF-DETR",analysis_range:{start_sec:38,end_sec:1000}},
   {id:second,video:"second.mp4",status:"queued",progress_percent:0}]};
@@ -68,6 +68,7 @@ renderer(queue);
 assert.equal(target.hidden,false);
 assert.equal(target.children[0].children[0].textContent,"Проект · 0/2 видео");
 assert.equal(target.children[1].value,10);
+assert.match(target.children[0].children[1].textContent,/300 кадров.*50 розыгр/);
 assert.equal(target.children[2].children[0].children[0].textContent,"Match A · 38 – 1000");
 assert.match(target.children[2].children[0].children[1].textContent,/12\/33 розыгр/);
 assert.match(target.children[2].children[0].children[1].textContent,/RF-DETR/);

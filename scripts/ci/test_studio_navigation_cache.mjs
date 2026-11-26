@@ -66,7 +66,7 @@ assert.equal(completionEvents,1,"A newly completed pipeline must refresh snapsho
 pipelineContext.displayPipeline(status,true);
 assert.equal(completionEvents,1,"Completion must be processed only once");
 
-assert.ok(preview.includes("if(previewCache.peek(path)===null)"),
+assert.ok(/if\(previewCache\.peek\(path\)===null(?:\s*&&[^)]*)?\)/.test(preview),
   "Previously cached rally preview must not display an intermediate loading state");
 assert.ok(!preview.includes('message("Загрузка кадровых границ и Touch-данных…")'),
   "Navigation must not display the obsolete Touch-data loading banner");

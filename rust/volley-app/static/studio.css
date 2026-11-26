@@ -2243,5 +2243,3 @@ body[data-ui-theme="light"] #studio-preview-view .rally-team-point{color:#216b47
 
 #studio-preview-view:not(.training-workspace) .viewer-head{align-items:center;gap:12px}
 #studio-preview-view:not(.training-workspace) .viewer-head>strong{flex:0 0 auto;white-space:nowrap}
-#studio-preview-video{width:min(44%,340px);min-width:0;margin-right:auto;padding:6px 10px;font-size:12px}
-#studio-preview-view.training-workspace #studio-preview-video{display:none}
