@@ -55,6 +55,7 @@ const fetch=async(url,options={})=>{
     schema:"volley-native-analysis-overview/1",project_id:"1234abcdef01",video:"match.mp4",metadata_only:true,
     stages:[{key:"rallies",items:[{id:otherRun,count:6},{id:run,count:4}],truncated:false}]
   });
+  if(url==="/api/montage/native/start")return reply({job_id:job,status:"queued"});
   if(url==="/api/montage/native/audio")return reply({audio_file:audio,duration_sec:31});
   if(url==="/api/montage/native/player-highlights"||url==="/api/montage/native/game-report") {
     assert.deepEqual(body.rally_run_ids,[expectedRun]);
@@ -225,6 +226,27 @@ window.dispatchEvent(new context.CustomEvent("volley:montage-favorites",{detail:
 }}));
 assert.deepEqual([...window.VolleyballMontageDraft.ids("1234abcdef01",run)],[],
   "Draft order must be scoped to a specific CPU run");
+await choose("creative");
+assert.equal(montage("settings-label").textContent,"Творчество");
+assert.equal(montage("creative").classList.contains("hidden"),false);
+assert.equal(montage("sources").classList.contains("hidden"),true);
+montage("creative-source").value="match.mp4";await montage("creative-source").fire("change");
+const creativeVideo=montage("creative-video");creativeVideo.duration=30;
+const initialCreativeRequests=requests.filter(r=>r.url==="/api/montage/native/start").length;
+await montage("start").fire("click");
+assert.equal(requests.filter(r=>r.url==="/api/montage/native/start").length,initialCreativeRequests);
+creativeVideo.currentTime=6;await montage("creative-in").fire("click");
+creativeVideo.currentTime=3;await montage("creative-out").fire("click");
+assert.equal(montage("creative-add").disabled,true,"Reversed bounds cannot be added");
+creativeVideo.currentTime=2;await montage("creative-in").fire("click");
+creativeVideo.currentTime=5;await montage("creative-out").fire("click");
+await montage("creative-add").fire("click");
+assert.equal(montage("creative-list").children.length,1);
+montage("recognition").checked=false;get("studio-music").files=[];
+await montage("start").fire("click");
+const creativeRequest=requests.filter(r=>r.url==="/api/montage/native/start").at(-1);
+assert.deepEqual(creativeRequest.body.clips,[{video:"match.mp4",start_frame:60,end_frame:149}]);
+await choose("report");assert.equal(montage("creative").classList.contains("hidden"),true);
 console.log("Live montage builder: profiles, fingerprint, audio, sequenced preview, reordered export IDs, cleanup and source isolation passed");
 
 const libListeners=new Map();

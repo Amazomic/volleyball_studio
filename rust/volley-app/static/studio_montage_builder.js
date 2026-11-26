@@ -25,13 +25,18 @@
     sequence:$("studio-montage-sequence"),video:$("studio-montage-video"),
     play:$("studio-montage-play"),restart:$("studio-montage-restart"),
     playStatus:$("studio-montage-play-status"),playPosition:$("studio-montage-play-position"),
-    draftCount:$("studio-montage-draft-count")
+    draftCount:$("studio-montage-draft-count"),durationField:$("studio-montage-duration-field"),
+    creative:$("studio-montage-creative"),creativeSource:$("studio-montage-creative-source"),
+    creativeVideo:$("studio-montage-creative-video"),creativeStart:$("studio-montage-creative-start"),
+    creativeEnd:$("studio-montage-creative-end"),creativeIn:$("studio-montage-creative-in"),
+    creativeOut:$("studio-montage-creative-out"),creativeAdd:$("studio-montage-creative-add"),
+    creativeList:$("studio-montage-creative-list"),creativeStatus:$("studio-montage-creative-status")
   };
   if(!ui.profile)return;
   const st={project:"",token:0,busy:false,runs:new Map(),available:new Map(),fingerprint:"",key:"",
     jobId:"",timer:null,audioSeconds:null,audioURL:"",
     sourceKey:"",favoriteItems:[],order:[],previewIndex:-1,playEpoch:0,
-    mediaVideo:"",advancing:false,finished:false};
+    mediaVideo:"",advancing:false,finished:false,creativeClips:[],creativeVideos:[],creativeProject:""};
   const option=(label,value)=>{const node=document.createElement("option");
     node.textContent=String(label);node.value=String(value);return node;};
   const validRun=value=>typeof value==="string"&&/^[a-f0-9]{32}$/.test(value);
@@ -68,29 +73,36 @@
     attacks:{mode:"player",label:"Лучшие атаки",
       hint:"Атаки выбранного игрока с контекстом до и после.",
       duration:30,layout:"vertical",action:"attack",context:"0.5"},
+    creative:{mode:"creative",label:"Творчество",
+      hint:"Выберите произвольные фрагменты исходных видео.",
+      duration:30,layout:"original",action:"all",context:"1"},
     report:{mode:"report",label:"Лучшие и длинные розыгрыши",
       hint:"Автоматическая подборка из подтверждённых розыгрышей.",
       duration:30,layout:"original",action:"all",context:"1"}
   };
   const mode=()=>profiles[ui.profile.value]?.mode||"favorites";
   const sync=()=>{
-    const person=mode()==="player",favorite=mode()==="favorites";
+    const person=mode()==="player",favorite=mode()==="favorites",creative=mode()==="creative";
     const selected=profiles[ui.profile.value]||profiles.favorites;
     ui.settingsLabel.textContent=selected.label;
     ui.settingsHint.textContent=selected.hint;
     ui.playerField.classList.toggle("hidden",!person);
     ui.actionField.classList.toggle("hidden",!person||ui.profile.value==="attacks");
     ui.contextField.classList.toggle("hidden",!person);
-    ui.sources.classList.toggle("hidden",favorite);
+    ui.sources.classList.toggle("hidden",favorite||creative);
+    ui.creative.classList.toggle("hidden",!creative);
+    ui.durationField.classList.toggle("hidden",creative);
+    if(!creative)ui.creativeVideo.pause();
+    syncCreative();
     ui.statisticsField.classList.toggle("hidden",mode()!=="report");
     ui.favorites.classList.toggle("hidden",!favorite);
     ui.assembly.classList.toggle("hidden",!favorite);
     ui.play.disabled=st.busy||!favorite||!st.order.length;
     ui.restart.disabled=st.busy||!favorite||!st.order.length;
-    ui.cameraField.classList.toggle("hidden",ui.layout.value==="original");
-    ui.zoomField.classList.toggle("hidden",ui.layout.value==="original"||ui.camera.value!=="on");
+    ui.cameraField.classList.toggle("hidden",creative||ui.layout.value==="original");
+    ui.zoomField.classList.toggle("hidden",creative||ui.layout.value==="original"||ui.camera.value!=="on");
     ui.start.disabled=st.busy;ui.preview.disabled=st.busy;ui.refresh.disabled=st.busy;
-    ui.help.textContent=favorite?
+    ui.help.textContent=creative?"Монтаж сохраняет порядок добавленных фрагментов.":favorite?
       "Избранные розыгрыши собираются из оригинального видео.":
       person?"В рилс входят только фрагменты вокруг проверенных касаний выбранного игрока.":
       "Лучшие и длинные розыгрыши."+
@@ -106,6 +118,47 @@
     if(ui.audioFit.checked&&st.audioSeconds)ui.duration.value=String(
       Math.max(8,Math.min(600,Math.round(st.audioSeconds))));
     invalidate();sync();
+    if(mode()==="creative"&&ui.creativeSource.value&&!ui.creativeVideo.src)void openCreativeSource();
+  };
+  const creativeBounds=()=>{
+    const video=ui.creativeSource.value,duration=ui.creativeVideo.duration;
+    if(!st.creativeVideos.includes(video)||!Number.isFinite(duration)||duration<=0||
+       ui.creativeStart.value===""||ui.creativeEnd.value==="")return null;
+    const start=Number(ui.creativeStart.value),end=Number(ui.creativeEnd.value);
+    if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end>duration||end<=start)return null;
+    const start_frame=Math.round(start*30),end_frame=Math.min(Math.round(end*30),Math.floor(duration*30))-1;
+    return end_frame>=start_frame?{video,start_frame,end_frame}:null;
+  };
+  const creativeFrames=()=>st.creativeClips.reduce((sum,c)=>sum+c.end_frame-c.start_frame+1,0);
+  const syncCreative=()=>{
+    const clip=creativeBounds(),ready=Number.isFinite(ui.creativeVideo.duration)&&ui.creativeVideo.duration>0;
+    ui.creativeIn.disabled=ui.creativeOut.disabled=st.busy||!ready;
+    ui.creativeAdd.disabled=st.busy||!clip||st.creativeClips.length>=80||creativeFrames()+(clip?clip.end_frame-clip.start_frame+1:0)>18000;
+    ui.creativeStatus.textContent=clip?
+      "Длительность фрагмента: "+((clip.end_frame-clip.start_frame+1)/30).toFixed(1)+" сек.":
+      "Отметьте начало и конец фрагмента.";
+  };
+  const openCreativeSource=async()=>{
+    ui.creativeStart.value=ui.creativeEnd.value="";
+    ui.creativeVideo.pause();
+    const video=ui.creativeSource.value;
+    if(!st.creativeVideos.includes(video))return;
+    try{
+      if(window.VolleyballBrowserVideo?.load)await window.VolleyballBrowserVideo.load(ui.creativeVideo,st.project,video,{autoplay:false});
+      else{ui.creativeVideo.src="/api/video-media?"+new URLSearchParams({project_id:st.project,video});ui.creativeVideo.load();}
+    }catch(e){show(e.message,true);}
+    syncCreative();
+  };
+  const renderCreative=()=>{
+    ui.creativeList.replaceChildren();
+    st.creativeClips.forEach((clip,index)=>{
+      const row=document.createElement("div");row.className="montage-creative-row";
+      const label=document.createElement("span");label.textContent=(index+1)+". "+clip.video+" · "+(clip.start_frame/30).toFixed(1)+" – "+((clip.end_frame+1)/30).toFixed(1)+" сек.";
+      const remove=document.createElement("button");remove.type="button";remove.className="secondary";remove.textContent="Удалить";
+      remove.addEventListener("click",()=>{if(st.busy)return;st.creativeClips.splice(index,1);renderCreative();invalidate();});
+      row.append(label,remove);ui.creativeList.append(row);
+    });
+    syncCreative();
   };
   const favoriteId=id=>typeof id==="string"&&/^[a-f0-9]{24}$/.test(id);
   const draftStoreKey=()=>st.sourceKey?"volley:montage-draft:v1:"+st.sourceKey:"";
@@ -347,6 +400,13 @@
   const load=async()=>{
     const token=++st.token;st.project=ui.project.value;st.runs.clear();
     st.available.clear();
+    if(st.creativeProject!==st.project){
+      st.creativeProject=st.project;st.creativeClips=[];st.creativeVideos=[];
+      ui.creativeSource.replaceChildren();ui.creativeStart.value=ui.creativeEnd.value="";
+      if(window.VolleyballBrowserVideo?.cancel)window.VolleyballBrowserVideo.cancel(ui.creativeVideo);
+      else{ui.creativeVideo.pause();ui.creativeVideo.removeAttribute("src");ui.creativeVideo.load();}
+      renderCreative();
+    }
     invalidate();ui.sourceList.replaceChildren();ui.player.replaceChildren();
     if(st.sourceKey&&!st.sourceKey.startsWith(JSON.stringify([st.project]).slice(0,-1))){
       stopPreview();st.sourceKey="";st.order=[];st.favoriteItems=[];
@@ -370,6 +430,10 @@
       players.forEach(row=>ui.player.append(option(row.name,row.id)));
       if(players.length===1)ui.player.value=players[0].id;
       const videos=Array.isArray(project.videos)?project.videos:[];
+      const previousSource=ui.creativeSource.value;
+      st.creativeVideos=videos;ui.creativeSource.replaceChildren(...videos.map(video=>option(video,video)));
+      ui.creativeSource.value=videos.includes(previousSource)?previousSource:videos[0]||"";
+      if(mode()==="creative"&&ui.creativeSource.value)void openCreativeSource();
       if(videos.length>40)throw Error("Монтаж поддерживает не более 40 видео");
       const overviews=await window.VolleyballOverview.loadMany(st.project,videos);
       if(token!==st.token)return;
@@ -445,6 +509,10 @@
     return clips>0;
   };
   const preview=async()=>{
+    if(mode()==="creative"){
+      if(creativeFrames()<30){show("Добавьте не менее одной секунды видео.",true);return false;}
+      show("Фрагментов: "+st.creativeClips.length+" · "+(creativeFrames()/30).toFixed(1)+" сек.");return true;
+    }
     if(mode()==="favorites"){
       if(!st.order.length){show("Добавьте розыгрыши в монтажную ленту.",true);return false;}
       show("В подборке "+st.order.length+" розыгрышей. Предпросмотр из оригинального видео.");
@@ -520,6 +588,26 @@
       }
       ui.legacyStart.click();return;
     }
+    if(mode()==="creative"){
+      if(!await preview())return;
+      const project=st.project,token=st.token,clips=st.creativeClips.map(c=>({...c}));
+      const settings={audio_volume:Number(ui.volume.value),encoder:ui.encoder.value,layout:ui.layout.value,
+        include_recognition_data:ui.recognition.checked};
+      const fit=ui.audioFit.checked;
+      st.busy=true;sync();ui.job.textContent="Загрузка музыки...";
+      try{
+        const audio_file=await uploadAudio();
+        if(token!==st.token||project!==st.project||mode()!=="creative")return;
+        const result=await post("/api/montage/native/start",{project_id:project,clips,audio_file,...settings,
+          target_duration_sec:audio_file&&fit?Math.min(600,Math.max(1,st.audioSeconds||creativeFrames()/30)):null});
+        if(!/^montage_[a-f0-9]{32}$/.test(result.job_id||"")||result.status!=="queued")throw Error("Монтаж не подтверждён");
+        st.jobId=result.job_id;ui.cancel.classList.remove("hidden");
+        window.VolleyballTasks?.set("montage",{label:"Монтаж",stage:"В очереди",progress:0});
+        window.VolleyballTasks?.refresh();stopPoll();st.timer=setInterval(poll,1300);await poll();
+      }catch(e){ui.job.textContent=e.message;show(e.message,true);}
+      finally{if(token===st.token){st.busy=false;sync();}}
+      return;
+    }
     if(!st.fingerprint||st.key!==snapshot()){
       try{if(!await preview()){
         ui.job.textContent="Монтаж не запущен: нет подходящих фрагментов.";
@@ -574,6 +662,17 @@
     };
     audio.onerror=()=>{ui.audioLength.textContent="Не удалось прочитать длительность музыки.";};
   };
+  ui.creativeSource.addEventListener("change",openCreativeSource);
+  ui.creativeVideo.addEventListener("loadedmetadata",syncCreative);
+  ui.creativeVideo.addEventListener("emptied",syncCreative);
+  ui.creativeVideo.addEventListener("error",()=>show("Не удалось открыть исходное видео.",true));
+  for(const field of [ui.creativeStart,ui.creativeEnd])field.addEventListener("input",syncCreative);
+  ui.creativeIn.addEventListener("click",()=>{ui.creativeStart.value=ui.creativeVideo.currentTime.toFixed(3);syncCreative();});
+  ui.creativeOut.addEventListener("click",()=>{ui.creativeEnd.value=ui.creativeVideo.currentTime.toFixed(3);syncCreative();});
+  ui.creativeAdd.addEventListener("click",()=>{
+    const clip=creativeBounds();if(ui.creativeAdd.disabled||!clip)return;
+    st.creativeClips.push(clip);renderCreative();invalidate();
+  });
   ui.profile.addEventListener("change",()=>chooseProfile(ui.profile.value));
   for(const input of [ui.player,ui.action,ui.context,ui.duration,ui.layout,ui.encoder,
     ui.volume,ui.camera,ui.zoom,ui.statistics,ui.recognition])input.addEventListener("change",()=>{invalidate();sync();});

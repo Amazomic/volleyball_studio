@@ -492,6 +492,7 @@
                   <option value="player">Рилс игрока</option>
                   <option value="attacks">Лучшие атаки</option>
                   <option value="report">Лучшие и длинные розыгрыши</option>
+                  <option value="creative">Творчество</option>
                 </select>
               </div>
             </header>
@@ -514,7 +515,7 @@
                     </select></div>
                   <div id="studio-montage-context-field"><label class="field-label" for="studio-montage-context">Контекст вокруг касания, сек.</label>
                     <select id="studio-montage-context"><option value="0.5">0,5 · быстрый</option><option value="1" selected>1 · стандартный</option><option value="1.5">1,5 · подробный</option><option value="2">2 · плавный</option></select></div>
-                  <div><label class="field-label" for="studio-montage-duration">Желаемая длительность, сек.</label>
+                  <div id="studio-montage-duration-field"><label class="field-label" for="studio-montage-duration">Желаемая длительность, сек.</label>
                     <input id="studio-montage-duration" type="number" min="8" max="600" step="1" value="30"></div>
                   <div><label class="field-label" for="studio-layout">Формат</label><select id="studio-layout">
                     <option value="vertical">Вертикальное 9:16 · вся площадка</option>
@@ -529,6 +530,23 @@
                   <div id="studio-montage-zoom-field"><label class="field-label" for="studio-montage-zoom">Увеличение кадра</label>
                     <select id="studio-montage-zoom"><option value="1">1×</option><option value="1.25">1,25×</option><option value="1.5">1,5×</option><option value="2">2×</option></select></div>
                 </div>
+                <section id="studio-montage-creative" class="montage-creative hidden">
+                  <label class="field-label" for="studio-montage-creative-source">Исходное видео</label>
+                  <select id="studio-montage-creative-source"></select>
+                  <video id="studio-montage-creative-video" controls playsinline preload="metadata" aria-label="Исходное видео"></video>
+                  <div class="montage-creative-field">
+                    <div class="montage-creative-heading"><h3>Добавление фрагмента в монтаж</h3><button id="studio-montage-creative-add" class="primary" type="button" disabled>Добавить в монтаж</button></div>
+                    <div id="studio-montage-creative-list" class="montage-creative-list"></div>
+                  </div>
+                  <div class="montage-creative-field">
+                    <h3>Выбор фрагмента</h3>
+                    <div class="montage-creative-range">
+                      <div><label class="field-label" for="studio-montage-creative-start">Начало, сек.</label><input id="studio-montage-creative-start" type="number" min="0" step="0.1"><button id="studio-montage-creative-in" class="secondary" type="button">Отметить начало</button></div>
+                      <div><label class="field-label" for="studio-montage-creative-end">Конец, сек.</label><input id="studio-montage-creative-end" type="number" min="0" step="0.1"><button id="studio-montage-creative-out" class="secondary" type="button">Отметить конец</button></div>
+                    </div>
+                    <p id="studio-montage-creative-status" class="panel-note" role="status"></p>
+                  </div>
+                </section>
                 <div id="studio-montage-favorites" class="montage-builder-favorites">
                   <h3>Отмечено розыгрышей · <span id="studio-selected-count">0</span></h3>
                   <p id="studio-selection-text" class="panel-note">Добавьте розыгрыши в избранное во вкладке предпросмотра.</p>

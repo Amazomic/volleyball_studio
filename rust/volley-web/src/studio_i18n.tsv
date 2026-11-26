@@ -739,3 +739,14 @@ ReID · сопоставление на CPU	ReID · matching on CPU
 Назад на 0,1 секунды	Back 0.1 seconds
 Вперёд на 0,1 секунды	Forward 0.1 seconds
 Английский язык интерфейса	English interface
+Творчество	Creative
+Добавить в монтаж	Add to montage
+Добавление фрагмента в монтаж	Add clip to montage
+Выбор фрагмента	Select clip
+Начало, сек.	Start, sec.
+Конец, сек.	End, sec.
+Отметить начало	Mark start
+Отметить конец	Mark end
+Выберите произвольные фрагменты исходных видео.	Select custom clips from source videos.
+Монтаж сохраняет порядок добавленных фрагментов.	Montage preserves the order of added clips.
+Отметьте начало и конец фрагмента.	Mark the start and end of the clip.

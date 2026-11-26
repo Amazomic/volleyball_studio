@@ -4734,3 +4734,10 @@ Studio показывает кнопку перехода между debug и re
 - Base: 175157fadd4d0f718ea211b404ff849d777655a7. Owners: studio.js, studio_montage_builder.js, studio_video_library.js. Both montage completion routes now dispatch the server result and the existing library player validates project/job/media URL before opening. Empty selections and missing jobs no longer silently return; empty preview fingerprints are not retained.
 - Regression: test_studio_montage_builder.mjs failed on missing completion detail before the fix; after the fix it passes, including cross-project and mismatched URL rejection. Montage tab and DOM ID tests pass. Full Windows-native scripts/check-all.ps1 PASS (fmt, clippy, Rust tests, 114 Node gates; 1102 Rust passed, 28 ignored). git diff --check PASS.
 - Existing saved MP4 HTTP Range returned 206 video/mp4. New real montage and manual playback NOT TESTED; separate GPU/real-match gates NOT TESTED. Deployment status verified separately after publication.
+
+
+## 2026-11-27 — Ручной монтаж «Творчество»
+
+- База 57bfffd1. Владельцы: static/studio.html, studio.css, studio_montage_builder.js, volley-web/src/studio_i18n.tsv. Новый профиль: плеер исходника, два блока для выбора границ и добавления фрагментов, экспорт через существующий Rust API ручного монтажа. Панель аудиодорожки сохранена. RU/EN.
+- Целевые регрессии выбора границ и запрета пустых/некорректных фрагментов, DOM, viewport и два полных Windows-native scripts/check-all.ps1 PASS: fmt, clippy, Rust tests, WASM, 114 Node gates; 388/388 статических текстов и 112/112 accessibility labels. git diff --check PASS.
+- Ручная проверка пользовательского проекта и реальный экспорт нового режима NOT TESTED; данные распознавания произвольных фрагментов не поддерживаются. Применение штатной очередью развёртывания.
