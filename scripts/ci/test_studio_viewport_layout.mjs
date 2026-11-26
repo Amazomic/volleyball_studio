@@ -10,6 +10,7 @@ const tracks=readFileSync(join(root,"rust/volley-app/static/studio_tracks.js"),"
 assert.doesNotMatch(html,/Анализ матчей и монтаж|Данные исходного анализа не изменяются|Классификация игровых действий требует ручного подтверждения/);
 assert.doesNotMatch(html,/class="sidebar-foot"/);
 assert.match(css,/#studio-preview-view:not\(\.hidden\):not\(\.training-workspace\)\s*~\s*\.footer\{display:none\}/,"The visible preview must remove the footer and its border from layout");
+assert.match(css,/#studio-preview-view:not\(\.training-workspace\) \.viewer-layout\{height:100%;grid-template-rows:minmax\(0,1fr\) auto\}/,"Desktop preview must budget the player row against the timeline and available content height");
 assert.match(css,/\.shell\{display:flex;width:100%;height:100vh;height:100dvh;min-height:0;overflow:hidden\}/);
 assert.match(css,/\.content\{flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:auto/);
 assert.match(css,/\.sr-only\{width:1px!important;height:1px!important;min-width:0!important;max-width:1px!important\}/);

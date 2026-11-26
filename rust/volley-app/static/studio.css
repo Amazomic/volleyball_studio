@@ -2280,3 +2280,12 @@ body[data-ui-theme="light"] #studio-preview-view .rally-team-point{color:#216b47
 #studio-preview-view:not(.training-workspace) .video-timeline-playhead::before{width:14px;height:14px;border:0;background:#ff7900;clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%)}
 #studio-preview-view:not(.training-workspace) .viewer-head{align-items:center;gap:12px}
 #studio-preview-view:not(.training-workspace) .viewer-head>strong{flex:0 0 auto;white-space:nowrap}
+@media(min-width:781px) and (min-height:540px){
+  #studio-preview-view:not(.training-workspace){height:100%;min-height:0}
+  #studio-preview-view:not(.training-workspace) .workspace{height:100%;min-height:0}
+  #studio-preview-view:not(.training-workspace) .viewer-layout{height:100%;grid-template-rows:minmax(0,1fr) auto}
+  #studio-preview-view:not(.training-workspace) .viewer-panel{display:flex;flex-direction:column;min-height:0}
+  #studio-preview-view:not(.training-workspace) .viewer-head{flex:0 0 auto}
+  #studio-preview-view:not(.training-workspace) .video-wrap:not(:fullscreen){flex:1 1 0;min-height:0;max-height:none;aspect-ratio:auto}
+  #studio-preview-view:not(.training-workspace) .rallies-panel{height:auto;max-height:none;align-self:stretch;contain:size}
+}
