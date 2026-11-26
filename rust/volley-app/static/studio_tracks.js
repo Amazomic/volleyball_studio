@@ -1105,7 +1105,7 @@
         if(scope.project_id!==state.project||scope.replay_id!==state.replay)return;
         const photoScope={project_id:scope.project_id,video:scope.video,
           replay_id:scope.replay_id,rally_run_id:scope.rally_run_id,
-          expected_source_sha256:scope.expected_source_sha256};
+          expected_source_sha256:scope.expected_source_sha256,reid_device:"gpu"};
         updateRefreshTask("Загрузка обновлённых фотографий игроков");
         await loadLibraryRoster();
         updateRefreshTask("Пересчёт сходства непривязанных Track ID");

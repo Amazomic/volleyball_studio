@@ -1,4 +1,5 @@
 use super::*;
+use volley_inference::reid_openvino::ReidDevice;
 
 static REFRESH_PROGRESS: OnceLock<Mutex<BTreeMap<String, Value>>> = OnceLock::new();
 
@@ -94,6 +95,12 @@ pub struct RefreshReferencesRequest {
     #[serde(default)]
     rally_run_id: Option<String>,
     expected_source_sha256: String,
+    #[serde(default = "default_refresh_device")]
+    reid_device: ReidDevice,
+}
+
+fn default_refresh_device() -> ReidDevice {
+    ReidDevice::Gpu
 }
 
 #[derive(Clone)]
@@ -247,6 +254,7 @@ async fn infer_missing(
     state: Arc<AppState>,
     model: &str,
     inputs: Vec<(String, Vec<f32>)>,
+    reid_device: ReidDevice,
 ) -> Result<Vec<(String, Vec<f32>)>, ApiError> {
     if inputs.is_empty() {
         return Ok(Vec::new());
@@ -262,9 +270,13 @@ async fn infer_missing(
             return Err(storage::conflict("ReID model changed during photo refresh"));
         }
         let refs: Vec<&[f32]> = inputs.iter().map(|(_, input)| input.as_slice()).collect();
-        let vectors =
-            volley_inference::reid_openvino::infer_batch(&repo, Path::new(&library), &refs)
-                .map_err(storage::bad_request)?;
+        let vectors = volley_inference::reid_openvino::infer_batch_on(
+            &repo,
+            Path::new(&library),
+            &refs,
+            reid_device,
+        )
+        .map_err(storage::bad_request)?;
         Ok(inputs
             .into_iter()
             .zip(vectors)
@@ -279,6 +291,7 @@ async fn album_vectors(
     state: Arc<AppState>,
     album: &RefreshAlbum,
     model: &str,
+    reid_device: ReidDevice,
 ) -> Result<BTreeMap<String, Vec<f32>>, ApiError> {
     let mut vectors = photo_comparison::read_global_features(&state, &album.player_id, model)?;
     let folder = checked_reference_folder(&state, &album.player_id, false)?;
@@ -309,14 +322,19 @@ async fn album_vectors(
         }
         pending.push((sha.to_owned(), photo_comparison::decode(&jpeg).await?));
         if pending.len() >= 24 {
-            for (key, vector) in
-                infer_missing(state.clone(), model, std::mem::take(&mut pending)).await?
+            for (key, vector) in infer_missing(
+                state.clone(),
+                model,
+                std::mem::take(&mut pending),
+                reid_device,
+            )
+            .await?
             {
                 vectors.insert(key, vector);
             }
         }
     }
-    for (key, vector) in infer_missing(state.clone(), model, pending).await? {
+    for (key, vector) in infer_missing(state.clone(), model, pending, reid_device).await? {
         vectors.insert(key, vector);
     }
     photo_comparison::persist_album_features(&state, &album.player_id, model, &vectors)?;
@@ -472,7 +490,7 @@ pub async fn refresh_reference_features(
                 expected_source_sha256: req.expected_source_sha256.clone(),
                 track_ids: batch.iter().map(|(id, _)| *id).collect(),
                 transient: false,
-                reid_device: Default::default(),
+                reid_device: req.reid_device,
             }),
         )
         .await?;
@@ -515,7 +533,7 @@ pub async fn refresh_reference_features(
         for album in &plan.albums {
             all_features.insert(
                 album.player_id.clone(),
-                album_vectors(state.clone(), album, &plan.model).await?,
+                album_vectors(state.clone(), album, &plan.model, req.reid_device).await?,
             );
             progress.update(
                 "album_features",
@@ -781,6 +799,22 @@ mod tests {
             .map(|id| (format!("{id:064x}"), embedding(1.0, 0.0)))
             .collect();
         assert!(redundant_references(&album, &vectors).is_empty());
+    }
+
+    #[test]
+    fn refresh_defaults_to_cuda_and_accepts_explicit_device() {
+        let mut payload = json!({
+            "project_id":"project-1", "video":"match.mp4", "replay_id":"cpu",
+            "expected_source_sha256":"a".repeat(64)
+        });
+        let request: RefreshReferencesRequest = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(request.reid_device, ReidDevice::Gpu);
+        for (value, device) in [("cpu", ReidDevice::Cpu), ("auto", ReidDevice::Auto)] {
+            payload["reid_device"] = json!(value);
+            let request: RefreshReferencesRequest =
+                serde_json::from_value(payload.clone()).unwrap();
+            assert_eq!(request.reid_device, device);
+        }
     }
 
     #[test]

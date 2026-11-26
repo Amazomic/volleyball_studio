@@ -32,7 +32,7 @@ async function runScenario({fail=false,waitForPhotos=false}={}){
     post:async (url,payload,progressId)=>{calls.push(url);assert.match(progressId,/^[a-f0-9]{32}$/);return apiGate;},
     read:async()=>({active:true,stage:"track_features",completed:24,total:48}),
     loadLibraryRoster:async()=>{calls.push("roster");},
-    refreshPhotoMatches:async()=>{calls.push("matches");return {trackCount:7};},
+    refreshPhotoMatches:async(scope)=>{assert.equal(scope.reid_device,"gpu");calls.push("matches");return {trackCount:7};},
     autoAssignSimilar:async()=>{calls.push("auto");}};
   const handler=vm.runInNewContext("(async()=>{"+body+"\n})",context);
   const pending=handler();
