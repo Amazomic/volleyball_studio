@@ -80,52 +80,40 @@ const current={
 };
 state.latestPipeline=current;
 result.renderHistory();
-assert.equal(ui.historyList.children.length,1,"Server history is visible even without a sessionStorage marker");
+assert.equal(ui.historyList.children.length,0,"Queued analysis must not appear in history");
 result.recordHistoryRun(project,id);
-assert.deepEqual(JSON.parse(sessionStorage.getItem("volley:analysis-session-runs:v1:"+project)),[id]);
-result.renderHistory();
-assert.equal(ui.historyList.children.length,1);
-let row=ui.historyList.children[0];
-assert.equal(row.dataset.runId,id);
-assert.equal(row.open,true,"Active history row should be expanded");
-assert.equal(logPanel.parent.tag,"div","Streaming log is inside the history detail");
-assert.equal(progress.parent,logPanel.parent);
-assert.equal(row.querySelector(".analysis-history-status").textContent,"В очереди");
-assert.strictEqual(row.querySelector(".analysis-history-live-stage").parent,row.children[0],
-  "Live stage and percent must be visible in history summary without scrolling");
-
-const running={...current,status:"running",stage:"CPU · касания",progress_percent:45.7};
+const secondId="c".repeat(32);
+const running={...current,status:"running",queue_id:id,project_queue:{active:true}};
 result.updateLiveHistory(running);
-assert.strictEqual(ui.historyList.children[0],row,"Polling must not replace the history row");
-assert.equal(row.querySelector(".analysis-history-live-stage").textContent,"CPU · касания · 45.7%");
-assert.equal(row.querySelector(".analysis-history-status").textContent,"Выполняется");
-
+assert.equal(ui.historyList.children.length,0);
 state.historyRows=[
-  {id,mode:"post",video:"match.mp4",status:"queued",stages:[],started_ms:1000},
+  {id,mode:"full",video:"match.mp4",status:"complete",stages:[],started_ms:1000},
   {id:"b".repeat(32),mode:"gpu",video:"older.mp4",status:"complete",stages:[],started_ms:500}
 ];
 result.renderHistory();
-assert.equal(ui.historyList.children.length,2,"All server history records must be visible");
-assert.strictEqual(progress.parent,logPanel.parent,"Progress and log remain colocated after reload");
-assert.equal(host.children.length,0,"Live nodes must not remain duplicated in the hidden host");
-row=ui.historyList.children[0];
-assert.equal(row.querySelector(".analysis-history-live-stage").textContent,"CPU · касания · 45.7%");
-assert.equal(ui.historyList.children[1].dataset.runId,"b".repeat(32),"Older server run is retained in history");
-
-state.historyFilter="gpu";
+assert.equal(ui.historyList.children.length,1,"Active queue must remain hidden even after its first video completes");
+assert.equal(ui.historyList.children[0].dataset.runId,"b".repeat(32));
+assert.strictEqual(progress.parent,host);
+assert.strictEqual(logPanel.parent,host);
+const completed={...running,status:"complete",id:secondId,project_queue:{active:false}};
+result.updateLiveHistory(completed);
+state.historyRows=[{id,mode:"full",status:"complete",started_ms:1000,duration_ms:5000,
+  videos:[{id,video:"match.mp4",status:"complete",stages:[]},
+    {id:secondId,video:"second.mp4",status:"complete",stages:[]}]}];
 result.renderHistory();
-assert.equal(ui.historyList.children.length,2,"History filter retains active run and only matching phase rows");
-state.historyFilter="all";
-result.updateLiveHistory({...running,status:"complete",stage:"Готово",progress_percent:100});
-assert.equal(ui.historyList.children[0].querySelector(".analysis-history-status").textContent,"Завершён");
-result.updateLiveHistory({...running,status:"complete",completion_quality:"identity_failed",
-  automatic_identity_error:"OpenVINO unavailable"});
-assert.equal(ui.historyList.children[0].querySelector(".analysis-history-status").textContent,
-  "Ошибка автопривязки","The saved run must expose a failed ReID stage");
-result.updateLiveHistory({...running,status:"complete",completion_quality:"identity_review_required"});
-assert.equal(ui.historyList.children[0].querySelector(".analysis-history-status").textContent,
-  "Нужна проверка ID","Unassigned athletes must not masquerade as verified");
-
+assert.equal(ui.historyList.children.length,1,"One archive entry for both videos");
+let row=ui.historyList.children[0];
+assert.equal(row.dataset.runId,id);
+assert.match(row.textContent,/match\.mp4/);
+assert.match(row.textContent,/second\.mp4/);
+assert.equal(row.open,false);
+assert.equal(row.querySelector(".analysis-history-live-stage"),null);
+state.historyRows[0].status="failed";
+state.historyRows[0].videos[1].status="failed";
+state.historyRows[0].videos[1].error="test failure";
+result.renderHistory();
+assert.match(ui.historyList.children[0].textContent,/test failure/);
+assert.equal(ui.historyList.children.length,1);
 project="ddddaaaabbbb";
 state.historyRows=[];state.historyFilter="all";
 result.renderHistory();
@@ -165,7 +153,7 @@ const graph=runInNewContext(registry+source.slice(from,to)+
 graph.renderGraphSummary();
 assert.equal(graphSources.at(-1).id,running.id,
   "A running analysis must animate even when another video is selected after reload");
-graphState.latestPipeline={...running,status:"complete"};
+graphState.latestPipeline={...running,status:"complete",project_queue:{active:false}};
 graph.renderGraphSummary();
 assert.equal(graphSources.at(-1).video,"older.mp4",
   "An inactive graph must follow the selected video");

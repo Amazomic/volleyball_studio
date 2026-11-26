@@ -1377,7 +1377,7 @@
     const stale=state.pollErrors>=3||
       state.lastPipelineStatusAt!=null&&Date.now()-state.lastPipelineStatusAt>8000;
     const source=active?(stale?{...latest,live_stale:true}:latest):video?(latest?.video===video?latest:
-      projectHistoryRows().find(row=>row.video===video)||null):null;
+      projectHistoryRows().flatMap(row=>Array.isArray(row.videos)?row.videos:[row]).find(row=>row.video===video)||null):null;
     const graphSource=source&&latest?.project_queue?.videos?.some(row=>row.id===source.id)?
       {...source,project_queue:latest.project_queue}:source;
     updatePipelineGraph(mainGraph,graphSource);
@@ -1416,40 +1416,8 @@
     for(const id of ["boxes","touch_detector","pose"])if(block[id]?.state==="running")ids.push(id);
     return ids.length?ids.map(id=>graphLabel(id,status)).join(" + "):null;
   };
-  const liveHistoryLine=status=>{
-    const pct=Number(status.progress_percent);
-    return (concurrentStageLabel(status)||pipelineNames.get(status.stage_id)||pipelineNames.get(pipelineId(status.stage))||String(status.stage||"Обработка"))+" · "+
-      (Number.isFinite(pct)?Math.max(0,Math.min(pct,100)).toFixed(1)+"%":"—");
-  };
-  const historyClock=status=>{
-    const moving=["queued","running","cancelling"].includes(status.status);
-    const since=Math.max(0,Date.now()-(state.historyStatusAt||Date.now()));
-    const base=status.elapsed_ms==null?NaN:Number(status.elapsed_ms);
-    const elapsed=Number.isFinite(base)?base+(moving?since:0):null;
-    const remaining=Number(status.remaining_ms);
-    return {elapsed,remaining:moving&&status.remaining_ms!=null&&
-      Number.isFinite(remaining)?Math.max(0,remaining-since):null};
-  };
-  const historyTimeLine=(row,current)=>{
-    if(!current)return Number.isFinite(row.duration_ms)?
-      "Всего · "+historyDuration(row.duration_ms):"";
-    const clock=historyClock(current);
-    if(current.status==="queued")return "Ожидает запуска";
-    const prefix=current.status==="complete"?
-      (current.completion_quality==="identity_failed"?"Ошибка автопривязки":
-       current.completion_quality==="identity_review_required"?"Нужна проверка ID":"Завершён"):
-      current.status==="failed"?"Ошибка":
-      current.status==="cancelled"?"Отменён":
-      current.status==="interrupted"?"Прерван":"Выполняется";
-    return clock.elapsed==null?"Время выполнения уточняется":
-      prefix+" · "+historyDuration(clock.elapsed);
-  };
-  const historyEtaLine=current=>{
-    if(!current||!["running","queued","cancelling"].includes(current.status))return "";
-    if(current.status==="queued")return "Ожидание очереди";
-    const eta=historyClock(current).remaining;
-    return eta==null?"Осталось: рассчитывается":"Осталось ≈ "+historyDuration(eta);
-  };
+  const historyTimeLine=row=>Number.isFinite(row.duration_ms)?
+    "Всего · "+historyDuration(row.duration_ms):"";
   const renderStageTimeline=(target,row,current)=>{
     clear(target);
     const stages=rallyStageHistory(combineRallyStages((Array.isArray(current?.stages)&&current.stages.length)?
@@ -1476,71 +1444,59 @@
     }
   };
   const renderHistory=()=>{
-    // Preserve the existing streaming log/progress nodes when history is refreshed.
     $("studio-analysis-live-host").append(ui.progress,ui.logPanel);
     clear(ui.historyList);
     const latest=liveHistory();
     renderGraphSummary();
-    const active=latest&&["queued","running","cancelling"].includes(latest.status);
-    const visibleIds=visibleHistoryRuns(projectId());
-    // The server owns durable history. Browser session state is only a fallback
-    // for a just-queued run that has not appeared in the history page yet.
+    const active=latest&&(latest.project_queue?.active||["queued","running","cancelling"].includes(latest.status));
+    const activeId=active?(latest.queue_id||latest.id):null;
     const rows=projectHistoryRows().filter(row=>
-      state.historyFilter==="all"||row.mode===state.historyFilter||
-      !row.mode||row.mode==="full"||(active&&row.id===latest.id));
-    // The status endpoint can observe a new job before the history endpoint lists it.
-    if(active&&!rows.some(row=>row.id===latest.id)){
-      rows.unshift({id:latest.id,mode:latest.mode,video:latest.video,
-        status:latest.status,stage:latest.stage,stages:[],started_ms:null});
-    }
-    if(!rows.length){
-      ui.historyList.textContent=visibleIds.size?
-        "Запуски текущей сессии не найдены в выбранном фильтре.":
-        "История заполнится после нового запуска анализа.";
-      return;
-    }
+      ["complete","failed","cancelled","interrupted"].includes(row.status)&&row.id!==activeId&&
+      (state.historyFilter==="all"||row.mode===state.historyFilter||!row.mode||row.mode==="full"));
     const labels={gpu:"1 фаза",post:"2 фаза",full:"Полный анализ"};
-    const statuses={queued:"В очереди",running:"Выполняется",cancelling:"Останавливается",
-      complete:"Завершён",failed:"Ошибка",cancelled:"Отменён",interrupted:"Прерван"};
+    const statuses={complete:"Завершён",failed:"Ошибка",cancelled:"Отменён",interrupted:"Прерван"};
+    const statusLabel=row=>row.status==="complete"&&row.completion_quality==="identity_failed"?
+      "Ошибка автопривязки":
+      row.status==="complete"&&row.completion_quality==="identity_review_required"?
+        "Нужна проверка ID":statuses[row.status]||String(row.status||"—");
+    const logProject=projectId();
+    const appendVideo=(body,row)=>{
+      const stages=make("div","analysis-history-stages");
+      renderStageTimeline(stages,row,null);
+      body.append(stages);
+      const log=make("details"),title=make("summary","","Журнал выполнения"),
+        output=make("pre","analysis-run-log-output","Загрузка…");
+      log.append(title,output);body.append(log);
+      let loaded=false;
+      log.addEventListener("toggle",()=>{
+        if(log.open&&!loaded){loaded=true;
+          historyLog(logProject,row.id,output).then(ok=>{if(!ok)loaded=false;});
+        }
+      });
+      if(row.error)body.append(make("p","",String(row.error)));
+    };
     for(const row of rows){
-      const current=latest&&latest.id===row.id?latest:null;
-      const currentStatus=current?.status||row.status;
-      const quality=(current||row).completion_quality;
-      const statusLabel=currentStatus==="complete"&&quality==="identity_failed"?
-        "Ошибка автопривязки":
-        currentStatus==="complete"&&quality==="identity_review_required"?
-          "Нужна проверка ID":statuses[currentStatus]||String(currentStatus||"—");
+      const videos=Array.isArray(row.videos)?row.videos:null;
       const details=make("details","analysis-history-run"),summary=make("summary");
       details.dataset.runId=row.id;
-      summary.append(make("strong","",(labels[row.mode]||labels.full)+" · "+String(row.video||"—")));
+      summary.append(make("strong","",(labels[row.mode]||labels.full)+" · "+
+        (videos?"Проект ("+videos.length+" видео)":String(row.video||"—"))));
       const date=Number.isFinite(row.started_ms)?new Date(row.started_ms).toLocaleString():"Дата недоступна";
       summary.append(make("span","analysis-history-date",date),
-        make("span","analysis-history-status",statusLabel),
-        make("span","analysis-history-runtime",historyTimeLine(row,current)));
+        make("span","analysis-history-status",statusLabel(row)),
+        make("span","analysis-history-runtime",historyTimeLine(row)));
       if(row.result_reused===true)summary.append(make("span","","Готовый результат"));
       else if(row.gpu_reused===true)summary.append(make("span","","GPU использован повторно"));
-      if(current)summary.append(make("span","analysis-history-live-stage",liveHistoryLine(current)));
-      if(current)summary.append(make("span","analysis-history-eta",historyEtaLine(current)));
       details.append(summary);
-      const body=make("div","analysis-history-detail"),stages=make("div","analysis-history-stages");
-      renderStageTimeline(stages,row,current);
-      body.append(stages);
-      if(current){
-        body.append(ui.progress,ui.logPanel);
-        if(["queued","running","cancelling"].includes(current.status))details.open=true;
-      }else{
-        const log=make("details"),title=make("summary","","Журнал выполнения"),
-          output=make("pre","analysis-run-log-output","Загрузка…");
-        log.append(title,output);body.append(log);
-        let loaded=false;
-        const logProject=projectId();
-        log.addEventListener("toggle",()=>{
-          if(log.open&&!loaded){loaded=true;
-            historyLog(logProject,row.id,output).then(ok=>{if(!ok)loaded=false;});
-          }
-        });
-      }
-      if(row.error)body.append(make("p","",String(row.error)));
+      const body=make("div","analysis-history-detail");
+      if(videos){
+        for(const video of videos){
+          const section=make("div","analysis-history-video");
+          section.append(make("strong","",String(video.video||"—")+" · "+statusLabel(video)));
+          appendVideo(section,video);
+          body.append(section);
+        }
+      }else appendVideo(body,row);
       details.append(body);ui.historyList.append(details);
     }
   };
@@ -1548,33 +1504,12 @@
     if(status.project_id!==projectId()||!status.id||status.status==="idle")return;
     state.latestPipeline=status;
     renderGraphSummary();
-    if(!visibleHistoryRuns(status.project_id).has(status.id))return;
-    let item=[...ui.historyList.children].find(node=>node.dataset?.runId===status.id);
-    if(!item){renderHistory();item=[...ui.historyList.children].find(node=>node.dataset?.runId===status.id);}
-    if(!item)return;
-    const statuses={queued:"В очереди",running:"Выполняется",cancelling:"Останавливается",
-      complete:"Завершён",failed:"Ошибка",cancelled:"Отменён",interrupted:"Прерван"};
-    const label=item.querySelector(".analysis-history-status");
-    if(label)label.textContent=status.status==="complete"&&
-      status.completion_quality==="identity_failed"?"Ошибка автопривязки":
-      status.status==="complete"&&status.completion_quality==="identity_review_required"?
-        "Нужна проверка ID":statuses[status.status]||String(status.status);
-    const stage=item.querySelector(".analysis-history-live-stage");
-    if(stage)stage.textContent=liveHistoryLine(status);
-    const runtime=item.querySelector(".analysis-history-runtime");
-    if(runtime)runtime.textContent=historyTimeLine(null,status);
-    const eta=item.querySelector(".analysis-history-eta");
-    if(eta)eta.textContent=historyEtaLine(status);
-    const stages=item.querySelector(".analysis-history-stages");
-    if(stages)renderStageTimeline(stages,null,status);
-    if(["queued","running","cancelling"].includes(status.status))item.open=true;
   };
   const loadHistory=async(append=false)=>{
     const project=projectId(),epoch=++state.historyEpoch,offset=append?state.historyOffset:0;
     if(!append)state.historyOffset=0;
     ui.historyMore.classList.add("hidden");
     if(!project){ui.historyList.textContent="Выберите проект.";return;}
-    // Keep the visible live run and its log mounted while refreshing history.
     if(!append&&!ui.historyList.children.length&&!liveHistory())
       ui.historyList.textContent="Загрузка истории…";
     try{
@@ -1586,7 +1521,7 @@
       state.historyRows=append?projectHistoryRows().concat(data.runs):data.runs;
       state.historyProject=project;
       state.historyOffset=data.next_offset;
-      ui.historyMore.classList.add("hidden");
+      ui.historyMore.classList[data.has_more?"remove":"add"]("hidden");
       renderHistory();
     }catch(error){if(epoch===state.historyEpoch){
       if(append)ui.historyMore.classList.remove("hidden");
@@ -1608,7 +1543,6 @@
     finally{ui.historyClear.disabled=false;}
   });
   ui.historyMore.addEventListener("click",()=>loadHistory(true));
-  // Only update the existing current row: do not rebuild it or remount the log.
   setInterval(()=>{
     const current=liveHistory();
     if(current&&["queued","running","cancelling"].includes(current.status))
@@ -1676,7 +1610,6 @@
           analysis_id:status.analysis_id,postprocessing_id:status.postprocessing_id,pipeline_id:status.id,queue_id:status.queue_id,project_queue:status.project_queue}
       }));
     }
-    state.historyStatusAt=Date.now();
     updateLiveHistory(status);
     if(!active&&status.id===state.pipelineId){
       stopPipelinePolling();
@@ -1700,7 +1633,6 @@
           state.pipelineId=status.id;
           recordHistoryRun(project,status.id);
           resetLog();
-          loadHistory();
         }
         state.pollErrors=0;
         displayPipeline(status,true);

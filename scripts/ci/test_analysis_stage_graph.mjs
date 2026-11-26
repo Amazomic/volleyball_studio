@@ -430,7 +430,7 @@ assert.match(runningIndicator,/animation:analysis-stage-status-spin 1s linear in
 assert.match(css,/@keyframes analysis-stage-status-spin\{to\{transform:rotate\(360deg\)\}\}/);
 assert.doesNotMatch(css,/\.analysis-flow-node\[data-status="running"\] \.analysis-flow-node-status::after/);
 assert.match(css,/@media\(prefers-reduced-motion:reduce\)\{[^}]*\.analysis-flow-node\[data-status="running"\] \.analysis-flow-node-status\{animation:none\}/);
-const historyProjection=rust.slice(rust.indexOf('rows.push(json!({"id":id'),rust.indexOf("    rows.sort_by"));
+const historyProjection=rust.slice(rust.indexOf('fn history_row('),rust.indexOf('fn archived_history_rows('));
 for(const key of ["gpu_jobs","cpu_runs","analysis_id","profile","gpu_rally_count","automatic_identity_available"])
   assert.ok(historyProjection.includes('"'+key+'":'),"Saved graph needs "+key);
 assert.doesNotMatch(js,/analysis-flow-inputs|analysis-flow-reference/);

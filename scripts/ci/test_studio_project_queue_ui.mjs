@@ -39,7 +39,7 @@ await api.pollPipeline();
 assert.equal(state.pipelineId,second);
 assert.equal(state.pipelineQueue,first);
 assert.equal(resetCount,1);
-assert.equal(historyCount,1);
+assert.equal(historyCount,0,"Changing active video must not refresh project history before queue completion");
 assert.equal(displays.at(-1).video,"second.mp4");
 fail=true;
 for(let index=0;index<4;index++)await api.pollPipeline();

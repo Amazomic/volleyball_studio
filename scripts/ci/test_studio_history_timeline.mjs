@@ -77,32 +77,20 @@ const {renderHistory,updateLiveHistory,recordHistoryRun}=runInNewContext(registr
     requestAnimationFrame:()=>{}
   });
 renderHistory();
-assert.equal(ui.historyList.children.length,1,"Server history is visible without a sessionStorage marker");
+assert.equal(ui.historyList.children.length,0,"Live stages belong to graph only");
 recordHistoryRun("aaaabbbbcccc",id);
+const finished={...current,status:"complete",progress_percent:100,remaining_ms:null,duration_ms:91000,
+  stages:[stages[0],{...stages[1],finished_ms:now,duration_ms:40000}]};
+updateLiveHistory(finished);
+state.historyRows=[finished];
 renderHistory();
 const run=ui.historyList.children[0];
 assert.equal(run.querySelector(".analysis-history-stages").children.length,2);
-assert.match(run.querySelector(".analysis-history-stages").textContent,/Детекция мяча.*50 с/);
-assert.doesNotMatch(run.querySelector(".analysis-history-stages").textContent,/120 \/ 400 кадров|В процессе/);
-assert.equal(run.querySelector(".analysis-history-stage-rail"),null);
-assert.equal(run.querySelector(".analysis-history-stages").children[0].children.length,2,
-  "A history stage is just its canonical name and duration");
-assert.match(run.querySelector(".analysis-history-eta").textContent,/Осталось ≈ 10[5-9] с|Осталось ≈ 110 с/);
-assert.match(run.querySelector(".analysis-history-runtime").textContent,/Выполняется · 91 с/);
-assert.equal(progress.parent,logPanel.parent);
-
-const finished={...current,status:"complete",progress_percent:100,remaining_ms:null,
-  stages:[stages[0],{...stages[1],finished_ms:now,duration_ms:40000}]};
-updateLiveHistory(finished);
-assert.equal(ui.historyList.children[0],run);
-assert.match(run.querySelector(".analysis-history-runtime").textContent,/Завершён ·/);
-assert.doesNotMatch(run.querySelector(".analysis-history-stages").textContent,/В процессе/);
-assert.match(run.querySelector(".analysis-history-stages").textContent,/40 с/);
-const instant={...finished,stages:[{...stages[0],started_ms:now,finished_ms:now,duration_ms:0}]};
-updateLiveHistory(instant);
-assert.equal(run.querySelector(".analysis-history-stage-duration").textContent,"");
-updateLiveHistory(finished);
-assert.strictEqual(progress.parent,logPanel.parent);
+assert.match(run.querySelector(".analysis-history-stages").textContent,/\u0414\u0435\u0442\u0435\u043a\u0446\u0438\u044f \u043c\u044f\u0447\u0430.*50 \u0441/);
+assert.match(run.querySelector(".analysis-history-stages").textContent,/40 \u0441/);
+assert.equal(run.querySelector(".analysis-history-eta"),null);
+assert.strictEqual(progress.parent,host);
+assert.strictEqual(logPanel.parent,host);
 const other={...finished,id:"b".repeat(32),video:"other.mp4"};
 state.historyRows=[finished,other];
 ui.video.value=other.video;

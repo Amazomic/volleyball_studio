@@ -333,77 +333,7 @@ fn history_rows(state: &AppState, project_id: &str, offset: usize) -> Result<Val
         if status["schema"] != SCHEMA || status["project_id"] != project_id || status["id"] != id {
             continue;
         }
-        let log_path = path.with_file_name("events.jsonl");
-        let records: Vec<Value> = match fs::symlink_metadata(&log_path) {
-            Ok(meta)
-                if meta.is_file()
-                    && !meta.file_type().is_symlink()
-                    && meta.len() <= MAX_LOG_BYTES =>
-            {
-                fs::read(&log_path)
-                    .ok()
-                    .map(|bytes| {
-                        let end = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-                        bytes[..end]
-                            .split(|b| *b == b'\n')
-                            .take(MAX_LOG_ENTRIES)
-                            .filter_map(|line| serde_json::from_slice(line).ok())
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            }
-            _ => Vec::new(),
-        };
-        let started = records.first().and_then(|row| row["timestamp_ms"].as_u64());
-        let finished = if ["complete", "failed", "cancelled"]
-            .contains(&status["status"].as_str().unwrap_or(""))
-        {
-            records.last().and_then(|row| row["timestamp_ms"].as_u64())
-        } else {
-            None
-        };
-        let starts: Vec<_> = records
-            .iter()
-            .filter(|row| row["kind"] == "stage_start")
-            .filter_map(|row| Some((row["stage"].as_str()?, row["timestamp_ms"].as_u64()?)))
-            .collect();
-        let stages: Vec<Value> = starts
-            .iter()
-            .enumerate()
-            .map(|(index, (name, start))| {
-                let end = starts.get(index + 1).map(|(_, time)| *time).or(finished);
-                json!({"name":name,"started_ms":start,"finished_ms":end,
-                    "duration_ms":end.and_then(|time| time.checked_sub(*start)),
-                    "active":end.is_none() && ["queued","running","cancelling"].contains(
-                        &status["status"].as_str().unwrap_or(""))})
-            })
-            .collect();
-        let stages = status["stages"]
-            .as_array()
-            .filter(|items| !items.is_empty())
-            .cloned()
-            .unwrap_or(stages);
-        rows.push(json!({"id":id,"video":status["video"],"mode":status["mode"],
-            "status":status["status"],"stage":status["stage"],"error":status["error"],
-            "started_ms":started,"duration_ms":started.zip(finished).and_then(|(a,b)| b.checked_sub(a)),
-            "gpu_reused":status["gpu_reused"],"result_reused":status["result_reused"],
-            "stage_id":status["stage_id"],"analysis_id":status["analysis_id"],
-            "gpu_jobs":status["gpu_jobs"],"cpu_runs":status["cpu_runs"],
-            "primary_tracking":status["primary_tracking"],
-            "gpu_rally_count":status["gpu_rally_mask"]["merged"].as_array().map(Vec::len),
-            "touch_detector_count":status["touch_detector_count"],
-            "shared_pose":status["shared_pose"],
-            "pose_frame_progress":status["pose_frame_progress"],
-            "rally_stage_progress":status["rally_stage_progress"],
-            "player_tracking_stats":status["player_tracking_stats"],
-            "ball_stabilizer":status["ball_stabilizer"],
-            "completion_quality":status["completion_quality"],
-            "automatic_identity_available":status["automatic_identity"].is_object(),
-            "profile":{"gpu":{
-                "person_detector":status["profile"]["gpu"]["person_detector"],
-                "pose_enabled":status["profile"]["gpu"]["pose_enabled"]
-            }},
-            "stages":stages}));
+        rows.push(history_row(&path, &id, &status));
     }
     rows.sort_by(|a, b| {
         b["started_ms"]
@@ -418,30 +348,213 @@ fn history_rows(state: &AppState, project_id: &str, offset: usize) -> Result<Val
     )
 }
 
+fn history_row(path: &Path, id: &str, status: &Value) -> Value {
+    let log_path = path.with_file_name("events.jsonl");
+    let records: Vec<Value> = match fs::symlink_metadata(&log_path) {
+        Ok(meta)
+            if meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= MAX_LOG_BYTES =>
+        {
+            fs::read(&log_path)
+                .ok()
+                .map(|bytes| {
+                    let end = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+                    bytes[..end]
+                        .split(|b| *b == b'\n')
+                        .take(MAX_LOG_ENTRIES)
+                        .filter_map(|line| serde_json::from_slice(line).ok())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+    let started = records.first().and_then(|row| row["timestamp_ms"].as_u64());
+    let finished =
+        if ["complete", "failed", "cancelled"].contains(&status["status"].as_str().unwrap_or("")) {
+            records.last().and_then(|row| row["timestamp_ms"].as_u64())
+        } else {
+            None
+        };
+    let starts: Vec<_> = records
+        .iter()
+        .filter(|row| row["kind"] == "stage_start")
+        .filter_map(|row| Some((row["stage"].as_str()?, row["timestamp_ms"].as_u64()?)))
+        .collect();
+    let stages: Vec<Value> = starts
+        .iter()
+        .enumerate()
+        .map(|(index, (name, start))| {
+            let end = starts.get(index + 1).map(|(_, time)| *time).or(finished);
+            json!({"name":name,"started_ms":start,"finished_ms":end,
+                "duration_ms":end.and_then(|time| time.checked_sub(*start)),
+                "active":end.is_none() && ["queued","running","cancelling"].contains(
+                    &status["status"].as_str().unwrap_or(""))})
+        })
+        .collect();
+    let stages = status["stages"]
+        .as_array()
+        .filter(|items| !items.is_empty())
+        .cloned()
+        .unwrap_or(stages);
+    json!({"id":id,"video":status["video"],"mode":status["mode"],
+        "status":status["status"],"stage":status["stage"],"error":status["error"],
+        "started_ms":started,"duration_ms":started.zip(finished).and_then(|(a,b)| b.checked_sub(a)),
+        "gpu_reused":status["gpu_reused"],"result_reused":status["result_reused"],
+        "stage_id":status["stage_id"],"analysis_id":status["analysis_id"],
+        "gpu_jobs":status["gpu_jobs"],"cpu_runs":status["cpu_runs"],
+        "primary_tracking":status["primary_tracking"],
+        "gpu_rally_count":status["gpu_rally_mask"]["merged"].as_array().map(Vec::len),
+        "touch_detector_count":status["touch_detector_count"],
+        "shared_pose":status["shared_pose"],
+        "pose_frame_progress":status["pose_frame_progress"],
+        "rally_stage_progress":status["rally_stage_progress"],
+        "player_tracking_stats":status["player_tracking_stats"],
+        "ball_stabilizer":status["ball_stabilizer"],
+        "completion_quality":status["completion_quality"],
+        "automatic_identity_available":status["automatic_identity"].is_object(),
+        "profile":{"gpu":{
+            "person_detector":status["profile"]["gpu"]["person_detector"],
+            "pose_enabled":status["profile"]["gpu"]["pose_enabled"]
+        }},
+        "stages":stages})
+}
+
+fn archived_history_rows(
+    state: &AppState,
+    project_id: &str,
+    offset: usize,
+    active_ids: &BTreeSet<String>,
+) -> Result<Value, ApiError> {
+    if offset > 1500 {
+        return Err(storage::bad_request("Invalid history page"));
+    }
+    let (root, ids) = collect_history_rows(state, project_id)?;
+    let hidden = hidden_history(&root)?;
+    let mut launches = Vec::new();
+    for id in ids {
+        if hidden.contains(&id) || active_ids.contains(&id) {
+            continue;
+        }
+        let Ok(path) = status_path(&root, &id) else {
+            continue;
+        };
+        let Ok(head) = read(&path) else { continue };
+        if head["schema"] != SCHEMA || head["project_id"] != project_id || head["id"] != id {
+            continue;
+        }
+        let members = if let Some(queue_id) = head["queue_id"].as_str() {
+            if queue_id != id {
+                continue;
+            }
+            let Ok(members) = read_queue_rows(&root, project_id, queue_id) else {
+                continue;
+            };
+            if members
+                .iter()
+                .any(|row| row["id"].as_str().is_some_and(|id| active_ids.contains(id)))
+            {
+                continue;
+            }
+            members
+        } else {
+            vec![head]
+        };
+        let started = members
+            .iter()
+            .filter_map(|row| row["started_ms"].as_u64())
+            .min();
+        launches.push((started, id, members));
+    }
+    launches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    let total = launches.len();
+    let next_offset = (offset + 25).min(total);
+    let mut rows = Vec::new();
+    for (started, id, members) in launches.into_iter().skip(offset).take(25) {
+        let mut videos = Vec::new();
+        let mut finished = None;
+        for mut status in members {
+            if matches!(
+                status["status"].as_str(),
+                Some("queued" | "running" | "cancelling")
+            ) {
+                status["status"] = json!("interrupted");
+            }
+            if let Some(end) = status["finished_ms"].as_u64() {
+                finished = Some(finished.map_or(end, |previous: u64| previous.max(end)));
+            }
+            let Some(member_id) = status["id"].as_str() else {
+                continue;
+            };
+            let Ok(path) = status_path(&root, member_id) else {
+                continue;
+            };
+            let mut row = history_row(&path, member_id, &status);
+            if let Some(start) = status["started_ms"].as_u64() {
+                row["started_ms"] = json!(start);
+                if let Some(end) = status["finished_ms"].as_u64() {
+                    row["duration_ms"] = json!(end.checked_sub(start));
+                }
+            }
+            videos.push(row);
+        }
+        let Some(mut row) = videos.first().cloned() else {
+            continue;
+        };
+        if row["id"].as_str() != Some(id.as_str()) {
+            continue;
+        }
+        if videos.len() > 1 {
+            let outcome = ["failed", "interrupted", "cancelled"]
+                .into_iter()
+                .find_map(|kind| videos.iter().find(|row| row["status"] == kind));
+            if let Some(outcome) = outcome {
+                row["status"] = outcome["status"].clone();
+                row["error"] = outcome["error"].clone();
+            }
+            for quality in ["identity_failed", "identity_review_required"] {
+                if videos
+                    .iter()
+                    .any(|row| row["completion_quality"] == quality)
+                {
+                    row["completion_quality"] = json!(quality);
+                    break;
+                }
+            }
+            row["started_ms"] = json!(started.or_else(|| videos
+                .iter()
+                .filter_map(|row| row["started_ms"].as_u64())
+                .min()));
+            row["duration_ms"] = json!(started
+                .zip(finished)
+                .and_then(|(start, end)| end.checked_sub(start)));
+            row["result_reused"] = json!(videos.iter().all(|row| row["result_reused"] == true));
+            row["gpu_reused"] = json!(videos.iter().all(|row| row["gpu_reused"] == true));
+            row["videos"] = json!(videos);
+        }
+        rows.push(row);
+    }
+    Ok(
+        json!({"schema":"volley-studio-pipeline-history/1","project_id":project_id,"runs":rows,
+        "next_offset":next_offset,"has_more":next_offset < total}),
+    )
+}
+
 pub async fn history(
     State(state): State<Arc<AppState>>,
     Query(query): Query<HistoryQuery>,
 ) -> ApiResult<Value> {
-    let result =
-        tokio::task::spawn_blocking(move || history_rows(&state, &query.project_id, query.offset))
-            .await
-            .map_err(|e| storage::internal(format!("Pipeline history worker: {e}")))??;
-    let mut result = result;
-    let project_id = result["project_id"].as_str().unwrap_or("").to_owned();
     let slot = manager().lock().await;
-    if let Some(runs) = result["runs"].as_array_mut() {
-        for run in runs {
-            if ["queued", "running", "cancelling"].contains(&run["status"].as_str().unwrap_or(""))
-                && !slot.as_ref().is_some_and(|active| {
-                    run["id"]
-                        .as_str()
-                        .is_some_and(|id| active.contains_run(&project_id, id))
-                })
-            {
-                run["status"] = json!("interrupted");
-            }
-        }
-    }
+    let active_ids = slot
+        .as_ref()
+        .filter(|entry| entry.project_id == query.project_id)
+        .map(|entry| entry.queue_runs.iter().cloned().collect::<BTreeSet<_>>())
+        .unwrap_or_default();
+    let result = tokio::task::spawn_blocking(move || {
+        archived_history_rows(&state, &query.project_id, query.offset, &active_ids)
+    })
+    .await
+    .map_err(|e| storage::internal(format!("Pipeline history worker: {e}")))??;
+    drop(slot);
     Ok(Json(result))
 }
 
@@ -6549,6 +6662,56 @@ mod branching_tests {
         let page2 = history_rows(&handler_state, "abc123def456", 25).unwrap();
         assert_eq!(page2["runs"].as_array().unwrap().len(), 1);
         assert_eq!(page2["has_more"], false);
+        let ids = vec!["a".repeat(32), "b".repeat(32)];
+        let queue_root = project_dir.join("native_studio_pipelines");
+        for (index, id) in ids.iter().enumerate() {
+            let dir = queue_root.join(id);
+            fs::create_dir(&dir).unwrap();
+            save(&dir.join("status.json"), &json!({
+                "schema":SCHEMA,"id":id,"project_id":"abc123def456","queue_id":ids[0],
+                "queue_runs":ids,"mode":"full","video":format!("{index}.mp4"),
+                "status":if index == 0 {"complete"} else {"running"},
+                "started_ms":1000 + index * 1000,"finished_ms":if index == 0 {Some(4000)} else {None}
+            })).unwrap();
+        }
+        let active = ids.iter().cloned().collect();
+        let page = archived_history_rows(&handler_state, "abc123def456", 0, &active).unwrap();
+        assert_eq!(page["runs"].as_array().unwrap().len(), 25);
+        assert!(page["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["id"] != ids[0] && row["id"] != ids[1]));
+        let path = queue_root.join(&ids[1]).join("status.json");
+        let mut second = read(&path).unwrap();
+        second["status"] = json!("failed");
+        second["error"] = json!("test failure");
+        second["finished_ms"] = json!(5000);
+        save(&path, &second).unwrap();
+        let page =
+            archived_history_rows(&handler_state, "abc123def456", 0, &BTreeSet::new()).unwrap();
+        let row = &page["runs"][0];
+        assert_eq!(row["id"], ids[0]);
+        assert_eq!(row["status"], "failed");
+        assert_eq!(row["duration_ms"], 4000);
+        assert_eq!(row["videos"].as_array().unwrap().len(), 2);
+        second["status"] = json!("complete");
+        second["error"] = Value::Null;
+        save(&path, &second).unwrap();
+        let page =
+            archived_history_rows(&handler_state, "abc123def456", 0, &BTreeSet::new()).unwrap();
+        assert_eq!(page["runs"][0]["status"], "complete");
+        assert_eq!(
+            archived_history_rows(&handler_state, "abc123def456", 25, &BTreeSet::new()).unwrap()
+                ["runs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        for id in ids {
+            fs::remove_dir_all(queue_root.join(id)).unwrap();
+        }
         clear_history_rows(&handler_state, "abc123def456", None).unwrap();
         assert!(
             history_rows(&handler_state, "abc123def456", 0).unwrap()["runs"]
