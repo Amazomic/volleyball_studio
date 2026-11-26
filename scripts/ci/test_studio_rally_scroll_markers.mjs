@@ -1,0 +1,36 @@
+import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
+import {runInNewContext} from "node:vm";
+
+const js=readFileSync(new URL("../../rust/volley-app/static/studio.js",import.meta.url),"utf8");
+const html=readFileSync(new URL("../../rust/volley-app/static/studio.html",import.meta.url),"utf8");
+const css=readFileSync(new URL("../../rust/volley-app/static/studio.css",import.meta.url),"utf8");
+assert.match(html,/id="studio-rally-video-markers"/);
+assert.match(css,/\.rally-video-marker\{/);
+const start=js.indexOf("  const renderRallyVideoMarkers=");
+const end=js.indexOf("  const rallyVideoMarkerRail=",start);
+assert.ok(start>=0&&end>start);
+const render=runInNewContext(js.slice(start,end)+"\nrenderRallyVideoMarkers");
+const card=(video,top)=>({getAttribute:()=>video,getBoundingClientRect:()=>({top})});
+let cards=[card("a.mp4",0),card("a.mp4",100),card("b.mp4",250),card("c.mp4",700),card("b.mp4",900)];
+const list={scrollHeight:1000,clientHeight:250,scrollTop:0,clientTop:0,offsetWidth:300,clientWidth:285,
+  getBoundingClientRect:()=>({top:0}),querySelectorAll:()=>cards};
+const rail={hidden:true,children:[],style:{setProperty(){}},replaceChildren(...nodes){this.children=nodes;}};
+const make=()=>({style:{},setAttribute(){},addEventListener(_,fn){this.click=fn;}});
+render(list,rail,make);
+assert.equal(rail.hidden,false);
+assert.deepEqual(rail.children.map(node=>node.style.top),["0%","25%","70%"]);
+assert.match(rail.children[1].title,/b\.mp4/);
+rail.children[1].click();
+assert.equal(list.scrollTop,250);
+list.scrollTop=0;cards=[card("b.mp4",0),card("a.mp4",300)];
+render(list,rail,make);
+assert.deepEqual(rail.children.map(node=>node.style.top),["0%","30%"]);
+cards=[card("a.mp4",0)];
+render(list,rail,make);
+assert.equal(rail.hidden,true);
+assert.equal(rail.children.length,0);
+cards=[card("a.mp4",0),card("b.mp4",100)];list.scrollHeight=250;
+render(list,rail,make);
+assert.equal(rail.hidden,true);
+console.log("PASS: video scroll markers follow actual card geometry, filters and click navigation.");

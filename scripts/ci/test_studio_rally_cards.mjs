@@ -25,7 +25,7 @@ const element=(tag,klass,text)=>({
 });
 const list=element("div","rally-grid");
 const ui={list,video:{currentTime:0},caption:{textContent:""},previous:{disabled:false},next:{disabled:false}};
-const s={items:[{
+const s={video:"sample.mp4",items:[{
   candidate_id:"a".repeat(24),detected_start_frame:1263,detected_end_frame:1592,
   manual_clip:{start_frame:1218,end_frame:1637},
   motion_event_count:7,motion_supported_touch_proposals:7,
@@ -56,6 +56,7 @@ runInNewContext(helpers+"\n"+estimates+"\n"+renderer+"\nthis.render=cards;",cont
 s.items[0].metadata={team_1:[4,9],team_2:[10,11],touches:[{kind:"serve",track_id:9},{kind:"attack",track_id:10}],winning_team:"team_2"};
 context.render();
 const card=list.children[0];
+assert.equal(card.attrs["data-rally-video"],"sample.mp4");
 const teamBlock=card.children.find(node=>node.klass==="rally-card-teams");
 assert.ok(teamBlock,"Rally card displays team rosters");
 assert.equal(teamBlock.children[0].children[0].klass,"rally-team-label");
