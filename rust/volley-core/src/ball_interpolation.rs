@@ -176,7 +176,74 @@ pub struct StabilizedBallMotion {
     pub observed_frames: usize,
 }
 
-pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v9";
+pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v10";
+
+fn reject_preexisting_remote_ball(
+    points: &[Option<[f64; 2]>],
+    max_step_fraction: f64,
+) -> Vec<usize> {
+    const HISTORY_FRAMES: usize = 600;
+    const HISTORY_RADIUS: f64 = 0.045;
+    const EXCLUSION_RADIUS: f64 = 0.065;
+    const EXCLUSION_TIMEOUT: usize = 90;
+
+    let distance = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+    let mut latest: Option<(usize, [f64; 2])> = None;
+    let mut foreign: Option<(usize, [f64; 2])> = None;
+    let mut rejected = Vec::new();
+    for (frame, &candidate) in points.iter().enumerate() {
+        let Some(point) = candidate else { continue };
+        foreign = foreign.filter(|(last_seen, _)| frame - last_seen <= EXCLUSION_TIMEOUT);
+        if let Some((_, center)) = foreign {
+            if distance(point, center) <= EXCLUSION_RADIUS {
+                let continuous_return = latest.is_some_and(|(last_frame, last_point)| {
+                    let dt = frame - last_frame;
+                    dt <= 3
+                        && distance(last_point, center) <= EXCLUSION_RADIUS + 0.025
+                        && distance(point, last_point) <= max_step_fraction * dt as f64
+                });
+                if !continuous_return {
+                    rejected.push(frame);
+                    foreign = Some((frame, center));
+                    continue;
+                }
+                foreign = None;
+            }
+        }
+        let impossible_switch = latest.is_some_and(|(last_frame, last_point)| {
+            let dt = frame - last_frame;
+            dt <= 4 && distance(point, last_point) > max_step_fraction * dt as f64
+        });
+        if impossible_switch {
+            let begin = frame.saturating_sub(HISTORY_FRAMES);
+            let end = frame.saturating_sub(12);
+            let mut visits: Vec<(usize, [f64; 2])> = Vec::new();
+            let established = points[begin..end]
+                .iter()
+                .enumerate()
+                .filter_map(|(offset, sample)| {
+                    sample
+                        .filter(|&prior| distance(prior, point) <= HISTORY_RADIUS)
+                        .map(|prior| (begin + offset, prior))
+                })
+                .any(|(prior_frame, prior)| {
+                    let repeated = visits.len() >= 2
+                        && visits.iter().any(|&(earlier_frame, earlier)| {
+                            prior_frame - earlier_frame >= 12 && distance(prior, earlier) <= 0.012
+                        });
+                    visits.push((prior_frame, prior));
+                    repeated
+                });
+            if established {
+                rejected.push(frame);
+                foreign = Some((frame, point));
+                continue;
+            }
+        }
+        latest = Some((frame, point));
+    }
+    rejected
+}
 
 fn reject_unlinked_motion(
     points: &mut [Option<[f64; 2]>],
@@ -457,7 +524,14 @@ pub fn stabilize_ball_motion(
         }
     }
     let confidence_frames = points.iter().filter(|p| p.is_some()).count();
-    let mut rejected_frames = reject_recurring_static_hotspots(&points, settings.max_step_fraction);
+    let mut rejected_frames = reject_preexisting_remote_ball(&points, settings.max_step_fraction);
+    for &index in &rejected_frames {
+        points[index] = None;
+    }
+    rejected_frames.extend(reject_recurring_static_hotspots(
+        &points,
+        settings.max_step_fraction,
+    ));
     for &index in &rejected_frames {
         points[index] = None;
     }
@@ -1320,6 +1394,57 @@ mod tests {
         assert_eq!(result.points[140], Some([0.408, 0.94]));
         assert!(!result.interpolated[140]);
         assert!(!result.rejected_frames.contains(&140));
+    }
+
+    #[test]
+    fn ball_stabilizer_does_not_reacquire_preexisting_remote_ball_after_loss() {
+        let samples = (0..100)
+            .filter_map(|frame| {
+                let point = match frame {
+                    0..=19 => [0.28, 0.21 + (frame % 5) as f64 * 0.004],
+                    40..=59 => [0.68 - (frame - 40) as f64 * 0.008, 0.25],
+                    60 => [0.28, 0.215],
+                    78..=99 => [
+                        0.28 + (frame % 3) as f64 * 0.002,
+                        0.21 + (frame % 5) as f64 * 0.005,
+                    ],
+                    _ => return None,
+                };
+                Some(ScoredBallSample {
+                    frame,
+                    point,
+                    confidence: 0.8,
+                })
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 100, BallStabilizerSettings::default()).unwrap();
+        assert_eq!(result.points[59], Some([0.528, 0.25]));
+        assert!(result.points[60..].iter().all(Option::is_none));
+        assert!(result.rejected_frames.contains(&78));
+        assert!(!result.interpolated[60..].iter().any(|&v| v));
+    }
+
+    #[test]
+    fn ball_stabilizer_keeps_continuous_return_through_preexisting_ball_area() {
+        let samples = (0..85)
+            .filter_map(|frame| {
+                let point = match frame {
+                    0..=19 => [0.28, 0.21 + (frame % 5) as f64 * 0.004],
+                    40..=84 => [0.68 - (frame - 40) as f64 * 0.01, 0.22],
+                    _ => return None,
+                };
+                Some(ScoredBallSample {
+                    frame,
+                    point,
+                    confidence: 0.8,
+                })
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 85, BallStabilizerSettings::default()).unwrap();
+        assert_eq!(result.points[80], Some([0.28, 0.22]));
+        assert!(!result.rejected_frames.contains(&80));
     }
 
     #[test]
