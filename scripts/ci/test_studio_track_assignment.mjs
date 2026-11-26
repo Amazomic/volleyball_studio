@@ -137,8 +137,8 @@ assert.equal(refreshStatus.hidden,true,"Processing status is shown in the shared
 assert.ok(refreshTasks.some(task=>/Ожидание сохранения фотографий/.test(task.stage||"")));
 releasePhotos();
 await refreshing;
-assert.deepEqual(refreshRequests,["/api/players/native/references/refresh","matches","auto_assign"],
-  "Refreshing reference photos must finish comparison before automatic assignment");
+assert.deepEqual(refreshRequests,["/api/players/native/references/refresh","matches"],
+  "Refreshing reference photos must not change existing assignments");
 assert.match(refreshStatus.textContent,/Сопоставлено ID: 3/);
 assert.ok(refreshTasks.some(task=>task.key==="player-references-refresh"&&task.cleared));
 

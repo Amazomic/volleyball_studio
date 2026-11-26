@@ -195,7 +195,11 @@ pub(super) fn snapshot(state: &AppState, req: &ReidReviewRequest) -> Result<Snap
         ));
     }
     let raw = existing(&ctx.sidecar).map_err(storage::bad_request)?;
-    let identity = validated(raw.as_deref(), &ctx).map_err(storage::bad_request)?;
+    let mut identity = validated(raw.as_deref(), &ctx).map_err(storage::bad_request)?;
+    if req.action == "refresh_matches" {
+        let full = source(state, &req.project_id, &req.video, &req.replay_id)?;
+        preserve_links_for_photo_refresh(state, &full, &mut identity)?;
+    }
     let model = volley_inference::reid_openvino::fingerprint(&state.repository_root)
         .map_err(storage::bad_request)?;
     let assigned = identity["assignments"]
@@ -210,7 +214,14 @@ pub(super) fn snapshot(state: &AppState, req: &ReidReviewRequest) -> Result<Snap
     let eligible = ctx
         .tracks
         .keys()
-        .filter(|id| !assigned.contains_key(&id.to_string()) && !excluded.contains(id))
+        .filter(|id| {
+            !assigned.contains_key(&id.to_string())
+                && !excluded.contains(id)
+                && (identity["automatic_binding_policy"] != "preserve_existing_v1"
+                    || identity["automatic_assignments"]
+                        .get(id.to_string())
+                        .is_none())
+        })
         .collect::<Vec<_>>();
     if !comparison_track_count_supported(eligible.len()) {
         return Err(storage::bad_request(
@@ -616,7 +627,14 @@ pub(super) async fn compare_with_crops(
         .ctx
         .tracks
         .keys()
-        .filter(|id| !assigned.contains_key(&id.to_string()) && !excluded.contains(id))
+        .filter(|id| {
+            !assigned.contains_key(&id.to_string())
+                && !excluded.contains(id)
+                && (snap.identity["automatic_binding_policy"] != "preserve_existing_v1"
+                    || snap.identity["automatic_assignments"]
+                        .get(id.to_string())
+                        .is_none())
+        })
         .copied()
         .collect::<Vec<_>>();
     if ids.is_empty() {

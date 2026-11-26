@@ -63,10 +63,10 @@ async function runScenario({fail=false,waitForPhotos=false}={}){
     assert.match(refreshStatus.textContent,/Ошибка обновления признаков: network error/);
     assert.equal(calls.includes("matches"),false);
   }else{
-    assert.deepEqual(calls.slice(-4),["roster","matches","auto","clear:"+key]);
+    assert.deepEqual(calls.slice(-3),["roster","matches","clear:"+key]);
     assert.match(refreshStatus.textContent,/Сопоставлено ID: 7/);
     assert.match(updates.map(u=>u.stage).join("|"),/Пересчёт сходства/);
-    assert.match(updates.map(u=>u.stage).join("|"),/Автопривязка/);
+    assert.equal(calls.includes("auto"),false,"Reference refresh must not run automatic assignment");
   }
 }
 await runScenario();

@@ -1106,16 +1106,12 @@
         const photoScope={project_id:scope.project_id,video:scope.video,
           replay_id:scope.replay_id,rally_run_id:scope.rally_run_id,
           expected_source_sha256:scope.expected_source_sha256};
-        window.dispatchEvent(new Event("volley:player-photo-saved"));
         updateRefreshTask("Загрузка обновлённых фотографий игроков");
         await loadLibraryRoster();
-        updateRefreshTask("Пересчёт сходства всех Track ID");
+        updateRefreshTask("Пересчёт сходства непривязанных Track ID");
         const comparison=await withRefreshProgress(id=>refreshPhotoMatches(photoScope,state.token,id));
         if(scope.project_id!==state.project||scope.replay_id!==state.replay)return;
-        if(comparison&&state.writable){
-          updateRefreshTask("Автопривязка Track ID");
-          await autoAssignSimilar();
-        }
+        window.dispatchEvent(new Event("volley:player-photo-saved"));
         refreshStatus.hidden=false;
         refreshStatus.textContent="Сопоставлено ID: "+(comparison?.trackCount||0)+
           " · добавлено фото: "+(result.added||0)+

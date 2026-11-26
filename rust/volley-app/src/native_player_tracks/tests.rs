@@ -2777,6 +2777,52 @@ fn refreshing_photo_scores_revalidates_old_automatic_links_without_assigning_new
 }
 
 #[test]
+fn refreshed_photo_candidates_keep_existing_bindings_and_only_add_unassigned_ids() {
+    let (root, _, sha) = fixture();
+    let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();
+    let mut ctx = context(&root, sha, tracks);
+    let mut next = ctx.tracks[&7].clone();
+    next.first += 100;
+    next.last += 100;
+    next.visible_spans = vec![(next.first, next.last)];
+    next.observed_pairs.clear();
+    ctx.tracks.insert(8, next);
+    ctx.tracks.insert(9, ctx.tracks[&7].clone());
+    ctx.known = VerifiedTrackSet::new(ctx.evidence.clone(), [7, 8, 9]).unwrap();
+    ctx.roster.insert("123456abcdef".into(), "Player B".into());
+    let mut doc = base_document(&ctx);
+    doc["automatic_assignments"] = json!({"7":"abcdef012345"});
+    doc["automatic_binding_policy"] = json!("preserve_existing_v1");
+    let matches = json!({
+        "7":[{"player_id":"123456abcdef","cosine_similarity":0.99,"samples_used":5}],
+        "8":[{"player_id":"abcdef012345","cosine_similarity":0.95,"samples_used":5}],
+        "9":[{"player_id":"abcdef012345","cosine_similarity":0.98,"samples_used":5}]
+    });
+    doc["automatic_identity_evidence"] = json!({
+        "threshold":0.75,
+        "photo_sample_policy":"five_observations_v2",
+        "matches":matches
+    });
+    let encoded = serde_json::to_vec(&doc).unwrap();
+    let mut reloaded = validated(Some(&encoded), &ctx).unwrap();
+    reconcile_automatic_photo_links(&ctx, &mut reloaded).unwrap();
+    assert_eq!(
+        reloaded["automatic_assignments"],
+        json!({"7":"abcdef012345"})
+    );
+    let before = filtered_page(&ctx, &reloaded, "rev", 0, 10, Some("unassigned"), None).unwrap();
+    assert_eq!(before["unassigned_track_ids"], json!([8, 9]));
+    let (updated, chosen) = refresh_automatic_photo_links(&ctx, &reloaded, &matches, 0.75).unwrap();
+    assert_eq!(chosen, BTreeMap::from([(8, "abcdef012345".into())]));
+    assert_eq!(
+        updated["automatic_assignments"],
+        json!({"7":"abcdef012345","8":"abcdef012345"})
+    );
+    assert_eq!(updated["assignments"], json!({}));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn manual_binding_keeps_its_confirmation_when_other_automatic_links_are_revalidated() {
     let (root, _, sha) = fixture();
     let tracks = index_replay(&root.join("tracked_frames.jsonl"), &sha, 18).unwrap();

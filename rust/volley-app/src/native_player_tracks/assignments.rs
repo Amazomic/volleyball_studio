@@ -481,6 +481,9 @@ pub(super) fn choose_automatic_photo_links_with_groups(
 /// Older automatic passes could select a weaker, wrong athlete when the best
 /// athlete was already occupied. Do not expose such stale names in previews.
 pub(super) fn reconcile_automatic_photo_links(ctx: &Inputs, doc: &mut Value) -> Result<(), String> {
+    if doc["automatic_binding_policy"] == "preserve_existing_v1" {
+        return Ok(());
+    }
     let Some(saved) = doc["automatic_assignments"].as_object() else {
         return Ok(());
     };
@@ -548,6 +551,7 @@ pub(super) fn reconcile_automatic_photo_links(ctx: &Inputs, doc: &mut Value) -> 
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn reconcile_saved_automatic_photo_links(
     ctx: &Inputs,
     doc: &mut Value,
@@ -638,7 +642,36 @@ fn reference_album_snapshot(state: &AppState, ctx: &Inputs) -> Option<ReferenceA
     Some((revisions, hashes))
 }
 
+pub(super) fn preserve_links_for_photo_refresh(
+    state: &AppState,
+    ctx: &Inputs,
+    doc: &mut Value,
+) -> Result<(), ApiError> {
+    if doc["automatic_binding_policy"] == "preserve_existing_v1" {
+        return Ok(());
+    }
+    if automatic_links_current(state, ctx, doc) {
+        let scope = automatic_assignment_scope(state, ctx, doc)?;
+        let mut previous_view = doc.clone();
+        reconcile_automatic_photo_links(scope.as_ref().unwrap_or(ctx), &mut previous_view)
+            .map_err(storage::bad_request)?;
+        if let Some(visible) = previous_view["automatic_assignments"].as_object() {
+            let saved = doc["automatic_assignments"]
+                .as_object_mut()
+                .ok_or_else(|| storage::bad_request("Invalid automatic assignments"))?;
+            for (id, player) in visible {
+                saved.entry(id.clone()).or_insert_with(|| player.clone());
+            }
+        }
+    }
+    doc["automatic_binding_policy"] = json!("preserve_existing_v1");
+    Ok(())
+}
+
 fn automatic_links_current(state: &AppState, ctx: &Inputs, doc: &Value) -> bool {
+    if doc["automatic_binding_policy"] == "preserve_existing_v1" {
+        return true;
+    }
     if doc["automatic_assignments"]
         .as_object()
         .is_none_or(|map| map.is_empty())
@@ -1432,13 +1465,28 @@ pub(super) fn refresh_automatic_photo_links_with_groups(
     threshold: f64,
 ) -> Result<(Value, BTreeMap<u64, String>), String> {
     let mut updated = doc.clone();
-    updated["automatic_assignments"] = json!({});
+    let mut selection = doc.clone();
+    if doc["automatic_binding_policy"] == "preserve_existing_v1" {
+        let existing = doc["automatic_assignments"]
+            .as_object()
+            .ok_or("Invalid automatic assignments")?;
+        selection["assignments"]
+            .as_object_mut()
+            .ok_or("Invalid assignments")?
+            .extend(existing.clone());
+    } else {
+        updated["automatic_assignments"] = json!({});
+    }
     let chosen =
-        choose_automatic_photo_links_with_groups(ctx, &updated, matches, groups, threshold)?;
-    updated["automatic_assignments"] = json!(chosen
-        .iter()
-        .map(|(id, player)| (id.to_string(), player.clone()))
-        .collect::<BTreeMap<_, _>>());
+        choose_automatic_photo_links_with_groups(ctx, &selection, matches, groups, threshold)?;
+    updated["automatic_assignments"]
+        .as_object_mut()
+        .ok_or("Invalid automatic assignments")?
+        .extend(
+            chosen
+                .iter()
+                .map(|(id, player)| (id.to_string(), json!(player))),
+        );
     Ok((updated, chosen))
 }
 
@@ -1609,7 +1657,12 @@ pub(super) fn save_cached_automatic_photo_links(
     let eligible = ctx
         .tracks
         .keys()
-        .filter(|id| !assigned.contains_key(&id.to_string()) && !excluded.contains(id))
+        .filter(|id| {
+            !assigned.contains_key(&id.to_string())
+                && !excluded.contains(id)
+                && (doc["automatic_binding_policy"] != "preserve_existing_v1"
+                    || doc["automatic_assignments"].get(id.to_string()).is_none())
+        })
         .copied()
         .collect::<BTreeSet<_>>();
     let Some(comparison) = cached_photo_comparison(
@@ -1666,6 +1719,9 @@ fn persist_photo_comparison(
         &req.replay_id,
         req.rally_run_id.as_deref(),
     )?;
+    if !auto_assign {
+        preserve_links_for_photo_refresh(state, &ctx, &mut doc)?;
+    }
     let matches = &comparison["player_matches"];
     let threshold = if return_automatic_result {
         req.auto_threshold_percent
@@ -1706,6 +1762,8 @@ fn persist_photo_comparison(
                 && !doc["excluded_ids"]
                     .as_array()
                     .is_some_and(|ids| ids.iter().any(|value| value.as_u64() == Some(**id)))
+                && (doc["automatic_binding_policy"] != "preserve_existing_v1"
+                    || doc["automatic_assignments"].get(id.to_string()).is_none())
         })
         .copied()
         .collect::<Vec<_>>();
@@ -1723,9 +1781,6 @@ fn persist_photo_comparison(
         "model_fingerprint":comparison["model_fingerprint"],
         "reviewed_scope_sha256":reviewed_scope_sha256(&doc)
     });
-    if !auto_assign {
-        reconcile_saved_automatic_photo_links(&scoped, &mut doc).map_err(storage::bad_request)?;
-    }
     let unassigned: Vec<_> = scoped
         .tracks
         .keys()
