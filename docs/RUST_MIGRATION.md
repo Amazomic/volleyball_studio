@@ -4797,3 +4797,9 @@ Studio показывает кнопку перехода между debug и re
 - Base 6ac64ec557af9bcfd1ea66632361d381e23d80ca; integrated on e8571445eb99d5359ed8bb5f314acbb164b90035. Owner rust/volley-app/static/studio.js. Source-wide seek now selects the CPU rally by its detected interval, preserves the requested media position and playback mode, and reveals its card using the existing nearest-edge scroll/pagination mechanism. Gaps clear selection, explicit list filters remain intact; no changes to analysis or saved data.
 - RED: node scripts/ci/test_studio_keyboard_scrub.mjs (missing selection; repeat pointer press did not reveal card). GREEN: keyboard scrub, playback modes, rally card progress, preview source/video selector, training merge and layout/WASM checks PASS. scripts/check-all.ps1 PASS: fmt, clippy, 1107 Rust tests passed, 28 ignored, 115 Node gates. Integrated tree: affected eight Node gates PASS; git diff --check PASS.
 - Browser playback on real footage and GPU/export NOT TESTED. Apply through the deployment queue.
+
+### 2026-11-27 - Preview timeline playhead height correction
+
+- Base 614dc5fc; task b6e287a9a7002f3460388df2f5874956df3b0687. Owner rust/volley-app/static/studio.css: restore the original 13px numeric time and extend only the playhead 8px above the whole-video track, retaining 36px track height and unchanged horizontal seek. Training styling unchanged; canvas remains rounded.
+- RED/GREEN: scripts/ci/test_studio_preview_layout_cache.mjs; DOM IDs, viewport layout PASS. Headless Edge isolated timeline geometry: dark/light, preview/training, 0/50/100% seek positions at 1440x900, 1920x1080, 800x900, 480x812, 48 cases PASS. scripts/check-all.ps1 PASS (fmt, clippy, Rust tests, WASM, 115 Node gates). Integration fast-forward uses identical tested tree; targeted integration checks PASS. git diff --check PASS.
+- Real project playback NOT TESTED; no detection or saved-analysis changes. Deploy via queue.
