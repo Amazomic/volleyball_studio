@@ -1372,3 +1372,99 @@ fn manual_plan(
     }
     Ok(result.clips)
 }
+
+/// The old zero-copy decoder used the first packet (including discarded
+/// edit-list preroll) as time zero. Correct only a proven legacy GPU source,
+/// never a new scan or a different backend. Keep immutable frame IDs intact.
+fn legacy_nvdec_source_matches(
+    model: &Value,
+    owner: &Value,
+    job_id: &str,
+    sha: Option<&Value>,
+) -> bool {
+    model["schema"] == "volley-native-gpu-model-detections/1"
+        && model["status"] == "model_raw_detections_complete"
+        && model["model"] == "ball"
+        && model["job_id"] == job_id
+        && model["decode_backend"] == "nvdec_zero_copy"
+        && model["timeline_origin"].is_null()
+        && model["project_id"] == owner["project_id"]
+        && model["video"] == owner["video"]
+        && model["source_identity"] == owner["source_identity"]
+        && model["original_source"] == owner["original_source"]
+        && model["analysis_range"] == owner["analysis_range"]
+        && sha.is_none_or(|sha| model["sha256"] == *sha)
+}
+
+pub(crate) fn preview_ball_offset(
+    root: &std::path::Path,
+    source: &std::path::Path,
+    owner: &Value,
+    job_id: &Value,
+    sha: Option<&Value>,
+    nominal: f64,
+) -> f64 {
+    let Some(job_id) = job_id
+        .as_str()
+        .filter(|id| volley_core::contracts::job_id(id))
+    else {
+        return nominal;
+    };
+    let runs = root.join("native_gpu_runs");
+    if storage::safe_folder(&runs).is_err() {
+        return nominal;
+    }
+    let Ok(model) = crate::native_rally_evidence::read_manifest(&runs.join(job_id), "ball") else {
+        return nominal;
+    };
+    if !legacy_nvdec_source_matches(&model, owner, job_id, sha) {
+        return nominal;
+    }
+    // Bounded prefix probe, read-only. No guessed offsets or cache rewrites.
+    match volley_media::nvdec::legacy_preroll_offset(source) {
+        Ok(offset) => nominal + offset,
+        Err(error) => {
+            eprintln!("Legacy preview timing unavailable: {error}");
+            nominal
+        }
+    }
+}
+
+#[cfg(test)]
+mod legacy_preview_timing_tests {
+    use super::*;
+
+    #[test]
+    fn only_matching_unversioned_nvdec_ball_runs_receive_legacy_timing() {
+        let job = "a".repeat(32);
+        let owner = json!({"project_id":"p","video":"match.mp4","source_identity":{"bytes":123},
+            "original_source":{"sha256":"source"},"analysis_range":{"start_sec":47.7}});
+        let mut model = owner.clone();
+        model["schema"] = json!("volley-native-gpu-model-detections/1");
+        model["status"] = json!("model_raw_detections_complete");
+        model["model"] = json!("ball");
+        model["job_id"] = json!(job);
+        model["decode_backend"] = json!("nvdec_zero_copy");
+        model["sha256"] = json!("ball-sha");
+        assert!(legacy_nvdec_source_matches(
+            &model,
+            &owner,
+            &job,
+            Some(&json!("ball-sha"))
+        ));
+        assert!(!legacy_nvdec_source_matches(
+            &model,
+            &owner,
+            &job,
+            Some(&json!("other"))
+        ));
+        model["timeline_origin"] = json!("container_start_time_v2");
+        assert!(!legacy_nvdec_source_matches(&model, &owner, &job, None));
+        model["timeline_origin"] = Value::Null;
+        model["decode_backend"] = json!("software");
+        assert!(!legacy_nvdec_source_matches(&model, &owner, &job, None));
+        model["decode_backend"] = json!("nvdec_zero_copy");
+        model["video"] = json!("other.mp4");
+        assert!(!legacy_nvdec_source_matches(&model, &owner, &job, None));
+    }
+}

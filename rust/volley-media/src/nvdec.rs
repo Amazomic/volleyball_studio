@@ -131,7 +131,7 @@ pub fn keyframe_window(
         .take_while(|index| *index <= first_needed)
         .last()
         .ok_or("No keyframe before NVDEC interval")?;
-    let seek_sec = timeline.timestamps[seek_index as usize];
+    let seek_sec = timeline.timestamps[seek_index as usize].max(0.0);
     Ok(NvdecDecodeWindow {
         seek_sec,
         end_sec: end_sec.max(seek_sec + 0.1),
@@ -588,9 +588,9 @@ pub fn display_timeline(source: &std::path::Path) -> Result<DisplayTimeline, Str
             "-select_streams",
             "v:0",
             "-show_entries",
-            "packet=pts_time,flags",
+            "packet=pts_time,flags:format=start_time",
             "-of",
-            "csv=p=0",
+            "compact=p=1:nk=0",
         ])
         .arg(source)
         .stdin(std::process::Stdio::null())
@@ -642,8 +642,14 @@ pub fn display_timeline(source: &std::path::Path) -> Result<DisplayTimeline, Str
     if !status.success() {
         return Err("NVDEC timestamp probe failed".into());
     }
+    parse_display_timeline(&bytes).map(|(timeline, _)| timeline)
+}
+
+fn parse_display_timeline(bytes: &[u8]) -> Result<(DisplayTimeline, f64), String> {
     let mut times = Vec::new();
     let mut key_pts = Vec::new();
+    let mut origin = None;
+    let mut first_discard_pts = None::<f64>;
     for line in bytes.split(|&byte| byte == b'\n') {
         let trimmed = std::str::from_utf8(line)
             .map_err(|_| "Invalid timestamp encoding")?
@@ -651,18 +657,46 @@ pub fn display_timeline(source: &std::path::Path) -> Result<DisplayTimeline, Str
         if trimmed.is_empty() {
             continue;
         }
-        let (pts, flags) = trimmed
-            .split_once(',')
-            .ok_or("NVDEC packet flags missing")?;
+        let mut fields = trimmed.split('|');
+        let section = fields.next();
+        let mut pts = None;
+        let mut flags = None;
+        for field in fields {
+            if let Some(value) = field.strip_prefix("pts_time=") {
+                pts = Some(value);
+            } else if let Some(value) = field.strip_prefix("flags=") {
+                flags = Some(value);
+            } else if section == Some("format") {
+                if let Some(value) = field.strip_prefix("start_time=") {
+                    if value != "N/A" {
+                        let start = value
+                            .parse::<f64>()
+                            .map_err(|_| "Invalid container start time")?;
+                        if !start.is_finite() {
+                            return Err("Invalid container start time".into());
+                        }
+                        origin = Some(start);
+                    }
+                }
+            }
+        }
+        if section != Some("packet") {
+            continue;
+        }
         let time = pts
+            .ok_or("NVDEC packet has no presentation timestamp")?
             .parse::<f64>()
             .map_err(|_| "NVDEC packet has no presentation timestamp")?;
         if !time.is_finite() || time < -3600.0 || time > 48.0 * 3600.0 + 3600.0 {
             return Err("NVDEC presentation time outside media bounds".into());
         }
+        let flags = flags.ok_or("NVDEC packet flags missing")?;
         times.push(time);
         if flags.contains('K') {
             key_pts.push(time);
+        }
+        if flags.contains('D') {
+            first_discard_pts = Some(first_discard_pts.map_or(time, |first| first.min(time)));
         }
     }
     if times.is_empty() {
@@ -670,6 +704,12 @@ pub fn display_timeline(source: &std::path::Path) -> Result<DisplayTimeline, Str
     }
     times.sort_by(|a, b| a.total_cmp(b));
     let first = times[0];
+    let origin = origin.unwrap_or(first);
+    let legacy_preroll = if first < origin && first_discard_pts == Some(first) {
+        first - origin
+    } else {
+        0.0
+    };
     let keyframes = key_pts
         .into_iter()
         .map(|time| {
@@ -682,13 +722,43 @@ pub fn display_timeline(source: &std::path::Path) -> Result<DisplayTimeline, Str
     if keyframes.first().copied() != Some(0) {
         return Err("NVDEC source does not start with a keyframe".into());
     }
+    // Keep decoder ordinals (including hidden edit-list preroll), but use
+    // the container's actual playback origin, never its first coded packet.
     for timestamp in &mut times {
-        *timestamp -= first;
+        *timestamp -= origin;
     }
-    Ok(DisplayTimeline {
-        timestamps: times,
-        keyframes,
-    })
+    Ok((
+        DisplayTimeline {
+            timestamps: times,
+            keyframes,
+        },
+        legacy_preroll,
+    ))
+}
+
+/// Offset of a historical NVDEC scan that used the first discarded packet as zero.
+/// Read only the initial packets; no video decoding or full-file scan.
+pub fn legacy_preroll_offset(source: &std::path::Path) -> Result<f64, String> {
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-read_intervals",
+            "%+#256",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=pts_time,flags:format=start_time",
+            "-of",
+            "compact=p=1:nk=0",
+        ])
+        .arg(source)
+        .output()
+        .map_err(|error| format!("Read legacy NVDEC preroll: {error}"))?;
+    if !output.status.success() {
+        return Err("Legacy NVDEC preroll probe failed".into());
+    }
+    parse_display_timeline(&output.stdout).map(|(_, offset)| offset)
 }
 
 pub fn display_timestamps(source: &std::path::Path) -> Result<Vec<f64>, String> {
@@ -699,9 +769,13 @@ pub fn closest_display_frame(times: &[f64], time_sec: f64) -> Option<u64> {
     if times.is_empty() || !time_sec.is_finite() || time_sec < 0.0 {
         return None;
     }
+    let first_visible = times.partition_point(|value| *value < 0.0);
+    if first_visible == times.len() {
+        return None;
+    }
     let next = times.partition_point(|value| *value < time_sec);
-    let frame = if next == 0 {
-        0
+    let frame = if next <= first_visible {
+        first_visible
     } else if next == times.len() || time_sec - times[next - 1] <= times[next] - time_sec {
         next - 1
     } else {
@@ -914,6 +988,70 @@ mod tests {
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn display_timeline_keeps_discard_preroll_before_movie_zero() {
+        let root = std::env::temp_dir().join(format!(
+            "volley-pts-origin-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let original = root.join("original.mp4");
+        let edited = root.join("edited.mp4");
+        {
+            assert!(Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=64x64:rate=30:duration=2",
+                    "-c:v",
+                    "libx264",
+                    "-g",
+                    "30",
+                    "-bf",
+                    "0",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-y"
+                ])
+                .arg(&original)
+                .status()
+                .unwrap()
+                .success());
+            assert!(Command::new("ffmpeg")
+                .args(["-v", "error", "-ss", "0.266667", "-i"])
+                .arg(&original)
+                .args(["-map", "0:v:0", "-c", "copy", "-y"])
+                .arg(&edited)
+                .status()
+                .unwrap()
+                .success());
+            let timeline = display_timeline(&edited).unwrap();
+            assert_eq!(timeline.timestamps.len(), 60);
+            assert!((legacy_preroll_offset(&edited).unwrap() + 8.0 / 30.0).abs() < 0.001);
+            assert!(
+                (timeline.timestamps[0] + 8.0 / 30.0).abs() < 0.001,
+                "discard-only decoder preroll must not move movie zero: {:?}",
+                &timeline.timestamps[..10]
+            );
+            assert_eq!(closest_display_frame(&timeline.timestamps, 0.0), Some(8));
+            assert_eq!(closest_display_frame(&timeline.timestamps, 0.1), Some(11));
+            let window = keyframe_window(&timeline, 0.0, 0.5).unwrap();
+            assert_eq!(window.first_frame, 0);
+            assert_eq!(window.seek_sec, 0.0);
+            let window = keyframe_window(&timeline, 1.0, 1.5).unwrap();
+            assert_eq!(window.first_frame, 30);
+            assert!((window.seek_sec - 22.0 / 30.0).abs() < 0.001);
+        }
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn bounded_window_seeks_to_the_previous_keyframe() {
