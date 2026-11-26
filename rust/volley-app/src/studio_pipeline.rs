@@ -3691,6 +3691,105 @@ fn read_queue_rows(root: &Path, project: &str, queue_id: &str) -> Result<Vec<Val
         .collect()
 }
 
+pub(crate) fn project_launches(project_root: &Path, project: &str) -> Result<Vec<Value>, ApiError> {
+    let root = project_root.join("native_studio_pipelines");
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    storage::safe_folder(&root).map_err(storage::bad_request)?;
+    let names = storage::read_json(&project_root.join("native_analysis_names.json"))?
+        .unwrap_or_else(|| json!({}));
+    let mut launches = Vec::new();
+    let mut count = 0;
+    for entry in fs::read_dir(&root)
+        .map_err(|error| storage::internal(format!("Read project launches: {error}")))?
+    {
+        let entry = entry.map_err(|error| storage::internal(format!("Read launch: {error}")))?;
+        let id = entry.file_name().to_string_lossy().into_owned();
+        if !valid_id(&id) {
+            continue;
+        }
+        count += 1;
+        if count > 1500 {
+            return Err(storage::bad_request("Too many project launch records"));
+        }
+        let Ok(path) = status_path(&root, &id) else {
+            continue;
+        };
+        let Ok(head) = read(&path) else { continue };
+        if head["schema"] != SCHEMA
+            || head["project_id"] != project
+            || head["id"] != id
+            || head["mode"] != "full"
+            || head["queue_id"] != id
+        {
+            continue;
+        }
+        let Ok(rows) = read_queue_rows(&root, project, &id) else {
+            continue;
+        };
+        let mut videos = BTreeSet::new();
+        if rows.iter().any(|row| {
+            row["mode"] != "full"
+                || !row["video"]
+                    .as_str()
+                    .is_some_and(|video| storage::video_name(video).is_ok() && videos.insert(video))
+        }) {
+            continue;
+        }
+        let members: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                let jobs: BTreeSet<_> = [
+                    &row["gpu_jobs"]["ball"],
+                    &row["gpu_jobs"]["players"],
+                    &row["current_gpu_job_id"],
+                ]
+                .into_iter()
+                .filter_map(Value::as_str)
+                .filter(|id| valid_id(id))
+                .collect();
+                json!({"video":row["video"],"analysis_id":row["analysis_id"],
+                "postprocessing_id":row["postprocessing_id"],"gpu_job_ids":jobs})
+            })
+            .collect();
+        if !members.iter().any(|row| {
+            row["analysis_id"].as_str().is_some_and(valid_id)
+                || row["gpu_job_ids"]
+                    .as_array()
+                    .is_some_and(|ids| !ids.is_empty())
+        }) {
+            continue;
+        }
+        let created_at = head["started_ms"]
+            .as_u64()
+            .map(|ms| ms / 1000)
+            .or_else(|| {
+                entry
+                    .metadata()
+                    .ok()?
+                    .created()
+                    .ok()?
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .map(|t| t.as_secs())
+            })
+            .unwrap_or_default();
+        launches.push(json!({
+            "id":id,"created_at":created_at,"members":members,
+            "display_name":names[format!("launch:{id}")],
+            "hidden":names[format!("hidden_launch:{id}")] == true
+        }));
+    }
+    launches.sort_by(|a, b| {
+        a["created_at"]
+            .as_u64()
+            .cmp(&b["created_at"].as_u64())
+            .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+    });
+    Ok(launches)
+}
+
 fn pipeline_frames_processed(row: &Value) -> Option<u64> {
     row["analysis_frames_processed"].as_u64().or_else(|| {
         row["stages"].as_array()?.iter().rev().find_map(|stage| {
@@ -4035,6 +4134,45 @@ mod tests {
         wrong_primary["video_profiles"]["a.mp4"]["gpu"]["pose_stride"] = json!(9);
         let wrong_primary: StartRequest = serde_json::from_value(wrong_primary).unwrap();
         assert!(validate_queue_profiles(&wrong_primary, &videos, true).is_err());
+    }
+
+    #[test]
+    fn project_launch_catalog_keeps_hundred_video_members_under_one_id() {
+        let project = "abc123def456";
+        let directory = std::env::temp_dir().join(format!("volley-launch-{}", Uuid::new_v4()));
+        let root = directory.join("native_studio_pipelines");
+        fs::create_dir_all(&root).unwrap();
+        let ids: Vec<_> = (1..=100).map(|id| format!("{id:032x}")).collect();
+        let queue = &ids[0];
+        for (index, id) in ids.iter().enumerate() {
+            let path = root.join(id);
+            fs::create_dir(&path).unwrap();
+            save(&path.join("status.json"), &json!({
+                "schema":SCHEMA,"project_id":project,"id":id,"queue_id":queue,"queue_runs":ids,
+                "mode":"full","video":format!("video-{index}.mp4"),"started_ms":1700000000000_u64,
+                "analysis_id":format!("{:032x}",1000+index),
+                "postprocessing_id":format!("{:032x}",2000+index)
+            })).unwrap();
+        }
+        let launches = project_launches(&directory, project).unwrap();
+        assert_eq!(launches.len(), 1);
+        assert_eq!(launches[0]["id"], queue.as_str());
+        assert_eq!(launches[0]["members"].as_array().unwrap().len(), 100);
+        assert_eq!(launches[0]["members"][99]["video"], "video-99.mp4");
+        storage::write_json_atomic(
+            &directory.join("native_analysis_names.json"),
+            &json!({format!("launch:{queue}"):"Saved name",format!("hidden_launch:{queue}"):true}),
+        )
+        .unwrap();
+        let launches = project_launches(&directory, project).unwrap();
+        assert_eq!(launches[0]["hidden"], true);
+        assert_eq!(launches[0]["display_name"], "Saved name");
+        let bad_path = root.join(&ids[99]).join("status.json");
+        let mut bad = read(&bad_path).unwrap();
+        bad["queue_id"] = json!("f".repeat(32));
+        save(&bad_path, &bad).unwrap();
+        assert!(project_launches(&directory, project).unwrap().is_empty());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -171,9 +171,107 @@ fn chain(input: &Value) -> Value {
             if let Some(items) = by.get_mut(&key) {
                 items.push(run.clone());
             }
-            run_to.insert(run_id, key);
+            run_to.insert(run_id.to_owned(), key);
         }
     }
+    let sources = choices.clone();
+    let mut claimed_sources = BTreeSet::new();
+    let mut claimed_runs = BTreeSet::new();
+    let mut launches: Vec<_> = input["launches"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|launch| id(&launch["id"]))
+        .collect();
+    launches.sort_by_key(|launch| launch["created_at"].as_u64().unwrap_or_default());
+    for launch in launches {
+        let mut members = Vec::new();
+        let mut rally_runs = Vec::new();
+        let mut seen_videos = BTreeSet::new();
+        for member in launch["members"].as_array().into_iter().flatten() {
+            let Some(video) = member["video"].as_str() else {
+                continue;
+            };
+            if !seen_videos.insert(video) {
+                continue;
+            }
+            let mut raw = None;
+            for job in member["gpu_job_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|job| id(job))
+            {
+                let key = json!([video, "gpu", job]).to_string();
+                if let Some(source) = sources.iter().find(|row| row["value"] == key) {
+                    claimed_sources.insert(key);
+                    raw = Some(source);
+                }
+            }
+            let physical = json!([video, "fusion", member["analysis_id"]]).to_string();
+            let source = id(&member["analysis_id"])
+                .then(|| sources.iter().find(|row| row["value"] == physical))
+                .flatten();
+            let Some(source) = source else {
+                if let Some(raw) = raw {
+                    members.push(raw.clone());
+                }
+                continue;
+            };
+            claimed_sources.insert(physical.clone());
+            members.push(source.clone());
+            if let Some(run) = by.get(&physical).into_iter().flatten().find(|run| {
+                id(&member["postprocessing_id"])
+                    && run["rally_run_id"] == member["postprocessing_id"]
+            }) {
+                claimed_runs.insert(run["rally_run_id"].as_str().unwrap_or_default().to_owned());
+                rally_runs.push(run.clone());
+            }
+        }
+        if members.is_empty() || launch["hidden"] == true {
+            continue;
+        }
+        let key = add(
+            &mut choices,
+            &mut by,
+            "",
+            "launch",
+            &json!({"id":launch["id"],"created_at":launch["created_at"]}),
+        );
+        if let Some(choice) = choices.iter_mut().find(|choice| choice["value"] == key) {
+            choice["video"] = members[0]["video"].clone();
+            choice["members"] = json!(members);
+            if let Some(name) = launch["display_name"]
+                .as_str()
+                .filter(|name| !name.is_empty())
+            {
+                choice["display_name"] = json!(name);
+            }
+        }
+        for run in &rally_runs {
+            if let Some(run_id) = run["rally_run_id"].as_str() {
+                run_to.insert(run_id.to_owned(), key.clone());
+            }
+        }
+        by.insert(key, rally_runs);
+    }
+    for source in &claimed_sources {
+        let Some(rows) = by.get_mut(source) else {
+            continue;
+        };
+        rows.retain(|row| !claimed_runs.contains(row["rally_run_id"].as_str().unwrap_or_default()));
+        if rows.is_empty() {
+            by.remove(source);
+        }
+    }
+    choices.retain(|choice| {
+        let key = choice["value"].as_str().unwrap_or_default();
+        !claimed_sources.contains(key) || by.contains_key(key)
+    });
+    run_to.retain(|id, key| {
+        by.get(key)
+            .is_some_and(|rows| rows.iter().any(|row| row["rally_run_id"] == id.as_str()))
+    });
     json!({"choices":choices,"byAnalysis":by,"runToAnalysis":run_to})
 }
 
@@ -281,6 +379,56 @@ mod tests {
             choice["display_name"],
             chain(&input)["choices"][0]["display_name"]
         );
+    }
+
+    #[test]
+    fn project_launch_groups_rallies_across_videos_without_mixing_launches() {
+        let first = "11111111111111111111111111111111";
+        let second = "22222222222222222222222222222222";
+        let a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let c = "cccccccccccccccccccccccccccccccc";
+        let ar = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1";
+        let br = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1";
+        let cr = "ccccccccccccccccccccccccccccccc1";
+        let at = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2";
+        let bt = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2";
+        let ct = "ccccccccccccccccccccccccccccccc2";
+        let input = json!({
+            "videos":["a.mp4","b.mp4"],
+            "overviews":{
+                "a.mp4":{"stages":[{"key":"fusion","items":[{"id":a},{"id":c}]},
+                    {"key":"tracking","items":[{"id":ar,"source_fusion_id":a},{"id":cr,"source_fusion_id":c}]}]},
+                "b.mp4":{"stages":[{"key":"fusion","items":[{"id":b}]},
+                    {"key":"tracking","items":[{"id":br,"source_fusion_id":b}]}]}
+            },
+            "runs":[{"video":"a.mp4","rally_run_id":at,"source_replay_id":ar},
+                    {"video":"b.mp4","rally_run_id":bt,"source_replay_id":br},
+                    {"video":"a.mp4","rally_run_id":ct,"source_replay_id":cr}],
+            "launches":[
+                {"id":first,"created_at":100,"members":[
+                    {"video":"a.mp4","analysis_id":a,"postprocessing_id":at},
+                    {"video":"b.mp4","analysis_id":b,"postprocessing_id":bt}]},
+                {"id":second,"created_at":200,"members":[
+                    {"video":"a.mp4","analysis_id":c,"postprocessing_id":ct},
+                    {"video":"b.mp4","analysis_id":b,"postprocessing_id":bt}]}
+            ]
+        });
+        let result = chain(&input);
+        let choices = result["choices"].as_array().unwrap();
+        assert_eq!(choices.len(), 2);
+        let first_key = json!(["", "launch", first]).to_string();
+        let second_key = json!(["", "launch", second]).to_string();
+        assert_eq!(result["byAnalysis"][&first_key][0]["rally_run_id"], at);
+        assert_eq!(result["byAnalysis"][&first_key][1]["rally_run_id"], bt);
+        assert_eq!(result["byAnalysis"][&second_key][0]["rally_run_id"], ct);
+        assert_eq!(result["byAnalysis"][&second_key][1]["rally_run_id"], bt);
+        let mut hidden = input;
+        hidden["launches"][0]["hidden"] = json!(true);
+        let result = chain(&hidden);
+        assert_eq!(result["choices"].as_array().unwrap().len(), 1);
+        assert!(result["byAnalysis"][&first_key].is_null());
+        assert_eq!(result["byAnalysis"][&second_key][1]["rally_run_id"], bt);
     }
 
     #[test]

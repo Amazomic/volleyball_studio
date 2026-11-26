@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{fs, path::Path, sync::Arc, time::SystemTime};
 
-const MAX_STAGE_ENTRIES: usize = 350;
+const MAX_STAGE_ENTRIES: usize = 1500;
 const RETURN_STAGE_ENTRIES: usize = 60;
 const MAX_MANIFEST: u64 = 16 * 1024;
 const STAGES: [(&str, &str, &str, &str); 5] = [

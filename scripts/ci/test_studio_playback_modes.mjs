@@ -30,7 +30,10 @@ assert.match(js,/isTypingSpaceTarget\(event\.target\)/);
 const start=js.indexOf('  const nextRally=()=>{');
 const end=js.indexOf('  ui.video.addEventListener("timeupdate"',start);
 assert.ok(start>=0&&end>start,"Rally boundary logic must be present");
-const script=js.slice(start,end)+"\nthis.nextRally=nextRally;this.onRallyBoundary=onRallyBoundary;";
+const advanceStart=js.indexOf("  const advanceProjectRally=async()=>");
+const advanceEnd=js.indexOf("  const projectRallyCard=",advanceStart);
+assert.ok(advanceStart>=0&&advanceEnd>advanceStart);
+const script=js.slice(advanceStart,advanceEnd)+js.slice(start,end)+"\nthis.nextRally=nextRally;this.onRallyBoundary=onRallyBoundary;";
 const rallies=[
   {candidate_id:"a",start_frame:0,end_frame:299},
   {candidate_id:"b",start_frame:450,end_frame:749},
@@ -62,11 +65,15 @@ s.playbackMode="free";s.stopAt=40;ctx.onRallyBoundary();
 assert.equal(paused,2,"Free mode must not pause at rally boundary");
 assert.equal(s.stopAt,null);
 assert.deepEqual(followed,["b"],"Other playback modes must not scroll");
-const nextSource={run:"second",rows:[{candidate_id:"d",start_frame:0,end_frame:59}]};
-s.projectRallies=new Map([["r",{run:"r",rows:rallies}],["second",nextSource]]);
+const nextSource={run:"second",analysis:"launch",rows:[{candidate_id:"d",start_frame:0,end_frame:59}]};
+s.analysis="launch";s.generation=1;
+s.projectRallies=new Map([["r",{run:"r",analysis:"launch",rows:rallies}],["second",nextSource]]);
 s.playbackMode="sequence";s.stopAt=40;
 ctx.training={active:false};
-ctx.openProjectRally=async (source,item)=>played.push([source.run,item.candidate_id]);
+ctx.openProjectRally=async (source,item,follow)=>{
+  assert.equal(follow,true,"Cross-video sequence must follow the playing card");
+  played.push([source.run,item.candidate_id]);
+};
 ctx.failed=error=>{throw error;};
 ctx.onRallyBoundary();
 assert.deepEqual(played.at(-1),["second","d"],"Sequence crosses into the next video at its first rally");

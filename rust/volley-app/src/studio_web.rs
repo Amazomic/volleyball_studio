@@ -334,10 +334,13 @@ fn list_runs(state: &AppState, project_id: &str) -> Result<Value, crate::storage
     } else {
         None
     };
+    let launches = crate::studio_pipeline::project_launches(&project_root, project_id)?;
     let root = project_root.join("native_cpu_rallies");
     if !root.exists() {
-        return Ok(json!({"project_id":project_id,"runs":[],"total_seen":0,
-            "listing_truncated":false,"provisional_only":true}));
+        return Ok(
+            json!({"project_id":project_id,"runs":[],"launches":launches,"total_seen":0,
+            "listing_truncated":false,"provisional_only":true}),
+        );
     }
     safe_folder(&root).map_err(storage::bad_request)?;
     let mut rows = Vec::new();
@@ -399,15 +402,10 @@ fn list_runs(state: &AppState, project_id: &str) -> Result<Value, crate::storage
                 .cmp(&a.1["rally_run_id"].as_str())
         })
     });
-    let truncated = rows.len() > 100;
-    let entries = rows
-        .into_iter()
-        .take(100)
-        .map(|(_, v)| v)
-        .collect::<Vec<_>>();
+    let entries = rows.into_iter().map(|(_, v)| v).collect::<Vec<_>>();
     Ok(json!({
-        "project_id":project_id,"runs":entries,"total_seen":total,
-        "listing_truncated":truncated,"provisional_only":true
+        "project_id":project_id,"runs":entries,"launches":launches,"total_seen":total,
+        "listing_truncated":false,"provisional_only":true
     }))
 }
 pub async fn runs(

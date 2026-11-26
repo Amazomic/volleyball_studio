@@ -33,7 +33,7 @@ assert.match(js,/\["ball_stabilizer_v3","ball_stabilizer_v4","ball_stabilizer_v5
 assert.match(html,/id="studio-overlay-processed"[^>]*role="tab"/);
 assert.match(html,/id="studio-overlay-raw"[^>]*role="tab"/);
 assert.match(html,/id="studio-raw-people-visible"/);
-const start=js.indexOf("  const rawFusion=()=>");
+const start=js.indexOf("  const selectedFusion=video=>");
 const end=js.indexOf("  const setOverlaySource=",start);
 assert.ok(start>=0&&end>start,"Preview overlay window helpers must exist");
 const colorStart=js.indexOf("  const playerTeamColor=");
@@ -63,7 +63,7 @@ const ctx={
   measureText(){return {width:20};},
   fillRect(){},fillText(value,x,y){renderedLabels.push(value);labelPositions.push({value,x,y});}
 };
-const s={project:"p",analysis:"a",chain:{choices:[{value:"a",kind:"fusion",id:"f"}]},run:"r",video:"v",videoKey:"p:v"};
+const s={project:"p",analysis:"a",chain:{choices:[{value:"a",kind:"fusion",video:"v",id:"f"}]},run:"r",video:"v",videoKey:"p:v"};
 const ui={video:{currentTime:90/30,src:"/api/video-media"}};
 const overlayLabels={key:"",names:new Map(),loaded:false};
 const overlay={
@@ -72,7 +72,7 @@ const overlay={
   fetching:new Set(),failed:new Map()
 };
 const timeline={data:{project_id:"p",rally_run_id:"r",video:"v",total_frames:300}};
-const scope={s,ui,overlay,overlayLabels,timeline,setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){},
+const scope={s,ui,window:{},overlay,overlayLabels,timeline,setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){},
   playerLabelKey:(project,run,video,sha)=>[project,run,video,sha].join(":"),
   requestOverlayLabels:()=>{},
   overlayContext:()=>({ctx,x:0,y:0,width:100,height:100}),

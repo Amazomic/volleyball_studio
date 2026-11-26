@@ -303,6 +303,8 @@
     return typeof saved?.video==="string"?saved.video:"";
   };
   const selectedGpuSource=()=>{
+    const grouped=window.VolleyballStudioSelectedFusion?.(ui.video.value);
+    if(grouped)return grouped;
     const raw=$("studio-inference")?.value;
     if(!raw)return "";
     try{
@@ -1660,7 +1662,7 @@
       state.completedId=status.id;
       window.dispatchEvent(new CustomEvent("volley:pipeline-complete",{
         detail:{project_id:status.project_id,video:status.video,
-          analysis_id:status.analysis_id,postprocessing_id:status.postprocessing_id,pipeline_id:status.id,project_queue:status.project_queue}
+          analysis_id:status.analysis_id,postprocessing_id:status.postprocessing_id,pipeline_id:status.id,queue_id:status.queue_id,project_queue:status.project_queue}
       }));
     }
     state.historyStatusAt=Date.now();

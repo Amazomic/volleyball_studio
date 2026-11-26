@@ -50,6 +50,22 @@ const orphan=result.runToAnalysis.get(i(12));
 assert.equal(JSON.parse(orphan)[1],"unlinked");
 assert.match(result.choices.find(item=>item.value===orphan).label,/не установлен/);
 assert.equal(result.byAnalysis.get(orphan).length,1);
+const launchId=i(101),secondLaunch=i(102);
+const grouped=chain.build([videoA,videoB],overviews,runs,[
+  {id:launchId,created_at:1700000000,members:[
+    {video:videoA,analysis_id:i(1),postprocessing_id:i(9)},
+    {video:videoB,analysis_id:i(5),postprocessing_id:i(11)}]},
+  {id:secondLaunch,created_at:1700000060,members:[
+    {video:videoA,analysis_id:i(2),postprocessing_id:i(10)},
+    {video:videoB,analysis_id:i(5),postprocessing_id:i(11)}]}
+]);
+const groupKey=JSON.stringify(["","launch",launchId]),nextGroupKey=JSON.stringify(["","launch",secondLaunch]);
+assert.equal(grouped.choices.filter(row=>row.kind==="launch").length,2,"Two launches, not one row per video");
+assert.equal(grouped.choices.filter(row=>row.kind==="fusion").length,0,"Claimed physical sources are not analyses");
+assert.deepEqual(grouped.byAnalysis.get(groupKey).map(row=>row.rally_run_id),[i(9),i(11)]);
+assert.deepEqual(grouped.byAnalysis.get(nextGroupKey).map(row=>row.rally_run_id),[i(10),i(11)]);
+assert.equal(grouped.choices.find(row=>row.value===groupKey).members.length,2);
+assert.equal(grouped.runToAnalysis.get(i(11)),nextGroupKey,"Reused CPU evidence does not merge separate launches");
 const none=chain.build([videoA],new Map(),[]);
 assert.equal(none.choices.length,0);
 const html=readFileSync(join(root,"rust/volley-app/static/studio.html"),"utf8");

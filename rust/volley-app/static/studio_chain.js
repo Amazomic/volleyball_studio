@@ -23,8 +23,8 @@
     return JSON.parse(new TextDecoder().decode(new Uint8Array(engine.memory.buffer,
       engine.volley_data_output_ptr(),engine.volley_data_output_len())));
   };
-  const build=(videos,overviews,runs)=>{
-    const result=call(1,{videos,overviews:Object.fromEntries(overviews||[]),runs});
+  const build=(videos,overviews,runs,launches=[])=>{
+    const result=call(1,{videos,overviews:Object.fromEntries(overviews||[]),runs,launches});
     for(const choice of result.choices){
       const stage=(overviews?.get(choice.video)?.stages||[]).find(row=>row.key===(choice.kind==="unlinked"?"tracking":choice.kind));
       const saved=stage?.items?.find(row=>row.id===choice.id)?.display_name||

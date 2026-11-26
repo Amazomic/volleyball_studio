@@ -59,7 +59,7 @@
   // selectors synchronously on refresh while metadata is checked in background.
   // Never cache video bytes or claim this snapshot verifies source evidence.
   const chainSnapshot=(()=>{
-    const key="volley:studio-chain:v2";
+    const key="volley:studio-chain:v3";
     const read=(project,videos)=>{
       try{
         const raw=localStorage.getItem(key);
@@ -76,13 +76,13 @@
           overviews.set(entry[0],entry[1]);
         }
         if(overviews.size!==videos.length)return null;
-        return window.VolleyStudioChain?.build(videos,overviews,row.runs)||null;
+        return window.VolleyStudioChain?.build(videos,overviews,row.runs,row.launches||[])||null;
       }catch{return null;}
     };
-    const save=(project,videos,overviews,runs)=>{
+    const save=(project,videos,overviews,runs,launches=[])=>{
       try{
         const packed=JSON.stringify({
-          project,videos,overviews:[...overviews],runs,
+          project,videos,overviews:[...overviews],runs,launches,
           expires:Date.now()+86400000
         });
         if(packed.length<=350000)localStorage.setItem(key,packed);
@@ -225,6 +225,14 @@
       trigger.disabled=select.disabled;
       trigger.textContent=select.selectedOptions[0]?.textContent||"Выберите результат";
       wipe(list);
+      const group=!primary&&s.chain?.choices.find(item=>item.value===s.analysis&&item.kind==="launch");
+      if(group){
+        const rows=s.chain.byAnalysis.get(group.value)||[];
+        trigger.disabled=true;
+        trigger.textContent=rows.length?rows.reduce((total,row)=>total+(Number(row.candidate_count)||0),0)+" розыгрышей":"Нет розыгрышей";
+        close();
+        return;
+      }
       for(const option of select.options){
         if(!option.value)continue;
         const row=make("div","analysis-picker-row");
@@ -307,7 +315,7 @@
             if(deleting)option.remove();
             try{
               await post(deleting?"/api/studio/analysis-edit":"/api/studio/analysis-rename",
-                {project_id:project,video:source.video,kind,id,action,name});
+                {project_id:project,video:primary?source.video:(s.chain?.byAnalysis.get(s.analysis)||[]).find(item=>item.rally_run_id===id)?.video||source.video,kind,id,action,name});
               invalidateCatalog();
               if(project!==s.project)return;
               await removal;
@@ -317,7 +325,7 @@
               const run=deletesActiveAnalysis||deletesActiveRun?"":s.run;
               if(!deleting)close();
               await loadChain(analysis,run,!deletesActiveAnalysis&&!deletesActiveRun);
-              message(deleting?"Результат и связанные данные удалены из каталога.":"Название сохранено.","ok");
+              message(deleting?(kind==="launch"?"Анализ удалён из каталога; исходные данные сохранены.":"Результат и связанные данные удалены из каталога."):"Название сохранено.","ok");
             }catch(error){
               if(deleting){
                 invalidateCatalog();
@@ -460,7 +468,12 @@
       }
     });
   };
-  const rawFusion=()=>s.chain?.choices.find(row=>row.value===s.analysis&&row.kind==="fusion")||null;
+  const selectedFusion=video=>{
+    const choice=s.chain?.choices.find(row=>row.value===s.analysis);
+    if(choice?.kind==="fusion")return choice.video===video?choice:null;
+    return choice?.members?.find(row=>row.video===video&&row.kind==="fusion")||null;
+  };
+  const rawFusion=()=>selectedFusion(s.video);
   const overlaySourceId=()=>overlay.raw?rawFusion()?.id||"":s.run;
   // Identify the detector by the saved GPU fusion, not current runtime settings.
   const rawDetectorKey=(project,run,video)=>[project,run,video].join(":");
@@ -1239,10 +1252,12 @@
         if(s.run!==item.rally_run_id)
           throw Error("Не удалось открыть CPU-версию примера");
       }else if(s.video!==item.video){
-        const choice=s.chain?.choices.find(row=>row.video===item.video&&row.kind==="fusion");
+        const choice=s.chain?.choices.find(row=>(row.video===item.video&&row.kind==="fusion")||
+          row.members?.some(member=>member.video===item.video&&member.kind==="fusion"));
         if(!choice)throw Error("Для камеры примера нет доступной GPU-версии");
         ui.analysis.value=choice.value;
-        await setAnalysis();
+        const run=(s.chain.byAnalysis.get(choice.value)||[]).find(row=>row.video===item.video);
+        await setAnalysis(run?.rally_run_id||"",true,item.video);
       }
       if(s.video!==item.video)throw Error("Исходное видео примера не совпало");
       const second=item.frame_index/fps();
@@ -3645,11 +3660,15 @@
       !s.analysis?"Сначала выберите анализ":
         rows.length?"Выберите постобработку":"Нет CPU-версий для анализа");
     ui.run.disabled=!s.analysis||!rows.length;
+    const defaultRun=source?.kind==="launch"&&!preferred?
+      rows.find(row=>row.video===previewVideo)?.rally_run_id||
+      s.projectVideos.map(video=>rows.find(row=>row.video===video)?.rally_run_id).find(Boolean)||"":preferred;
     ui.run.value=exact?(rows.some(row=>row.rally_run_id===preferred)?preferred:""):
-      window.VolleyStudioChain.latestRun(rows,preferred);
+      window.VolleyStudioChain.latestRun(rows,defaultRun);
     refreshPicker(ui.run);
     s.run=ui.run.value;
-    s.video=rows.find(row=>row.rally_run_id===s.run)?.video||source?.video||previewVideo;
+    s.video=rows.find(row=>row.rally_run_id===s.run)?.video||
+      (source?.members?.some(member=>member.video===previewVideo)?previewVideo:source?.video)||previewVideo;
     if(s.video){s.fps=30;if(!rally)ensurePreviewVideo();}
     // Overlay playback follows the selected CPU snapshot, not a rally card.
     // reset() clears the canvas source; restore it for full-video preview too.
@@ -3679,18 +3698,23 @@
     if(overlay.raw&&rawFusion())prefetchOverlayAtFrame(0);
   };
   const setAnalysis=async(preferredRun="",exact=false,previewVideo="",rally=null)=>{
+    if(s.analysis!==ui.analysis.value){
+      s.projectRallyRequest=null;
+      s.projectRallies?.clear();
+    }
     s.analysis=ui.analysis.value;
     const source=s.chain?.choices.find(row=>row.value===s.analysis);
-    window.dispatchEvent(new CustomEvent("volley:chain-change",{
-      detail:{project_id:s.project,video:source?.video||previewVideo,analysis:s.analysis}
-    }));
     s.previewVideoWithoutAnalysis=source?"":previewVideo;
     await setRuns(preferredRun,exact,previewVideo,rally);
+    window.dispatchEvent(new CustomEvent("volley:chain-change",{
+      detail:{project_id:s.project,video:s.video||source?.video||previewVideo,analysis:s.analysis}
+    }));
   };
+  window.VolleyballStudioSelectedFusion=video=>selectedFusion(video)?.id||"";
   const selectReferenceEntry=async entry=>{
     if(!reference.active||!entry||annotation.dirty)return;
-    const choice=s.chain?.choices.find(candidate=>candidate.video===entry.video&&
-      (s.chain.byAnalysis.get(candidate.value)||[]).some(run=>run.rally_run_id===entry.rally_run_id));
+    const choice=s.chain?.choices.find(candidate=>
+      (s.chain.byAnalysis.get(candidate.value)||[]).some(run=>run.video===entry.video&&run.rally_run_id===entry.rally_run_id));
     if(!choice){
       reference.counts.textContent="У эталона больше нет связанной CPU-версии";
       return;
@@ -3720,9 +3744,8 @@
       reference.entries=result.videos.filter(item=>
         typeof item.video==="string"&&typeof item.rally_run_id==="string"&&
         s.projectVideos.includes(item.video)&&s.chain?.choices.some(choice=>
-          choice.video===item.video&&
           (s.chain.byAnalysis.get(choice.value)||[]).some(run=>
-            run.rally_run_id===item.rally_run_id)));
+            run.video===item.video&&run.rally_run_id===item.rally_run_id)));
       for(const item of reference.entries){
         const name=item.video.split(/[\\/]/).pop()||item.video;
         const option=make("option","",name);
@@ -3762,6 +3785,11 @@
       String(b.id||"").localeCompare(String(a.id||"")))[0]?.value||"";
   };
   const renderChain=async(chain,preferredAnalysis="",preferredRun="",retainCurrent=false,exact=false)=>{
+    if(preferredAnalysis&&!chain.choices.some(row=>row.value===preferredAnalysis)){
+      const group=chain.choices.find(row=>row.members?.some(member=>member.value===preferredAnalysis)&&
+        (!preferredRun||(chain.byAnalysis.get(row.value)||[]).some(run=>run.rally_run_id===preferredRun)));
+      if(group)preferredAnalysis=group.value;
+    }
     const unchanged=retainCurrent&&s.analysis===preferredAnalysis&&s.run===preferredRun&&
       chain.choices.some(row=>row.value===s.analysis)&&
       (!s.run||(chain.byAnalysis.get(s.analysis)||[]).some(row=>row.rally_run_id===s.run));
@@ -3770,7 +3798,7 @@
       throw Error("Новая версия анализа ещё недоступна");
     s.chain=chain;
     const rawVideo=!exact&&!preferredAnalysis&&s.projectVideos.includes(s.previewVideoWithoutAnalysis)?s.previewVideoWithoutAnalysis:"";
-    if(rawVideo)preferredAnalysis=newestPrimaryAnalysis(chain.choices.filter(row=>row.video===rawVideo));
+    if(rawVideo)preferredAnalysis=newestPrimaryAnalysis(chain.choices.filter(row=>row.video===rawVideo||row.members?.some(member=>member.video===rawVideo)));
     options(ui.analysis,chain.choices,"value",item=>item.label,
       chain.choices.length?"Выберите 1 фазу":"Нет результатов 1 фазы",
       !chain.choices.length||!preferredAnalysis&&(exact||!!rawVideo));
@@ -3820,7 +3848,7 @@
   const loadChain=async(preferredAnalysis="",preferredRun="",retainCurrent=false,freshOnly=false,exact=false)=>{
     const token=++s.chainEpoch,project=s.project;
     if(!retainCurrent){
-      if(s.projectRallyRequest?.project!==project){s.projectRallyRequest=null;s.projectRallies?.clear();}
+      if(s.projectRallyRequest?.project!==project||s.analysis!==preferredAnalysis){s.projectRallyRequest=null;s.projectRallies?.clear();}
       reset();
       s.analysis="";s.chain=null;
       options(ui.analysis,[],"value",x=>x,"Загрузка анализов…");
@@ -3890,8 +3918,8 @@
         if(cached){message(error.message,"error");return;}
         throw error;
       }
-      const fresh=builder.build(videos,overviews,runs.runs);
-      chainSnapshot.save(project,videos,overviews,runs.runs);
+      const fresh=builder.build(videos,overviews,runs.runs,runs.launches||[]);
+      chainSnapshot.save(project,videos,overviews,runs.runs,runs.launches||[]);
       if(!s.chain||chainSignature(s.chain)!==chainSignature(fresh)){
         // Preserve edits to the current selection made while revalidating.
         await renderChain(fresh,retainCurrent?s.analysis:
@@ -4355,48 +4383,50 @@
     if(!rallies.length&&!unassigned.length)
       ui.list.append(make("div","empty-state","В этом эталоне нет размеченных розыгрышей и касаний."));
   };
-  const projectRallyRuns=(chain,videos,activeRun)=>{
+  const projectRallyRuns=(chain,videos,activeRun,selectedAnalysis)=>{
     const choices=new Map();
-    for(const [analysis,runs] of chain?.byAnalysis||[]){
-      for(const row of runs){
-        const current=choices.get(row.video);
-        const newest=Number(row.created_at||0)-Number(current?.created_at||0)||
-          row.rally_run_id.localeCompare(current?.run||"");
-        if(!current||row.rally_run_id===activeRun||(current.run!==activeRun&&newest>0))
-          choices.set(row.video,{video:row.video,analysis,run:row.rally_run_id,created_at:row.created_at});
-      }
+    const groups=chain?.byAnalysis;
+    const analysis=selectedAnalysis||[...(groups||[])].find(([,rows])=>rows.some(row=>row.rally_run_id===activeRun))?.[0];
+    const runs=groups?.get(analysis)||[];
+    for(const row of runs){
+      const current=choices.get(row.video);
+      const newest=Number(row.created_at||0)-Number(current?.created_at||0)||
+        row.rally_run_id.localeCompare(current?.run||"");
+      if(!current||row.rally_run_id===activeRun||(current.run!==activeRun&&newest>0))
+        choices.set(row.video,{video:row.video,analysis,run:row.rally_run_id,created_at:row.created_at});
     }
     return videos.map(video=>choices.get(video)).filter(Boolean);
   };
+  const loadProjectRallySource=async(project,source)=>{
+    const query={project_id:project,rally_run_id:source.run};
+    const [raw,marks]=await Promise.all([
+      previewCache.load(url("/api/cpu/native/rallies/timeline",query),900000,true),
+      previewCache.load(url("/api/cpu/native/rallies/marks",query),7000).catch(()=>null)
+    ]);
+    if(raw.schema!=="volley-native-rally-timeline/1"||raw.project_id!==project||
+       raw.rally_run_id!==source.run||raw.video!==source.video||!Array.isArray(raw.rallies)||
+       !Number.isFinite(raw.fps)||raw.fps<=0||
+       !raw.rallies.every(item=>valid(item.candidate_id)&&Number.isSafeInteger(item.start_frame)&&
+         Number.isSafeInteger(item.end_frame)&&item.start_frame>=0&&item.end_frame>=item.start_frame))
+      throw Error("Некорректные розыгрыши проекта");
+    return {...source,rows:raw.rallies,fps:raw.fps,offset:Number(raw.analysis_offset_sec)||0,
+      marked:marks?new Set(marks.candidate_ids||[]):null};
+  };
   const refreshProjectRallies=async()=>{
-    const project=s.project,choices=projectRallyRuns(s.chain,s.projectVideos,s.run);
+    const project=s.project,choices=projectRallyRuns(s.chain,s.projectVideos,s.run,s.analysis);
     const previous=s.projectRallyRequest;
-    const signature=JSON.stringify(choices.map(({run})=>run));
+    const signature=JSON.stringify([s.analysis,choices.map(({run})=>run)]);
     if(previous?.project===project&&previous.signature===signature)return;
     const update={project,signature};
     s.projectRallyRequest=update;
     const existing=s.projectRallies;
     const next=new Map(choices.map(source=>[source.run,previous?.project===project?
-      existing.get(source.run)||source:source]));
+      {...existing.get(source.run),...source}:source]));
     s.projectRallies=next;
     cards();
     const missing=[...next.values()].filter(source=>!source.rows);
     for(let offset=0;offset<missing.length;offset+=4){
-      const loaded=await Promise.allSettled(missing.slice(offset,offset+4).map(async source=>{
-        const query={project_id:project,rally_run_id:source.run};
-        const [raw,marks]=await Promise.all([
-          previewCache.load(url("/api/cpu/native/rallies/timeline",query),900000,true),
-          previewCache.load(url("/api/cpu/native/rallies/marks",query),7000).catch(()=>null)
-        ]);
-        if(raw.schema!=="volley-native-rally-timeline/1"||raw.project_id!==project||
-           raw.rally_run_id!==source.run||raw.video!==source.video||!Array.isArray(raw.rallies)||
-           !Number.isFinite(raw.fps)||raw.fps<=0||
-           !raw.rallies.every(item=>valid(item.candidate_id)&&Number.isSafeInteger(item.start_frame)&&
-             Number.isSafeInteger(item.end_frame)&&item.start_frame>=0&&item.end_frame>=item.start_frame))
-          throw Error("Некорректные розыгрыши проекта");
-        return {...source,rows:raw.rallies,fps:raw.fps,offset:Number(raw.analysis_offset_sec)||0,
-          marked:marks?new Set(marks.candidate_ids||[]):null};
-      }));
+      const loaded=await Promise.allSettled(missing.slice(offset,offset+4).map(source=>loadProjectRallySource(project,source)));
       if(s.projectRallyRequest!==update||s.project!==project)return;
       for(const result of loaded){
         if(result.status==="fulfilled")next.set(result.value.run,result.value);
@@ -4431,16 +4461,34 @@
       (b.item.motion_event_count||0)-(a.item.motion_event_count||0));
     return entries;
   };
-  const openProjectRally=async(source,item)=>{
-    if(source.run===s.run){view(item);return;}
-    if(!s.chain?.byAnalysis.get(source.analysis)?.some(row=>row.rally_run_id===source.run))return;
+  const openProjectRally=async(source,item,follow=false)=>{
+    if(source.analysis!==s.analysis||!s.chain?.byAnalysis.get(source.analysis)?.some(row=>row.rally_run_id===source.run))return;
+    if(source.run===s.run){view(item);if(follow)void followSequenceRally();return;}
     const scroll=ui.list.scrollTop;
     ui.analysis.value=source.analysis;
     refreshPicker(ui.analysis);
     await setAnalysis(source.run,true,"",{...source,item});
     if(s.run===source.run&&s.current===item.candidate_id){
       ui.list.scrollTop=scroll;
-      alignActiveRally();
+      if(follow)void followSequenceRally();
+    }
+  };
+  const advanceProjectRally=async()=>{
+    const project=s.project,analysis=s.analysis,run=s.run,current=s.current,generation=s.generation;
+    const valid=()=>s.project===project&&s.analysis===analysis&&s.run===run&&
+      s.current===current&&s.generation===generation&&s.playbackMode==="sequence";
+    const sources=[...s.projectRallies.values()];
+    const index=sources.findIndex(source=>source.run===run);
+    if(index<0)return;
+    for(let source of sources.slice(index+1)){
+      if(!valid())return;
+      if(!source.rows){
+        source=await loadProjectRallySource(project,source);
+        if(!valid()||s.projectRallies.get(source.run)?.analysis!==analysis)return;
+        s.projectRallies.set(source.run,source);
+      }
+      const first=[...source.rows].sort((a,b)=>a.start_frame-b.start_frame)[0];
+      if(first){await openProjectRally(source,first,true);return;}
     }
   };
   const projectRallyCard=({source,item})=>{
@@ -5064,7 +5112,7 @@
     const id=ui.run.value;reset();
     if(!(s.chain?.byAnalysis.get(s.analysis)||[]).some(row=>row.rally_run_id===id))return;
     s.run=id;
-    s.video=s.chain.choices.find(row=>row.value===s.analysis)?.video||"";
+    s.video=(s.chain.byAnalysis.get(s.analysis)||[]).find(row=>row.rally_run_id===id)?.video||"";
     sourceSelection.save(s.project,s.analysis,s.run);
     window.dispatchEvent(new CustomEvent("volley:postprocessing-change",{
       detail:{project_id:s.project,rally_run_id:s.run}
@@ -5078,14 +5126,25 @@
   const refreshQueueRallies=status=>{
     const project=status.project_id;
     if(project!==s.project)return;
+    const queue=status.queue_id||status.project_queue.videos?.[0]?.id||status.id||status.pipeline_id;
+    if(!queue)return;
     const published=(status.project_queue.videos||[]).map(row=>row.postprocessing_id).filter(Boolean);
-    if(!published.length)return;
-    const signature=JSON.stringify(published);
     const previous=s.queueRallyUpdates.get(project);
+    if(!published.length){
+      if(status.project_queue.active&&previous?.queue!==queue)
+        s.queueRallyUpdates.set(project,{queue,live:true});
+      return;
+    }
+    const signature=JSON.stringify([queue,published]);
     if(previous?.signature===signature)return;
-    const update={signature};
+    const update={signature,queue};
     s.queueRallyUpdates.set(project,update);
-    void loadChain(s.analysis,s.run,Boolean(s.chain),true).catch(error=>{
+    const first=previous?.queue!==queue||!previous.signature;
+    const launch=JSON.stringify(["","launch",queue]);
+    const chooseNew=first&&(status.project_queue.active||previous?.live===true||!s.analysis);
+    invalidateCatalog();
+    void loadChain(chooseNew?launch:s.analysis,chooseNew?published[0]:s.run,
+      !chooseNew&&Boolean(s.chain),true).catch(error=>{
       if(s.queueRallyUpdates.get(project)===update)s.queueRallyUpdates.delete(project);
       if(project===s.project)failed(error);
     });
@@ -5214,10 +5273,7 @@
       const next=nextRally();
       if(next){view(next);void followSequenceRally();return;}
       if(s.projectRallies?.size&&!training.active){
-        const sources=[...s.projectRallies.values()];
-        const index=sources.findIndex(source=>source.run===s.run);
-        const source=index>=0?sources.slice(index+1).find(entry=>entry.rows?.length):null;
-        if(source){s.stopAt=null;ui.video.pause();void openProjectRally(source,source.rows[0]).catch(failed);return;}
+        s.stopAt=null;ui.video.pause();void advanceProjectRally().catch(failed);return;
       }
     }
     s.stopAt=null;

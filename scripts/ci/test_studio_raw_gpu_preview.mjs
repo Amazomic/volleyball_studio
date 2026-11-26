@@ -11,7 +11,7 @@ assert.match(html,/id="studio-raw-ball"[^>]*value="0"/,
   "Raw VballNet candidates should be visible before tuning confidence");
 assert.doesNotMatch(html,/id="studio-raw-obsolete-ball"/,
   "Obsolete ball candidates must not appear in the new UI");
-const first=source.indexOf("  const rawFusion=()=>");
+const first=source.indexOf("  const selectedFusion=video=>");
 const last=source.indexOf("  const cpuTouchStyle=",first);
 assert.ok(first>=0&&last>first);
 const scheduled=[];
@@ -20,8 +20,8 @@ const messages=[];
 const s={
   project:"p",analysis:"fusion-a",video:"match.mp4",run:"",
   chain:{choices:[
-    {value:"fusion-a",kind:"fusion",id:"a".repeat(32)},
-    {value:"fusion-b",kind:"fusion",id:"b".repeat(32)}
+    {value:"fusion-a",kind:"fusion",video:"match.mp4",id:"a".repeat(32)},
+    {value:"fusion-b",kind:"fusion",video:"match.mp4",id:"b".repeat(32)}
   ]}
 };
 const overlay={
@@ -30,7 +30,7 @@ const overlay={
   cache:new Map(),rawFrames:new Map(),rawDetectors:new Map(),failed:new Map(),controllers:new Map(),fetching:new Set()
 };
 const ctx={
-  s,overlay,timeline:{data:null},AbortController,Date,setTimeout:fn=>{scheduled.push(fn);return scheduled.length;},clearTimeout:()=>{},
+  s,overlay,window:{},timeline:{data:null},AbortController,Date,setTimeout:fn=>{scheduled.push(fn);return scheduled.length;},clearTimeout:()=>{},
   url:(route,params)=>route+"?"+new URLSearchParams(params),
   request:(path)=>new Promise((resolve,reject)=>requests.push({path,resolve,reject})),
   drawOverlay:()=>{},updateRawDetectorLabel:()=>{},overlayMessage:message=>messages.push(message),

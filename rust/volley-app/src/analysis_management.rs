@@ -736,12 +736,71 @@ pub(crate) fn display_name(root: &Path, kind: &str, id: &str) -> Result<Option<S
     Ok(names[format!("{kind}:{id}")].as_str().map(str::to_owned))
 }
 
+fn edit_launch(root: &Path, req: &EditRequest) -> Result<Option<std::path::PathBuf>, ApiError> {
+    if !opaque_id(&req.id)
+        || !crate::studio_pipeline::project_launches(root, &req.project_id)?
+            .iter()
+            .any(|row| row["id"] == req.id && row["hidden"] != true)
+    {
+        return Err(storage::not_found("Project analysis launch not found"));
+    }
+    let names_path = root.join("native_analysis_names.json");
+    let mut names = storage::read_json(&names_path)?.unwrap_or_else(|| json!({}));
+    let map = names
+        .as_object_mut()
+        .ok_or_else(|| storage::conflict("Invalid analysis names"))?;
+    match req.action.as_str() {
+        "rename" => {
+            let name = req.name.as_deref().unwrap_or("").trim();
+            if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
+                return Err(storage::bad_request(
+                    "Analysis name must contain 1 to 100 characters",
+                ));
+            }
+            map.insert(format!("launch:{}", req.id), json!(name));
+        }
+        "delete" => {
+            map.insert(format!("hidden_launch:{}", req.id), json!(true));
+        }
+        _ => return Err(storage::bad_request("Unknown action")),
+    }
+    storage::write_json_atomic(&names_path, &names)?;
+    Ok(None)
+}
+
 fn edit(root: &Path, req: &EditRequest) -> Result<Option<std::path::PathBuf>, ApiError> {
     recover(root)?;
+    if req.kind == "launch" {
+        return edit_launch(root, req);
+    }
     if !opaque_id(&req.id)
         || !matches!(req.kind.as_str(), "gpu" | "fusion" | "unlinked" | "rallies")
     {
         return Err(storage::bad_request("Некорректный результат"));
+    }
+    if req.action == "delete"
+        && matches!(req.kind.as_str(), "fusion" | "rallies")
+        && crate::studio_pipeline::project_launches(root, &req.project_id)?
+            .iter()
+            .filter(|launch| launch["hidden"] != true)
+            .any(|launch| {
+                launch["members"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|member| {
+                        let field = if req.kind == "fusion" {
+                            "analysis_id"
+                        } else {
+                            "postprocessing_id"
+                        };
+                        member["video"] == req.video && member[field] == req.id
+                    })
+            })
+    {
+        return Err(storage::conflict(
+            "Result belongs to a project analysis launch",
+        ));
     }
     let all = entries(root)?;
     let target_kind = if req.kind == "unlinked" {
@@ -1044,11 +1103,17 @@ pub async fn change(
     Json(req): Json<EditRequest>,
 ) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
-    storage::video_name(&req.video)?;
+    if req.kind != "launch" {
+        storage::video_name(&req.video)?;
+    }
     projects::existing_project(&state, &req.project_id)?;
     let _lock = project_guard::write_guard(&state, &req.project_id)?;
     let _catalog_lock = catalog_guard(&state, &req.project_id)?;
-    if crate::studio_pipeline::uses_analysis(&state, &req.project_id, &req.video, &req.id).await? {
+    if (req.kind == "launch"
+        && crate::studio_pipeline::has_active_for_project(&req.project_id).await)
+        || crate::studio_pipeline::uses_analysis(&state, &req.project_id, &req.video, &req.id)
+            .await?
+    {
         return Err(storage::conflict(
             "Этот результат используется выполняющимся анализом",
         ));
