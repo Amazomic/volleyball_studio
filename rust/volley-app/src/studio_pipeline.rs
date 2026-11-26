@@ -396,7 +396,7 @@ fn history_row(path: &Path, id: &str, status: &Value) -> Value {
         .filter(|items| !items.is_empty())
         .cloned()
         .unwrap_or(stages);
-    json!({"id":id,"video":status["video"],"mode":status["mode"],
+    json!({"id":id,"project_id":status["project_id"],"video":status["video"],"mode":status["mode"],
         "status":status["status"],"stage":status["stage"],"error":status["error"],
         "started_ms":started,"duration_ms":started.zip(finished).and_then(|(a,b)| b.checked_sub(a)),
         "gpu_reused":status["gpu_reused"],"result_reused":status["result_reused"],
@@ -6761,6 +6761,12 @@ mod branching_tests {
             archived_history_rows(&handler_state, "abc123def456", 0, &BTreeSet::new()).unwrap();
         let row = &page["runs"][0];
         assert_eq!(row["id"], ids[0]);
+        assert_eq!(row["project_id"], "abc123def456");
+        assert!(row["videos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|video| video["project_id"] == "abc123def456"));
         assert_eq!(row["status"], "failed");
         assert_eq!(row["duration_ms"], 4000);
         assert_eq!(row["videos"].as_array().unwrap().len(), 2);
