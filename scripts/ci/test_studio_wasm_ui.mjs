@@ -40,7 +40,7 @@ const profileInputs=[...markup.matchAll(/<input[^>]*id="(studio-(?:gpu|post)[^"]
     for(const attr of row[0].matchAll(/([\w-]+)="([^"]*)"/g))attrs[attr[1]]=attr[2];
     return attrs;
   });
-assert.equal(profileInputs.length,44,"GPU + CPU post-processing profile fields");
+assert.equal(profileInputs.length,43,"GPU + CPU post-processing profile fields");
 const profileSelects=[...markup.matchAll(/<select[^>]*id="(studio-(?:gpu|post)[^"]*)"[^>]*>/g)]
   .map(row=>Object.fromEntries([...row[0].matchAll(/([\w-]+)="([^"]*)"/g)]
     .map(attr=>[attr[1],attr[2]])));

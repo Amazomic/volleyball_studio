@@ -287,14 +287,16 @@ assert.match(pipelineBody,/request\.mode\.allows_gpu_execution\(\) && request\.g
 assert.match(js,/payload\.post=postProfile\(\);/);
 assert.doesNotMatch(js,/if\(mode!=="gpu"\)payload\.post/);
 assert.equal(stages.find(item=>item[0]==="touch_detector")[3],1);
-assert.deepEqual(actualInputs("touch_detector"),["ball_stabilizer","boxes","rallies"]);
+assert.deepEqual(actualInputs("touch_detector"),["rallies"]);
+assert.ok(stages.findIndex(([id])=>id==="rallies")+1===stages.findIndex(([id])=>id==="touch_detector"));
+assert.ok(actualInputs("players").includes("touch_detector"));
 assert.deepEqual(actualInputs("touches"),["ball_stabilizer","pose","rallies","tracking"]);
 assert.deepEqual(actualInputs("publish"),["rallies","touches","tracking"]);
 assert.deepEqual(actualInputs("identity"),["publish","tracking","video"]);
 assert.equal(dataLinks.state("pose",null),"optional");
 assert.equal(dataLinks.state("pose",{profile:{gpu:{pose_enabled:false}}}),"disabled");
 assert.equal(dataLinks.state("pose",{gpu_reused:true,gpu_jobs:{pose:"saved"}}),"available");
-assert.deepEqual(actualInputs("pose"),["touch_detector","video"]);
+assert.deepEqual(actualInputs("pose"),["boxes","video"]);
 assert.deepEqual(actualInputs("touch_types"),[]);
 assert.equal(dataLinks.state("pose",{profile:{post:{pose_classification:false}},gpu_jobs:{pose:"saved"}}),"available");
 const withClass=(stageId,classes)=>({
@@ -358,7 +360,7 @@ vm.runInContext('updatePipelineGraph(graph,{status:"running",stage_id:"touches",
 assert.equal(touchCard.classList["is-active"],true);
 assert.equal(touchCard.classList["is-skipped"],false);
 vm.runInContext('updatePipelineGraph(graph,{status:"complete",profile:{gpu:{pose_enabled:false}},stages:[{id:"touches",finished_ms:3000}]});',stageContext);
-assert.equal(detectorCard.classList["is-skipped"],true);
+assert.equal(detectorCard.classList["is-skipped"],false);
 assert.equal(detectorCard.dataset.status,"idle");
 assert.equal(touchCard.classList["is-complete"],true);
 assert.equal(touchCard.classList["is-skipped"],false);

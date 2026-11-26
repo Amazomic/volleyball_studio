@@ -1613,9 +1613,7 @@ fn requested_gpu_model_stack(detector: DetectorVariant) -> &'static str {
 }
 
 fn rally_pipeline_enabled(request: &StartRequest) -> bool {
-    request.gpu.pose_enabled
-        && request.mode.allows_gpu_execution()
-        && std::env::var("VOLLEY_RALLY_PIPELINE").as_deref() != Ok("0")
+    request.gpu.pose_enabled && request.mode.allows_gpu_execution()
 }
 fn compatible_version(saved: &Value, request: &StartRequest, identity: &Value) -> bool {
     saved["schema"] == SCHEMA
@@ -1625,7 +1623,10 @@ fn compatible_version(saved: &Value, request: &StartRequest, identity: &Value) -
         && saved["project_id"] == request.project_id
         && saved["video"] == request.video
         && decode_profiles(saved["profile"]["gpu"].clone(), empty_profile())
-            .is_ok_and(|(gpu, _)| json!(gpu) == json!(request.gpu))
+            .is_ok_and(|(mut gpu, _)| {
+                gpu.parallel_rally_poses = request.gpu.parallel_rally_poses;
+                json!(gpu) == json!(request.gpu)
+            })
         // Older pipeline status files can predate the source_identity field;
         // the fusion and both GPU manifests are always validated separately.
         && (saved["source_identity"].is_null() || saved["source_identity"] == *identity)
@@ -2360,7 +2361,6 @@ async fn pipeline(
                         request.gpu.primary_rallies,
                         request.post.ball_stabilizer,
                         block_mode.then(|| cpu_retrack::EarlyPoseOptions {
-                            parallel_rally_poses: request.gpu.parallel_rally_poses,
                             sampling: request.gpu.pose_sampling(),
                             tracking: request.post.tracking,
                             court: None,
@@ -2386,12 +2386,19 @@ async fn pipeline(
                                     .map_err(|e| e.to_string())?;
                             }
                             if let Some((mask, decoded_frames)) = rally_mask {
-                                publish_primary_rally_mask(path, status, mask, decoded_frames)?;
+                                return publish_primary_rally_mask(
+                                    path,
+                                    status,
+                                    mask,
+                                    decoded_frames,
+                                );
                             }
-                            let label = if fraction == 0.399999 && rally_mask.is_none() {
+                            let label = if fraction == 0.399999 {
                                 "ball_stabilizer"
-                            } else if fraction == 0.3999995 && rally_mask.is_none() {
+                            } else if fraction == 0.3999995 {
                                 "Rally Detector"
+                            } else if fraction == 0.39999975 {
+                                "Touch Detector"
                             } else if fraction < 0.4 {
                                 "GPU · VBallNet: траектория мяча и розыгрыши"
                             } else {
@@ -2545,15 +2552,19 @@ async fn pipeline(
             early: early_poses,
         },
     );
-    let pose_permit = if refine_pose.is_some() {
+    let pose_permit = if let Some(refinement) = &refine_pose {
         let plan =
             preparation::plan_for(app, &request.project_id, &request.video).map_err(reason)?;
         let native = volley_media::probe(&plan.source)?;
         if !shared_native_pose_supported(true, native.width, native.height) {
             return Err("RTMPose: исходное разрешение превышает предел декодера".into());
         }
-        progress(path, status, "Ожидание очереди RTMPose", 86.0)?;
-        Some(acquire_gpu(&app.inference_limit, cancel).await?)
+        if refinement.early.is_none() {
+            progress(path, status, "Ожидание очереди RTMPose", 86.0)?;
+            Some(acquire_gpu(&app.inference_limit, cancel).await?)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -4378,9 +4389,16 @@ mod tests {
         assert_eq!(result["status"], "complete", "{result}");
         let stages = result["stages"].as_array().unwrap();
         let position = |id| stages.iter().position(|stage| stage["id"] == id).unwrap();
-        assert!(position("boxes") < position("touch_detector"));
-        assert!(position("touch_detector") < position("pose"));
-        assert!(position("pose") < position("touches"));
+        assert!(position("rallies") < position("touch_detector"));
+        assert!(position("touch_detector") < position("players"));
+        assert!(position("players") < position("touches"));
+        let progress = &result["rally_stage_progress"];
+        assert_eq!(progress["boxes"]["state"], "complete");
+        assert_eq!(progress["pose"]["state"], "complete");
+        assert!(
+            progress["boxes"]["started_ms"].as_u64().unwrap()
+                <= progress["pose"]["started_ms"].as_u64().unwrap()
+        );
         assert_eq!(
             result["primary_tracking"]["pose_sampling"],
             cpu_retrack::pose_sampling_contract(Default::default(), Default::default()),
@@ -4432,10 +4450,10 @@ mod tests {
         });
         let request = serde_json::from_value::<StartRequest>(json!({
             "project_id":project_id,"video":videos[0],"mode":"full",
-            "gpu":{"pose_stride":1,"primary_rallies":{"min_trajectory_seconds":1.0}},
+            "gpu":{"pose_stride":1,"parallel_rally_poses":false,"primary_rallies":{"min_trajectory_seconds":1.0}},
             "post":{"reid_device":"cpu","reid_buffer_mib":0},
             "video_profiles":{
-                "first.mp4":{"gpu":{"pose_stride":1,"primary_rallies":{"min_trajectory_seconds":1.0}},
+                "first.mp4":{"gpu":{"pose_stride":1,"parallel_rally_poses":false,"primary_rallies":{"min_trajectory_seconds":1.0}},
                     "post":{"reid_device":"cpu","reid_buffer_mib":0}},
                 "second.mp4":{"gpu":{"pose_stride":3,"primary_rallies":{"min_trajectory_seconds":1.0}},
                     "post":{"reid_device":"cpu","reid_buffer_mib":0}}
@@ -4473,6 +4491,16 @@ mod tests {
                 .as_u64()
                 .unwrap()
         };
+        for row in &rows {
+            let first_phase_stages = row["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|stage| stage["id"].as_str())
+                .filter(|id| matches!(*id, "rallies" | "touch_detector" | "players"))
+                .collect::<Vec<_>>();
+            assert_eq!(first_phase_stages, ["rallies", "touch_detector", "players"]);
+        }
         assert!(stage_start(&rows[0], "ball") <= stage_start(&rows[1], "ball"));
         let detector_finished = rows[0]["stages"]
             .as_array()
@@ -4483,7 +4511,17 @@ mod tests {
             .as_u64()
             .unwrap();
         assert!(stage_start(&rows[1], "ball") >= detector_finished);
-        assert!(rows[1]["started_ms"].as_u64().unwrap() < rows[0]["finished_ms"].as_u64().unwrap());
+        assert!(stage_start(&rows[1], "ball") < rows[0]["finished_ms"].as_u64().unwrap());
+        for row in &rows {
+            let progress = &row["rally_stage_progress"];
+            assert!(progress["boxes"]["rallies_total"].as_u64().unwrap() > 0);
+            assert!(
+                progress["boxes"]["started_ms"].as_u64().unwrap()
+                    < progress["detector_finished_ms"].as_u64().unwrap()
+            );
+        }
+        assert_eq!(rows[0]["profile"]["gpu"]["parallel_rally_poses"], false);
+        assert_eq!(rows[1]["profile"]["gpu"]["parallel_rally_poses"], true);
         assert_eq!(rows[0]["profile"]["gpu"]["pose_stride"], 1);
         assert_eq!(rows[1]["profile"]["gpu"]["pose_stride"], 3);
         assert_ne!(
@@ -5111,6 +5149,9 @@ mod tests {
             "gpu_model_stack":RFDETR_GPU_MODEL_STACK,"profile":{"gpu":medium.gpu}
         });
         assert!(compatible_version(&saved, &medium, &Value::Null));
+        let mut previous = saved.clone();
+        previous["profile"]["gpu"]["parallel_rally_poses"] = json!(false);
+        assert!(compatible_version(&previous, &medium, &Value::Null));
         assert!(!compatible_version(&saved, &large, &Value::Null));
     }
 

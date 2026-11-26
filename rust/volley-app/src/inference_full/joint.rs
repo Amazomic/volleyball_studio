@@ -9,9 +9,8 @@ use crate::rally_handoff::{
     rally_windows, update_progress as update_rally_progress, RallyHandoff, RallyStageProgress,
 };
 pub(crate) use rally_mask::PrimaryRallySettings;
-use rally_mask::RallyMask;
+use rally_mask::{RallyDetection, RallyMask};
 use std::cell::RefCell;
-use std::io::{BufRead, BufReader};
 use std::sync::OnceLock;
 use volley_media::nvdec::NvdecCodec;
 use volley_media::raw_decoder::{DecodeBackend, DecodePreference, PrimaryDecodeSummary};
@@ -439,7 +438,6 @@ pub(crate) fn run_joint_pair(
     let pose = RefCell::new(None);
     let mut gpu_pose = None;
     let mut early_worker = None;
-    let mut deferred_pose = None;
     let early_progress = early_pose.as_ref().map(|options| options.progress.clone());
     let early_pose_error = None;
     let rally_filter;
@@ -539,7 +537,11 @@ pub(crate) fn run_joint_pair(
             total_frames,
             None,
         )?;
-        let (mut mask, contacts) = RallyMask::detect(
+        let RallyDetection {
+            mut mask,
+            contacts,
+            impacts,
+        } = RallyMask::detect(
             &trajectory,
             rally_settings,
             stabilizer_settings,
@@ -586,14 +588,21 @@ pub(crate) fn run_joint_pair(
         )
         .map_err(|error| format!("Save primary rally mask: {error:?}"))?;
 
-        let player_total = mask.sampled_frames(person_stride);
-        player_target = player_total;
         report(
-            0.4,
-            0,
-            player_total,
+            0.3999995,
+            ball_scan.decode.decoded_frames,
+            total_frames,
             Some((&mask_value, ball_scan.decode.decoded_frames)),
         )?;
+        report(0.39999975, 0, 0, None)?;
+        let impacts = match impacts {
+            Some(impacts) => impacts,
+            None => crate::cpu_touches::trajectory_breaks(&trajectory, dimensions, cancelled)?,
+        };
+
+        let player_total = mask.sampled_frames(person_stride);
+        player_target = player_total;
+        report(0.4, 0, player_total, None)?;
         rally_filter = Some(mask_value);
         if cancelled.load(Ordering::Acquire) {
             return Err("cancelled".into());
@@ -667,29 +676,21 @@ pub(crate) fn run_joint_pair(
             update_rally_progress(&options.progress, |p| p.initialize(&windows))?;
             let selected = windows.iter().map(|w| (w.left, w.right)).collect();
             let handoff = RallyHandoff::new(windows, frames)?;
-            let parallel = options.parallel_rally_poses;
-            let start = move || -> Result<_, String> {
-                let (worker, sender) = EarlyPoseWorker::start(
-                    options,
-                    original.to_owned(),
-                    state.repository_root.clone(),
-                    range,
-                    decoded_frames,
-                    selected,
-                    trajectory,
-                    rallies,
-                    dimensions,
-                    session_memory,
-                )?;
-                Ok((worker, handoff, sender))
-            };
-            if parallel {
-                let (worker, handoff, sender) = start()?;
-                person_writer.rally_handoff = Some((handoff, sender));
-                early_worker = Some(worker);
-            } else {
-                deferred_pose = Some(start);
-            }
+            let (worker, sender) = EarlyPoseWorker::start(
+                options,
+                original.to_owned(),
+                state.repository_root.clone(),
+                range,
+                decoded_frames,
+                selected,
+                trajectory,
+                rallies,
+                impacts,
+                dimensions,
+                session_memory,
+            )?;
+            person_writer.rally_handoff = Some((handoff, sender));
+            early_worker = Some(worker);
         }
         if zero_copy && pose_enabled {
             gpu_pose = Some(GpuPoseStage::new(
@@ -846,22 +847,6 @@ pub(crate) fn run_joint_pair(
         update_rally_progress(progress, RallyStageProgress::detector_finished)?;
         report(1.0, player_target, player_target, None)?;
     }
-    if let Some(start) = deferred_pose {
-        let (worker, handoff, sender) = start()?;
-        replay_rally_evidence(
-            BufReader::new(
-                File::open(players.folder.join(RESULT_FILE)).map_err(|e| e.to_string())?,
-            ),
-            handoff,
-            cancelled,
-            |rally| {
-                sender.send(rally)?;
-                report(1.0, player_target, player_target, None)
-            },
-        )?;
-        drop(sender);
-        early_worker = Some(worker);
-    }
     if let Some(worker) = &early_worker {
         while !worker.is_finished() {
             if cancelled.load(Ordering::Acquire) {
@@ -898,103 +883,9 @@ pub(crate) fn run_joint_pair(
     })
 }
 
-fn replay_rally_evidence(
-    reader: impl BufRead,
-    mut handoff: RallyHandoff<RawDetection>,
-    cancelled: &AtomicBool,
-    mut send: impl FnMut(crate::rally_handoff::CompletedRally<RawDetection>) -> Result<(), String>,
-) -> Result<(), String> {
-    #[derive(Deserialize)]
-    struct Window {
-        first_frame: u64,
-        raw_detections: Vec<checkpoint::SavedDetection>,
-    }
-    for line in reader.lines() {
-        if cancelled.load(Ordering::Acquire) {
-            return Err("cancelled".into());
-        }
-        let window: Window =
-            serde_json::from_str(&line.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-        let records = window
-            .raw_detections
-            .into_iter()
-            .map(|row| row.into_raw("player"))
-            .collect::<Result<Vec<_>, _>>()?;
-        for rally in handoff.push(window.first_frame, &records, |row| row.frame_index)? {
-            send(rally)?;
-        }
-    }
-    handoff.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn deferred_rally_replay_matches_streaming_packets_and_checks_completion() {
-        let windows = rally_windows(&[(1, 16), (21, 35)], &[(3, 12), (23, 33)]).unwrap();
-        let mut streaming = RallyHandoff::new(windows.clone(), 36).unwrap();
-        let mut expected = Vec::new();
-        let mut evidence = Vec::new();
-        for first in [0, 9, 18, 27] {
-            let records = vec![RawDetection {
-                frame_index: first + 4,
-                class_name: "player",
-                score: 0.73,
-                bbox_xyxy_norm: [0.1, 0.2, 0.3, 0.4],
-                query_index: Some(7),
-                touch_probability: None,
-                head_point_norm: None,
-            }];
-            expected.extend(
-                streaming
-                    .push(first, &records, |row| row.frame_index)
-                    .unwrap()
-                    .into_iter()
-                    .map(|packet| (packet.window, packet.observations)),
-            );
-            serde_json::to_writer(
-                &mut evidence,
-                &json!({"first_frame":first,"raw_detections":records}),
-            )
-            .unwrap();
-            evidence.push(b'\n');
-        }
-        streaming.finish().unwrap();
-        let cancel = AtomicBool::new(false);
-        let mut actual = Vec::new();
-        replay_rally_evidence(
-            evidence.as_slice(),
-            RallyHandoff::new(windows.clone(), 36).unwrap(),
-            &cancel,
-            |packet| {
-                actual.push((packet.window, packet.observations));
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(actual, expected);
-        assert_eq!(actual.len(), 2);
-        assert!(replay_rally_evidence(
-            &[][..],
-            RallyHandoff::new(windows.clone(), 36).unwrap(),
-            &cancel,
-            |_| Ok(()),
-        )
-        .is_err());
-        cancel.store(true, Ordering::Release);
-        assert_eq!(
-            replay_rally_evidence(
-                evidence.as_slice(),
-                RallyHandoff::new(windows, 36).unwrap(),
-                &cancel,
-                |_| panic!("Cancelled replay must not send packets"),
-            )
-            .unwrap_err(),
-            "cancelled"
-        );
-    }
 
     #[test]
     fn zero_copy_source_color_matrix_preserves_range_and_bt2020() {

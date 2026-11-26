@@ -6,12 +6,22 @@ use volley_core::ball_interpolation::{
     BALL_STABILIZER_ALGORITHM_VERSION,
 };
 use volley_core::rally_reconstruction::serve_flight::{ServeFlightDetector, SERVE_FLIGHT_VERSION};
-use volley_core::{court_geometry::CourtTransform, motion::GroundContact};
+use volley_core::{
+    court_geometry::CourtTransform,
+    motion::{GroundContact, TrajectoryBreak},
+};
 
 #[derive(Debug, Serialize)]
 struct RallyBallStabilizer {
     algorithm: &'static str,
     settings: BallStabilizerSettings,
+}
+
+#[derive(Debug)]
+pub(super) struct RallyDetection {
+    pub mask: RallyMask,
+    pub contacts: Vec<GroundContact>,
+    pub impacts: Option<Vec<TrajectoryBreak>>,
 }
 
 const CONTEXT_FRAMES: u64 = 30;
@@ -234,8 +244,9 @@ impl RallyMask {
         court: Option<&CourtTransform>,
         dimensions: (u32, u32),
         cancelled: &AtomicBool,
-    ) -> Result<(Self, Vec<GroundContact>), String> {
+    ) -> Result<RallyDetection, String> {
         let mut contacts = Vec::new();
+        let mut impacts = None;
         let serve_detector = court.and_then(ServeFlightDetector::new);
         let mask = Self::from_stabilized(
             trajectory,
@@ -255,11 +266,16 @@ impl RallyMask {
                         dimensions.1,
                         cancelled,
                     )?;
+                    impacts = Some(breaks);
                 }
                 Ok(contacts.iter().map(|contact| contact.frame).collect())
             },
         )?;
-        Ok((mask, contacts))
+        Ok(RallyDetection {
+            mask,
+            contacts,
+            impacts,
+        })
     }
 
     fn from_stabilized(
@@ -523,7 +539,7 @@ mod tests {
         .unwrap()
         .with_net(Some([[0.32, 0.2813], [0.68, 0.2813]]))
         .unwrap();
-        let (mask, _) = RallyMask::detect(
+        let RallyDetection { mask, .. } = RallyMask::detect(
             &trajectory,
             settings,
             stabilizer,
@@ -638,7 +654,11 @@ mod tests {
         let trajectory = RallyMask::stabilize(&samples, 900, stabilizer).unwrap();
         let baseline = RallyMask::from_ball_samples(&samples, 900, settings).unwrap();
         let cancel = AtomicBool::new(false);
-        let (mask, contacts) = RallyMask::detect(
+        let RallyDetection {
+            mask,
+            contacts,
+            impacts,
+        } = RallyMask::detect(
             &trajectory,
             settings,
             stabilizer,
@@ -648,6 +668,7 @@ mod tests {
         )
         .unwrap();
         assert!(contacts.is_empty());
+        assert!(impacts.is_none());
         assert_eq!(
             serde_json::to_value(mask).unwrap(),
             serde_json::to_value(baseline).unwrap()
@@ -704,7 +725,11 @@ mod tests {
         };
         let court = CourtTransform::new([[0.06, 1.02], [0.34, 0.294], [0.60, 0.288], [0.89, 1.03]])
             .unwrap();
-        let (mask, contacts) = RallyMask::detect(
+        let RallyDetection {
+            mask,
+            contacts,
+            impacts,
+        } = RallyMask::detect(
             &trajectory,
             PrimaryRallySettings::default(),
             BallStabilizerSettings::default(),
@@ -713,6 +738,23 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap();
+        let expected = crate::cpu_touches::trajectory_breaks(
+            &trajectory,
+            (3840, 2160),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(
+            impacts
+                .unwrap()
+                .iter()
+                .map(|impact| impact.frame)
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|impact| impact.frame)
+                .collect::<Vec<_>>()
+        );
         let impact = contacts
             .iter()
             .find(|c| (264..=266).contains(&c.frame))

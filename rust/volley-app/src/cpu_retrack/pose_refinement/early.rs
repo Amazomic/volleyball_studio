@@ -37,7 +37,6 @@ impl CompletedRallies {
 }
 
 pub(crate) struct EarlyPoseOptions {
-    pub parallel_rally_poses: bool,
     pub sampling: PoseSampling,
     pub tracking: TrackingOptions,
     pub court: Option<crate::video_edits::CourtSnapshot>,
@@ -63,6 +62,7 @@ struct WorkerInput {
     selected: Vec<(u64, u64)>,
     motion: StabilizedBallMotion,
     rallies: Vec<(u64, u64)>,
+    impacts: Vec<TrajectoryBreak>,
     dimensions: (u32, u32),
     memory_mb: u64,
 }
@@ -118,6 +118,7 @@ impl EarlyPoseWorker {
         selected: Vec<(u64, u64)>,
         motion: StabilizedBallMotion,
         rallies: Vec<(u64, u64)>,
+        impacts: Vec<TrajectoryBreak>,
         dimensions: (u32, u32),
         memory_mb: u64,
     ) -> Result<(Self, RallyWorkerSender), String> {
@@ -130,6 +131,7 @@ impl EarlyPoseWorker {
             selected,
             motion,
             rallies,
+            impacts,
             dimensions,
             memory_mb,
         };
@@ -292,8 +294,7 @@ fn build_local_plan(
         },
     )?;
     update_progress(&options.progress, |p| {
-        p.boxes_finished(frames, totals.tentative_tracks);
-        p.touch_started();
+        p.boxes_finished(frames, totals.tentative_tracks)
     })?;
     let mut reader = BoundedReader::open(&tracked)?;
     let mut schedule = PoseSchedule::new(options.sampling);
@@ -311,12 +312,10 @@ fn build_local_plan(
             serve_points,
             (f64::from(dimensions.0), f64::from(dimensions.1)),
         )?;
-        update_progress(&options.progress, RallyStageProgress::touch_frame)?;
     }
     if reader.line()?.is_some() || reader.finish() != digest {
         return Err("Early crop plan changed before pose inference".into());
     }
-    update_progress(&options.progress, RallyStageProgress::touch_finished)?;
     let reid_plan = if options.reid_crops.is_some() {
         crate::native_player_tracks::plan_shared_reid_crops(
             &tracked,
@@ -635,12 +634,7 @@ fn run(
     stop: &AtomicBool,
 ) -> Result<CompletedRallies, String> {
     let global_frames = input.decoded_frames / 9 * 9;
-    let touch_start = std::time::Instant::now();
-    let impacts = crate::cpu_touches::trajectory_breaks(&input.motion, input.dimensions, stop)?;
     let serve_points = initial_serve_pose_points(&input.motion, &input.rallies);
-    update_progress(&input.options.progress, |p| {
-        p.touch_trajectory_finished(touch_start.elapsed().as_millis().min(u64::MAX as u128) as u64);
-    })?;
     let make_plan = |packet| {
         update_progress(&input.options.progress, RallyStageProgress::boxes_started)?;
         build_local_plan(
@@ -648,7 +642,7 @@ fn run(
             &input.options,
             stop,
             global_frames,
-            &impacts,
+            &input.impacts,
             &serve_points,
             input.dimensions,
         )

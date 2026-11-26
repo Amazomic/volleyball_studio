@@ -1121,7 +1121,6 @@ fn phase1_checkpoint_cuda_resume() -> Result<(), String> {
             Default::default(),
             Some(EarlyPoseOptions {
                 court: None,
-                parallel_rally_poses: true,
                 sampling: Default::default(),
                 tracking: Default::default(),
                 interpolate_players: true,

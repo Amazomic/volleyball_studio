@@ -209,7 +209,7 @@
   const gpuProfile=()=>({
       stride:9,
       person_detector:$("studio-gpu-person-detector").value,
-      parallel_rally_poses:$("studio-gpu-parallel-rally-poses").checked,
+      parallel_rally_poses:true,
       gpu_memory_limit_mb:inputValue("studio-gpu-memory"),
       cpu_threads:inputValue("studio-gpu-threads"),
       pose_enabled:$("studio-gpu-pose-enabled").value==="1",
@@ -456,9 +456,9 @@
     ["ball","Детекция мяча","gpu",1],
     ["ball_stabilizer","ball_stabilizer","cpu",1],
     ["rallies","Розыгрыши","cpu",1],
+    ["touch_detector","Touch Detector","cpu",1],
     ["players","Поиск игроков","gpu",1],
     ["boxes","Стабилизация рамок","cpu",1],
-    ["touch_detector","Touch Detector","cpu",1],
     ["pose","Позы по стабилизированным рамкам","gpu",1],
     ["tracking","Трекинг ID","cpu",2],
     ["touches","Touch Attribution","cpu",2],
@@ -692,18 +692,16 @@
     ["video","ball"],
     ["ball","ball_stabilizer"],
     ["video","players"],
-    ["rallies","players"],
+    ["touch_detector","players"],
     ["video","pose","pose"],
-    ["touch_detector","pose","pose"],
+    ["boxes","pose","pose"],
     ["ball","boxes"],
     ["players","boxes"],
     ["rallies","boxes"],
     ["pose","tracking","pose"],
     ["boxes","tracking","no_pose"],
     ["ball_stabilizer","rallies"],
-    ["ball_stabilizer","touch_detector","pose"],
-    ["boxes","touch_detector","pose"],
-    ["rallies","touch_detector","pose"],
+    ["rallies","touch_detector"],
     ["ball_stabilizer","touches"],
     ["tracking","touches"],
     ["rallies","touches"],
@@ -729,7 +727,7 @@
     ball:["#studio-gpu-stride","#studio-gpu-memory","#studio-gpu-threads"],
     ball_stabilizer:["#studio-post-ball-stabilizer-gap","#studio-post-ball-stabilizer-step"],
     rallies:["#studio-gpu-rally-min-seconds","#studio-gpu-rally-merge-seconds","#studio-gpu-rally-stationary-ms","#studio-gpu-rally-padding-before-ms","#studio-gpu-rally-padding-after-ms"],
-    players:["#studio-gpu-person-detector","#studio-gpu-person-stride","#studio-gpu-touch-pose-stride","#studio-gpu-background-pose-stride","#studio-gpu-parallel-rally-poses"],
+    players:["#studio-gpu-person-detector","#studio-gpu-person-stride","#studio-gpu-touch-pose-stride","#studio-gpu-background-pose-stride"],
     pose:["#studio-gpu-pose-enabled","#studio-gpu-interpolate-pose"],
     boxes:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap","#studio-post-nms"],
     tracking:["#studio-gpu-interpolate-players","#studio-post-player-score","#studio-post-max-gap",
@@ -751,7 +749,7 @@
     boxes:"ByteTrack связывает рамки детектора по движению в игровых интервалах, объединяет фрагменты одного трека и при включённой интерполяции восстанавливает пропуски между наблюдениями. Суставы на этой стадии не сравниваются.",
     pose:"RTMPose-M Body7 измеряет точки тела в исходных кадрах. Рядом с кандидатом касания позы измеряются в каждом кадре окна ±8 кадров. Между измерениями позы одного Track ID интерполируются, если включена интерполяция.",
     tracking:"Сохраняет устойчивые Track ID, определённые по движению рамок до RTMPose. При наличии измеренных поз прикрепляет их к готовым трекам, не меняя ID и рамки.",
-    touch_detector:"По траектории мяча находит кандидаты касаний и выбирает ближайшие Track ID для покадрового RTMPose. Остальные игроки получают три измерения позы в секунду.",
+    touch_detector:"По стабилизированной траектории мяча находит кандидаты касаний.",
     touches:"По траектории мяча, стабилизированным рамкам и точкам RTMPose уточняет контакт, привязывает событие к Track ID и определяет тип касания. Если признаков недостаточно, тип остаётся unknown_touch. Достоверный контакт тела может опровергнуть кандидата пола. ReID выполняется позднее.",
     publish:"Публикует границы первичных розыгрышей и касания с Track ID и типами из Touch Attribution для выбранной версии CPU replay.",
     identity:"Подготавливает фотографии игроков из исходных кадров, сравнивает признаки внешности с библиотекой и автоматически привязывает Track ID к игрокам внутри опубликованных розыгрышей.",
@@ -764,7 +762,7 @@
     rallies:"Определяет начало и конец розыгрышей по движению мяча и касаниям пола.",
     players:"Находит игроков на кадрах розыгрыша.",
     boxes:"Связывает рамки одного игрока и восстанавливает пропуски его движения.",
-    touch_detector:"Находит возможные касания мяча и выбирает игроков для анализа поз.",
+    touch_detector:"Находит возможные касания мяча по траектории.",
     pose:"Определяет положение тела игроков.",
     tracking:"Закрепляет устойчивые ID игроков и связывает рамки с позами.",
     touches:"Определяет игрока и тип касания мяча.",
@@ -1114,7 +1112,7 @@
       node.classList.toggle("is-complete",done);
       node.classList.toggle("is-reused",reused);
       node.classList.toggle("is-skipped",
-        !running&&(id==="pose"||id==="touch_detector")&&graphLinkState("pose",run)==="disabled");
+        !running&&id==="pose"&&graphLinkState("pose",run)==="disabled");
       node.classList.toggle("is-failed",
         !running&&(run?.status==="failed"&&id===currentId||
         id==="identity"&&run?.completion_quality==="identity_failed"));
@@ -1167,8 +1165,7 @@
       const state=graphLinkState(edgeCondition,run);
       const block=run?.rally_stage_progress;
       const partial=block&&((edgeSource==="players"&&edgeTarget==="boxes"&&block.detector_rallies_ready>0)||
-        (edgeSource==="boxes"&&block.boxes?.rallies_completed>0)||
-        (edgeSource==="touch_detector"&&edgeTarget==="pose"&&block.touch_detector?.rallies_completed>0));
+        (edgeSource==="boxes"&&block.boxes?.rallies_completed>0));
       const ready=state==="available"&&
         (partial||source.classList.contains("is-complete")||source.classList.contains("is-reused"));
       const running=ready&&destination.classList.contains("is-active")&&(!active||active.includes(edgeTarget));
@@ -1816,7 +1813,7 @@
       renderHistory();
       loadHistory();
       ui.progress.value=0;state.stopRequested=false;
-      saveMessage(mode==="gpu"?"Запущена 1 фаза: VBallNet → детектор игроков → ByteTrack BBox → Touch Detector → RTMPose.":
+      saveMessage(mode==="gpu"?"Запущена 1 фаза: VBallNet → Rally Detector → Touch Detector → детектор игроков → ByteTrack BBox → RTMPose.":
         mode==="post"?"Запущена 2 фаза для выбранного результата 1 фазы.":
         "Запущен полный анализ: VBallNet → "+(window.VolleyballPersonDetector?.label||"детектор игроков + RTMPose")+" → CPU.");
       stopPipelinePolling();

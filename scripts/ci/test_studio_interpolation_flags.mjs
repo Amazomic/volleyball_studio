@@ -19,7 +19,6 @@ const values={
 };
 const boxes={
   "studio-gpu-pose-enabled":{value:"1"},
-  "studio-gpu-parallel-rally-poses":{type:"checkbox",checked:true,dataset:{default:"1"},id:"studio-gpu-parallel-rally-poses",checkValidity:()=>true},
   "studio-gpu-threads":{type:"number",value:"0",dataset:{default:"0"},id:"studio-gpu-threads",checkValidity:()=>true},
   "studio-gpu-interpolate-players":{type:"checkbox",checked:true,dataset:{default:"1"},id:"studio-gpu-interpolate-players",checkValidity:()=>true},
   "studio-gpu-interpolate-pose":{type:"checkbox",checked:true,dataset:{default:"1"},id:"studio-gpu-interpolate-pose",checkValidity:()=>true}
@@ -27,7 +26,7 @@ const boxes={
 const state={saved:null};
 const context={
   $:id=>boxes[id]??{value:""},inputValue:id=>values[id],
-  ui:{analysis:{querySelectorAll:()=>[boxes["studio-gpu-parallel-rally-poses"],boxes["studio-gpu-interpolate-players"],boxes["studio-gpu-interpolate-pose"],boxes["studio-gpu-threads"]]},video:{value:"clip.mp4"}},
+  ui:{analysis:{querySelectorAll:()=>[boxes["studio-gpu-interpolate-players"],boxes["studio-gpu-interpolate-pose"],boxes["studio-gpu-threads"]]},video:{value:"clip.mp4"}},
   projectId:()=>"abc123def456",
   analysisFormCache:{write:(project,video,fields)=>{state.saved={project,video,fields};},
     read:()=>({video:state.saved?.video,fields:state.saved?.fields})}
@@ -41,14 +40,13 @@ assert.equal(api.postProfile().interpolate_pose,true);
 assert.equal(api.gpuProfile().pose_stride,10);
 assert.ok(html.indexOf('id="studio-gpu-interpolate-players"')>html.indexOf('id="studio-post-heading"'));
 boxes["studio-gpu-interpolate-players"].checked=false;
-boxes["studio-gpu-parallel-rally-poses"].checked=false;
 api.saveAnalysisSettings();
-assert.equal(state.saved.fields["studio-gpu-parallel-rally-poses"][1],"0");
+assert.ok(!html.includes('id="studio-gpu-parallel-rally-poses"'));
 assert.equal(state.saved.fields["studio-gpu-interpolate-players"][1],"0");
 assert.ok(!("studio-gpu-interpolate-pose" in state.saved.fields));
 boxes["studio-gpu-interpolate-players"].checked=true;
 api.restoreAnalysisSettings("abc123def456");
-assert.equal(api.gpuProfile().parallel_rally_poses,false);
+assert.equal(api.gpuProfile().parallel_rally_poses,true);
 assert.equal(api.postProfile().interpolate_players,false);
 assert.equal(api.postProfile().interpolate_pose,true);
 state.saved={video:"clip.mp4",fields:{"studio-gpu-threads":["8","12"]}};
