@@ -288,6 +288,115 @@ fn montage(input: &Value) -> Value {
     });
     json!(rows.iter().map(|r| &r["id"]).collect::<Vec<_>>())
 }
+
+fn creative_catalog(input: &Value) -> Value {
+    let video = input["video"].as_str().unwrap_or_default();
+    let total = input["total_frames"].as_u64().unwrap_or_default();
+    let offset = input["analysis_offset_sec"].as_f64().unwrap_or_default();
+    let clip = |start: u64, end: u64| {
+        if video.is_empty() || start > end || end >= total {
+            return None;
+        }
+        let mut clip = json!({"video":video,"start_frame":start,"end_frame":end});
+        if offset != 0.0 {
+            clip["analysis_offset_sec"] = json!(offset);
+        }
+        Some(clip)
+    };
+    let marked: BTreeSet<_> = input["candidate_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let mut rows = Vec::new();
+    let mut players = BTreeMap::new();
+    for rally in input["rallies"].as_array().into_iter().flatten() {
+        let Some(start) = rally["start_frame"].as_u64() else {
+            continue;
+        };
+        let Some(end) = rally["end_frame"].as_u64() else {
+            continue;
+        };
+        if let Some(clip) = clip(start, end) {
+            let favorite = rally["candidate_id"]
+                .as_str()
+                .is_some_and(|id| marked.contains(id));
+            rows.push(json!({"kind":"rally","clip":clip,"favorite":favorite,"label":"Розыгрыш"}));
+        }
+    }
+    for event in input["touch_annotations"].as_array().into_iter().flatten() {
+        if event["touch_attributed"].as_bool() != Some(true) {
+            continue;
+        }
+        let Some(frame) = event["frame_index"].as_u64().filter(|&frame| frame < total) else {
+            continue;
+        };
+        let Some(clip) = clip(
+            frame.saturating_sub(30),
+            frame.saturating_add(30).min(total - 1),
+        ) else {
+            continue;
+        };
+        let reviewed = &event["reviewed_action"];
+        let action = (reviewed["action_verified"].as_bool() == Some(true))
+            .then(|| reviewed["action_kind"].as_str())
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .or_else(|| event["kind"].as_str().filter(|s| !s.is_empty()))
+            .unwrap_or("unknown_touch");
+        let player = event["player_id"].as_str().unwrap_or_default();
+        let name = event["player_name"].as_str().unwrap_or_default();
+        if !player.is_empty() && !name.is_empty() {
+            players.insert(player, name);
+        }
+        let label = match action {
+            "attack" => "Атака",
+            "block" => "Блок",
+            "serve" => "Подача",
+            "dig" => "Приём",
+            "overhead_pass" => "Верхняя передача",
+            "low_touch" => "Касание снизу",
+            _ => "Касание",
+        };
+        let label = if name.is_empty() {
+            label.to_owned()
+        } else {
+            format!("{label} · {name}")
+        };
+        rows.push(
+            json!({"kind":"touch","clip":clip,"action":action,"player":player,"label":label}),
+        );
+    }
+    json!({"rows":rows,"players":players.into_iter().collect::<Vec<_>>()})
+}
+
+fn creative_filter(input: &Value) -> Value {
+    let action = input["action"].as_str().unwrap_or_default();
+    let player = input["player"].as_str().unwrap_or_default();
+    let kind = input["kind"].as_str().unwrap_or("rallies");
+    let indices: Vec<_> = input["rows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let matches = match kind {
+                "touches" => {
+                    row["kind"] == "touch"
+                        && (action.is_empty() || row["action"] == action)
+                        && (player.is_empty() || row["player"] == player)
+                }
+                "rallies" => row["kind"] == "rally",
+                "favorites" => row["kind"] == "rally" && row["favorite"].as_bool() == Some(true),
+                _ => false,
+            };
+            matches.then_some(index)
+        })
+        .collect();
+    json!(indices)
+}
+
 #[no_mangle]
 pub extern "C" fn volley_domain_call(operation: u32) -> i32 {
     OUTPUT.with(|out| out.borrow_mut().clear());
@@ -298,6 +407,8 @@ pub extern "C" fn volley_domain_call(operation: u32) -> i32 {
     let value = match operation {
         1 => chain(&input),
         2 => montage(&input),
+        3 => creative_catalog(&input),
+        4 => creative_filter(&input),
         _ => return 0,
     };
     match serde_json::to_vec(&value) {

@@ -96,13 +96,16 @@ let pollTimer=null;
 const window={addEventListener:(event,fn)=>windowListeners.set(event,fn),
   dispatchEvent:event=>{events.push(event);windowListeners.get(event.type)?.(event);},
   VolleyballStudioActivity:{fetch}};
-const context={document:{getElementById:get,createElement:tag=>new Element(tag)},
+const {instance:{exports:wasm}}=await WebAssembly.instantiate(readFileSync(new URL("../../rust/volley-app/static/volley_web.wasm",import.meta.url)),{});
+window.VolleyballUi={ready:Promise.resolve(),isReady:()=>true,engine:wasm};
+const context={TextEncoder,TextDecoder,document:{getElementById:get,createElement:tag=>new Element(tag)},
   window,Event:class {constructor(type){this.type=type;}},
   CustomEvent:class {constructor(type,opts={}){this.type=type;this.detail=opts.detail;}},
   URLSearchParams,setInterval:fn=>{pollTimer=fn;return 1;},clearInterval(){} ,
   URL:{createObjectURL:()=>"blob:test",revokeObjectURL(){}},
   FormData:class {append(){}}};
 vm.runInNewContext(text("rust/volley-app/static/studio_overview.js"),context);
+vm.runInNewContext(text("rust/volley-app/static/studio_chain.js"),context);
 vm.runInNewContext(source,context);await tick();
 assert.equal(montage("player").value,"athlete1");
 assert.equal(montage("player").children.length,2);

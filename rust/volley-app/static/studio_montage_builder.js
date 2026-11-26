@@ -186,11 +186,6 @@
     }
     cancelCreativePlayback();st.creativeClips.push({...clip});renderCreative();invalidate();
   };
-  const catalogClip=(raw,start,end)=>{
-    if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end<start||end>=raw.total_frames)return null;
-    const offset=Number(raw.analysis_offset_sec)||0;
-    return {video:raw.video,start_frame:start,end_frame:end,...(offset?{analysis_offset_sec:offset}:{})};
-  };
   const renderCreativeCatalog=()=>{
     const kind=ui.creativeKind.value||"rallies",manual=kind==="manual";
     ui.creativeFilters.classList.toggle("hidden",kind!=="touches");
@@ -201,10 +196,14 @@
     ui.creativeStatus.classList.toggle("hidden",!manual);
     ui.creativeCatalog.replaceChildren();
     if(manual)return;
-    const rows=st.creativeRows.filter(row=>kind==="touches"?row.kind==="touch"&&
-      (!ui.creativeTouchKind.value||row.action===ui.creativeTouchKind.value)&&
-      (!ui.creativeTouchPlayer.value||row.player===ui.creativeTouchPlayer.value):
-      row.kind==="rally"&&(kind!=="favorites"||row.favorite));
+    const rows=[];
+    try{
+      for(let i=0;i<st.creativeRows.length;i+=512){
+        const batch=st.creativeRows.slice(i,i+512);
+        const indices=window.VolleyStudioChain.call(4,{rows:batch,kind,action:ui.creativeTouchKind.value,player:ui.creativeTouchPlayer.value});
+        for(const index of indices)rows.push(batch[index]);
+      }
+    }catch(error){ui.creativeCatalogStatus.textContent=error.message;return;}
     for(const row of rows){
       const card=document.createElement("article");card.className="montage-creative-card";card.draggable=true;
       const image=document.createElement("img");image.loading="lazy";image.alt="";image.draggable=false;
@@ -229,7 +228,11 @@
     if(!sources?.length)return;
     ui.creativeCatalogStatus.textContent="Загрузка фрагментов…";
     const rows=[],players=new Map();let failures=0;
-    const actions={attack:"Атака",block:"Блок",serve:"Подача",dig:"Приём",overhead_pass:"Верхняя передача",low_touch:"Касание снизу",unknown_touch:"Касание"};
+    try{await window.VolleyballUi.ready;}catch(error){
+      if(valid())ui.creativeCatalogStatus.textContent=error.message;
+      return;
+    }
+    if(!valid())return;
     for(let i=0;i<sources.length;i+=4){
       const results=await Promise.allSettled(sources.slice(i,i+4).map(async source=>{
         const query=new URLSearchParams({project_id:project,rally_run_id:source.run});
@@ -239,19 +242,18 @@
         if(raw.schema!=="volley-native-rally-timeline/1"||raw.project_id!==project||raw.rally_run_id!==source.run||
           raw.video!==source.video||raw.fps!==30||!st.creativeVideos.includes(raw.video)||!Number.isSafeInteger(raw.total_frames))
           throw Error("Некорректный источник фрагментов");
-        const marked=new Set(marks?.candidate_ids||[]);
-        for(const rally of raw.rallies||[]){
-          const clip=catalogClip(raw,rally.start_frame,rally.end_frame);
-          if(clip)rows.push({kind:"rally",clip,favorite:marked.has(rally.candidate_id),label:"Розыгрыш"});
-        }
-        for(const event of raw.touch_annotations||[]){
-          if(!event.touch_attributed||!Number.isSafeInteger(event.frame_index)||event.frame_index<0||event.frame_index>=raw.total_frames)continue;
-          const clip=catalogClip(raw,Math.max(0,event.frame_index-30),Math.min(raw.total_frames-1,event.frame_index+30));
-          const action=(event.reviewed_action?.action_verified===true?event.reviewed_action.action_kind:null)||event.kind||"unknown_touch";
-          const player=event.player_id||"",name=event.player_name||"";
-          if(player&&name)players.set(player,name);
-          if(clip)rows.push({kind:"touch",clip,action,player,label:(actions[action]||actions.unknown_touch)+(name?" · "+name:"")});
-        }
+        const base={video:raw.video,total_frames:raw.total_frames,analysis_offset_sec:Number(raw.analysis_offset_sec)||0};
+        const sourceRows=[],sourcePlayers=new Map();
+        const collect=input=>{
+          const result=window.VolleyStudioChain.call(3,{...base,...input});
+          sourceRows.push(...result.rows);
+          for(const [id,name] of result.players)sourcePlayers.set(id,name);
+        };
+        const rallies=raw.rallies||[],touches=raw.touch_annotations||[];
+        for(let i=0;i<rallies.length;i+=256)collect({rallies:rallies.slice(i,i+256),candidate_ids:marks?.candidate_ids||[]});
+        for(let i=0;i<touches.length;i+=256)collect({touch_annotations:touches.slice(i,i+256)});
+        for(const row of sourceRows)rows.push(row);
+        for(const [id,name] of sourcePlayers)players.set(id,name);
         if(!marks)failures++;
       }));
       if(!valid())return;

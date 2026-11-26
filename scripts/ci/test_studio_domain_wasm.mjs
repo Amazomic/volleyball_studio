@@ -29,4 +29,24 @@ assert.equal(read(),createHash("sha256").digest("hex"));e.volley_hash_finish(a);
 assert.equal(read(),createHash("sha256").update("abc").digest("hex"));
 e.volley_hash_abort(e.volley_hash_begin());
 assert.equal(e.volley_data_reserve(8388609),0);
-console.log("PASS: actual WASM lineage, stable montage order and incremental SHA-256 vectors/independent contexts");
+
+
+const creative=call(3,{video:"match.mp4",total_frames:100,analysis_offset_sec:4,
+  candidate_ids:["a"],rallies:[{candidate_id:"a",start_frame:5,end_frame:30},{candidate_id:"b",start_frame:90,end_frame:100}],
+  touch_annotations:[{frame_index:2,touch_attributed:true,kind:"attack",player_id:"p",player_name:"Player",reviewed_action:{action_verified:true,action_kind:"block"}},{frame_index:99,touch_attributed:true,kind:"dig"},{frame_index:3,touch_attributed:false},{frame_index:100,touch_attributed:true}]});
+assert.deepEqual(creative.rows.map(row=>[row.kind,row.clip.start_frame,row.clip.end_frame,row.clip.analysis_offset_sec]),[["rally",5,30,4],["touch",0,32,4],["touch",69,99,4]]);
+assert.equal(creative.rows[0].favorite,true);
+assert.equal(creative.rows[1].action,"block");
+assert.equal(creative.rows[1].label,"Блок · Player");
+assert.deepEqual(creative.players,[["p","Player"]]);
+assert.deepEqual(call(4,{rows:creative.rows,kind:"favorites"}),[0]);
+assert.deepEqual(call(4,{rows:creative.rows,kind:"touches",action:"block",player:"p"}),[1]);
+assert.deepEqual(call(4,{rows:creative.rows,kind:"touches",action:"dig",player:"p"}),[]);
+assert.deepEqual(call(4,{rows:creative.rows,kind:"rallies"}),[0]);
+assert.deepEqual(call(4,{rows:creative.rows,kind:"manual"}),[]);
+
+const unverified=call(3,{video:"match.mp4",total_frames:20,rallies:[{start_frame:9,end_frame:2},{start_frame:-1,end_frame:5}],touch_annotations:[{frame_index:9,touch_attributed:true,kind:"attack",reviewed_action:{action_verified:false,action_kind:"block"}}]});
+assert.equal(unverified.rows.length,1);
+assert.equal(unverified.rows[0].action,"attack");
+assert.equal(unverified.rows[0].clip.analysis_offset_sec,undefined);
+console.log("PASS: WASM lineage, montage order, SHA-256, creative catalog and filters");
