@@ -40,21 +40,29 @@ montage("zoom").value="1.25";
 const run="a".repeat(32),otherRun="b".repeat(32),job="montage_"+"1".repeat(32),audio="track_"+"d".repeat(32)+".wav";
 get("studio-run").value=run;
 let requests=[],jobState="running",clips=2,invalidFingerprint=false,wrongProject=false,failPreview=false;
-let expectedRun=run;
+let expectedRun=run,creativeSourcesExpanded=false;
 const reply=(data,ok=true)=>({ok,status:ok?200:409,json:async()=>data});
 const fetch=async(url,options={})=>{
   const body=typeof options.body==="string"?JSON.parse(options.body):null;
   requests.push({url,body});
   if(url==="/api/projects")return reply({projects:[{
-    id:"1234abcdef01",videos:["match.mp4"],player_ids:["athlete1"]
+    id:"1234abcdef01",videos:creativeSourcesExpanded?["match.mp4","second.mp4"]:["match.mp4"],player_ids:["athlete1"]
   }]});
   if(url==="/api/players/library/native")return reply({players:[
     {id:"athlete1",name:"Athlete 1"},{id:"other",name:"Other athlete"}
   ]});
   if(url.startsWith("/api/studio/analysis-overview?"))return reply({
-    schema:"volley-native-analysis-overview/1",project_id:"1234abcdef01",video:"match.mp4",metadata_only:true,
+    schema:"volley-native-analysis-overview/1",project_id:"1234abcdef01",video:new URLSearchParams(url.split("?")[1]).get("video"),metadata_only:true,
     stages:[{key:"rallies",items:[{id:otherRun,count:6},{id:run,count:4}],truncated:false}]
   });
+  if(url.startsWith("/api/cpu/native/rallies/timeline?")&&new URLSearchParams(url.split("?")[1]).get("rally_run_id")===otherRun)return reply({
+    schema:"volley-native-rally-timeline/1",project_id:"1234abcdef01",rally_run_id:otherRun,video:"second.mp4",fps:30,total_frames:900,analysis_offset_sec:4,
+    rallies:[{candidate_id:"c",start_frame:30,end_frame:89}],touch_annotations:[]
+  });
+  if(url.startsWith("/api/cpu/native/rallies/timeline?"))return reply({schema:"volley-native-rally-timeline/1",project_id:"1234abcdef01",rally_run_id:run,video:"match.mp4",fps:30,total_frames:900,analysis_offset_sec:0,
+    rallies:[{candidate_id:"a",start_frame:60,end_frame:149},{candidate_id:"b",start_frame:240,end_frame:329}],
+    touch_annotations:[{frame_index:90,touch_attributed:true,kind:"attack",player_id:"athlete1",player_name:"Athlete 1"},{frame_index:270,touch_attributed:true,kind:"block",player_id:"other",player_name:"Other athlete"}]});
+  if(url.startsWith("/api/cpu/native/rallies/marks?"))return reply({candidate_ids:["a"]});
   if(url==="/api/montage/native/start")return reply({job_id:job,status:"queued"});
   if(url==="/api/montage/native/audio")return reply({audio_file:audio,duration_sec:31});
   if(url==="/api/montage/native/player-highlights"||url==="/api/montage/native/game-report") {
@@ -226,7 +234,40 @@ window.dispatchEvent(new context.CustomEvent("volley:montage-favorites",{detail:
 }}));
 assert.deepEqual([...window.VolleyballMontageDraft.ids("1234abcdef01",run)],[],
   "Draft order must be scoped to a specific CPU run");
+window.VolleyballMontageSources=()=>({project_id:"1234abcdef01",sources:[{video:"match.mp4",run}]});
 await choose("creative");
+assert.equal(montage("creative-catalog").children.length,2);
+const card=montage("creative-catalog").children[0];
+montage("creative-video").duration=30;
+await card.children[2].children[0].fire("click");
+assert.equal(montage("creative-video").currentTime,2);
+montage("creative-video").currentTime=5;await montage("creative-video").fire("timeupdate");
+assert.equal(montage("creative-video").paused,true);
+const dragEvent={preventDefault(){},stopPropagation(){},dataTransfer:{setData(){}}};
+await card.fire("dragstart",dragEvent);await montage("creative-drop").fire("drop",dragEvent);
+await montage("creative-catalog").children[1].children[2].children[1].fire("click");
+assert.equal(montage("creative-list").children.length,2);
+await montage("creative-list").children[1].fire("dragstart",dragEvent);
+await montage("creative-list").children[0].fire("drop",dragEvent);
+await montage("creative-play").fire("click");
+assert.equal(montage("creative-video").currentTime,8);
+montage("creative-video").currentTime=11;await montage("creative-video").fire("timeupdate");
+assert.equal(montage("creative-video").currentTime,2);
+montage("creative-video").currentTime=5;await montage("creative-video").fire("timeupdate");
+assert.equal(montage("creative-video").paused,true);
+assert.match(montage("creative-play-status").textContent,/завершён/);
+await montage("creative-list").children[0].children[2].fire("click");
+await montage("creative-list").children[0].children[2].fire("click");
+assert.equal(montage("creative-list").children.length,0);
+montage("creative-kind").value="favorites";await montage("creative-kind").fire("change");
+assert.equal(montage("creative-catalog").children.length,1);
+montage("creative-kind").value="touches";await montage("creative-kind").fire("change");
+assert.equal(montage("creative-catalog").children.length,2);
+montage("creative-touch-kind").value="attack";await montage("creative-touch-kind").fire("change");
+assert.equal(montage("creative-catalog").children.length,1);
+montage("creative-touch-player").value="other";await montage("creative-touch-player").fire("change");
+assert.equal(montage("creative-catalog").children.length,0);
+montage("creative-kind").value="manual";await montage("creative-kind").fire("change");
 assert.equal(montage("settings-label").textContent,"Творчество");
 assert.equal(montage("creative").classList.contains("hidden"),false);
 assert.equal(montage("sources").classList.contains("hidden"),true);
@@ -246,6 +287,22 @@ montage("recognition").checked=false;get("studio-music").files=[];
 await montage("start").fire("click");
 const creativeRequest=requests.filter(r=>r.url==="/api/montage/native/start").at(-1);
 assert.deepEqual(creativeRequest.body.clips,[{video:"match.mp4",start_frame:60,end_frame:149}]);
+creativeSourcesExpanded=true;
+window.VolleyballMontageSources=()=>({project_id:"1234abcdef01",sources:[{video:"match.mp4",run},{video:"second.mp4",run:otherRun}]});
+await get("studio-project").fire("change");
+montage("creative-kind").value="rallies";await montage("creative-kind").fire("change");
+assert.equal(montage("creative-catalog").children.length,3,"Every source in the selected analysis contributes rallies");
+await montage("creative-catalog").children[2].children[2].children[1].fire("click");
+await montage("creative-play").fire("click");
+assert.equal(creativeVideo.currentTime,2);
+creativeVideo.currentTime=5;await creativeVideo.fire("timeupdate");
+assert.match(creativeVideo.src,/second.mp4/);
+assert.equal(creativeVideo.currentTime,5,"Source analysis offset must be included");
+await montage("start").fire("click");
+assert.deepEqual(requests.filter(r=>r.url==="/api/montage/native/start").at(-1).body.clips,[
+  {video:"match.mp4",start_frame:60,end_frame:149},
+  {video:"second.mp4",start_frame:30,end_frame:89,analysis_offset_sec:4}
+],"Cross-video playback and export must preserve clip order and offsets");
 await choose("report");assert.equal(montage("creative").classList.contains("hidden"),true);
 console.log("Live montage builder: profiles, fingerprint, audio, sequenced preview, reordered export IDs, cleanup and source isolation passed");
 
