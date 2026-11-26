@@ -770,6 +770,102 @@ fn occluded_stationary_launches(
     launches
 }
 
+fn descending_lateral_brakes(
+    points: &[BallObservation],
+    config: DirectionBreakConfig,
+) -> Vec<TrajectoryBreak> {
+    let mut found: Vec<TrajectoryBreak> = Vec::new();
+    for at in 6..points.len().saturating_sub(5) {
+        let contact = points[at];
+        let left = &points[at - 6..at];
+        let right = &points[at + 1..at + 6];
+        let first = left[0];
+        let last = left[5];
+        let next = right[0];
+        let end = right[4];
+        if contact.frame - last.frame != 1
+            || next.frame - contact.frame != 1
+            || points[at - 6..=at + 5]
+                .windows(2)
+                .any(|p| p[1].frame - p[0].frame > 2)
+        {
+            continue;
+        }
+        let velocity = |a: BallObservation, b: BallObservation| {
+            let dt = (b.frame - a.frame) as f64;
+            [(b.x - a.x) / dt, (b.y - a.y) / dt]
+        };
+        let before = velocity(first, last);
+        let after = velocity(next, end);
+        let speed_before = before[0].hypot(before[1]);
+        let speed_after = after[0].hypot(after[1]);
+        let tolerance = config.max_fit_error_px;
+        if before[1] < 3.5 * tolerance
+            || after[1] < tolerance
+            || speed_after > speed_before * 0.72
+            || before[0] * after[0] >= 0.0
+            || (last.x - first.x).abs().min((end.x - next.x).abs()) < 3.5 * tolerance
+            || (contact.x - last.x).abs() > 3.0 * tolerance
+            || (contact.x - next.x).abs() > 4.0 * tolerance
+            || (contact.y - last.y - before[1]).abs() > 3.0 * tolerance
+            || (next.y - contact.y - after[1]).abs() > 1.25 * config.max_join_error_px
+        {
+            continue;
+        }
+        let angle = ((before[0] * after[0] + before[1] * after[1]) / (speed_before * speed_after))
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
+        if angle < (config.min_turn_angle_deg * 0.6).max(25.0) || config.min_turn_angle_deg > 60.0 {
+            continue;
+        }
+        let error = |segment: &[BallObservation], v: [f64; 2]| {
+            let origin = segment[0];
+            (segment
+                .iter()
+                .map(|p| {
+                    let t = (p.frame - origin.frame) as f64;
+                    (p.x - origin.x - v[0] * t).powi(2) + (p.y - origin.y - v[1] * t).powi(2)
+                })
+                .sum::<f64>()
+                / segment.len() as f64)
+                .sqrt()
+        };
+        let fit_error = error(left, before).max(error(right, after));
+        if fit_error > 2.5 * tolerance {
+            continue;
+        }
+        let candidate = TrajectoryBreak {
+            frame: contact.frame,
+            position: [contact.x, contact.y],
+            motion: MotionEvidence {
+                motion_frame: contact.frame,
+                speed_before,
+                speed_after,
+                angle,
+                residual: (after[0] - before[0]).hypot(after[1] - before[1]),
+            },
+            fit_error,
+            before_frames: left.iter().map(|p| p.frame).collect(),
+            after_frames: right.iter().map(|p| p.frame).collect(),
+            contact_observed: true,
+        };
+        if let Some(prior) = found
+            .last_mut()
+            .filter(|e| candidate.frame.abs_diff(e.frame) <= config.min_separation_frames as u64)
+        {
+            if candidate.motion.residual / (1.0 + candidate.fit_error)
+                > prior.motion.residual / (1.0 + prior.fit_error)
+            {
+                *prior = candidate;
+            }
+        } else {
+            found.push(candidate);
+        }
+    }
+    found
+}
+
 pub fn trajectory_direction_breaks(
     points: &[BallObservation],
     config: DirectionBreakConfig,
@@ -973,6 +1069,14 @@ pub fn trajectory_direction_breaks(
             .any(|event| event.frame.abs_diff(rebound.frame) <= config.min_separation_frames as u64)
         {
             found.push(rebound);
+        }
+    }
+    for brake in descending_lateral_brakes(points, config) {
+        if !found
+            .iter()
+            .any(|e| e.frame.abs_diff(brake.frame) <= config.min_separation_frames as u64)
+        {
+            found.push(brake);
         }
     }
     found.sort_by_key(|event| event.frame);
@@ -1294,6 +1398,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn descending_lateral_brake_survives_quantized_tracking() {
+        let coords = [
+            (0, 52., 0.),
+            (1, 45., 23.),
+            (2, 45., 52.),
+            (3, 37., 75.),
+            (4, 30., 105.),
+            (5, 30., 135.),
+            (6, 22., 165.),
+            (7, 22., 195.),
+            (8, 15., 225.),
+            (9, 30., 265.),
+            (10, 45., 287.),
+            (11, 45., 295.),
+            (12, 48., 306.),
+            (13, 57., 322.),
+            (14, 70., 344.),
+            (15, 90., 373.),
+            (16, 110., 405.),
+            (17, 127., 420.),
+        ];
+        let points = coords
+            .iter()
+            .map(|&(frame, x, y)| BallObservation { frame, x, y })
+            .collect::<Vec<_>>();
+        let events = trajectory_direction_breaks(&points, DirectionBreakConfig::default());
+        assert!(
+            events.iter().any(|e| e.frame.abs_diff(8) <= 1),
+            "{events:?}"
+        );
+        let mut smooth = points.clone();
+        for p in &mut smooth {
+            p.x = 100. - 5. * p.frame as f64;
+            p.y = 20. * p.frame as f64 + 0.4 * (p.frame as f64).powi(2);
+        }
+        assert!(trajectory_direction_breaks(&smooth, DirectionBreakConfig::default()).is_empty());
+    }
     #[test]
     fn directional_turn_is_detected_without_velocity_threshold() {
         let settings = DirectionBreakConfig::default();

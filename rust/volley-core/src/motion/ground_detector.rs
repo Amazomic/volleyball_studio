@@ -1,7 +1,7 @@
 use super::{BallObservation, TrajectoryBreak};
 use crate::court_geometry::CourtTransform;
 
-pub const GROUND_DETECTOR_VERSION: &str = "court_ball_roll_v11";
+pub const GROUND_DETECTOR_VERSION: &str = "court_ball_roll_v12";
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroundContact {
@@ -376,6 +376,17 @@ pub fn terminal_ground_contacts(
     }
     let mut contacts: Vec<GroundContact> = Vec::new();
     for split in 5..points.len() {
+        if let Some(contact) =
+            short_terminal_rebound(points, split - 1, court, width, height, rally_end_frame)
+        {
+            if contacts
+                .last()
+                .is_none_or(|prior| contact.frame.saturating_sub(prior.frame) > 12)
+            {
+                contacts.push(contact);
+            }
+            continue;
+        }
         let before = &points[split - 5..split];
         if points[split].frame - before[4].frame > 6
             || before.windows(2).any(|p| p[1].frame - p[0].frame > 2)
@@ -399,6 +410,96 @@ pub fn terminal_ground_contacts(
         }
     }
     contacts
+}
+
+fn short_terminal_rebound(
+    points: &[BallObservation],
+    at: usize,
+    court: &CourtTransform,
+    width: u32,
+    height: u32,
+    rally_end_frame: u64,
+) -> Option<GroundContact> {
+    let [w, h] = [f64::from(width), f64::from(height)];
+    let peak = points[at];
+    if rally_end_frame.saturating_sub(peak.frame as u64) > 45
+        || points[at - 1].y > peak.y
+        || points[at + 1].y >= peak.y
+    {
+        return None;
+    }
+    let lo = points.partition_point(|p| p.frame < peak.frame - 15);
+    let before = &points[lo..=at];
+    let start = before.first()?;
+    let descent = (peak.y - start.y) / h;
+    if before.len() < 10
+        || peak.frame - start.frame < 12
+        || descent < 0.06
+        || before
+            .windows(2)
+            .any(|p| p[1].frame - p[0].frame > 2 || p[1].y + h * 0.004 < p[0].y)
+    {
+        return None;
+    }
+    let tail = &points[at + 1..];
+    let limit = tail.partition_point(|p| p.frame <= peak.frame + 7);
+    let n = tail[..limit]
+        .windows(2)
+        .position(|p| p[1].frame - p[0].frame > 2)
+        .map_or(limit, |i| i + 1);
+    let after = &tail[..n];
+    let end = after.last()?;
+    let rise = (peak.y - end.y) / h;
+    if !(3..=7).contains(&(end.frame - peak.frame))
+        || after.len() < 3
+        || after[0].frame - peak.frame > 2
+        || !(0.006..=0.024).contains(&rise)
+        || rise > descent * 0.3
+        || tail
+            .get(n)
+            .map_or(rally_end_frame.saturating_sub(end.frame as u64) < 15, |p| {
+                p.frame - end.frame < 16
+            })
+        || after
+            .iter()
+            .any(|p| (p.x - peak.x).abs() > w * 0.018 || p.y > peak.y + h * 0.002)
+        || after.windows(2).any(|p| p[1].y > p[0].y + h * 0.002)
+    {
+        return None;
+    }
+    let incoming_speed =
+        ((peak.x - start.x) / w).hypot(descent) / (peak.frame - start.frame) as f64;
+    let outgoing_speed = ((end.x - peak.x) / w).hypot(rise) / (end.frame - peak.frame) as f64;
+    if outgoing_speed > incoming_speed * 0.8 {
+        return None;
+    }
+    let position = [peak.x / w, peak.y / h];
+    let zones = court.zones()?;
+    let top = zones
+        .near_half
+        .iter()
+        .chain(&zones.far_half)
+        .map(|p| p[1])
+        .reduce(f64::min)?;
+    if position[1] < top + 0.10 {
+        return None;
+    }
+    let [x, y] = court.to_court(position)?;
+    let distance = (x.abs() - crate::court_geometry::COURT_LENGTH_M / 2.0)
+        .max(y.abs() - crate::court_geometry::COURT_WIDTH_M / 2.0);
+    if distance > 0.8 {
+        return None;
+    }
+    let landing = if distance.abs() <= 0.25 {
+        "line_uncertain"
+    } else {
+        court.tentative_landing(position)?
+    };
+    Some(GroundContact {
+        frame: peak.frame as u64,
+        position,
+        landing: landing.to_owned(),
+    })
 }
 
 fn terminal_rolling_transition(
@@ -755,6 +856,46 @@ mod tests {
         assert!(terminal_ground_contacts(&points, &court(), 1000, 1000, 100).is_empty());
     }
 
+    #[test]
+    fn short_terminal_rebound_between_measured_anchors_is_floor() {
+        let court =
+            CourtTransform::new([[0.06, 1.02], [0.34, 0.29], [0.60, 0.29], [0.89, 1.03]]).unwrap();
+        let coords = [
+            (0, 0.416, 0.350),
+            (2, 0.421, 0.361),
+            (3, 0.422, 0.365),
+            (4, 0.427, 0.369),
+            (5, 0.428, 0.375),
+            (6, 0.430, 0.379),
+            (7, 0.432, 0.382),
+            (8, 0.433, 0.389),
+            (9, 0.435, 0.399),
+            (10, 0.437, 0.403),
+            (11, 0.439, 0.420),
+            (12, 0.441, 0.424),
+            (13, 0.443, 0.426),
+            (14, 0.445, 0.428),
+            (15, 0.447, 0.428),
+            (16, 0.449, 0.426),
+            (17, 0.451, 0.424),
+            (18, 0.453, 0.420),
+            (19, 0.457, 0.417),
+            (50, 0.5, 0.3),
+        ];
+        let points = coords
+            .iter()
+            .map(|&(frame, x, y)| BallObservation {
+                frame,
+                x: x * 3840.,
+                y: y * 2160.,
+            })
+            .collect::<Vec<_>>();
+        let hits = terminal_ground_contacts(&points, &court, 3840, 2160, 35);
+        assert!(hits.iter().any(|c| c.frame.abs_diff(15) <= 1), "{hits:?}");
+        let mut continuing = points.clone();
+        continuing.last_mut().unwrap().frame = 20;
+        assert!(terminal_ground_contacts(&continuing, &court, 3840, 2160, 35).is_empty());
+    }
     #[test]
     fn short_damped_tail_before_tracking_loss_ends_merged_rally() {
         let c = court();
