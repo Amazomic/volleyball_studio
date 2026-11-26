@@ -2,10 +2,10 @@
 //! Python parity: PlayerStore foot homography and stable per-track side,
 //! player_contacts block threshold, preparation/serve-zone gating.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use volley_core::{
     action_prediction::{ActionKind, PredictionMethod},
-    court_geometry::{CourtSide, CourtTransform, TeamSideVotes},
+    court_geometry::{resolve_team_sides, CourtSide, CourtTransform, TeamSideVotes},
     touch_pipeline::{PhysicalTouchCandidate, TouchFrame},
 };
 
@@ -300,36 +300,17 @@ pub(crate) fn attach_occluded_followups(
         previous = None;
     }
 }
-fn stable_sides(frames: &[TouchFrame], court: &CourtTransform) -> HashMap<u64, CourtSide> {
-    let mut positions: HashMap<u64, Vec<f64>> = HashMap::new();
+fn stable_sides(frames: &[TouchFrame], court: &CourtTransform) -> BTreeMap<u64, CourtSide> {
+    let mut votes = BTreeMap::<u64, TeamSideVotes>::new();
     for frame in frames {
         for player in &frame.players {
-            if let Some(value) = court.player_evidence(player.bbox_xyxy_norm) {
-                positions
-                    .entry(player.track_id)
-                    .or_default()
-                    .push(value.x_m);
-            }
+            votes
+                .entry(player.track_id)
+                .or_default()
+                .observe(court, player.bbox_xyxy_norm);
         }
     }
-    positions
-        .into_iter()
-        .filter_map(|(id, mut samples)| {
-            if samples.is_empty() {
-                return None;
-            }
-            samples.sort_by(f64::total_cmp);
-            let median = samples[samples.len() / 2];
-            Some((
-                id,
-                if median < 0.0 {
-                    CourtSide::Near
-                } else {
-                    CourtSide::Far
-                },
-            ))
-        })
-        .collect()
+    resolve_team_sides(votes)
 }
 
 /// Python reach ellipse: locate ball held by the serving player before a
@@ -991,6 +972,44 @@ mod tests {
         assert_eq!(
             events[0].action_prediction.as_ref().unwrap().kind,
             ActionKind::Attack
+        );
+    }
+
+    #[test]
+    fn net_jitter_does_not_assign_teammate_to_opposite_side() {
+        let frames = (0..66)
+            .map(|i| {
+                let foot_x = if i < 15 {
+                    0.46
+                } else if i < 44 {
+                    0.495
+                } else {
+                    0.54
+                };
+                let mut row = frame(i, foot_x, false);
+                for (id, x) in [
+                    (1, 0.25),
+                    (2, 0.3),
+                    (4, 0.35),
+                    (5, 0.65),
+                    (6, 0.7),
+                    (7, 0.75),
+                ] {
+                    let mut p = frame(i, x, false).players.remove(0);
+                    p.track_id = id;
+                    row.players.push(p);
+                }
+                row
+            })
+            .collect::<Vec<_>>();
+        let mut events = vec![event(48)];
+        events[0].action_prediction.as_mut().unwrap().kind = ActionKind::OverheadPass;
+        annotate(&mut events, &frames, &court());
+        assert_eq!(events[0].court.unwrap().side, CourtSide::Far);
+        reconcile_block_origin(&mut events[0], Some(CourtSide::Far), true);
+        assert_eq!(
+            events[0].action_prediction.as_ref().unwrap().kind,
+            ActionKind::OverheadPass
         );
     }
 
