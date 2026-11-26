@@ -2420,11 +2420,13 @@ async fn pipeline(
                 }
                 turn.wait_detector(cancel).await?;
                 let independent = turn.independent.clone();
-                let permit = if independent.is_none() {
-                    Some(acquire_gpu(&app.inference_limit, cancel).await?)
-                } else {
-                    None
-                };
+                let permit = acquire_gpu(
+                    independent
+                        .as_ref()
+                        .map_or(&app.inference_limit, |q| &q.joint),
+                    cancel,
+                )
+                .await?;
                 let total = status["gpu_total_frames"].as_u64().unwrap_or(0);
                 progress_with_frames(
                     path,
@@ -2674,15 +2676,11 @@ async fn pipeline(
         }
         if refinement.early.is_none() {
             progress(path, status, "Ожидание очереди RTMPose", 86.0)?;
-            Some(
-                acquire_gpu(
-                    turn.independent
-                        .as_ref()
-                        .map_or(&app.inference_limit, |q| &q.pose),
-                    cancel,
-                )
-                .await?,
-            )
+            Some(if let Some(queues) = &turn.independent {
+                queues.reid(cancel).await?
+            } else {
+                acquire_gpu(&app.inference_limit, cancel).await?
+            })
         } else {
             None
         }
@@ -2946,7 +2944,11 @@ async fn pipeline(
         && request.post.reid_device != volley_inference::reid_openvino::ReidDevice::Cpu
     {
         progress(path, status, "Ожидание очереди ReID", 98.0)?;
-        Some(acquire_gpu(&app.inference_limit, cancel).await?)
+        Some(if let Some(queues) = &turn.independent {
+            queues.reid(cancel).await?
+        } else {
+            acquire_gpu(&app.inference_limit, cancel).await?
+        })
     } else {
         None
     };
@@ -3611,6 +3613,17 @@ fn mark_unstarted(job: &mut QueuedRun, cancelled: bool, error: Option<&str>) {
     }
 }
 
+fn independent_queues_requested(value: Option<&str>) -> bool {
+    matches!(value, None | Some("1") | Some("true"))
+}
+
+fn independent_profile(request: &StartRequest) -> bool {
+    request.mode == PipelineMode::Full
+        && rally_pipeline_enabled(request)
+        && request.gpu.person_detector == DetectorVariant::RfDetrMedium
+        && request.gpu.gpu_memory_limit_mb == 0
+}
+
 async fn run_project_queue(
     state: Arc<AppState>,
     project: String,
@@ -3618,14 +3631,12 @@ async fn run_project_queue(
     cancel: Arc<AtomicBool>,
 ) {
     let first = jobs[0].id.clone();
-    let independent_requested = std::env::var("VOLLEY_INDEPENDENT_GPU_QUEUES").as_deref()
-        == Ok("1")
-        && jobs.len() > 1
-        && jobs.iter().all(|job| {
-            job.request.mode == PipelineMode::Full
-                && rally_pipeline_enabled(&job.request)
-                && job.request.post.reid_device == volley_inference::reid_openvino::ReidDevice::Cpu
-        });
+    let independent_requested = independent_queues_requested(
+        std::env::var("VOLLEY_INDEPENDENT_GPU_QUEUES")
+            .ok()
+            .as_deref(),
+    ) && jobs.len() > 1
+        && jobs.iter().all(|job| independent_profile(&job.request));
     let queue_permit = if independent_requested {
         acquire_gpu(&state.inference_limit, &cancel).await.ok()
     } else {
@@ -4723,6 +4734,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn independent_queue_defaults_on_for_medium_full_analysis_with_auto_reid() {
+        let mut req: StartRequest = serde_json::from_value(json!({
+            "project_id":"abc123def456","video":"first.mp4","mode":"full"
+        }))
+        .unwrap();
+        assert!(independent_profile(&req));
+        assert!(independent_queues_requested(None));
+        assert!(independent_queues_requested(Some("1")));
+        assert!(!independent_queues_requested(Some("0")));
+        req.gpu.gpu_memory_limit_mb = 4096;
+        assert!(!independent_profile(&req));
+        req.gpu.gpu_memory_limit_mb = 0;
+        req.gpu.person_detector = DetectorVariant::RfDetrLarge;
+        assert!(!independent_profile(&req));
+        req.gpu.person_detector = DetectorVariant::RfDetrMedium;
+        req.gpu.pose_enabled = false;
+        assert!(!independent_profile(&req));
+    }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "requires isolated example and native CUDA/ORT"]
     async fn project_queue_two_videos_cuda_stage_handoff() {
@@ -4766,15 +4796,16 @@ mod tests {
             inference_limit: tokio::sync::Semaphore::new(1),
             full_inference: crate::inference_full::FullInferenceManager::new(),
         });
+        let reid = std::env::var("VOLLEY_AB_REID_DEVICE").unwrap_or_else(|_| "cpu".into());
         let request = serde_json::from_value::<StartRequest>(json!({
             "project_id":project_id,"video":videos[0],"mode":"full",
             "gpu":{"pose_stride":1,"parallel_rally_poses":false,"primary_rallies":{"min_trajectory_seconds":1.0}},
-            "post":{"reid_device":"cpu","reid_buffer_mib":0},
+            "post":{"reid_device":reid,"reid_buffer_mib":0},
             "video_profiles":{
                 "first.mp4":{"gpu":{"pose_stride":1,"parallel_rally_poses":false,"primary_rallies":{"min_trajectory_seconds":1.0}},
-                    "post":{"reid_device":"cpu","reid_buffer_mib":0}},
+                    "post":{"reid_device":reid,"reid_buffer_mib":0}},
                 "second.mp4":{"gpu":{"pose_stride":3,"primary_rallies":{"min_trajectory_seconds":1.0}},
-                    "post":{"reid_device":"cpu","reid_buffer_mib":0}}
+                    "post":{"reid_device":reid,"reid_buffer_mib":0}}
             }
         })).unwrap();
         let Json(queued) = start_project(State(state.clone()), HeaderMap::new(), Json(request))
@@ -4828,7 +4859,11 @@ mod tests {
             .unwrap()["finished_ms"]
             .as_u64()
             .unwrap();
-        let independent = std::env::var("VOLLEY_INDEPENDENT_GPU_QUEUES").as_deref() == Ok("1");
+        let independent = independent_queues_requested(
+            std::env::var("VOLLEY_INDEPENDENT_GPU_QUEUES")
+                .ok()
+                .as_deref(),
+        );
         if independent {
             assert!(
                 stage_start(&rows[1], "ball") < detector_finished,

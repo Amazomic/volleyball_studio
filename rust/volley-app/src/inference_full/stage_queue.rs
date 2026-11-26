@@ -4,7 +4,10 @@ use tokio::sync::{oneshot, Semaphore, SemaphorePermit};
 
 const CANCEL_INTERVAL: Duration = Duration::from_millis(100);
 
+const JOINT_SLOTS: u32 = 2;
+
 pub(crate) struct IndependentStages {
+    pub(crate) joint: Semaphore,
     pub(crate) players: Semaphore,
     pub(crate) pose: Semaphore,
 }
@@ -12,9 +15,16 @@ pub(crate) struct IndependentStages {
 impl Default for IndependentStages {
     fn default() -> Self {
         Self {
+            joint: Semaphore::new(JOINT_SLOTS as usize),
             players: Semaphore::new(1),
             pose: Semaphore::new(1),
         }
+    }
+}
+
+impl IndependentStages {
+    pub(crate) async fn reid(&self, cancel: &AtomicBool) -> Result<SemaphorePermit<'_>, String> {
+        acquire_gpu_many(&self.joint, JOINT_SLOTS, cancel).await
     }
 }
 
@@ -103,7 +113,15 @@ pub(crate) async fn acquire_gpu<'a>(
     gpu: &'a Semaphore,
     cancel: &AtomicBool,
 ) -> Result<SemaphorePermit<'a>, String> {
-    let request = gpu.acquire();
+    acquire_gpu_many(gpu, 1, cancel).await
+}
+
+async fn acquire_gpu_many<'a>(
+    gpu: &'a Semaphore,
+    slots: u32,
+    cancel: &AtomicBool,
+) -> Result<SemaphorePermit<'a>, String> {
+    let request = gpu.acquire_many(slots);
     tokio::pin!(request);
     loop {
         if cancel.load(Ordering::Acquire) {
@@ -123,6 +141,29 @@ pub(crate) async fn acquire_gpu<'a>(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn reid_waits_for_both_joint_gpu_passes_and_releases_slots() {
+        let queues = IndependentStages::default();
+        let cancel = AtomicBool::new(false);
+        let first = acquire_gpu(&queues.joint, &cancel).await.unwrap();
+        let second = acquire_gpu(&queues.joint, &cancel).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), queues.reid(&cancel))
+                .await
+                .is_err()
+        );
+        drop(first);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), queues.reid(&cancel))
+                .await
+                .is_err()
+        );
+        drop(second);
+        let reid = queues.reid(&cancel).await.unwrap();
+        assert!(queues.joint.try_acquire().is_err());
+        drop(reid);
+        assert_eq!(queues.joint.available_permits(), 2);
+    }
     #[test]
     fn independent_model_queues_have_separate_slots_and_cancel_safely() {
         let queues = IndependentStages::default();
