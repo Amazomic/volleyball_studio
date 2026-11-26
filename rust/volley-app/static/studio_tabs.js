@@ -565,13 +565,6 @@
     return result;
   };
   const pipelineLabel=entry=>window.VolleyballUi.translate(pipelineNames.get(pipelineId(entry))||String(entry?.name||"Стадия"));
-  const stageTime=ms=>{
-    if(!Number.isFinite(ms)||ms<1000)return "";
-    const seconds=Math.floor(ms/1000);
-    return String(Math.floor(seconds/3600)).padStart(2,"0")+":"+
-      String(Math.floor(seconds/60)%60).padStart(2,"0")+":"+
-      String(seconds%60).padStart(2,"0");
-  };
   const playerTrackingSummary=(run,id)=>{
     const stats=run?.player_tracking_stats;
     const fmt=n=>n.toLocaleString("ru-RU");
@@ -627,10 +620,6 @@
     }
     return entries.sort((a,b)=>(a.started_ms??0)-(b.started_ms??0));
   };
-  const withStageTime=(text,duration,suffix="")=>{
-    const time=stageTime(duration);
-    return time?text+" · "+time+suffix:text;
-  };
   const stageResultText=(id,entry,run,now,done,running)=>{
     if(id==="touch_detector"){
       const count=run?.project_queue?.touch_detector_count??run?.touch_detector_count;
@@ -640,12 +629,10 @@
       return count.toLocaleString("ru-RU")+" "+noun;
     }
     if(entry?.rallies_total&&run?.rally_stage_progress&&rallyBlockStages.includes(id)){
-      const duration=Number.isFinite(entry.finished_ms)?Math.max(0,entry.finished_ms-entry.started_ms):
-        Number.isFinite(entry.started_ms)?Math.max(0,now-entry.started_ms):null;
       const fmt=value=>Number.isSafeInteger(value)?value.toLocaleString("ru-RU"):"—";
       const count=id==="pose"?fmt(entry.sampled_frames)+" кадров":fmt(entry.tracks)+" Track ID";
-      return withStageTime(count+" · "+fmt(entry.rallies_completed)+"/"+fmt(entry.rallies_total)+" розыгр."+
-        (entry.state==="waiting"?" · Ожидание":""),duration);
+      return count+" · "+fmt(entry.rallies_completed)+"/"+fmt(entry.rallies_total)+" розыгр."+
+        (entry.state==="waiting"?" · Ожидание":"");
     }
     if(id==="pose"&&!entry&&!running&&done){
       const {processed,total}=run?.pose_frame_progress||{};
@@ -656,15 +643,12 @@
       const shared=run?.shared_pose;
       const player=run?.stages?.find(stage=>stage.id==="players");
       const joint=shared?.source_stage_id==="players"||/RF-DETR.*RTMPose/.test(String(player?.name||""));
-      if(!joint)return running?"Выполняется":"Позы сохранены · время не измерено";
-      const duration=Number.isFinite(shared?.duration_ms)?shared.duration_ms:
-        running&&Number.isFinite(player?.started_ms)?Math.max(0,now-player.started_ms):
-        player?.duration_ms;
+      if(!joint)return running?"Выполняется":"Позы сохранены";
       const scoped=Number.isSafeInteger(shared?.eligible_pose_frames);
       const count=scoped?shared.eligible_pose_frames:shared?.sampled_frames,poses=shared?.player_poses;
       if(Number.isSafeInteger(count)&&count>=0&&Number.isSafeInteger(poses)&&poses>=0)
-        return withStageTime(count.toLocaleString("ru-RU")+(scoped?" игровых кадр. · ":" выборок · ")+poses.toLocaleString("ru-RU")+" поз",duration," (общ.)");
-      return withStageTime("С RF-DETR",duration);
+        return count.toLocaleString("ru-RU")+(scoped?" игровых кадр. · ":" выборок · ")+poses.toLocaleString("ru-RU")+" поз";
+      return "С RF-DETR";
     }
     let result="";
     if(id==="ball_stabilizer"&&entry&&run?.ball_stabilizer){
@@ -679,12 +663,10 @@
         Number.isSafeInteger(entry.frames_total)&&entry.frames_total>0){
       result=entry.frames_processed.toLocaleString("ru-RU")+" / "+
         entry.frames_total.toLocaleString("ru-RU")+" кадров";
-    }else if(done)return stageTime(entry?.duration_ms)||"—";
+    }else if(done)return "—";
     else if(running)result="Выполняется";
     if(!result)return "—";
-    const duration=running&&Number.isFinite(entry?.started_ms)&&entry?.finished_ms==null?
-      Math.max(0,now-entry.started_ms):entry?.duration_ms;
-    return withStageTime(result,duration);
+    return result;
   };
   const stageProgressPercent=(entry,running,done)=>{
     if(done)return 100;
@@ -1161,7 +1143,7 @@
           (run?.shared_pose?.source_stage_id==="players"||
             /RF-DETR.*RTMPose/.test(String(seen.get("players")?.name||"")));
         stats.title=stats.textContent==="—"?"Нет данных об этапе":
-          sharedPose?"RTMPose и RF-DETR использовали общий GPU-проход; время указано совместное. "+stats.textContent:stats.textContent;
+          sharedPose?"RTMPose и RF-DETR использовали общий GPU-проход. "+stats.textContent:stats.textContent;
       }
       if(id==="boxes"||id==="tracking"){
         const metrics=(done||reused)&&!(id==="boxes"&&entry?.rallies_total)?playerTrackingSummary(run,id):null;
@@ -1343,8 +1325,17 @@
     const mode=source.mode==="gpu"?"1 фаза":source.mode==="post"?"2 фаза":"Полный анализ";
     const statuses={queued:"В очереди",running:"В процессе",cancelling:"Останавливается",
       complete:"Завершён",failed:"Ошибка",cancelled:"Отменён",interrupted:"Прерван"};
-    const elapsed=source.elapsed_ms??source.duration_ms;
-    const started=Number(source.started_ms);
+    const activeQueue=queue?.active===true;
+    const multiVideo=activeQueue&&queue.total_videos>1;
+    const currentStatus=activeQueue&&source.status==="complete"?"running":source.status;
+    const elapsed=activeQueue?(queue.elapsed_ms??source.elapsed_ms):source.elapsed_ms??source.duration_ms;
+    const started=Number(activeQueue?(queue.started_ms??source.started_ms):source.started_ms);
+    const remaining=multiVideo?queue.remaining_ms:(source.remaining_ms??(activeQueue?queue.remaining_ms:null));
+    const showRemaining=!source.live_stale&&!source.cancel_requested&&
+      ["queued","running"].includes(currentStatus);
+    const eta=showRemaining?(Number.isFinite(remaining)&&remaining>0?
+      " \u00b7 \u041e\u0441\u0442\u0430\u043b\u043e\u0441\u044c \u2248 "+historyDuration(remaining):
+      " \u00b7 \u041e\u0441\u0442\u0430\u043b\u043e\u0441\u044c: \u0440\u0430\u0441\u0441\u0447\u0438\u0442\u044b\u0432\u0430\u0435\u0442\u0441\u044f"):"";
     const timestamp=Number.isFinite(started)&&started>0?
       " · "+new Date(started).toLocaleString("ru-RU"):"";
     const ballInput=queuedBallInput(source);
@@ -1356,12 +1347,12 @@
         (stage?stage:"Последний запуск · "+mode)+" · "+
         ([...ui.video.options].find(option=>option.value===video)?.textContent||video||"—")),
       make("span","analysis-flow-result-status",
-        (source.live_stale?"Ожидание данных":source.status==="complete"&&source.completion_quality==="identity_failed"?
+        (source.live_stale?"Ожидание данных":currentStatus==="complete"&&source.completion_quality==="identity_failed"?
           "Ошибка автопривязки":
-         source.status==="complete"&&source.completion_quality==="identity_review_required"?
+         currentStatus==="complete"&&source.completion_quality==="identity_review_required"?
           "Нужна проверка ID":
-          statuses[source.status]||"Ожидание данных")+
-        (elapsed==null?"":" · "+historyDuration(Number(elapsed)))+timestamp)
+          statuses[currentStatus]||"Ожидание данных")+
+        (elapsed==null?"":" · "+historyDuration(Number(elapsed)))+eta+timestamp)
     );
   };
   const liveHistory=()=>{

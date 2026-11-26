@@ -154,6 +154,15 @@ const secondFeed={id:"next",video:"game-b.mp4",status:"running",stage_id:"ball",
   frames_processed:45,ball_frames_total:120};
 const firstPass={...finished,status:"running",stage_id:"boxes",stage:"CPU · Связывание рамок игроков"};
 const queue={active:true,videos:[firstPass,secondFeed]};
+const timedQueue={...queue,total_videos:2,started_ms:1000,elapsed_ms:120000,remaining_ms:180000};
+showGraphResult({...firstPass,started_ms:60000,elapsed_ms:61000,remaining_ms:3000,project_queue:timedQueue},timedQueue);
+assert.match(resultPanel.querySelector(".analysis-flow-result-status").textContent,/В процессе.*120 с.*180 с/);
+showGraphResult({...firstPass,remaining_ms:5000},null);
+assert.match(resultPanel.querySelector(".analysis-flow-result-status").textContent,/Осталось.*5 с/);
+showGraphResult({...firstPass,remaining_ms:5000,live_stale:true},null);
+assert.doesNotMatch(resultPanel.querySelector(".analysis-flow-result-status").textContent,/Осталось/);
+showGraphResult({...finished,remaining_ms:5000},null);
+assert.doesNotMatch(resultPanel.querySelector(".analysis-flow-result-status").textContent,/Осталось/);
 showGraphResult({...firstPass,project_queue:queue},queue);
 assert.match(resultPanel.querySelector(".analysis-flow-result-title").textContent,
   /Видео 2\/2 → VballNetV4c · game-b\.mp4/);

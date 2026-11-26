@@ -13,8 +13,8 @@ assert.match(css,/\.analysis-flow-diagram\{[^}]*container-type:inline-size/);
 assert.match(css,/\.analysis-flow-node\{[^}]*min-height:76px/);
 assert.match(css,/\.analysis-flow-node-stats\{[^}]*font-size:/);
 assert.match(js,/cell\.append\(node,stats\)/);
-const metricsSource=js.slice(js.indexOf("const stageTime="),js.indexOf("const pipelineEdges="));
-assert.ok(metricsSource.startsWith("const stageTime="));
+const metricsSource=js.slice(js.indexOf("const playerTrackingSummary="),js.indexOf("const pipelineEdges="));
+assert.ok(metricsSource.startsWith("const playerTrackingSummary="));
 const metricsContext=vm.createContext({});
 vm.runInContext(metricsSource+"this.format=stageResultText;",metricsContext);
 const format=metricsContext.format;
@@ -60,28 +60,28 @@ assert.equal(blockContext.history([{id:"touch_detector",started_ms:9000}],touchR
 assert.equal(blockContext.history([{id:"touch_detector",started_ms:9000}],blockRun).find(e=>e.id==="touch_detector").started_ms,9000);
 const run={status:"running",gpu_rally_mask:{merged:[[0,30],[90,130]]}};
 const entry={started_ms:1000,finished_ms:null,frames_processed:1450,frames_total:1450};
-assert.equal(format("players",entry,run,3662000,true,true),"1 450 / 1 450 кадров · 01:01:01");
-assert.equal(format("rallies",{started_ms:1000,finished_ms:3662000,duration_ms:3661000},run,4000000,true,false),"2 розыгрыша · 01:01:01");
-assert.equal(format("rallies",{duration_ms:2000,finished_ms:3000},{gpu_rally_count:2,gpu_rally_mask:{ground_detector:{calibrated:true,candidate_count:3}}},4000,true,false),"2 розыгрыша · 00:00:02");
-assert.equal(format("rallies",{duration_ms:2000,finished_ms:3000},{gpu_rally_count:2,gpu_rally_mask:{ground_detector:{calibrated:false,candidate_count:3}}},4000,true,false),"2 розыгрыша · 00:00:02");
+assert.equal(format("players",entry,run,3662000,true,true),"1 450 / 1 450 кадров");
+assert.equal(format("rallies",{started_ms:1000,finished_ms:3662000,duration_ms:3661000},run,4000000,true,false),"2 розыгрыша");
+assert.equal(format("rallies",{duration_ms:2000,finished_ms:3000},{gpu_rally_count:2,gpu_rally_mask:{ground_detector:{calibrated:true,candidate_count:3}}},4000,true,false),"2 розыгрыша");
+assert.equal(format("rallies",{duration_ms:2000,finished_ms:3000},{gpu_rally_count:2,gpu_rally_mask:{ground_detector:{calibrated:false,candidate_count:3}}},4000,true,false),"2 розыгрыша");
 assert.equal(format("rallies",null,{status:"complete",gpu_rally_mask:{merged:[]}},0,false,false),"—");
-assert.equal(format("video",{duration_ms:423000,finished_ms:500000},{status:"complete"},0,true,false),"00:07:03");
+assert.equal(format("video",{duration_ms:423000,finished_ms:500000},{status:"complete"},0,true,false),"—");
 assert.equal(format("touches",null,null,0,false,false),"—");
-assert.equal(format("pose",{started_ms:1000,frames_processed:30,frames_total:120},run,3000,false,true),"30 / 120 кадров · 00:00:02");
-assert.equal(format("pose",{duration_ms:4000,finished_ms:5000,frames_processed:120,frames_total:120},run,5000,true,false),"120 / 120 кадров · 00:00:04");
+assert.equal(format("pose",{started_ms:1000,frames_processed:30,frames_total:120},run,3000,false,true),"30 / 120 кадров");
+assert.equal(format("pose",{duration_ms:4000,finished_ms:5000,frames_processed:120,frames_total:120},run,5000,true,false),"120 / 120 кадров");
 assert.equal(format("pose",null,{primary_tracking:{pose_ready:true},pose_frame_progress:{processed:120,total:120}},0,true,false),"120 / 120 кадров · Из кэша");
 const sharedPose={gpu_jobs:{pose:"pose-run"},stages:[{id:"players",duration_ms:36000}],
   shared_pose:{source_stage_id:"players",sampled_frames:175,player_poses:612,duration_ms:36000}};
 const scopedPose={gpu_jobs:{pose:"pose-run"},stages:[{id:"players",duration_ms:36000}],
   shared_pose:{source_stage_id:"players",sampled_frames:175,eligible_pose_frames:50,player_poses:612,duration_ms:36000}};
 assert.equal(format("pose",null,scopedPose,0,true,false),
-  "50 игровых кадр. · 612 поз · 00:00:36 (общ.)");
+  "50 игровых кадр. · 612 поз");
 assert.equal(format("pose",null,sharedPose,0,true,false),
-  "175 выборок · 612 поз · 00:00:36 (общ.)");
+  "175 выборок · 612 поз");
 assert.equal(format("pose",null,{gpu_jobs:{pose:"pose-run"},stages:[{id:"players",name:"GPU · RF-DETR + RTMPose",duration_ms:36000}]},0,true,false),
-  "С RF-DETR · 00:00:36");
+  "С RF-DETR");
 assert.equal(format("pose",null,{gpu_jobs:{pose:"pose-run"},stages:[]},0,true,false),
-  "Позы сохранены · время не измерено");
+  "Позы сохранены");
 assert.match(css,/\.analysis-flow-node\{[^}]*background:var\(--flow-card\)/);
 for(const kind of ["input","gpu","cpu","mixed","output"]){
   assert.match(css,new RegExp('\\.analysis-flow-node\\[data-kind="'+kind+'"\\]\\s+\\.analysis-flow-node-icon\\{color:'));

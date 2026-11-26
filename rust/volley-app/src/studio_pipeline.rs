@@ -4073,7 +4073,16 @@ fn pipeline_frames_processed(row: &Value) -> Option<u64> {
     })
 }
 
-fn queue_progress(rows: &[Value], active: bool) -> Value {
+fn progress_remaining(elapsed_ms: u64, progress_percent: f64) -> Option<u64> {
+    if elapsed_ms < 30_000 || !(1.0..100.0).contains(&progress_percent) {
+        return None;
+    }
+    let estimate = elapsed_ms as f64 * (100.0 - progress_percent) / progress_percent;
+    (estimate.is_finite() && estimate <= (7 * 24 * 3_600_000) as f64)
+        .then(|| (estimate.round() as u64).max(1000))
+}
+
+fn queue_progress(rows: &[Value], active: bool, now: u64) -> Value {
     let mut weighted_progress = 0.0;
     let mut total_weight = 0.0;
     let mut completed = 0;
@@ -4142,8 +4151,34 @@ fn queue_progress(rows: &[Value], active: bool) -> Value {
             "error":row["error"]})
         })
         .collect();
+    let progress_percent = if total_weight > 0.0 {
+        weighted_progress / total_weight
+    } else {
+        0.0
+    };
+    let started = rows
+        .iter()
+        .filter_map(|row| row["started_ms"].as_u64())
+        .min();
+    let elapsed = if active {
+        started.map(|start| now.saturating_sub(start))
+    } else {
+        None
+    };
+    let remaining = if active
+        && rows.iter().all(|row| {
+            matches!(
+                row["status"].as_str(),
+                Some("queued" | "running" | "complete")
+            )
+        }) {
+        elapsed.and_then(|ms| progress_remaining(ms, progress_percent))
+    } else {
+        None
+    };
     json!({"active":active,"completed_videos":completed,"total_videos":rows.len(),
-        "progress_percent":if total_weight > 0.0 {weighted_progress / total_weight} else {0.0},
+        "progress_percent":progress_percent,"started_ms":started,"elapsed_ms":elapsed,
+        "remaining_ms":remaining,
         "frames_processed":frames_processed,"rallies_total":rallies_total,
         "touch_detector_count":touch_detector_count,"videos":videos})
 }
@@ -4254,7 +4289,7 @@ pub async fn status(
         if let Some(current) = rows.iter().find(|row| row["id"] == id) {
             result = current.clone();
         }
-        result["project_queue"] = queue_progress(&rows, active);
+        result["project_queue"] = queue_progress(&rows, active, epoch_ms());
     }
     if result["status"] == "running" || result["status"] == "queued" {
         match slot
@@ -4296,6 +4331,14 @@ pub async fn status(
             result["remaining_ms"] =
                 stage_aware_remaining(&result, &history, now).map_or(Value::Null, |ms| json!(ms));
         }
+    }
+    if matches!(result["status"].as_str(), Some("queued" | "running"))
+        && result["remaining_ms"].is_null()
+    {
+        result["remaining_ms"] = json!(result["elapsed_ms"]
+            .as_u64()
+            .zip(result["progress_percent"].as_f64())
+            .and_then(|(elapsed, progress)| progress_remaining(elapsed, progress)));
     }
     Ok(Json(result))
 }
@@ -4460,6 +4503,32 @@ mod tests {
     }
 
     #[test]
+    fn queue_remaining_uses_whole_project_elapsed_and_includes_pending_videos() {
+        let rows = [
+            json!({"status":"complete","started_ms":1000,"finished_ms":31000,
+                "queue_weight_sec":25.0,"progress_percent":100.0}),
+            json!({"status":"running","started_ms":31000,
+                "queue_weight_sec":75.0,"progress_percent":33.333333333333336}),
+            json!({"status":"queued","queue_weight_sec":100.0,"progress_percent":0.0}),
+        ];
+        let summary = queue_progress(&rows, true, 61000);
+        assert_eq!(summary["started_ms"], 1000);
+        assert_eq!(summary["elapsed_ms"], 60000);
+        assert_eq!(summary["progress_percent"], 25.0);
+        assert_eq!(summary["remaining_ms"], 180000);
+        assert!(queue_progress(&rows, false, 61000)["remaining_ms"].is_null());
+        assert!(queue_progress(&rows, true, 2000)["remaining_ms"].is_null());
+        let mut failed = rows.clone();
+        failed[0]["status"] = json!("failed");
+        assert!(queue_progress(&failed, true, 61000)["remaining_ms"].is_null());
+        assert_eq!(progress_remaining(60000, 50.0), Some(60000));
+        assert_eq!(progress_remaining(1000, 50.0), None);
+        assert_eq!(progress_remaining(60000, 0.0), None);
+        assert_eq!(progress_remaining(60000, 100.0), None);
+        assert_eq!(progress_remaining(60000, f64::NAN), None);
+    }
+
+    #[test]
     fn queue_progress_uses_video_duration_and_never_completes_pending_video() {
         let rows = vec![
             json!({"id":"first","video":"a.mp4","status":"complete","progress_percent":100.0,
@@ -4469,7 +4538,7 @@ mod tests {
             json!({"id":"third","video":"c.mp4","status":"queued","progress_percent":0.0,
                 "queue_weight_sec":100.0}),
         ];
-        let summary = queue_progress(&rows, true);
+        let summary = queue_progress(&rows, true, 0);
         assert_eq!(summary["progress_percent"], 20.0);
         assert_eq!(summary["completed_videos"], 1);
         assert_eq!(summary["frames_processed"], 300);
@@ -4488,7 +4557,7 @@ mod tests {
             "running"
         );
         assert!(summary["videos"][2]["rallies_total"].is_null());
-        let interrupted = queue_progress(&rows, false);
+        let interrupted = queue_progress(&rows, false, 0);
         assert_eq!(interrupted["videos"][1]["status"], "interrupted");
         assert!(interrupted["videos"][1]["rally_stage_progress"].is_null());
         assert_eq!(interrupted["videos"][2]["status"], "interrupted");
@@ -4502,11 +4571,11 @@ mod tests {
             json!({"status":"running","stage_id":"ball","stages":[{"id":"ball",
                 "frames_processed":45,"frames_total":250}]}),
         ];
-        let summary = queue_progress(&rows, true);
+        let summary = queue_progress(&rows, true, 0);
         assert!(summary["videos"][0]["ball_frames_total"].is_null());
         assert_eq!(summary["videos"][1]["frames_processed"], 45);
         assert_eq!(summary["videos"][1]["ball_frames_total"], 250);
-        assert!(queue_progress(&rows, false)["videos"][1]["ball_frames_total"].is_null());
+        assert!(queue_progress(&rows, false, 0)["videos"][1]["ball_frames_total"].is_null());
     }
 
     #[test]
