@@ -4785,3 +4785,9 @@ Studio показывает кнопку перехода между debug и re
 
 - Base 6eadb6ecbc97ef9657d4210feba4d95be3215748; owner rust/volley-app/static/studio.js. Render saved serve proposals using the existing serve appearance, source scope, frame tolerance and filters; use the trajectory point when available, otherwise a text-only label; avoid duplicate serve annotations. No changes to detection or saved analysis.
 - RED: node scripts/ci/test_studio_preview_serve_label.mjs (missing label); GREEN: same test, touch filter and identity label tests PASS. scripts/check-all.ps1 PASS: fmt, clippy, 1107 Rust tests passed, 28 ignored by existing suite, 115 Node gates; git diff --check PASS. Browser playback on real footage and GPU/export NOT TESTED. Deploy via queue.
+
+### 2026-11-27 — Preview frame time label
+
+- Base 6eadb6ec, task 0b958431, integration base 6ac64ec5. Owner rust/volley-app/static/studio.css: raise the current-frame time by 5px, font 15px, line height 16px, both themes; keep timeline geometry and playback logic unchanged. Training view unaffected.
+- RED/GREEN: scripts/ci/test_studio_preview_layout_cache.mjs; DOM IDs, viewport layout PASS. Headless Edge isolated timeline geometry: dark/light at 1440x900, 1920x1080, 800x900, 480x812 PASS (5px shift, no track overlap). scripts/check-all.ps1 PASS on task (114 Node gates) and integration (115 Node gates), including Rust tests, fmt, clippy, WASM. git diff --check PASS.
+- Real project playback NOT TESTED; no detection or saved-analysis changes. Deploy via queue.
