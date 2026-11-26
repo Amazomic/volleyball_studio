@@ -19,7 +19,9 @@ assert.doesNotMatch(js, /ui\.(?:total|goldCount)\.textContent/,
   "Removed preview counters must not be updated by JavaScript");
 assert.ok(preview.indexOf('class="viewer-panel"')<preview.indexOf('class="rallies-panel"'),
   "Large player must precede the rally rail on the right");
-assert.match(css, /#studio-preview-view:not\(\.training-workspace\) #studio-timeline-middle\{[^}]*font-size:15px;[^}]*transform:translateY\(-5px\)/, "Current frame time must sit higher and be easier to locate");
+assert.match(css, /#studio-preview-view:not\(\.training-workspace\) \.video-timeline-playhead\{[^}]*top:-8px;[^}]*z-index:4/, "The playhead must protrude above the preview timeline");
+assert.match(css, /#studio-preview-view:not\(\.training-workspace\) \.video-timeline-track\{[^}]*overflow:visible/, "The protruding playhead must not be clipped");
+assert.doesNotMatch(css, /#studio-preview-view:not\(\.training-workspace\) #studio-timeline-middle/, "The numeric time label must keep its original styling");
 assert.equal((preview.match(/id="studio-video"/g)||[]).length,1);
 assert.equal((preview.match(/id="studio-rallies"/g)||[]).length,1);
 assert.match(css, /#studio-preview-view \.viewer-layout\{\s*grid-template-columns:minmax\(0,1fr\)/);
