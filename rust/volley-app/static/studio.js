@@ -4226,7 +4226,7 @@
     if(!s.project||!s.video)return;
     s.keyboardRallyAnchor=null;
     if(s.current!==item.candidate_id){
-      s.current=item.candidate_id;cards();alignActiveRally();
+      s.current=item.candidate_id;cards();
     }
     // Full timeline entries may not belong to the currently loaded (or sorted) card page.
     const {start,end}=rallyClipFrames(item);
@@ -4583,11 +4583,7 @@
           throw Error("Неподдерживаемая версия предварительного CPU-анализа");
         s.items.push(...raw.items);
         s.canLoadMore=raw.items.length>0&&s.items.length<s.filtered;
-        const active=ui.list.querySelector(".rally-card.active");
-        const bounds=ui.list.getBoundingClientRect();
-        const align=s.current&&(!active||(active.getBoundingClientRect().top>=bounds.top&&
-          active.getBoundingClientRect().top<bounds.bottom));
-        cards();if(align)alignActiveRally();
+        cards();
         drawTimeline();
       }catch(error){
         if(token===s.generation)
@@ -5216,7 +5212,7 @@
     }
     if(!rows[next])return;
     s.keyboardRallyAnchor=null;
-    rows[next].click();
+    rows[next].click();alignActiveRally();
   };
   document.addEventListener("keydown",event=>{
     if(!["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].includes(event.key))return;
