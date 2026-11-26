@@ -36,12 +36,18 @@ pub(crate) fn candidates(
         if frame < start {
             continue;
         }
-        let mut anchors = impact.before_frames.clone();
-        anchors.extend_from_slice(&impact.after_frames);
-        anchors.sort_unstable();
-        anchors.dedup();
-        let points = anchors
-            .into_iter()
+        let first = impact.frame.saturating_sub(18).max(0);
+        let last = impact
+            .frame
+            .saturating_add(48)
+            .min(motion.points.len() as i64 - 1);
+        let first = first
+            .min(*impact.before_frames.first().unwrap_or(&first))
+            .max(0);
+        let last = last
+            .max(*impact.after_frames.last().unwrap_or(&last))
+            .min(motion.points.len() as i64 - 1);
+        let points = (first..=last)
             .filter_map(|frame| {
                 let [x, y] = motion.points.get(usize::try_from(frame).ok()?)?.as_ref()?;
                 Some(volley_core::motion::BallObservation {
@@ -567,5 +573,54 @@ mod tests {
         )
         .is_err());
         fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn distant_out_rebound_uses_stabilized_context_outside_fit_anchors() {
+        let court =
+            CourtTransform::new([[0.1, 0.9], [0.35, 0.28], [0.6, 0.28], [0.9, 0.9]]).unwrap();
+        let mut motion = volley_core::ball_interpolation::StabilizedBallMotion {
+            points: vec![None; 100],
+            interpolated: vec![false; 100],
+            rejected_frames: vec![],
+            confidence_frames: 60,
+            observed_frames: 60,
+        };
+        for frame in 2..=64 {
+            let y = match frame {
+                2..=14 => 0.14 + (frame - 2) as f64 * 0.012,
+                15..=20 => 0.284 + (frame - 14) as f64 * 0.0015,
+                21 => 0.285,
+                22..=35 => 0.278 - (frame - 22) as f64 * 0.0045,
+                36..=56 => 0.2195 + (frame - 35) as f64 * 0.0034,
+                _ => 0.279,
+            };
+            motion.points[frame] = Some([0.69 - frame.saturating_sub(20) as f64 * 0.0005, y]);
+        }
+        motion.interpolated[20] = true;
+        motion.interpolated[21] = true;
+        let impact = volley_core::motion::TrajectoryBreak {
+            frame: 20,
+            position: [690.0, 293.0],
+            motion: Default::default(),
+            fit_error: 0.5,
+            before_frames: vec![16, 17, 18, 19],
+            after_frames: vec![22, 23, 24, 25],
+            contact_observed: false,
+        };
+        let cancel = AtomicBool::new(false);
+        let contacts = candidates(
+            &motion,
+            &[impact],
+            &[(0, 99)],
+            Some(&court),
+            1000,
+            1000,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].frame, 20);
+        assert_eq!(contacts[0].landing, "out");
     }
 }
