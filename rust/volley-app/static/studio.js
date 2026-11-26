@@ -3071,6 +3071,36 @@
     invalidateTrainingTouchPrediction();
     updateTrainingRallyLayers();
   });
+  const renderRallyVideoMarkers=(list,rail,create)=>{
+    const firstCards=new Map();
+    for(const card of list.querySelectorAll("[data-rally-video]")){
+      const video=card.getAttribute("data-rally-video");
+      if(video&&!firstCards.has(video))firstCards.set(video,card);
+    }
+    const height=list.scrollHeight;
+    rail.hidden=firstCards.size<2||!list.clientHeight||height<=list.clientHeight;
+    if(rail.hidden){rail.replaceChildren();return;}
+    rail.style.setProperty("--rally-scrollbar-width",Math.max(0,list.offsetWidth-list.clientWidth)+"px");
+    const contentTop=card=>card.getBoundingClientRect().top-list.getBoundingClientRect().top+
+      list.scrollTop-list.clientTop;
+    const buttons=[];
+    for(const [video,card] of firstCards){
+      const marker=create("button","rally-video-marker");
+      marker.type="button";
+      marker.title="Перейти к розыгрышам: "+video;
+      marker.setAttribute("aria-label",marker.title);
+      marker.style.top=(Math.max(0,Math.min(1,contentTop(card)/height))*100)+"%";
+      marker.addEventListener("click",()=>{list.scrollTop=contentTop(card);});
+      buttons.push(marker);
+    }
+    rail.replaceChildren(...buttons);
+  };
+  const rallyVideoMarkerRail=$("studio-rally-video-markers");
+  const refreshRallyVideoMarkers=()=>renderRallyVideoMarkers(ui.list,rallyVideoMarkerRail,make);
+  if(rallyVideoMarkerRail){
+    if(typeof MutationObserver==="function")new MutationObserver(refreshRallyVideoMarkers).observe(ui.list,{childList:true});
+    if(typeof ResizeObserver==="function")new ResizeObserver(refreshRallyVideoMarkers).observe(ui.list);
+  }
   const rallyCardProgresses=new Map();
   const placeTrainingTimeline=()=>{
     const element=$("studio-timeline");
@@ -4727,6 +4757,7 @@
         (sameSource&&s.current===id?" active":"")+(trainingList?" training-touch":""));
       card.tabIndex=0;card.setAttribute("role","button");
       card.setAttribute("data-rally-id",id);
+      if(!trainingList&&(source?.video||s.video))card.setAttribute("data-rally-video",source?.video||s.video);
       card.setAttribute("aria-label","Просмотр розыгрыша "+range);
       card.addEventListener("click",e=>{
         if(!e.target.closest(".rally-card-progress,button,label,input"))open();
