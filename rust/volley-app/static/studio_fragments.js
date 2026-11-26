@@ -188,7 +188,7 @@
     return sourceInfo.get(key);
   }
   window.VolleyballBrowserVideo={
-    load,cancel,
+    load,cancel,sourceInfo:readInfo,
     canStream:(project,name)=>readInfo(project,name).then(info=>
       info?.codec==="hevc"||info?.codec==="h265")
   };

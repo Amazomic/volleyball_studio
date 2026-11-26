@@ -1,7 +1,6 @@
 //! Pure, deterministic keyboard-scrub policy for the browser's video player.
 //! DOM events and HTMLVideoElement.currentTime stay in the JS platform adapter.
 
-const TAP_SECONDS: f64 = 0.001;
 const HOLD_DELAY_MS: f64 = 280.0;
 const HOLD_DOUBLING_MS: f64 = 650.0;
 const INITIAL_SECONDS_PER_SECOND: f64 = 0.1;
@@ -16,10 +15,32 @@ fn signed_direction(direction: i32) -> f64 {
     }
 }
 
-/// One discrete arrow-key press: exactly one millisecond in either direction.
 #[no_mangle]
-pub extern "C" fn volley_preview_seek_tap(direction: i32) -> f64 {
-    signed_direction(direction) * TAP_SECONDS
+pub extern "C" fn volley_preview_seek_frame(
+    position: f64,
+    direction: i32,
+    fps: f64,
+    duration: f64,
+    frames: u32,
+) -> f64 {
+    if !position.is_finite()
+        || !fps.is_finite()
+        || fps <= 0.0
+        || fps > 1000.0
+        || !duration.is_finite()
+        || duration <= 0.0
+        || signed_direction(direction) == 0.0
+        || frames == 0
+    {
+        return position;
+    }
+    let last = ((duration * fps - 1e-7).ceil() - 1.0).max(0.0);
+    let current = ((position * fps + 1e-7).floor()).clamp(0.0, last);
+    let target = (current + signed_direction(direction) * f64::from(frames)).clamp(0.0, last);
+    if target == current && position >= 0.0 && position < duration {
+        return position;
+    }
+    ((target + 0.5) / fps).min((duration - 1e-7).max(0.0))
 }
 
 /// Source seconds to advance for this rendered frame while holding an arrow.
@@ -51,11 +72,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tap_is_always_one_millisecond() {
-        assert_eq!(volley_preview_seek_tap(-1), -0.001);
-        assert_eq!(volley_preview_seek_tap(1), 0.001);
-        assert_eq!(volley_preview_seek_tap(0), 0.0);
-        assert_eq!(volley_preview_seek_tap(7), 0.0);
+    fn tap_selects_the_adjacent_frame_at_native_rate() {
+        for fps in [24.0, 25.0, 29.97, 30.0, 59.94, 60.0, 120.0] {
+            let frame = |time: f64| (time * fps + 1e-7).floor();
+            let start = 100.25 / fps;
+            let next = volley_preview_seek_frame(start, 1, fps, 60.0, 1);
+            let previous = volley_preview_seek_frame(start, -1, fps, 60.0, 1);
+            assert_eq!(frame(next), 101.0);
+            assert_eq!(frame(previous), 99.0);
+            assert_eq!(
+                frame(volley_preview_seek_frame(next, -1, fps, 60.0, 1)),
+                100.0
+            );
+            assert_eq!(volley_preview_seek_frame(0.0, -1, fps, 60.0, 1), 0.0);
+            assert!(volley_preview_seek_frame(60.0, 1, fps, 60.0, 1) < 60.0);
+        }
     }
 
     #[test]

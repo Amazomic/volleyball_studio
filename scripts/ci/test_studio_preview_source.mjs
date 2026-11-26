@@ -10,7 +10,8 @@ assert.ok(start>=0&&end>start,"Preview source initialization must exist");
 const s={project:"project",video:"match.mp4",videoKey:"",seekAt:0};
 const video={src:"",loads:0,load(){this.loads++;},getAttribute(name){return name==="src"?this.src:null;}};
 const emptyVideo={classList:{add(){}}};
-const context={window:{addEventListener(){}},previewLoad:{timer:null,key:"",retries:0,pending:false,epoch:0},clearTimeout,
+const infoRequests=[];
+const context={request:path=>new Promise(resolve=>infoRequests.push({path,resolve})),window:{addEventListener(){}},previewLoad:{timer:null,key:"",retries:0,pending:false,epoch:0},clearTimeout,
   schedulePreviewRecovery(){},s,ui:{video,emptyVideo},url:(path,params)=>path+"?"+new URLSearchParams(params),URLSearchParams};
 runInNewContext(js.slice(start,end)+"\nthis.ensurePreviewVideo=ensurePreviewVideo;",context);
 context.ensurePreviewVideo();
@@ -19,6 +20,16 @@ assert.equal(s.videoKey,"project:match.mp4");
 assert.equal(video.loads,1);
 context.ensurePreviewVideo();
 assert.equal(video.loads,1,"Repeated data responses must preserve the current playback");
+assert.equal(infoRequests.length,1);
+assert.match(infoRequests[0].path,/video=match.mp4/);
+s.video="other.mp4";
+context.ensurePreviewVideo();
+infoRequests[1].resolve({video:"other.mp4",fps:60});
+await new Promise(setImmediate);
+assert.equal(context.previewLoad.sourceFps,60);
+infoRequests[0].resolve({video:"match.mp4",fps:24});
+await new Promise(setImmediate);
+assert.equal(context.previewLoad.sourceFps,60,"Stale source metadata must not change frame step");
 assert.match(js,/if\(!s\.video\)s\.video=raw\.video;\s*ensurePreviewVideo\(\);/);
 assert.match(js,/s\.video=typeof raw\.video==="string"\?raw\.video:"";\s*ensurePreviewVideo\(\);/);
 console.log("Studio preview initializes selected source: OK");

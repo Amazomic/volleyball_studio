@@ -12,7 +12,7 @@ assert.match(js,/const steps=\{PageDown:-30,PageUp:30\}/,
 let now=0,visible=true,nextFrame=1,duration=6000;
 const queued=new Map(),documentHandlers=new Map(),windowHandlers=new Map(),seeks=[];
 const s={project:"p",video:"match.mp4",videoKey:"p:match.mp4",seekAt:100,current:"a",generation:1};
-const video={currentTime:100,paused:false,pause(){this.paused=true;}};
+const video={currentTime:100,readyState:2,src:"",getAttribute(){return this.src;},paused:false,pause(){this.paused=true;}};
 const visited=[];
 let mountedIds=["a","c","b"];
 const list={querySelectorAll:()=>mountedIds.map(id=>({
@@ -25,8 +25,17 @@ const document={
 // Exercise the real compiled Rust WASM policy, not a JavaScript reimplementation.
 const wasmBytes=readFileSync(new URL("../../rust/volley-app/static/volley_web.wasm",import.meta.url));
 const engine=new WebAssembly.Instance(new WebAssembly.Module(wasmBytes),{}).exports;
-assert.equal(engine.volley_preview_seek_tap(1),0.001);
-assert.equal(engine.volley_preview_seek_tap(-1),-0.001);
+for(const rate of [24,25,29.97,30,59.94,60,120]){
+  const frame=position=>Math.floor(position*rate+1e-7);
+  const position=(100.25)/rate;
+  const next=engine.volley_preview_seek_frame(position,1,rate,60,1);
+  const previous=engine.volley_preview_seek_frame(position,-1,rate,60,1);
+  assert.equal(frame(next),101,"Right must change the displayed frame at "+rate+" FPS");
+  assert.equal(frame(previous),99,"Left must change the displayed frame at "+rate+" FPS");
+  assert.equal(frame(engine.volley_preview_seek_frame(next,-1,rate,60,1)),100);
+  assert.equal(frame(engine.volley_preview_seek_frame(0,-1,rate,60,1)),0);
+  assert.ok(engine.volley_preview_seek_frame(60,1,rate,60,1)<60);
+}
 assert.equal(engine.volley_preview_seek_hold_delta(1,279,100),0);
 assert.equal(engine.volley_preview_seek_hold_delta(1,280,100),0.01);
 const window={VolleyballUi:{engine},
@@ -34,7 +43,7 @@ const window={VolleyballUi:{engine},
 const context={
   document,window,s,ui:{video,list},performance:{now:()=>now},
   previewIsVisible:()=>visible&&!document.hidden,
-  timelineDuration:()=>duration,
+  timelineDuration:()=>duration,previewLoad:{sourceFps:60},fps:()=>30,
   loadMore:async()=>{mountedIds.push("d");s.canLoadMore=false;},
   isTypingSpaceTarget:target=>target?.isContentEditable||["TEXTAREA","SELECT"].includes(target?.tagName)||(target?.tagName==="INPUT"&&target.type!=="range"),
   seekTimeline:(position,keyboard)=>{
@@ -78,26 +87,28 @@ const advanceTo=endTime=>{
 };
 
 let event=key("ArrowRight");
-assert.equal(s.seekAt,100.001,"A quick right-arrow press moves exactly 0.001 seconds");
+assert.equal(Math.floor(s.seekAt*60),6001,"A quick right-arrow press advances one source frame");
+const firstPosition=s.seekAt;
 assert.equal(event.prevented,1);
 assert.equal(event.stopped,1);
 assert.equal(video.paused,true,"Arrow seek pauses playback immediately");
 key("ArrowRight",{repeat:true});
 assert.equal(seeks.length,1,"OS key-repeat must not cause repeated base seeks");
 advanceTo(240);
-assert.equal(s.seekAt,100.001,"A tap should not start a continuous seek");
+assert.equal(s.seekAt,firstPosition,"A tap should not start a continuous seek");
 release("ArrowRight");
 advanceTo(600);
-assert.equal(s.seekAt,100.001,"Seeking must stop on keyup");
+assert.equal(s.seekAt,firstPosition,"Seeking must stop on keyup");
 assert.equal(queued.size,0);
 
 now=700;
 key("ArrowRight");
+const secondPosition=s.seekAt;
 advanceTo(1600);
 const afterEarly=s.seekAt;
 advanceTo(3000);
 const afterLate=s.seekAt;
-const earlyPerSecond=(afterEarly-100.002)/(0.9);
+const earlyPerSecond=(afterEarly-secondPosition)/(0.9);
 const latePerSecond=(afterLate-afterEarly)/1.4;
 assert.ok(earlyPerSecond>0);
 assert.ok(latePerSecond>earlyPerSecond*2,
@@ -108,8 +119,8 @@ advanceTo(3500);
 assert.equal(s.seekAt,settled);
 
 key("ArrowLeft",{shiftKey:true});
-assert.ok(Math.abs(s.seekAt-(settled-0.001))<1e-6,
-  "Shift+Left also moves exactly 0.001 seconds");
+assert.equal(Math.floor(s.seekAt*60),Math.floor(settled*60)-1,
+  "Shift+Left also moves one source frame");
 release("ArrowLeft");
 const beforeIgnored=s.seekAt;
 for(const target of [
@@ -129,9 +140,20 @@ for(const target of [
   const before=s.seekAt;
   const consumed=key("ArrowRight",{target});
   assert.equal(consumed.prevented,1);
-  assert.ok(Math.abs(s.seekAt-before-0.001)<1e-6);
+  assert.equal(Math.floor(s.seekAt*60),Math.floor(before*60)+1);
   release("ArrowRight");
 }
+video.src="blob:fragment";
+const beforeFragment=Math.floor(video.currentTime*30);
+key("ArrowRight");
+assert.equal(Math.floor(s.seekAt*30),beforeFragment+1,"Fragments are encoded at 30 FPS");
+release("ArrowRight");
+video.src="/api/video-media?playback=compatible";
+const beforeCompatible=Math.floor(video.currentTime*30);
+key("ArrowRight");
+assert.equal(Math.floor(s.seekAt*30),beforeCompatible+1,"Compatibility copy uses its actual 30 FPS");
+release("ArrowRight");
+video.src="";
 const afterControls=s.seekAt;
 key("ArrowLeft",{ctrlKey:true});
 assert.equal(s.seekAt,afterControls,"OS modifier combinations remain available");
@@ -212,4 +234,4 @@ const railContext={ui:{list:rail}};
 runInNewContext(js.slice(alignStart,alignEnd)+"\nthis.align=alignActiveRally;",railContext);
 railContext.align();
 assert.equal(rail.scrollTop,299,"Active card is aligned to the top of its own scrolling rail");
-console.log("Studio preview keyboard: 1 ms, acceleration, pause, cross-rally seek, ordered navigation and active-card alignment: OK");
+console.log("Studio preview keyboard: native frame steps, acceleration, pause, cross-rally seek, ordered navigation and active-card alignment: OK");

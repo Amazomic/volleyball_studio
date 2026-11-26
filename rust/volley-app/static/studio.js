@@ -38,7 +38,7 @@
     playbackMode:"sequence",generation:0,busy:false,jobId:"",timer:null,
     loadingMore:false,canLoadMore:true,pageLoading:false,pageError:""
   };
-  const previewLoad={key:"",epoch:0,pending:false,retries:0,timer:null};
+  const previewLoad={key:"",epoch:0,pending:false,retries:0,timer:null,sourceFps:0};
   // Persist selected source IDs only; restored IDs are validated against each catalog.
   const sourceSelection=(()=>{
     const key="volley:studio-source-selection:v1";
@@ -3271,6 +3271,13 @@
     if(previewLoad.key!==key){previewLoad.key=key;previewLoad.retries=0;}
     previewLoad.pending=true;
     const epoch=++previewLoad.epoch;
+    previewLoad.sourceFps=0;
+    const sourceInfo=window.VolleyballBrowserVideo?.sourceInfo?.(project,video)||
+      request(url("/api/video-info",{video}));
+    sourceInfo.then(info=>{
+      if(epoch===previewLoad.epoch&&s.videoKey===key&&info?.video===video)
+        previewLoad.sourceFps=Number(info.fps)||0;
+    }).catch(()=>{});
     const onLoaded=()=>{
       if(epoch!==previewLoad.epoch||s.videoKey!==key)return;
       previewLoad.pending=false;
@@ -3507,7 +3514,7 @@
     wasmReady=true;syncFavoritesSelection();cards();
   };
   const clearVideo=()=>{
-    previewLoad.epoch++;previewLoad.key="";previewLoad.pending=false;previewLoad.retries=0;
+    previewLoad.epoch++;previewLoad.key="";previewLoad.pending=false;previewLoad.retries=0;previewLoad.sourceFps=0;
     if(previewLoad.timer)clearTimeout(previewLoad.timer);
     previewLoad.timer=null;
     if(window.VolleyballBrowserVideo?.cancel)window.VolleyballBrowserVideo.cancel(ui.video);
@@ -5136,13 +5143,24 @@
   });
   ui.video.addEventListener("click",toggleVideoPlayback);
   // Left/right arrows scrub the one source-wide timeline, including raw GPU.
-  // Rust/WASM owns the precise 1 ms tap and exponential hold acceleration.
+  // Rust/WASM owns adjacent-frame selection and exponential hold acceleration.
   // JS only adapts keyboard events, requestAnimationFrame and media seeking.
-  const arrowScrub={direction:0,startedAt:0,lastSeekAt:0,frame:0,key:"",generation:0,navigation:0};
+  const arrowScrub={direction:0,startedAt:0,lastSeekAt:0,frame:0,key:"",generation:0,navigation:0,remainder:0};
   const stopArrowScrub=()=>{
     arrowScrub.direction=0;
     if(arrowScrub.frame)cancelAnimationFrame(arrowScrub.frame);
     arrowScrub.frame=0;
+  };
+  const previewFrameRate=()=>{
+    const media=ui.video.getAttribute?.("src")||"";
+    const compatible=media.startsWith("blob:")||media.includes("playback=compatible");
+    return window.VolleyballUi.engine.volley_evidence_fps(
+      compatible?30:previewLoad.sourceFps||fps());
+  };
+  const seekPreviewFrames=(position,direction,count)=>{
+    const target=window.VolleyballUi.engine.volley_preview_seek_frame(
+      position,direction,previewFrameRate(),timelineDuration(),count);
+    if(target!==position)seekTimeline(target,true);
   };
   const tickArrowScrub=timestamp=>{
     arrowScrub.frame=0;
@@ -5153,7 +5171,12 @@
       const delta=window.VolleyballUi.engine.volley_preview_seek_hold_delta(
         arrowScrub.direction,timestamp-arrowScrub.startedAt,
         timestamp-arrowScrub.lastSeekAt);
-      if(delta)seekTimeline(s.seekAt+delta,true);
+      arrowScrub.remainder+=Math.abs(delta)*previewFrameRate();
+      const count=Math.floor(arrowScrub.remainder);
+      if(count>0&&!ui.video.seeking){
+        arrowScrub.remainder-=count;
+        seekPreviewFrames(s.seekAt,arrowScrub.direction,count);
+      }
       arrowScrub.lastSeekAt=timestamp;
     }
     arrowScrub.frame=requestAnimationFrame(tickArrowScrub);
@@ -5184,7 +5207,7 @@
        isTypingSpaceTarget(event.target)||event.target?.closest?.("dialog[open]")||
        !s.videoKey||!previewIsVisible()||s.videoKey!==s.project+":"+s.video)return;
     const horizontal=event.key==="ArrowLeft"||event.key==="ArrowRight";
-    if(horizontal&&!timelineDuration())return;
+    if(horizontal&&(!timelineDuration()||ui.video.readyState<1))return;
     event.preventDefault();
     event.stopPropagation();
     if(!horizontal){
@@ -5200,11 +5223,12 @@
     ui.video.pause();
     arrowScrub.direction=direction;
     arrowScrub.key=s.videoKey;arrowScrub.generation=s.generation;
+    arrowScrub.remainder=0;
     arrowScrub.startedAt=performance.now();
     arrowScrub.lastSeekAt=arrowScrub.startedAt;
     const current=ui.video.seeking?s.seekAt:Number.isFinite(ui.video.currentTime)?
       ui.video.currentTime:s.seekAt;
-    seekTimeline(current+window.VolleyballUi.engine.volley_preview_seek_tap(direction),true);
+    seekPreviewFrames(current,direction,1);
     arrowScrub.frame=requestAnimationFrame(tickArrowScrub);
   },true);
   document.addEventListener("keyup",event=>{
