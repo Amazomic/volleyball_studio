@@ -13,7 +13,7 @@ let now=0,visible=true,nextFrame=1,duration=6000;
 const queued=new Map(),documentHandlers=new Map(),windowHandlers=new Map(),seeks=[];
 const s={project:"p",video:"match.mp4",videoKey:"p:match.mp4",seekAt:100,current:"a",generation:1};
 const video={currentTime:100,readyState:2,src:"",getAttribute(){return this.src;},paused:false,pause(){this.paused=true;}};
-const visited=[];
+const visited=[],aligned=[];
 let mountedIds=["a","c","b"];
 const list={querySelectorAll:()=>mountedIds.map(id=>({
   getAttribute:()=>id,click(){visited.push(id);s.current=id;}
@@ -44,7 +44,7 @@ assert.equal(engine.volley_preview_seek_hold_delta(1,280,100),0.01);
 const window={VolleyballUi:{engine},
   addEventListener:(name,handler)=>windowHandlers.set(name,handler)};
 const context={overlay:{presentedTime:null},
-  document,window,s,ui:{video,list},performance:{now:()=>now},
+  document,window,s,ui:{video,list},alignActiveRally:()=>aligned.push(s.current),performance:{now:()=>now},
   previewIsVisible:()=>visible&&!document.hidden,
   timelineDuration:()=>duration,previewLoad:{sourceFps:60},fps:()=>30,
   loadMore:async()=>{mountedIds.push("d");s.canLoadMore=false;},
@@ -215,6 +215,7 @@ await new Promise(setImmediate);
 assert.deepEqual(visited,["c","b","d"],"Down loads the next page at the list boundary");
 key("ArrowUp");
 assert.deepEqual(visited,["c","b","d","b"]);
+assert.deepEqual(aligned,visited,"Only keyboard navigation aligns the active card");
 key("ArrowLeft");
 release("ArrowLeft");
 s.current="";

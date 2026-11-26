@@ -186,3 +186,40 @@ runInNewContext(source.slice(nextStart,nextEnd)+"\nthis.nextRally=nextRally;",ne
 assert.equal(nextContext.nextRally().candidate_id,"b",
   "Sequence mode must choose the next detected boundary, not its 45-frame montage lead-in");
 console.log("Rally preview: detected boundaries align with timeline, padded manual clips preserved for montage, seek/redraw and sequence: OK");
+
+{
+const viewStart=source.indexOf("  const alignActiveRally=");
+const viewEnd=source.indexOf("  const renderReferenceCards=",viewStart);
+const rail={scrollTop:230,clientTop:0,getBoundingClientRect:()=>({top:100}),
+  querySelector:()=>({getBoundingClientRect:()=>({top:280})})};
+const selection={project:"p",video:"v",current:"a",videoKey:"p:v",playbackMode:"once"};
+const selectedVideo={readyState:2,currentTime:0};
+let renders=0;
+const selectionContext={s:selection,ui:{list:rail,video:selectedVideo,viewTitle:{},videoTime:{},
+  emptyVideo:{classList:{add(){}}}},cards(){renders++;},rallyClipFrames:()=>({start:60,end:99}),
+  fps:()=>10,clock:String,renderRallyTouches(){},rallyCardProgresses:new Map(),
+  setOverlaySource(){},prefetchOverlayAtFrame(){},drawTimeline(){},previewIsVisible:()=>false};
+runInNewContext(source.slice(viewStart,viewEnd)+"\nthis.view=view;",selectionContext);
+selectionContext.view({candidate_id:"b"});
+assert.equal(selection.current,"b");
+assert.equal(renders,1,"Selection must redraw the active highlight");
+assert.equal(selectedVideo.currentTime,6);
+assert.equal(rail.scrollTop,230,"Clicking a rally must preserve the list scroll position");
+selectionContext.view({candidate_id:"c"},8);
+assert.equal(selectedVideo.currentTime,8);
+assert.equal(rail.scrollTop,230,"Clicking a different card timeline must preserve scroll");
+
+const moreStart=source.indexOf("  const loadMore=async()=>",viewEnd);
+const moreEnd=source.indexOf("  const uploadAudio=",moreStart);
+const moreState={project:"p",run:"r",items:[],canLoadMore:true,filtered:2,generation:1,limit:1,current:"c"};
+rail.getBoundingClientRect=()=>({top:100,bottom:400});
+const moreContext={s:moreState,ui:{list:rail},reference:{active:false},training:{active:false},
+  previewCache:{load:async()=>({schema:"volley-native-rally-preview/1",authoritative_game_events:false,
+    automatic_montage_eligible:false,items:[{candidate_id:"d"}]})},url(){},rallyListQuery:()=>({}),
+  validSurfaceContacts:()=>true,cards(){},drawTimeline(){},message(error){throw Error(error);}};
+runInNewContext(source.slice(viewStart,source.indexOf("  const view=",viewStart))+
+  source.slice(moreStart,moreEnd)+"\nthis.loadMore=loadMore;",moreContext);
+await moreContext.loadMore();
+assert.equal(moreState.items.length,1);
+assert.equal(rail.scrollTop,230,"Loading another page must not move the selected rally to the top");
+}
