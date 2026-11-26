@@ -4803,3 +4803,9 @@ Studio показывает кнопку перехода между debug и re
 - Base 614dc5fc; task b6e287a9a7002f3460388df2f5874956df3b0687. Owner rust/volley-app/static/studio.css: restore the original 13px numeric time and extend only the playhead 8px above the whole-video track, retaining 36px track height and unchanged horizontal seek. Training styling unchanged; canvas remains rounded.
 - RED/GREEN: scripts/ci/test_studio_preview_layout_cache.mjs; DOM IDs, viewport layout PASS. Headless Edge isolated timeline geometry: dark/light, preview/training, 0/50/100% seek positions at 1440x900, 1920x1080, 800x900, 480x812, 48 cases PASS. scripts/check-all.ps1 PASS (fmt, clippy, Rust tests, WASM, 115 Node gates). Integration fast-forward uses identical tested tree; targeted integration checks PASS. git diff --check PASS.
 - Real project playback NOT TESTED; no detection or saved-analysis changes. Deploy via queue.
+
+### 2026-11-27 — Preview rally scroll video markers
+
+- Base 6ac64ec5; integration base def344af; owner rust/volley-app/static/studio.js with studio.html and studio.css. Native scrollbar retained; clickable markers locate first displayed rally per source video using actual card geometry, refresh after filter or resize, and do not change playback.
+- RED: node scripts/ci/test_studio_rally_scroll_markers.mjs (missing marker rail); GREEN: new marker test, rally card regression and preview tests. scripts/check-all.ps1 PASS: fmt, clippy, 1107 Rust tests passed (28 ignored by existing suite), 116 Node gates; transient CUDA NV12 test failure passed in isolation and on full rerun. Integration: 116 Node gates PASS; base changes only JS/CSS/tests/docs, WASM and Rust unchanged; git diff --check PASS.
+- Isolated Edge DOM fixture PASS at 1440x900, 1920x1080, 800x900, 480x812. Real project playback, GPU inference and export NOT TESTED. Deploy via queue.
