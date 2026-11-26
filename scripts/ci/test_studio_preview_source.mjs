@@ -33,3 +33,9 @@ assert.equal(context.previewLoad.sourceFps,60,"Stale source metadata must not ch
 assert.match(js,/if\(!s\.video\)s\.video=raw\.video;\s*ensurePreviewVideo\(\);/);
 assert.match(js,/s\.video=typeof raw\.video==="string"\?raw\.video:"";\s*ensurePreviewVideo\(\);/);
 console.log("Studio preview initializes selected source: OK");
+const html=readFileSync(new URL("../../rust/volley-app/static/studio.html",import.meta.url),"utf8");
+const videoTag=html.match(/<video\b[^>]*\bid="studio-video"[^>]*>/)?.[0];
+assert.ok(videoTag&&/\bmuted(?:\s|>)/.test(videoTag),"Analysis preview must be muted initially");
+const muteButton=html.match(/<button\b[^>]*\bid="studio-video-mute"[^>]*>/)?.[0];
+assert.match(muteButton,/aria-pressed="true"/,"Initial mute button state must match video");
+assert.match(js,/ui\.video\.muted=!ui\.video\.muted;/,"Sound must remain manually toggleable");

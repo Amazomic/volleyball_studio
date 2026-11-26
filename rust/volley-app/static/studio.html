@@ -321,7 +321,7 @@
                 <span id="studio-video-time">—</span>
               </div>
               <div class="video-wrap">
-                <video id="studio-video" tabindex="0" preload="metadata" playsinline aria-label="Просмотр исходного видео. Пробел — воспроизведение или пауза"></video>
+                <video id="studio-video" tabindex="0" preload="metadata" playsinline muted aria-label="Просмотр исходного видео. Пробел — воспроизведение или пауза"></video>
                 <canvas id="studio-video-overlay" class="video-overlay" aria-hidden="true"></canvas>
                 <span id="studio-debug-manual-point" class="studio-debug-manual-point" hidden aria-hidden="true"></span>
                 <div class="video-overlay-controls">
@@ -386,7 +386,7 @@
 
                 <div class="viewer-playback-controls" role="group" aria-label="Управление видео">
                   <button id="studio-video-play" type="button" class="secondary" aria-label="Воспроизвести">▶ Воспроизвести</button>
-                  <button id="studio-video-mute" type="button" class="secondary" aria-label="Отключить звук" aria-pressed="false">♫ Звук</button>
+                  <button id="studio-video-mute" type="button" class="secondary" aria-label="Отключить звук" aria-pressed="true">🔇 Без звука</button>
                   <button id="studio-video-fullscreen" type="button" class="secondary" aria-label="Полноэкранный режим">⛶ На весь экран</button>
                 </div>
                 <div class="video-playback-mode">
