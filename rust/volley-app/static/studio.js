@@ -5091,7 +5091,6 @@
   // timeline is the ONE seek slider. Keep transport controls accessible.
   const playback={
     play:$("studio-video-play"),mute:$("studio-video-mute"),
-    backward:$("studio-video-step-backward"),forward:$("studio-video-step-forward"),
     fullscreen:$("studio-video-fullscreen"),mode:$("studio-video-mode"),
     wrap:ui.video.closest(".video-wrap")
   };
@@ -5103,7 +5102,6 @@
   const updatePlaybackControls=()=>{
     const playing=!ui.video.paused&&!ui.video.ended;
     playback.play.disabled=!s.videoKey;
-    playback.backward.disabled=playback.forward.disabled=!s.videoKey;
     playback.play.textContent=playing?"❚❚ Пауза":"▶ Воспроизвести";
     playback.play.setAttribute("aria-label",playing?"Пауза":"Воспроизвести");
     playback.mute.disabled=!s.videoKey;
@@ -5181,8 +5179,6 @@
     seekPreviewSteps(current,direction,1);
     return true;
   };
-  playback.backward.addEventListener("click",()=>stepPreview(-1));
-  playback.forward.addEventListener("click",()=>stepPreview(1));
   const tickArrowScrub=timestamp=>{
     arrowScrub.frame=0;
     if(!arrowScrub.direction)return;

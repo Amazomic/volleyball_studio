@@ -43,9 +43,7 @@ assert.equal(engine.volley_preview_seek_hold_delta(1,279,100),0);
 assert.equal(engine.volley_preview_seek_hold_delta(1,280,100),0.01);
 const window={VolleyballUi:{engine},
   addEventListener:(name,handler)=>windowHandlers.set(name,handler)};
-const buttonHandlers=new Map();
-const playback={backward:{addEventListener:(name,fn)=>buttonHandlers.set("backward",fn)},forward:{addEventListener:(name,fn)=>buttonHandlers.set("forward",fn)}};
-const context={playback,overlay:{presentedTime:null},
+const context={overlay:{presentedTime:null},
   document,window,s,ui:{video,list},performance:{now:()=>now},
   previewIsVisible:()=>visible&&!document.hidden,
   timelineDuration:()=>duration,previewLoad:{sourceFps:60},fps:()=>30,
@@ -159,21 +157,21 @@ key("ArrowRight");
 near(s.seekAt,beforeCompatible+0.1,"Compatibility copies use the same time step");
 release("ArrowRight");
 video.src="";
-const beforeButtons=s.seekAt;
-for(let i=0;i<10;i++)buttonHandlers.get("forward")();
-near(s.seekAt,beforeButtons+1,"Ten visible button presses must advance one second");
-for(let i=0;i<10;i++)buttonHandlers.get("backward")();
-near(s.seekAt,beforeButtons,"Ten backward button presses must restore the position");
+const beforeArrows=s.seekAt;
+for(let i=0;i<10;i++){key("ArrowRight");release("ArrowRight");}
+near(s.seekAt,beforeArrows+1,"Ten right-arrow presses must advance one second");
+for(let i=0;i<10;i++){key("ArrowLeft");release("ArrowLeft");}
+near(s.seekAt,beforeArrows,"Ten left-arrow presses must restore the position");
 video.seeking=true;
 video.currentTime=0;
-buttonHandlers.get("forward")();
-near(s.seekAt,beforeButtons+0.1,"A pending seek must advance from its requested target");
+{key("ArrowRight");release("ArrowRight");}
+near(s.seekAt,beforeArrows+0.1,"A pending seek must advance from its requested target");
 video.seeking=false;
 video.currentTime=s.seekAt;
 video.paused=false;
 context.overlay.presentedTime=s.seekAt-0.02;
 const displayed=context.overlay.presentedTime;
-buttonHandlers.get("forward")();
+{key("ArrowRight");release("ArrowRight");}
 near(s.seekAt,displayed+0.1,"Playing step starts at the displayed video frame");
 assert.equal(video.paused,true);
 context.overlay.presentedTime=null;
@@ -257,4 +255,4 @@ const railContext={ui:{list:rail}};
 runInNewContext(js.slice(alignStart,alignEnd)+"\nthis.align=alignActiveRally;",railContext);
 railContext.align();
 assert.equal(rail.scrollTop,299,"Active card is aligned to the top of its own scrolling rail");
-console.log("Studio preview keyboard: 100 ms steps, visible controls, acceleration, pause, cross-rally seek, ordered navigation and active-card alignment: OK");
+console.log("Studio preview keyboard: 100 ms steps, acceleration, pause, cross-rally seek, ordered navigation and active-card alignment: OK");
