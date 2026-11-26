@@ -1,7 +1,7 @@
 use super::{BallObservation, TrajectoryBreak};
 use crate::court_geometry::CourtTransform;
 
-pub const GROUND_DETECTOR_VERSION: &str = "court_ball_roll_v6";
+pub const GROUND_DETECTOR_VERSION: &str = "court_ball_roll_v7";
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroundContact {
@@ -159,9 +159,14 @@ fn distant_sand_rebound(
     let local = &points[lo..hi];
     let split = local.partition_point(|p| p.frame <= frame);
     let (before, after) = local.split_at(split);
+    let contiguous_end = after
+        .windows(2)
+        .position(|p| p[1].frame - p[0].frame > 6)
+        .map_or(after.len(), |index| index + 1);
+    let after = &after[..contiguous_end];
     if before.len() < 8
         || after.len() < 12
-        || local.windows(2).any(|p| p[1].frame - p[0].frame > 6)
+        || before.windows(2).any(|p| p[1].frame - p[0].frame > 6)
         || frame - before.last()?.frame > 3
         || after.first()?.frame - frame > 3
     {
@@ -197,7 +202,18 @@ fn distant_sand_rebound(
                 .all(|p| (p.y / h - position[1]).abs() <= 0.018)
             && (window[3].y - window[0].y).abs() <= h * 0.015
     });
-    returned.then_some(GroundContact {
+    let damped_return = after[apex.0 + 1..].windows(2).any(|window| {
+        let elapsed = (window[1].frame - apex.1.frame) as f64;
+        let recovery = window[1].y / h - apex.1.y / h;
+        let approach_speed = descent / (frame - start.frame) as f64;
+        elapsed >= 8.0
+            && window[1].frame - window[0].frame <= 6
+            && window.iter().all(|p| p.y / h - apex.1.y / h >= rise * 0.65)
+            && (window[1].y / h - position[1]).abs() <= 0.035
+            && recovery / elapsed <= approach_speed * 0.65
+            && window[1].y + h * 0.006 >= window[0].y
+    });
+    (returned || damped_return).then_some(GroundContact {
         frame: frame as u64,
         position,
         landing: "out".to_owned(),
@@ -546,6 +562,32 @@ mod tests {
         let contact = classify_ground_contact(&points, &impact, &court, 1000, 1000, 200).unwrap();
         assert_eq!(contact.frame, 20);
         assert_eq!(contact.landing, "out");
+    }
+
+    #[test]
+    fn distant_out_damped_rebound_returns_toward_sand_without_settling() {
+        let (mut points, impact, court) = distant_sand_samples();
+        points.retain(|p| p.frame <= 54);
+        for p in &mut points {
+            if p.frame > 35 {
+                p.y = 219.5 + (p.frame - 35) as f64 * 2.8;
+            }
+        }
+        points.push(BallObservation {
+            frame: 64,
+            x: 800.0,
+            y: 400.0,
+        });
+        let contact = classify_ground_contact(&points, &impact, &court, 1000, 1000, 200)
+            .expect("damped out rebound with incomplete return");
+        assert_eq!(contact.frame, 20);
+        assert_eq!(contact.landing, "out");
+        for p in &mut points {
+            if p.frame > 35 {
+                p.y = 219.5 + (p.frame - 35) as f64 * 0.8;
+            }
+        }
+        assert!(classify_ground_contact(&points, &impact, &court, 1000, 1000, 200).is_none());
     }
 
     #[test]
