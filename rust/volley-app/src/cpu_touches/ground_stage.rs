@@ -109,11 +109,20 @@ pub(crate) fn candidates(
                         motion.points.get(i).is_some_and(Option::is_some)
                             && !motion.interpolated.get(i).copied().unwrap_or(true)
                     };
-                    measured(frame)
+                    let observed_impact = measured(frame)
                         && (frame.saturating_sub(4)..frame)
                             .filter(|&i| measured(i))
                             .count()
+                            >= 2;
+                    let bracketed_impact = !measured(frame)
+                        && (frame.saturating_sub(5)..frame)
+                            .filter(|&i| measured(i))
+                            .count()
                             >= 2
+                        && (frame + 1..=frame + 4).filter(|&i| measured(i)).count() >= 2
+                        && (frame.saturating_sub(3)..frame).any(measured)
+                        && (frame + 1..=frame + 3).any(measured);
+                    (observed_impact || bracketed_impact)
                         && (frame + 1..=frame + 14).filter(|&i| measured(i)).count() >= 2
                 });
         for contact in
@@ -556,6 +565,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn weak_terminal_rebound_requires_measured_brackets() {
+        let court =
+            CourtTransform::new([[0.06, 1.02], [0.34, 0.29], [0.60, 0.29], [0.89, 1.03]]).unwrap();
+        let mut motion = volley_core::ball_interpolation::StabilizedBallMotion {
+            points: vec![None; 60],
+            interpolated: vec![false; 60],
+            rejected_frames: vec![],
+            confidence_frames: 20,
+            observed_frames: 16,
+        };
+        let coords = [
+            (0, 0.416, 0.350),
+            (2, 0.421, 0.361),
+            (3, 0.422, 0.365),
+            (4, 0.427, 0.369),
+            (5, 0.428, 0.375),
+            (6, 0.430, 0.379),
+            (7, 0.432, 0.382),
+            (8, 0.433, 0.389),
+            (9, 0.435, 0.399),
+            (10, 0.437, 0.403),
+            (11, 0.439, 0.420),
+            (12, 0.441, 0.424),
+            (13, 0.443, 0.426),
+            (14, 0.445, 0.428),
+            (15, 0.447, 0.428),
+            (16, 0.449, 0.426),
+            (17, 0.451, 0.424),
+            (18, 0.453, 0.420),
+            (19, 0.457, 0.417),
+            (50, 0.5, 0.3),
+        ];
+        for (frame, x, y) in coords {
+            motion.points[frame] = Some([x, y]);
+        }
+        motion.interpolated[13..=16].fill(true);
+        let cancel = AtomicBool::new(false);
+        let run = |m: &volley_core::ball_interpolation::StabilizedBallMotion| {
+            candidates(m, &[], &[(0, 35)], Some(&court), 3840, 2160, &cancel).unwrap()
+        };
+        let hits = run(&motion);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].frame, 15);
+        motion.interpolated[17..=19].fill(true);
+        assert!(run(&motion).is_empty());
+        motion.interpolated[17..=19].fill(false);
+        motion.interpolated[10..=12].fill(true);
+        assert!(run(&motion).is_empty());
+    }
     #[test]
     fn short_roll_uses_interpolated_descent_but_requires_measured_tail() {
         let court = CourtTransform::new([[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]]).unwrap();
