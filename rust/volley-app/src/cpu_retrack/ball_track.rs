@@ -16,6 +16,14 @@ pub(crate) const LOCAL_POLICY: &str = "vballnet_local_artifacts_v1";
 pub(crate) const CONTINUOUS_MIN_SECONDS: f64 = 1.5;
 pub(crate) const CONTINUOUS_MERGE_SECONDS: f64 = 4.0;
 pub(crate) const MIN_RALLY_FRAMES: u64 = 5 * 30;
+pub(crate) const MOVEMENT_FILTER_VERSION: &str = "stationary_ball_min_rally_5s_v4";
+
+pub(crate) fn movement_filter_supported(version: Option<&str>) -> bool {
+    matches!(
+        version,
+        Some("stationary_ball_min_rally_5s_v3" | MOVEMENT_FILTER_VERSION)
+    )
+}
 
 pub(crate) fn filter_short_rallies(intervals: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     intervals
@@ -182,6 +190,72 @@ fn is_field_motion(points: &[Option<[f64; 2]>], start: u64, end: u64) -> bool {
     (high_x - low_x).max(high_y - low_y) >= MIN_RALLY_FIELD_TRAVEL
 }
 
+fn extend_high_ball_returns(
+    points: &[Option<[f64; 2]>],
+    intervals: &mut [(u64, u64)],
+    barriers: &[(u64, u64)],
+    merge_gap_seconds: f64,
+) {
+    let max_gap = (merge_gap_seconds * 30.0).ceil().min(60.0) as usize;
+    for index in 0..intervals.len() {
+        let end = intervals[index].1 as usize;
+        let limit = intervals
+            .get(index + 1)
+            .map_or(points.len(), |&(start, _)| start as usize);
+        let Some(exit) = (end..(end + 9).min(limit)).find(|&frame| {
+            points[frame].is_some() && points.get(frame + 1).is_some_and(Option::is_none)
+        }) else {
+            continue;
+        };
+        let Some([exit_x, exit_y]) = points[exit] else {
+            continue;
+        };
+        let approach = points[exit.saturating_sub(7)..=exit]
+            .iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        if exit_y > 0.05 || approach.len() < 4 || approach[0][1] - exit_y < 0.05 {
+            continue;
+        }
+        let Some(entry) =
+            (exit + 1..(exit + max_gap + 1).min(limit)).find(|&frame| points[frame].is_some())
+        else {
+            continue;
+        };
+        let Some([entry_x, entry_y]) = points[entry] else {
+            continue;
+        };
+        if entry_y > 0.10
+            || (entry_x - exit_x).abs() > 0.12
+            || barriers
+                .iter()
+                .any(|&(start, stop)| start <= entry as u64 && stop > end as u64)
+        {
+            continue;
+        }
+        let mut last = entry;
+        let mut descending = Vec::new();
+        for (frame, point) in points.iter().enumerate().take(limit).skip(entry) {
+            if frame - last > 4 {
+                break;
+            }
+            if let Some(point) = point {
+                last = frame;
+                if frame < entry + 8 {
+                    descending.push(point);
+                }
+            }
+        }
+        if descending.len() >= 4
+            && descending
+                .last()
+                .is_some_and(|point| point[1] - entry_y >= 0.05)
+        {
+            intervals[index].1 = last as u64;
+        }
+    }
+}
+
 pub(crate) fn analyze_moving_ball(
     points: &[Option<[f64; 2]>],
     min_seconds: f64,
@@ -224,11 +298,10 @@ pub(crate) fn analyze_moving_ball(
     }
     let mut barriers = stationary.clone();
     barriers.extend(unobserved.iter().copied());
-    let merged = filter_short_rallies(merge_continuous_intervals_with_pauses(
-        &detected,
-        merge_gap_seconds,
-        &barriers,
-    )?);
+    let mut merged =
+        merge_continuous_intervals_with_pauses(&detected, merge_gap_seconds, &barriers)?;
+    extend_high_ball_returns(&moving, &mut merged, &barriers, merge_gap_seconds);
+    let merged = filter_short_rallies(merged);
     Ok(MovingBallIntervals {
         detected,
         merged,
@@ -839,6 +912,34 @@ fn scan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn high_ball_returns_to_existing_rally_without_minimum_independent_duration() {
+        let mut points = vec![None; 330];
+        for (frame, point) in points.iter_mut().enumerate().take(200).skip(20) {
+            let y = if frame < 185 {
+                0.4
+            } else {
+                0.4 - (frame - 184) as f64 * 0.026
+            };
+            *point = Some([0.2 + (frame - 20) as f64 * 0.002, y]);
+        }
+        for (frame, point) in points.iter_mut().enumerate().take(244).skip(230) {
+            *point = Some([
+                0.59 + (frame - 230) as f64 * 0.001,
+                0.02 + (frame - 230) as f64 * 0.02,
+            ]);
+        }
+        let analysis = analyze_moving_ball(&points, 1.5, 4.0, 1000).unwrap();
+        assert_eq!(analysis.merged, vec![(20, 243)], "{analysis:?}");
+        let no_merge = analyze_moving_ball(&points, 1.5, 0.5, 1000).unwrap();
+        assert_eq!(no_merge.merged, vec![(20, 196)]);
+        for point in points[230..244].iter_mut().flatten() {
+            point[1] += 0.2;
+        }
+        let unrelated = analyze_moving_ball(&points, 1.5, 4.0, 1000).unwrap();
+        assert_eq!(unrelated.merged, vec![(20, 196)]);
+    }
 
     #[test]
     fn final_rally_duration_is_checked_after_merge_at_exact_five_second_boundary() {

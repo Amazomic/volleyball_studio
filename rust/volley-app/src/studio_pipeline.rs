@@ -1161,7 +1161,9 @@ fn parse_primary_rally_scope(
             || end >= frames
             || end - start + 1 < crate::cpu_retrack::ball_track::MIN_RALLY_FRAMES
     }) || intervals.windows(2).any(|pair| pair[0].1 >= pair[1].0)
-        || mask["movement_filter_version"] != "stationary_ball_min_rally_5s_v3"
+        || !crate::cpu_retrack::ball_track::movement_filter_supported(
+            mask["movement_filter_version"].as_str(),
+        )
         || mask["min_rally_seconds"] != 5.0
         || evidence["schema"] != "volley-primary-rally-mask-evidence/1"
         || evidence["ball_job_id"] != ball_id
@@ -1280,8 +1282,12 @@ fn gpu_lineage_valid(
                     || saved["gpu_rally_mask"]["padding_after_ms"]
                         != json!(request.gpu.primary_rallies.padding_after_ms)
                     || !saved["gpu_rally_mask"]["rally_intervals"].is_array()))
-            || saved["gpu_rally_mask"]["movement_filter_version"]
-                != "stationary_ball_min_rally_5s_v3"
+            || !crate::cpu_retrack::ball_track::movement_filter_supported(
+                saved["gpu_rally_mask"]["movement_filter_version"].as_str(),
+            )
+            || (request.mode.allows_gpu_execution()
+                && saved["gpu_rally_mask"]["movement_filter_version"]
+                    != crate::cpu_retrack::ball_track::MOVEMENT_FILTER_VERSION)
             || saved["gpu_rally_mask"]["min_rally_seconds"] != 5.0)
     {
         return false;
@@ -5555,7 +5561,7 @@ mod branching_tests {
                 "padding_before_ms":request.gpu.primary_rallies.padding_before_ms,
                 "padding_after_ms":request.gpu.primary_rallies.padding_after_ms,
                 "rally_intervals":[],
-                "movement_filter_version":"stationary_ball_min_rally_5s_v3",
+                "movement_filter_version":crate::cpu_retrack::ball_track::MOVEMENT_FILTER_VERSION,
                 "min_rally_seconds":5.0,
                 "ground_boundary_version":"ground_ends_rally_v4",
                 "ground_detector":{"version":volley_core::motion::GROUND_DETECTOR_VERSION,"sha256":sha},
