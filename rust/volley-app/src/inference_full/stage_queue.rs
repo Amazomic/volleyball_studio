@@ -104,33 +104,20 @@ pub(crate) async fn acquire_gpu<'a>(
 }
 
 pub(crate) struct GpuStages<'a> {
-    gpu: &'a Semaphore,
-    permit: Option<SemaphorePermit<'a>>,
+    _permit: SemaphorePermit<'a>,
     turn: &'a mut VideoTurn,
 }
 
 impl<'a> GpuStages<'a> {
-    pub(crate) fn new(
-        gpu: &'a Semaphore,
-        permit: SemaphorePermit<'a>,
-        turn: &'a mut VideoTurn,
-    ) -> Self {
+    pub(crate) fn new(permit: SemaphorePermit<'a>, turn: &'a mut VideoTurn) -> Self {
         Self {
-            gpu,
-            permit: Some(permit),
+            _permit: permit,
             turn,
         }
     }
 
     pub(crate) fn finish_ball(&mut self) {
         self.turn.finish_ball();
-        self.permit.take();
-    }
-
-    pub(crate) fn enter_people(&mut self, cancel: &AtomicBool) -> Result<(), String> {
-        self.permit =
-            Some(tokio::runtime::Handle::current().block_on(acquire_gpu(self.gpu, cancel))?);
-        Ok(())
     }
 }
 
@@ -178,7 +165,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ready_next_ball_claims_gpu_before_previous_players() {
+    async fn waiting_next_ball_cannot_displace_current_video_players() {
         let cancel = AtomicBool::new(false);
         let gpu = Semaphore::new(1);
         let mut turns = video_turns(2).into_iter();
@@ -196,27 +183,27 @@ mod tests {
                 .await
                 .is_err()
         );
-        first.finish_ball();
-        drop(first_permit);
-        let next_permit = next_ball.await.unwrap();
+        let mut stages = GpuStages::new(first_permit, &mut first);
+        stages.finish_ball();
         second.wait_ball(&cancel).await.unwrap();
-        let players = acquire_gpu(&gpu, &cancel);
-        tokio::pin!(players);
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), &mut players)
+            tokio::time::timeout(Duration::from_millis(20), &mut next_ball)
                 .await
                 .is_err()
         );
+        drop(stages);
+        let next_permit = next_ball.await.unwrap();
+        assert_eq!(gpu.available_permits(), 0);
         second.finish_ball();
         drop(next_permit);
-        let permit = players.await.unwrap();
-        assert_eq!(gpu.available_permits(), 0);
-        drop(permit);
         assert_eq!(gpu.available_permits(), 1);
+        first.wait_publish(&cancel).await.unwrap();
+        first.finish_publish();
+        second.wait_publish(&cancel).await.unwrap();
     }
 
     #[tokio::test]
-    async fn gpu_permit_is_exclusive_and_released_at_ball_boundary() {
+    async fn gpu_permit_is_exclusive_until_current_gpu_pass_finishes() {
         let cancel = AtomicBool::new(false);
         let gpu = tokio::sync::Semaphore::new(1);
         let mut turns = video_turns(2).into_iter();
@@ -224,14 +211,20 @@ mod tests {
         let mut second = turns.next().unwrap();
         first.wait_ball(&cancel).await.unwrap();
         let permit = acquire_gpu(&gpu, &cancel).await.unwrap();
-        let mut stages = GpuStages::new(&gpu, permit, &mut first);
+        let mut stages = GpuStages::new(permit, &mut first);
         assert_eq!(gpu.available_permits(), 0);
         stages.finish_ball();
         second.wait_ball(&cancel).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), acquire_gpu(&gpu, &cancel))
+                .await
+                .is_err(),
+            "next video must not displace RF-DETR"
+        );
+        drop(stages);
         let next = acquire_gpu(&gpu, &cancel).await.unwrap();
         assert_eq!(gpu.available_permits(), 0);
         drop(next);
-        drop(stages);
         assert_eq!(gpu.available_permits(), 1);
     }
 }

@@ -597,9 +597,8 @@ pub(crate) fn run_joint_pair(
             Some((&mask_value, ball_scan.decode.decoded_frames)),
         )?;
         rally_filter = Some(mask_value);
-        if let Some(stages) = stages.as_mut() {
-            stages.enter_people(cancelled)?;
-            report(0.4, 0, player_total, None)?;
+        if cancelled.load(Ordering::Acquire) {
+            return Err("cancelled".into());
         }
         let mut person_engine = PersonEngine::load_for_primary_gpu_evidence(
             &state.repository_root,

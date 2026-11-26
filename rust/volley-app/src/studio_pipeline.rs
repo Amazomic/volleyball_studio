@@ -2305,7 +2305,6 @@ async fn pipeline(
                 let result = tokio::task::block_in_place(|| {
                     let stages = if queued {
                         Some(GpuStages::new(
-                            &app.inference_limit,
                             permit.take().ok_or("Missing GPU permit")?,
                             turn,
                         ))
@@ -2355,9 +2354,7 @@ async fn pipeline(
                             if let Some((mask, decoded_frames)) = rally_mask {
                                 publish_primary_rally_mask(path, status, mask, decoded_frames)?;
                             }
-                            let label = if queued && fraction == 0.4 && rally_mask.is_some() {
-                                "Ожидание очереди игроков"
-                            } else if fraction == 0.399999 && rally_mask.is_none() {
+                            let label = if fraction == 0.399999 && rally_mask.is_none() {
                                 "ball_stabilizer"
                             } else if fraction == 0.3999995 && rally_mask.is_none() {
                                 "Rally Detector"
@@ -3451,7 +3448,7 @@ async fn run_project_queue(
     let mut workers = tokio::task::JoinSet::new();
     let mut failed = false;
     loop {
-        while workers.len() < 2 && !failed && !cancel.load(Ordering::Acquire) {
+        while workers.is_empty() && !failed && !cancel.load(Ordering::Acquire) {
             let Some((index, (mut job, turn))) = pending.next() else {
                 break;
             };
@@ -3692,14 +3689,22 @@ fn queue_progress(rows: &[Value], active: bool) -> Value {
 }
 
 fn queue_focus(rows: &[Value]) -> Option<&Value> {
+    let started_active = |row: &&Value| {
+        row["started_ms"].as_u64().is_some()
+            && matches!(
+                row["status"].as_str(),
+                Some("queued" | "running" | "cancelling")
+            )
+    };
     rows.iter()
+        .filter(started_active)
         .find(|row| {
-            row["started_ms"].as_u64().is_some()
-                && matches!(
-                    row["status"].as_str(),
-                    Some("queued" | "running" | "cancelling")
-                )
+            row["status"] == "running"
+                && !row["stage"]
+                    .as_str()
+                    .is_some_and(|stage| stage.starts_with("Ожидание очереди"))
         })
+        .or_else(|| rows.iter().find(started_active))
         .or_else(|| rows.iter().find(|row| row["status"] == "failed"))
         .or_else(|| rows.iter().find(|row| row["status"] == "cancelled"))
         .or_else(|| {
@@ -3890,6 +3895,13 @@ mod tests {
             json!({"id":"second","started_ms":2,"status":"running"}),
             json!({"id":"third","status":"queued"}),
         ];
+        assert_eq!(queue_focus(&rows).unwrap()["id"], "first");
+        rows[0]["stage"] = json!("Ожидание очереди игроков");
+        rows[1]["stage"] = json!("GPU · VBallNet: траектория мяча и розыгрыши");
+        rows[1]["stage_id"] = json!("ball");
+        assert_eq!(queue_focus(&rows).unwrap()["id"], "second");
+        rows[0]["stage"] = json!("GPU · RF-DETR: игровые интервалы");
+        rows[1]["stage"] = json!("Ожидание очереди VBallNet");
         assert_eq!(queue_focus(&rows).unwrap()["id"], "first");
         rows[0]["status"] = json!("complete");
         assert_eq!(queue_focus(&rows).unwrap()["id"], "second");
@@ -4380,12 +4392,12 @@ mod tests {
         };
         assert!(stage_start(&rows[0], "ball") <= stage_start(&rows[1], "ball"));
         assert!(
-            stage_start(&rows[1], "ball") < rows[0]["finished_ms"].as_u64().unwrap(),
-            "VBallNet must not wait for the previous video to complete"
+            stage_start(&rows[1], "ball") >= rows[0]["finished_ms"].as_u64().unwrap(),
+            "Next video must wait until the previous video fully completes"
         );
         assert!(
-            stage_start(&rows[1], "ball") <= stage_start(&rows[0], "players"),
-            "Ready next VBallNet should enter the GPU queue before the previous RF-DETR"
+            rows[1]["started_ms"].as_u64().unwrap() >= rows[0]["finished_ms"].as_u64().unwrap(),
+            "No overlapping video analysis is permitted"
         );
         assert_eq!(rows[0]["profile"]["gpu"]["pose_stride"], 1);
         assert_eq!(rows[1]["profile"]["gpu"]["pose_stride"], 3);
@@ -4408,7 +4420,7 @@ mod tests {
                 assert_eq!(manifest["video"], video);
             }
         }
-        println!("PROJECT STAGE HANDOFF: independent profiles, checkpoints, artifacts and earlier second VBallNet");
+        println!("PROJECT STAGE HANDOFF: independent profiles, checkpoints, artifacts and strict sequential video execution");
     }
 
     #[tokio::test]
