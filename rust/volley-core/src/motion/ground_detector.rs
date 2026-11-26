@@ -1,7 +1,7 @@
 use super::{BallObservation, TrajectoryBreak};
 use crate::court_geometry::CourtTransform;
 
-pub const GROUND_DETECTOR_VERSION: &str = "court_ball_roll_v9";
+pub const GROUND_DETECTOR_VERSION: &str = "court_ball_roll_v10";
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroundContact {
@@ -340,13 +340,12 @@ fn terminal_rolling_transition(
     let mut previous = impact;
     let mut count = 0;
     for point in following {
-        if point.frame - previous.frame > 6 {
+        if point.frame - previous.frame > 6 || point.frame - impact.frame > 14 {
             break;
         }
         let speed = ((point.x - previous.x) / w).hypot((point.y - previous.y) / h)
             / (point.frame - previous.frame) as f64;
-        if point.frame - impact.frame > 14
-            || point.y > impact.y + h * 0.006
+        if point.y > impact.y + h * 0.006
             || point.y < impact.y - h * 0.025
             || speed > incoming_speed * 0.5
         {
@@ -355,16 +354,22 @@ fn terminal_rolling_transition(
         previous = *point;
         count += 1;
     }
-    if count < 2
-        || previous.frame - impact.frame < 3
-        || ((previous.x - impact.x) / w).hypot((previous.y - impact.y) / h)
-            / (previous.frame - impact.frame) as f64
-            > incoming_speed * 0.35
-        || following.get(count).map_or_else(
-            || rally_end_frame.saturating_sub(previous.frame as u64) < 15,
-            |next| next.frame - previous.frame < 16,
-        )
-    {
+    if count < 2 || previous.frame - impact.frame < 3 {
+        return None;
+    }
+    let mean_speed = ((previous.x - impact.x) / w).hypot((previous.y - impact.y) / h)
+        / (previous.frame - impact.frame) as f64;
+    let sustained_settle = count >= 8
+        && previous.frame - impact.frame >= 12
+        && mean_speed <= incoming_speed * 0.2
+        && following[..count]
+            .iter()
+            .all(|p| (p.y - impact.y).abs() <= h * 0.012);
+    let tracking_loss = following.get(count).map_or_else(
+        || rally_end_frame.saturating_sub(previous.frame as u64) >= 15,
+        |next| next.frame - previous.frame >= 16,
+    );
+    if mean_speed > incoming_speed * 0.35 || !(sustained_settle || tracking_loss) {
         return None;
     }
     let position = [impact.x / w, impact.y / h];
@@ -636,6 +641,34 @@ mod tests {
             p.y -= (p.frame - 4) as f64 * 16.0;
         }
         assert!(rolling_ground_contacts(&points, &court(), 1000, 1000, 30).is_empty());
+    }
+
+    #[test]
+    fn sand_settle_followed_by_visible_pickup_ends_at_landing() {
+        let mut points = (0..5)
+            .map(|frame| BallObservation {
+                frame,
+                x: 510.0,
+                y: 520.0 + frame as f64 * 30.0,
+            })
+            .collect::<Vec<_>>();
+        points.extend((5..=24).map(|frame| BallObservation {
+            frame,
+            x: 510.0 + (frame - 4) as f64 * 0.3,
+            y: 640.0,
+        }));
+        points.extend((25..=40).map(|frame| BallObservation {
+            frame,
+            x: 516.0,
+            y: 640.0 - (frame - 24) as f64 * 20.0,
+        }));
+        let contacts = terminal_ground_contacts(&points, &court(), 1000, 1000, 100);
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].frame, 4);
+        for p in &mut points[5..] {
+            p.y = 640.0 + (p.frame - 4) as f64 * 15.0;
+        }
+        assert!(terminal_ground_contacts(&points, &court(), 1000, 1000, 100).is_empty());
     }
 
     #[test]

@@ -590,6 +590,37 @@ mod tests {
     }
 
     #[test]
+    fn visible_pickup_after_sand_settle_keeps_original_ground_frame() {
+        let court = CourtTransform::new([[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]]).unwrap();
+        let mut motion = volley_core::ball_interpolation::StabilizedBallMotion {
+            points: vec![None; 100],
+            interpolated: vec![false; 100],
+            rejected_frames: vec![],
+            confidence_frames: 41,
+            observed_frames: 37,
+        };
+        for frame in 0..=4 {
+            motion.points[frame] = Some([0.51, 0.52 + frame as f64 * 0.03]);
+        }
+        for frame in 5..=24 {
+            motion.points[frame] = Some([0.51 + (frame - 4) as f64 * 0.0003, 0.64]);
+        }
+        for frame in 25..=40 {
+            motion.points[frame] = Some([0.516, 0.64 - (frame - 24) as f64 * 0.02]);
+        }
+        motion.interpolated[9..13].fill(true);
+        let cancel = AtomicBool::new(false);
+        let run = |motion: &volley_core::ball_interpolation::StabilizedBallMotion| {
+            candidates(motion, &[], &[(0, 99)], Some(&court), 1000, 1000, &cancel).unwrap()
+        };
+        let contacts = run(&motion);
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].frame, 4);
+        motion.interpolated[5..=18].fill(true);
+        assert!(run(&motion).is_empty());
+    }
+
+    #[test]
     fn stage_persists_separate_floor_evidence_and_checksum() {
         let folder = std::env::temp_dir().join(format!("ground-stage-{}", Uuid::new_v4()));
         fs::create_dir(&folder).unwrap();
