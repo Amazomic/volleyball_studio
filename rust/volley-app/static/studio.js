@@ -735,6 +735,40 @@
     const data=timeline.data;
     if(data?.project_id!==project||data?.rally_run_id!==run||data?.video!==video||
        data?.source_replay_sha256!==record.replay_sha256)return;
+    if(data.schema==="volley-native-rally-timeline/1"&&overlay.actionFlags.serve&&
+       Array.isArray(data.serve_proposals)){
+      for(const serve of data.serve_proposals){
+        const at=serve.trajectory_start_frame??serve.rally_start_frame;
+        if(serve.kind!=="serve"||!Number.isSafeInteger(at)||Math.abs(at-frame)>8)continue;
+        if(events.some(event=>event.kind==="serve"&&Math.abs(event.frame_index-at)<=8&&
+          Array.isArray(event.ball_position_px)&&event.ball_position_px.length===2&&
+          event.ball_position_px.every(Number.isFinite)&&event.ball_position_px[0]>=0&&
+          event.ball_position_px[0]<=record.width&&event.ball_position_px[1]>=0&&
+          event.ball_position_px[1]<=record.height))continue;
+        const row=record.frames?.find(item=>item.frame===at);
+        const ball=row?.ball;
+        const id=serve.provisional_track_id;
+        const conflict=record.frames?.find(item=>item.frame===frame)?.players?.some(player=>
+          player.id===id&&player.identity_conflict===true);
+        const owner=id!=null&&!conflict&&overlayLabels.loaded&&
+          overlayLabels.key===playerLabelKey(project,run,video,record.replay_sha256)?
+          overlayLabels.names.get(String(id)):null;
+        const [color,label]=cpuTouchStyle.serve;
+        let px=x+5,py=y+23;
+        if(Array.isArray(ball)&&ball.length===2&&ball.every(v=>Number.isFinite(v)&&v>=0&&v<=1)){
+          px=x+ball[0]*width;py=y+ball[1]*height;
+          ctx.beginPath();ctx.arc(px,py,12,0,2*Math.PI);
+          ctx.strokeStyle=color;ctx.lineWidth=3;ctx.stroke();
+        }
+        ctx.font="bold 12px Inter, sans-serif";ctx.textBaseline="bottom";
+        const text=label+" · "+(owner||String(id??"не определён"));
+        const tw=ctx.measureText(text).width;
+        const tx=Math.max(x+5,Math.min(x+width-tw-9,px+15));
+        const ty=Math.max(y+17,Math.min(y+height-5,py-6));
+        ctx.fillStyle="rgba(9,20,35,.94)";ctx.fillRect(tx-4,ty-14,tw+8,17);
+        ctx.fillStyle=color;ctx.fillText(text,tx,ty);
+      }
+    }
     const surface=data.surface_contact_candidates||[];
     let left=0,right=surface.length;
     while(left<right){
