@@ -176,7 +176,7 @@ pub struct StabilizedBallMotion {
     pub observed_frames: usize,
 }
 
-pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v10";
+pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v11";
 
 fn reject_preexisting_remote_ball(
     points: &[Option<[f64; 2]>],
@@ -245,7 +245,70 @@ fn reject_preexisting_remote_ball(
     rejected
 }
 
+fn supports_moving_source_after_idle(
+    raw_points: &[Option<[f64; 2]>],
+    points: &[Option<[f64; 2]>],
+    frame: usize,
+    last_frame: usize,
+    last_point: [f64; 2],
+    max_step: f64,
+) -> bool {
+    const IDLE_HISTORY: usize = 30;
+    const FLIGHT_SUPPORT: usize = 12;
+    const IDLE_RADIUS: f64 = 0.025;
+    let distance = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+    if last_frame < IDLE_HISTORY - 1 || frame - last_frame > 4 {
+        return false;
+    }
+    let history = &points[last_frame + 1 - IDLE_HISTORY..=last_frame];
+    if history.iter().flatten().count() < 24
+        || history
+            .iter()
+            .flatten()
+            .any(|&point| distance(point, last_point) > IDLE_RADIUS)
+    {
+        return false;
+    }
+    let Some(flight) = points.get(frame..frame + FLIGHT_SUPPORT) else {
+        return false;
+    };
+    let Some(first) = flight[0] else { return false };
+    let Some(last) = flight[FLIGHT_SUPPORT - 1] else {
+        return false;
+    };
+    let displacement = distance(first, last);
+    if displacement < 0.045 || distance(first, last_point) <= max_step * (frame - last_frame) as f64
+    {
+        return false;
+    }
+    let direction = [
+        (last[0] - first[0]) / displacement,
+        (last[1] - first[1]) / displacement,
+    ];
+    let mut previous = first;
+    let mut forward_steps = 0;
+    for &candidate in &flight[1..] {
+        let Some(point) = candidate else { return false };
+        if distance(point, previous) > max_step || distance(point, last_point) <= IDLE_RADIUS * 2.0
+        {
+            return false;
+        }
+        let progress =
+            (point[0] - previous[0]) * direction[0] + (point[1] - previous[1]) * direction[1];
+        if progress < -0.006 {
+            return false;
+        }
+        forward_steps += usize::from(progress > 0.001);
+        previous = point;
+    }
+    forward_steps >= 8
+        && !raw_points[frame + FLIGHT_SUPPORT..(frame + 30).min(raw_points.len())]
+            .iter()
+            .flatten()
+            .any(|&point| distance(point, last_point) <= IDLE_RADIUS * 2.0)
+}
 fn reject_unlinked_motion(
+    raw_points: &[Option<[f64; 2]>],
     points: &mut [Option<[f64; 2]>],
     settings: BallStabilizerSettings,
 ) -> Vec<usize> {
@@ -338,6 +401,18 @@ fn reject_unlinked_motion(
                     < 2
             });
             if !supported_turn {
+                if supports_moving_source_after_idle(
+                    raw_points,
+                    points,
+                    frame,
+                    last_frame,
+                    last_point,
+                    settings.max_step_fraction,
+                ) {
+                    previous = None;
+                    latest = Some((frame, point));
+                    continue;
+                }
                 points[frame] = None;
                 rejected.push(frame);
                 continue;
@@ -524,6 +599,7 @@ pub fn stabilize_ball_motion(
         }
     }
     let confidence_frames = points.iter().filter(|p| p.is_some()).count();
+    let raw_points = points.clone();
     let mut rejected_frames = reject_preexisting_remote_ball(&points, settings.max_step_fraction);
     for &index in &rejected_frames {
         points[index] = None;
@@ -632,7 +708,7 @@ pub fn stabilize_ball_motion(
             }
         }
     }
-    rejected_frames.extend(reject_unlinked_motion(&mut points, settings));
+    rejected_frames.extend(reject_unlinked_motion(&raw_points, &mut points, settings));
     rejected_frames.sort_unstable();
     rejected_frames.dedup();
     let observed_frames = confidence_frames - rejected_frames.len();
@@ -1088,6 +1164,24 @@ mod tests {
             .expect("overlapping segment windows must not access removed observations");
         assert!((8..=10).all(|frame| result.rejected_frames.contains(&frame)));
         assert!(result.points[15].is_some());
+    }
+    #[test]
+    fn idle_lock_rejects_remote_motion_that_returns_to_original_ball() {
+        let samples = (0..100)
+            .map(|frame| ScoredBallSample {
+                frame,
+                point: if (45..60).contains(&frame) {
+                    [0.20 + (frame - 45) as f64 * 0.008, 0.35]
+                } else {
+                    [0.85, 0.75]
+                },
+                confidence: 0.9,
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 100, BallStabilizerSettings::default()).unwrap();
+        assert!(result.rejected_frames.contains(&45));
+        assert!(result.points[45].is_none());
     }
     #[test]
     fn ball_stabilizer_keeps_lock_through_long_false_detection_burst() {

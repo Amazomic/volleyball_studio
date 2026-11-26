@@ -294,6 +294,38 @@ mod tests {
     }
 
     #[test]
+    fn opening_after_stationary_remote_ball_keeps_observed_launch() {
+        use crate::ball_interpolation::{
+            stabilize_ball_motion, BallStabilizerSettings, ScoredBallSample,
+        };
+
+        let flight = trajectory([-9.0, 0.0, 2.2], [12.0, 1.0, 5.5]);
+        let mut samples = (0..45)
+            .map(|frame| ScoredBallSample {
+                frame,
+                point: [0.95, 0.80],
+                confidence: 0.9,
+            })
+            .collect::<Vec<_>>();
+        samples.extend(
+            flight
+                .points
+                .iter()
+                .enumerate()
+                .map(|(index, point)| ScoredBallSample {
+                    frame: 45 + index,
+                    point: point.unwrap(),
+                    confidence: 0.8,
+                }),
+        );
+        let motion =
+            stabilize_ball_motion(&samples, 85, BallStabilizerSettings::default()).unwrap();
+        assert_eq!(motion.points[45], flight.points[0]);
+        assert!(!motion.interpolated[45]);
+        assert!(!motion.rejected_frames.contains(&45));
+        assert!(detector().supports_opening(&motion, (45, 84), 0));
+    }
+    #[test]
     fn local_toss_and_flight_below_net_do_not_start_rally() {
         let detector = detector();
         let toss = trajectory([8.5, 0.0, 1.8], [-0.5, 0.5, 5.5]);
