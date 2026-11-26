@@ -3,7 +3,7 @@ import {runInNewContext} from "node:vm";
 import assert from "node:assert/strict";
 
 const source=readFileSync(new URL("../../rust/volley-app/static/studio_tracks.js",import.meta.url),"utf8");
-const start=source.indexOf("  const refreshPhotoMatches=async(scope,token)=>{");
+const start=source.indexOf("  const refreshPhotoMatches=async(scope,token,progressId)=>{");
 const end=source.indexOf("  const reviewRender=",start);
 assert.ok(start>=0&&end>start,"photo analysis action is defined");
 const calls=[];

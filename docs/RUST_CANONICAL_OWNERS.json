@@ -103,6 +103,10 @@
                                            "handler":  "native_player_tracks::refresh_reference_features"
                                        },
                                        {
+                                           "path":  "/api/players/native/references/progress",
+                                           "handler":  "native_player_tracks::reference_refresh_progress"
+                                       },
+                                       {
                                            "path":  "/api/players/native/reference-photo",
                                            "handler":  "native_player_tracks::reference_photo"
                                        },

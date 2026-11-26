@@ -22,13 +22,15 @@ async function runScenario({fail=false,waitForPhotos=false}={}){
   const state={busy:false,rosterBusy:false,project:"project",video:"match.mp4",
     replay:"cpu",rallyRun:"rally",sourceSha:"sha",token:1,writable:true};
   const calls=[];
-  const window={VolleyballTasks:{
+  let timerCallback;
+  const window={crypto:{getRandomValues:a=>a.fill(1)},setTimeout(fn){timerCallback=fn;return 1;},clearTimeout(){timerCallback=null;},VolleyballTasks:{
     set(key,value){active.set(key,value);updates.push({key,...value});},
     clear(key){active.delete(key);calls.push("clear:"+key);}
   },dispatchEvent(){}};
   const context={refreshReferences,refreshStatus,state,photoEnrollmentQueues,window,
     Event:class{constructor(name){this.type=name;}},
-    post:async url=>{calls.push(url);return apiGate;},
+    post:async (url,payload,progressId)=>{calls.push(url);assert.match(progressId,/^[a-f0-9]{32}$/);return apiGate;},
+    read:async()=>({active:true,stage:"track_features",completed:24,total:48}),
     loadLibraryRoster:async()=>{calls.push("roster");},
     refreshPhotoMatches:async()=>{calls.push("matches");return {trackCount:7};},
     autoAssignSimilar:async()=>{calls.push("auto");}};
@@ -46,10 +48,15 @@ async function runScenario({fail=false,waitForPhotos=false}={}){
     await new Promise(resolve=>setImmediate(resolve));
   }
   assert.match(active.get(key).stage,/эталонов/i);
+  assert.equal(typeof timerCallback,"function","poll real server progress during pending request");
+  await timerCallback();
+  assert.equal(active.get(key).progress,50);
+  assert.match(active.get(key).stage,/24\s*\/\s*48/);
   if(fail)releaseApi.reject(Error("network error"));
   else releaseApi.resolve({added:2,deactivated:1,confirmed_tracks:3});
   await pending;
   assert.equal(refreshReferences.disabled,false);
+  assert.equal(timerCallback,null,"polling stops on completion or error");
   assert.equal(active.has(key),false,"task must be removed after success or failure");
   assert.ok(calls.includes("clear:"+key));
   if(fail){

@@ -41,9 +41,9 @@
     if(!response.ok)throw Error(body.message||body.error||"HTTP "+response.status);
     return body;
   };
-  const post=async (url,payload)=>{
+  const post=async (url,payload,progressId)=>{
     const response=await window.VolleyballStudioActivity.fetch(url,{method:"POST",cache:"no-store",
-      credentials:"same-origin",headers:{"Content-Type":"application/json"},
+      credentials:"same-origin",headers:{"Content-Type":"application/json",...(progressId?{"X-Volley-Refresh-Id":progressId}:{})},
       body:JSON.stringify(payload)});
     const body=await response.json().catch(()=>({}));
     if(!response.ok)throw Error(body.message||body.error||"HTTP "+response.status);
@@ -1063,9 +1063,35 @@
       }
       refreshReferences.disabled=true;
       refreshStatus.hidden=true;
-      const updateRefreshTask=stage=>window.VolleyballTasks?.set("player-references-refresh",{
-        label:"Обновление признаков",stage,progress:null
+      const updateRefreshTask=(stage,progress=null)=>window.VolleyballTasks?.set("player-references-refresh",{
+        label:"Обновление признаков",stage,progress
       });
+      const withRefreshProgress=async operation=>{
+        const id=Array.from(window.crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join("");
+        const labels={prepare:"Подготовка",track_features:"Признаки подтверждённых ID",
+          album_features:"Признаки альбомов",select_references:"Выбор непохожих эталонов",
+          save_references:"Сохранение эталонов",filter_references:"Фильтрация альбомов",
+          compare_tracks:"Признаки непривязанных ID",compare_photos:"Признаки фотографий",
+          sample_crops:"Дополнительные кадры ID",sample_features:"Признаки дополнительных кадров",
+          verify_matches:"Проверка совпадений"};
+        let stopped=false,timer;
+        const poll=async()=>{
+          try{
+            const value=await read("/api/players/native/references/progress?id="+id);
+            if(!stopped&&value.active&&labels[value.stage]){
+              const {completed,total}=value;
+              const measured=Number.isSafeInteger(completed)&&Number.isSafeInteger(total)&&
+                completed>=0&&total>0&&completed<=total;
+              updateRefreshTask(labels[value.stage]+(measured?" · "+completed+" / "+total:""),
+                measured?100*completed/total:null);
+            }
+          }catch{}
+          if(!stopped)timer=window.setTimeout(poll,750);
+        };
+        timer=window.setTimeout(poll,750);
+        try{return await operation(id);}
+        finally{stopped=true;window.clearTimeout(timer);}
+      };
       updateRefreshTask("Проверка фотографий и признаков подтверждённых ID");
       try{
         if(photoEnrollmentQueues.size){
@@ -1075,7 +1101,7 @@
             scope.expected_source_sha256!==state.sourceSha)return;
         }
         updateRefreshTask("Обновление признаков и выбор непохожих эталонов");
-        const result=await post("/api/players/native/references/refresh",scope);
+        const result=await withRefreshProgress(id=>post("/api/players/native/references/refresh",scope,id));
         if(scope.project_id!==state.project||scope.replay_id!==state.replay)return;
         const photoScope={project_id:scope.project_id,video:scope.video,
           replay_id:scope.replay_id,rally_run_id:scope.rally_run_id,
@@ -1084,7 +1110,7 @@
         updateRefreshTask("Загрузка обновлённых фотографий игроков");
         await loadLibraryRoster();
         updateRefreshTask("Пересчёт сходства всех Track ID");
-        const comparison=await refreshPhotoMatches(photoScope,state.token);
+        const comparison=await withRefreshProgress(id=>refreshPhotoMatches(photoScope,state.token,id));
         if(scope.project_id!==state.project||scope.replay_id!==state.replay)return;
         if(comparison&&state.writable){
           updateRefreshTask("Автопривязка Track ID");
@@ -1576,12 +1602,12 @@
       unlock();reidUnlock();
     }
   };
-  const refreshPhotoMatches=async(scope,token)=>{
+  const refreshPhotoMatches=async(scope,token,progressId)=>{
     const ids=[...state.comparisonIds];
     // Keep the last valid scores visible until the replacement is verified.
     const result=await post("/api/players/native/reid-review",{
       ...scope,action:state.writable?"refresh_matches":"compare_photos"
-    });
+    },progressId);
     if(token!==state.token||scope.replay_id!==state.replay)return null;
     if(result.schema!=="volley-native-player-photo-comparison/1"||
       result.source_replay_sha256!==state.sourceSha||result.auto_assign_enabled!==false||

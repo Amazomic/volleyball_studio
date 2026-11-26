@@ -7,7 +7,7 @@ const css=readFileSync(new URL("../../rust/volley-app/static/studio.css",import.
 assert.match(css,/\.track-auto-assign\.is-working/);
 assert.match(js,/galleryAuto\.disabled=.*autoAssignInFlight/);
 const start=js.indexOf("  const autoAssignSimilar=async(forcedThreshold)=>{");
-const end=js.indexOf("  const refreshPhotoMatches=async(scope,token)=>{",start);
+const end=js.indexOf("  const refreshPhotoMatches=async(scope,token,progressId)=>{",start);
 assert.ok(start>=0&&end>start);
 const handler=js.slice(start,end);
 assert.ok(!handler.includes("state.busy=true"),"Auto-link must not lock the whole player UI");

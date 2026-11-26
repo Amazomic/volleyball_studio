@@ -1,5 +1,81 @@
 use super::*;
 
+static REFRESH_PROGRESS: OnceLock<Mutex<BTreeMap<String, Value>>> = OnceLock::new();
+
+fn refresh_progress() -> &'static Mutex<BTreeMap<String, Value>> {
+    REFRESH_PROGRESS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+pub(super) struct RefreshProgress(Option<String>);
+
+impl RefreshProgress {
+    pub(super) fn start(headers: &HeaderMap) -> Result<Self, ApiError> {
+        let Some(value) = headers.get("x-volley-refresh-id") else {
+            return Ok(Self(None));
+        };
+        let id = value
+            .to_str()
+            .ok()
+            .filter(|id| opaque_id(id))
+            .ok_or_else(|| storage::bad_request("Invalid reference refresh ID"))?;
+        let mut jobs = refresh_progress()
+            .lock()
+            .map_err(|_| storage::internal("Reference progress lock"))?;
+        if jobs.contains_key(id) {
+            return Err(storage::conflict("Reference refresh ID is already active"));
+        }
+        jobs.insert(
+            id.to_owned(),
+            json!({"active":true,"stage":"prepare","completed":null,"total":null}),
+        );
+        Ok(Self(Some(id.to_owned())))
+    }
+
+    pub(super) fn update(&self, stage: &str, counts: Option<(usize, usize)>) {
+        if let Some(id) = &self.0 {
+            if let Ok(mut jobs) = refresh_progress().lock() {
+                jobs.insert(
+                    id.clone(),
+                    json!({"active":true,"stage":stage,
+                    "completed":counts.map(|(done, _)| done),
+                    "total":counts.map(|(_, total)| total)}),
+                );
+            }
+        }
+    }
+}
+
+impl Drop for RefreshProgress {
+    fn drop(&mut self) {
+        if let Some(id) = &self.0 {
+            if let Ok(mut jobs) = refresh_progress().lock() {
+                jobs.remove(id);
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RefreshProgressQuery {
+    id: String,
+}
+
+pub async fn reference_refresh_progress(
+    Query(query): Query<RefreshProgressQuery>,
+) -> ApiResult<Value> {
+    if !opaque_id(&query.id) {
+        return Err(storage::bad_request("Invalid reference refresh ID"));
+    }
+    let jobs = refresh_progress()
+        .lock()
+        .map_err(|_| storage::internal("Reference progress lock"))?;
+    Ok(Json(
+        jobs.get(&query.id)
+            .cloned()
+            .unwrap_or_else(|| json!({"active":false})),
+    ))
+}
+
 const MAX_TRACKS_PER_ATHLETE: usize = 16;
 const MAX_REFRESH_TRACKS: usize = 128;
 const MAX_NEW_PHOTOS_PER_ATHLETE: usize = 3;
@@ -376,12 +452,14 @@ pub async fn refresh_reference_features(
     {
         return Err(storage::bad_request("Invalid CPU replay provenance"));
     }
+    let progress = RefreshProgress::start(&headers)?;
     let scan_state = state.clone();
     let scan_req = req.clone();
     let plan = tokio::task::spawn_blocking(move || refresh_snapshot(&scan_state, &scan_req))
         .await
         .map_err(|e| storage::internal(format!("Reference scan task: {e}")))??;
     let mut track_vectors = BTreeMap::<u64, Vec<f32>>::new();
+    progress.update("track_features", Some((0, plan.candidates.len())));
     for batch in plan.candidates.chunks(48) {
         let Json(result) = embeddings(
             State(state.clone()),
@@ -413,11 +491,16 @@ pub async fn refresh_reference_features(
                 return Err(storage::internal("Duplicate track embedding"));
             }
         }
+        progress.update(
+            "track_features",
+            Some((track_vectors.len(), plan.candidates.len())),
+        );
     }
     if track_vectors.len() != plan.candidates.len() {
         return Err(storage::internal("Incomplete confirmed Track ID features"));
     }
     let mut all_features = BTreeMap::<String, BTreeMap<String, Vec<f32>>>::new();
+    progress.update("album_features", Some((0, plan.albums.len())));
     {
         let _reid = state
             .reid_limit
@@ -434,8 +517,13 @@ pub async fn refresh_reference_features(
                 album.player_id.clone(),
                 album_vectors(state.clone(), album, &plan.model).await?,
             );
+            progress.update(
+                "album_features",
+                Some((all_features.len(), plan.albums.len())),
+            );
         }
     }
+    progress.update("select_references", None);
     let _identity = state
         .identity_limit
         .acquire()
@@ -513,6 +601,7 @@ pub async fn refresh_reference_features(
         .map(|a| (a.player_id.clone(), a.revision.clone()))
         .collect::<BTreeMap<_, _>>();
     let mut added = 0;
+    progress.update("save_references", Some((0, proposals.len())));
     for (track_id, player_id) in &proposals {
         let request = ReferenceRequest {
             project_id: req.project_id.clone(),
@@ -552,11 +641,14 @@ pub async fn refresh_reference_features(
             .ok_or_else(|| storage::internal("Reference revision missing after save"))?;
         revisions.insert(player_id.clone(), new_revision.to_owned());
         added += 1;
+        progress.update("save_references", Some((added, proposals.len())));
     }
     let mut deactivated = 0;
-    for album in &plan.albums {
+    progress.update("filter_references", Some((0, plan.albums.len())));
+    for (index, album) in plan.albums.iter().enumerate() {
         let ids = redundant_references(album, &all_features[&album.player_id]);
         if ids.is_empty() {
+            progress.update("filter_references", Some((index + 1, plan.albums.len())));
             continue;
         }
         let writer = state.clone();
@@ -570,6 +662,7 @@ pub async fn refresh_reference_features(
         .await
         .map_err(|e| storage::internal(format!("Deactivate redundant references: {e}")))??;
         deactivated += changed;
+        progress.update("filter_references", Some((index + 1, plan.albums.len())));
     }
     Ok(Json(json!({
         "schema":"volley-native-player-reference-refresh/1",
@@ -591,6 +684,22 @@ pub async fn refresh_reference_features(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_progress_is_scoped_and_removed_on_drop() {
+        let mut headers = HeaderMap::new();
+        let id = "0123456789abcdef0123456789abcdef";
+        headers.insert("x-volley-refresh-id", id.parse().unwrap());
+        let job = RefreshProgress::start(&headers).unwrap();
+        assert!(RefreshProgress::start(&headers).is_err());
+        job.update("track_features", Some((24, 48)));
+        let record = refresh_progress().lock().unwrap()[id].clone();
+        assert_eq!(record["completed"], 24);
+        assert_eq!(record["total"], 48);
+        drop(job);
+        assert!(!refresh_progress().lock().unwrap().contains_key(id));
+        assert!(RefreshProgress::start(&HeaderMap::new()).is_ok());
+    }
 
     fn embedding(a: f32, b: f32) -> Vec<f32> {
         vec![a, b]

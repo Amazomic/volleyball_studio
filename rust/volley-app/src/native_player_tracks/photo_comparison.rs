@@ -583,6 +583,7 @@ pub(super) async fn compare_with_crops(
             "Invalid rally run for photo comparison",
         ));
     }
+    let progress = super::reference_refresh::RefreshProgress::start(&headers)?;
     let cloned = state.clone();
     let query = req.clone();
     let reid_device = req.reid_device;
@@ -623,6 +624,7 @@ pub(super) async fn compare_with_crops(
             json!({"schema":"volley-native-player-photo-comparison/1","project_id":snap.ctx.project_id,"replay_id":snap.ctx.replay_id,"source_replay_sha256":snap.ctx.source_sha,"player_matches":{},"photo_count":snap.photos.len(),"identity_revision":snap.identity_revision,"album_revisions":snap.albums,"model_fingerprint":snap.model,"photo_sample_policy":PHOTO_SAMPLE_POLICY,"auto_assign_enabled":false,"confirmed":false}),
         );
     }
+    progress.update("compare_tracks", Some((0, ids.len())));
     for chunk in ids.chunks(48) {
         let Json(result) = embeddings_with_crops(
             State(state.clone()),
@@ -661,7 +663,9 @@ pub(super) async fn compare_with_crops(
         if chunk.iter().any(|id| !snap.vectors.contains_key(id)) {
             return Err(storage::internal("Incomplete track features"));
         }
+        progress.update("compare_tracks", Some((snap.vectors.len(), ids.len())));
     }
+    progress.update("compare_photos", None);
     let _permit = state
         .reid_limit
         .acquire()
@@ -706,6 +710,11 @@ pub(super) async fn compare_with_crops(
         .enumerate()
         .filter_map(|(index, _)| photo_vectors[index].is_none().then_some(index))
         .collect::<Vec<_>>();
+    let mut completed_photos = snap.photos.len() - missing_indices.len();
+    progress.update(
+        "compare_photos",
+        Some((completed_photos, snap.photos.len())),
+    );
     if !missing_indices.is_empty() {
         let library = std::env::var("VOLLEY_OPENVINO_C_LIB")
             .map_err(|_| storage::bad_request("Native OpenVINO C runtime is not configured"))?;
@@ -750,12 +759,18 @@ pub(super) async fn compare_with_crops(
                 );
                 photo_vectors[index] = Some(vector);
             }
+            completed_photos += batch.len();
+            progress.update(
+                "compare_photos",
+                Some((completed_photos, snap.photos.len())),
+            );
         }
     }
     let vectors = photo_vectors
         .into_iter()
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| storage::internal("Reference ReID vectors incomplete"))?;
+    progress.update("verify_matches", None);
     let check_state = state.clone();
     let check_req = req.clone();
     let current = tokio::task::spawn_blocking(move || snapshot(&check_state, &check_req))
@@ -860,6 +875,9 @@ pub(super) async fn compare_with_crops(
     if let Some(source) = source_for_sampling {
         let mut set = tokio::task::JoinSet::new();
         let mut decoded = shared_inputs;
+        let total = cached_inputs.len();
+        let mut processed = 0;
+        progress.update("sample_crops", Some((0, total)));
         for (id, index, key, frame, crop) in cached_inputs {
             let path = source.clone();
             let analysis_offset = snap.ctx.analysis_offset_sec;
@@ -877,14 +895,19 @@ pub(super) async fn compare_with_crops(
                 if let Some(Ok((id, index, key, Some(input)))) = set.join_next().await {
                     decoded.push((id, index, key, input));
                 }
+                processed += 1;
+                progress.update("sample_crops", Some((processed, total)));
             }
         }
         while let Some(result) = set.join_next().await {
             if let Ok((id, index, key, Some(input))) = result {
                 decoded.push((id, index, key, input));
             }
+            processed += 1;
+            progress.update("sample_crops", Some((processed, total)));
         }
         if !decoded.is_empty() {
+            progress.update("sample_features", None);
             let repo = state.repository_root.clone();
             let library = std::env::var("VOLLEY_OPENVINO_C_LIB")
                 .map_err(|_| storage::bad_request("Native OpenVINO C runtime is not configured"))?;
@@ -925,6 +948,7 @@ pub(super) async fn compare_with_crops(
             }
         }
     }
+    progress.update("verify_matches", None);
     let multi_samples = independently_verified
         .into_iter()
         .filter_map(|(id, samples)| {

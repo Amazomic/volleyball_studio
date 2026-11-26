@@ -122,7 +122,7 @@ runInNewContext(source.slice(refreshStart,refreshEnd),{
   refreshReferences:refreshButton,refreshStatus,state:refreshState,
   photoEnrollmentQueues:queued,
   post:async url=>{refreshRequests.push(url);return {added:1,confirmed_tracks:1};},
-  window:{dispatchEvent(){},VolleyballTasks:{
+  window:{dispatchEvent(){},crypto:{getRandomValues:a=>a.fill(1)},setTimeout(){return 1;},clearTimeout(){},VolleyballTasks:{
     set(key,task){refreshTasks.push({key,...task});},
     clear(key){refreshTasks.push({key,cleared:true});}
   }},Event:class{},

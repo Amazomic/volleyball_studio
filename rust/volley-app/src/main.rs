@@ -289,6 +289,10 @@ fn app_with_gate(state: Arc<AppState>, gate: Arc<runtime::ShutdownGate>) -> Rout
             post(native_player_tracks::refresh_reference_features),
         )
         .route(
+            "/api/players/native/references/progress",
+            get(native_player_tracks::reference_refresh_progress),
+        )
+        .route(
             "/api/players/native/reference-photo",
             get(native_player_tracks::reference_photo),
         )
