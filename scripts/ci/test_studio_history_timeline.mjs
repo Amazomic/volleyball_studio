@@ -158,6 +158,17 @@ assert.match(resultPanel.textContent,/Ожидание очереди публи
 showGraphResult({...finished,status:"running",stage_id:"ball",stage:"VBallNet",live_stale:true});
 assert.equal(resultPanel.dataset.activity,"idle");
 assert.match(resultPanel.textContent,/Ожидание данных/);
+const secondFeed={id:"next",video:"game-b.mp4",status:"running",stage_id:"ball",stage:"GPU · VBallNet",
+  frames_processed:45,ball_frames_total:120};
+const firstPass={...finished,status:"running",stage_id:"boxes",stage:"CPU · Связывание рамок игроков"};
+const queue={active:true,videos:[firstPass,secondFeed]};
+showGraphResult({...firstPass,project_queue:queue},queue);
+assert.match(resultPanel.querySelector(".analysis-flow-result-title").textContent,
+  /Видео 2\/2 → VballNetV4c · game-b\.mp4/);
+const waitingFeed={...secondFeed,stage_id:"other",stage:"Ожидание очереди VBallNet"};
+const waitingQueue={...queue,videos:[firstPass,waitingFeed]};
+showGraphResult({...firstPass,project_queue:waitingQueue},waitingQueue);
+assert.doesNotMatch(resultPanel.querySelector(".analysis-flow-result-title").textContent,/→ VballNet/);
 showGraphResult(null);
 assert.match(resultPanel.textContent,/После анализа здесь будет виден последний результат/);
 console.log("History timeline: compact stage durations, latest result outside history and stable live log");

@@ -2036,6 +2036,7 @@ body[data-ui-theme="light"] .analysis-flow{--flow-shell:#f7f9fc;--flow-phase:#ed
 .analysis-flow-edge[data-state="disabled"]{visibility:hidden}
 .analysis-flow-edge.is-complete{stroke:var(--flow-edge);opacity:.58}
 .analysis-flow-edge.is-active{stroke:var(--flow-active);stroke-width:2.2;stroke-dasharray:6 5;opacity:1;animation:analysis-flow-move .8s linear infinite}
+.analysis-flow-edge.is-input-active{stroke-width:3}
 .analysis-flow-edge.is-highlighted{stroke:var(--flow-active);stroke-width:2;opacity:1}
 .analysis-flow-edge.is-outgoing{stroke:var(--flow-output)}
 @keyframes analysis-flow-move{to{stroke-dashoffset:-22}}

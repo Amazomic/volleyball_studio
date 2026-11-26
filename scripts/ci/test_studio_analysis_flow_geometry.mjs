@@ -80,6 +80,9 @@ for(const columns of [8,7,4,3,2,1]){
 
 console.log("PASS: arrows stay outside cards at wide, tablet and narrow layouts");
 const visible=vm.runInNewContext(definition("const graphEdgeVisible=","const drawGraphEdges=")+"graphEdgeVisible;");
+assert.equal(visible({local:true,state:"available",focus:"players",focused:false,input:true}),true,
+  "The live VBallNet input remains visible while another stage is focused");
+assert.equal(visible({local:true,state:"disabled",focus:"players",focused:false,input:true}),false);
 assert.equal(visible({local:true,state:"available"}),true);
 assert.equal(visible({local:false,state:"available"}),false);
 assert.equal(visible({local:false,state:"optional",focus:"pose",focused:true}),true);

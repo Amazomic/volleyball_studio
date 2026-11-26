@@ -3747,10 +3747,19 @@ fn queue_progress(rows: &[Value], active: bool) -> Value {
                         .map(|rallies| rallies.len() as u64)
                 });
             let frames = pipeline_frames_processed(row);
+            let ball_frames_total = if state == "running" && row["stage_id"] == "ball" {
+                row["stages"]
+                    .as_array()
+                    .and_then(|stages| stages.last())
+                    .filter(|stage| stage["id"] == "ball")
+                    .and_then(|stage| stage["frames_total"].as_u64())
+            } else {
+                None
+            };
             frames_processed += frames.unwrap_or(0);
             rallies_total += rallies.unwrap_or(0);
             json!({"id":row["id"],"video":row["video"],"status":state,"progress_percent":percent,
-            "frames_processed":frames,
+            "frames_processed":frames,"ball_frames_total":ball_frames_total,
             "stage":row["stage"],"stage_id":row["stage_id"],
             "rally_stage_progress":if state == "running" { row["rally_stage_progress"].clone() } else { Value::Null },
             "profile":{"gpu":{"person_detector":row["profile"]["gpu"]["person_detector"]}},
@@ -4044,7 +4053,7 @@ mod tests {
             json!({"id":"first","video":"a.mp4","status":"complete","progress_percent":100.0,
                 "queue_weight_sec":20.0,"analysis_frames_processed":100,"rallies_published":30,"gpu_rally_mask":{"merged":[[0,30]]}}),
             json!({"id":"second","video":"b.mp4","status":"running","progress_percent":25.0,
-                "queue_weight_sec":80.0,"stages":[{"id":"ball","frames_processed":200},{"id":"players","frames_processed":40}],"rally_stage_progress":{"pose":{"rallies_total":20,"state":"running"}}}),
+                "queue_weight_sec":80.0,"stage_id":"players","stages":[{"id":"ball","frames_processed":200},{"id":"players","frames_processed":40}],"rally_stage_progress":{"pose":{"rallies_total":20,"state":"running"}}}),
             json!({"id":"third","video":"c.mp4","status":"queued","progress_percent":0.0,
                 "queue_weight_sec":100.0}),
         ];
@@ -4056,6 +4065,8 @@ mod tests {
         assert_eq!(summary["total_videos"], 3);
         assert_eq!(summary["videos"][0]["rallies_total"], 30);
         assert_eq!(summary["videos"][1]["rallies_total"], 20);
+        assert!(summary["videos"][1]["ball_frames_total"].is_null());
+        assert!(summary["videos"][2]["ball_frames_total"].is_null());
         assert_eq!(
             summary["videos"][1]["rally_stage_progress"]["pose"]["state"],
             "running"
@@ -4067,6 +4078,21 @@ mod tests {
         assert_eq!(interrupted["videos"][2]["status"], "interrupted");
         assert_eq!(interrupted["progress_percent"], 20.0);
     }
+    #[test]
+    fn queue_current_ball_input_exposes_its_own_frame_budget() {
+        let rows = [
+            json!({"status":"running","stage_id":"boxes",
+                "stages":[{"id":"ball","frames_processed":100,"frames_total":100}]}),
+            json!({"status":"running","stage_id":"ball","stages":[{"id":"ball",
+                "frames_processed":45,"frames_total":250}]}),
+        ];
+        let summary = queue_progress(&rows, true);
+        assert!(summary["videos"][0]["ball_frames_total"].is_null());
+        assert_eq!(summary["videos"][1]["frames_processed"], 45);
+        assert_eq!(summary["videos"][1]["ball_frames_total"], 250);
+        assert!(queue_progress(&rows, false)["videos"][1]["ball_frames_total"].is_null());
+    }
+
     #[test]
     fn active_analysis_sources_match_only_the_requested_video_and_artifact() {
         let status = json!({

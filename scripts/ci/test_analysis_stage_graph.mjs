@@ -334,6 +334,17 @@ const card=id=>({
   removeAttribute(){},
   querySelector(){return {classList:{toggle(){}}};}
 });
+const inputNode=withClass("video",["is-complete"]);
+const ballNode=withClass("ball",["is-active"]);
+const inputLink={dataset:{edgeSource:"video",edgeTarget:"ball",edgeCondition:""},
+  classList:{toggle(name,enabled){this[name]=enabled;}}};
+edgeContext.inputGraph={querySelectorAll:selector=>selector===".analysis-flow-node"?
+  [inputNode,ballNode]:[inputLink]};
+vm.runInContext('paintGraphEdges(inputGraph,{status:"running",stage_id:"boxes"},["boxes"],{ordinal:2,total:2});',edgeContext);
+assert.equal(inputLink.classList["is-active"],true,"The second input must animate while the first video is focused");
+assert.equal(inputLink.classList["is-input-active"],true);
+vm.runInContext('paintGraphEdges(inputGraph,{status:"running",stage_id:"boxes"},["boxes"],null);',edgeContext);
+assert.equal(inputLink.classList["is-active"],false,"The input edge must stop animating when VBallNet leaves the stage");
 const ballCard=card("ball"),poseCard=card("pose"),detectorCard=card("touch_detector"),touchCard=card("touches");
 const graph={
   querySelector:()=>true,
@@ -376,6 +387,11 @@ render({status:"running",stage_id:"boxes",stage:"CPU · Связывание р�
   project_queue:{active:true,videos:[{id:"next",status:"running",stage_id:"ball",video:"next.mp4"}]}});
 assert.equal(ballCard.dataset.status,"running","VBallNet must stay active while another video processes CPU stages");
 assert.equal(ballCard.classList["is-complete"],false);
+render({id:"next",status:"running",stage_id:"other",stage:"Ожидание очереди VBallNet",
+  project_queue:{active:true,videos:[{id:"next",status:"running",stage_id:"ball",video:"next.mp4",
+    frames_processed:45,ball_frames_total:120}]}});
+assert.equal(ballCard.dataset.status,"running","The queue snapshot must win over an older focused status");
+assert.equal(ballCard.classList["is-progress-unknown"],false);
 render({status:"running",stage_id:"fusion",stage:"Объединение · VBallNet и рамки игроков",
   project_queue:{active:true,videos:[{id:"next",status:"running",stage_id:"players",video:"next.mp4",
     rally_stage_progress:{detector_finished_ms:2500,pose:{state:"running"}}}]}});
