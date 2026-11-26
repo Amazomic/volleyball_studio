@@ -116,6 +116,68 @@ impl CourtTransform {
         point.iter().all(|n| n.is_finite()).then_some(point)
     }
 
+    pub(crate) fn flight_projection(&self, net_height: f64) -> Option<[[f64; 4]; 3]> {
+        let [a, b, _, _] = self.zones()?.net_surface?;
+        let m = &self.matrix;
+        let mut h = [
+            m[4] * m[8] - m[5] * m[7],
+            m[2] * m[7] - m[1] * m[8],
+            m[1] * m[5] - m[2] * m[4],
+            m[5] * m[6] - m[3] * m[8],
+            m[0] * m[8] - m[2] * m[6],
+            m[2] * m[3] - m[0] * m[5],
+            m[3] * m[7] - m[4] * m[6],
+            m[1] * m[6] - m[0] * m[7],
+            m[0] * m[4] - m[1] * m[3],
+        ];
+        let scale = h[8];
+        if scale.abs() < 1e-10 || !net_height.is_finite() || net_height <= 0.0 {
+            return None;
+        }
+        for item in &mut h {
+            *item /= scale;
+        }
+        let ground = |y: f64| [h[1] * y + h[2], h[4] * y + h[5], h[7] * y + h[8]];
+        let ga = ground(-COURT_WIDTH_M / 2.0);
+        let gb = ground(COURT_WIDTH_M / 2.0);
+        let rhs = |point: [f64; 2], g: [f64; 3]| {
+            [
+                (point[0] * g[2] - g[0]) / net_height,
+                (point[1] * g[2] - g[1]) / net_height,
+            ]
+        };
+        let ra = rhs(a, ga);
+        let rb = rhs(b, gb);
+        let dx = a[0] - b[0];
+        let dy = a[1] - b[1];
+        let denominator = dx * dx + dy * dy;
+        if denominator < 1e-6 {
+            return None;
+        }
+        let z2 = (dx * (rb[0] - ra[0]) + dy * (rb[1] - ra[1])) / denominator;
+        let z0 = (ra[0] + rb[0] + (a[0] + b[0]) * z2) / 2.0;
+        let z1 = (ra[1] + rb[1] + (a[1] + b[1]) * z2) / 2.0;
+        let projection = [
+            [h[0], h[1], z0, h[2]],
+            [h[3], h[4], z1, h[5]],
+            [h[6], h[7], z2, h[8]],
+        ];
+        if !projection.iter().flatten().all(|v| v.is_finite()) {
+            return None;
+        }
+        for (point, g) in [(a, ga), (b, gb)] {
+            let depth = g[2] + z2 * net_height;
+            if depth <= 0.0
+                || ((g[0] + z0 * net_height) / depth - point[0])
+                    .hypot((g[1] + z1 * net_height) / depth - point[1])
+                    > 0.02
+            {
+                return None;
+            }
+        }
+        Some(projection)
+    }
+
     pub fn zones(&self) -> Option<CourtZones> {
         let left = self.floor_to_image([0.0, -COURT_WIDTH_M / 2.0])?;
         let right = self.floor_to_image([0.0, COURT_WIDTH_M / 2.0])?;

@@ -5,6 +5,7 @@ use volley_core::ball_interpolation::{
     stabilize_ball_motion, BallStabilizerSettings, ScoredBallSample, StabilizedBallMotion,
     BALL_STABILIZER_ALGORITHM_VERSION,
 };
+use volley_core::rally_reconstruction::serve_flight::{ServeFlightDetector, SERVE_FLIGHT_VERSION};
 use volley_core::{court_geometry::CourtTransform, motion::GroundContact};
 
 #[derive(Debug, Serialize)]
@@ -109,6 +110,9 @@ pub(super) struct RallyMask {
     stationary_intervals: Vec<(u64, u64)>,
     unobserved_intervals: Vec<(u64, u64)>,
     movement_filter_version: &'static str,
+    serve_flight_version: &'static str,
+    serve_flight_geometry_available: bool,
+    rejected_no_serve: Vec<(u64, u64)>,
     context_seconds: f64,
     observed_ball_frames: usize,
     ball_stabilizer: RallyBallStabilizer,
@@ -165,8 +169,13 @@ impl RallyMask {
         ground_frames: impl FnOnce(&StabilizedBallMotion, &[(u64, u64)]) -> Result<Vec<u64>, String>,
     ) -> Result<(Self, StabilizedBallMotion), String> {
         let trajectory = Self::stabilize(samples, frames, stabilizer_settings)?;
-        let mask =
-            Self::from_stabilized(&trajectory, settings, stabilizer_settings, ground_frames)?;
+        let mask = Self::from_stabilized(
+            &trajectory,
+            settings,
+            stabilizer_settings,
+            None,
+            ground_frames,
+        )?;
         Ok((mask, trajectory))
     }
 
@@ -227,10 +236,12 @@ impl RallyMask {
         cancelled: &AtomicBool,
     ) -> Result<(Self, Vec<GroundContact>), String> {
         let mut contacts = Vec::new();
+        let serve_detector = court.and_then(ServeFlightDetector::new);
         let mask = Self::from_stabilized(
             trajectory,
             settings,
             stabilizer_settings,
+            serve_detector.as_ref(),
             |motion, intervals| {
                 if court.is_some() {
                     let breaks =
@@ -255,6 +266,7 @@ impl RallyMask {
         trajectory: &StabilizedBallMotion,
         settings: PrimaryRallySettings,
         stabilizer_settings: BallStabilizerSettings,
+        serve_detector: Option<&ServeFlightDetector>,
         ground_candidates: impl FnOnce(&StabilizedBallMotion, &[(u64, u64)]) -> Result<Vec<u64>, String>,
     ) -> Result<Self, String> {
         settings.validate()?;
@@ -307,6 +319,23 @@ impl RallyMask {
         let mut merged = crate::cpu_retrack::ball_track::filter_short_rallies(grounded_intervals);
         merged.extend(short_grounded);
         merged.sort_unstable();
+        let mut rejected_no_serve = Vec::new();
+        if let Some(detector) = serve_detector {
+            let mut earliest = 0;
+            merged.retain(|&(start, end)| {
+                let previous_ground = ground_frames.partition_point(|&frame| frame < start);
+                let floor_limit = previous_ground
+                    .checked_sub(1)
+                    .map_or(0, |index| ground_frames[index].saturating_add(1));
+                let supported =
+                    detector.supports_opening(trajectory, (start, end), earliest.max(floor_limit));
+                earliest = end.saturating_add(1);
+                if !supported {
+                    rejected_no_serve.push((start, end));
+                }
+                supported
+            });
+        }
         let padded = pad_rally_intervals(
             &merged,
             frames,
@@ -349,6 +378,12 @@ impl RallyMask {
         let uncertain = short_motion
             .into_iter()
             .filter(|&(start, end)| {
+                if rejected_no_serve
+                    .iter()
+                    .any(|&(left, right)| left <= end && right >= start)
+                {
+                    return false;
+                }
                 let covered = selected
                     .iter()
                     .map(|&(left, right)| {
@@ -386,6 +421,8 @@ impl RallyMask {
         }
         let fallback_reason = if observed_ball_frames < MIN_DETECTIONS {
             Some("insufficient_ball_observations")
+        } else if merged.is_empty() && !rejected_no_serve.is_empty() {
+            Some("no_supported_opening_serve_flights")
         } else if merged.is_empty() {
             Some("no_reliable_moving_ball_intervals")
         } else {
@@ -407,6 +444,9 @@ impl RallyMask {
             stationary_intervals: motion.stationary,
             unobserved_intervals: motion.unobserved,
             movement_filter_version: crate::cpu_retrack::ball_track::MOVEMENT_FILTER_VERSION,
+            serve_flight_version: SERVE_FLIGHT_VERSION,
+            serve_flight_geometry_available: serve_detector.is_some(),
+            rejected_no_serve,
             context_seconds: CONTEXT_FRAMES as f64 / 30.0,
             observed_ball_frames,
             ball_stabilizer: RallyBallStabilizer {
@@ -461,6 +501,37 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn calibrated_rally_requires_opening_flight_over_net() {
+        let samples = moving_samples(80, 300);
+        let settings = PrimaryRallySettings::default();
+        let stabilizer = BallStabilizerSettings::default();
+        let trajectory = RallyMask::stabilize(&samples, 400, stabilizer).unwrap();
+        let court = CourtTransform::new([
+            [0.090909, 1.072727],
+            [0.406897, 0.282759],
+            [0.655172, 0.282759],
+            [0.745455, 1.072727],
+        ])
+        .unwrap()
+        .with_net(Some([[0.32, 0.2813], [0.68, 0.2813]]))
+        .unwrap();
+        let (mask, _) = RallyMask::detect(
+            &trajectory,
+            settings,
+            stabilizer,
+            Some(&court),
+            (1920, 1080),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(
+            mask.merged.is_empty(),
+            "local motion must not become a rally: {:?}",
+            mask.merged
+        );
     }
 
     #[test]
@@ -612,6 +683,7 @@ mod tests {
             &trajectory,
             PrimaryRallySettings::default(),
             BallStabilizerSettings::default(),
+            None,
             |_, preliminary| {
                 assert_eq!(preliminary, &[(20, 243)]);
                 Ok(vec![239])

@@ -1299,6 +1299,8 @@ fn gpu_lineage_valid(
             != volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION
             || saved["gpu_rally_mask"]["ball_stabilizer"]["settings"]
                 != json!(request.post.ball_stabilizer)
+            || saved["gpu_rally_mask"]["serve_flight_version"]
+                != volley_core::rally_reconstruction::serve_flight::SERVE_FLIGHT_VERSION
             || saved["gpu_rally_mask"]["ground_boundary_version"] != "ground_ends_rally_v5"
             || saved["gpu_rally_mask"]["ground_detector"]["version"]
                 != volley_core::motion::GROUND_DETECTOR_VERSION
@@ -5574,6 +5576,7 @@ mod branching_tests {
                 "rally_intervals":[],
                 "movement_filter_version":crate::cpu_retrack::ball_track::MOVEMENT_FILTER_VERSION,
                 "min_rally_seconds":5.0,
+                "serve_flight_version":volley_core::rally_reconstruction::serve_flight::SERVE_FLIGHT_VERSION,
                 "ground_boundary_version":"ground_ends_rally_v5",
                 "ground_detector":{"version":volley_core::motion::GROUND_DETECTOR_VERSION,"sha256":sha},
                 "ball_stabilizer":{

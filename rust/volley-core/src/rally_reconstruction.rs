@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod serve_flight;
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RallySettings {
