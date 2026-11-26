@@ -60,6 +60,52 @@ pub(crate) fn candidates(
             result.push(contact);
         }
     }
+    let mut used_frames = result
+        .iter()
+        .map(|c| c.frame)
+        .collect::<std::collections::BTreeSet<_>>();
+    for &(start, end) in intervals {
+        if cancel.load(Ordering::Acquire) {
+            return Err("cancelled".into());
+        }
+        let first = (start as usize).saturating_sub(12).min(motion.points.len());
+        let last = (end as usize).saturating_add(31).min(motion.points.len());
+        let points = motion.points[first..last]
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, point)| {
+                let frame = first + offset;
+                let [x, y] = (*point)?;
+                if motion.interpolated.get(frame).copied().unwrap_or(true) {
+                    return None;
+                }
+                Some(volley_core::motion::BallObservation {
+                    frame: frame as i64,
+                    x: x * f64::from(width),
+                    y: y * f64::from(height),
+                })
+            })
+            .collect::<Vec<_>>();
+        for contact in
+            volley_core::motion::rolling_ground_contacts(&points, court, width, height, end)
+        {
+            if !(start..=end).contains(&contact.frame) {
+                continue;
+            }
+            if result.len() >= LIMIT {
+                return Err("Ground candidate limit exceeded".into());
+            }
+            if used_frames
+                .range(contact.frame.saturating_sub(6)..=contact.frame.saturating_add(6))
+                .next()
+                .is_none()
+            {
+                used_frames.insert(contact.frame);
+                result.push(contact);
+            }
+        }
+    }
+    result.sort_unstable_by_key(|contact| contact.frame);
     Ok(result)
 }
 
@@ -228,11 +274,7 @@ pub(crate) fn prepare_touch_detection(
             cancel,
         )?
     };
-    contacts.retain(|c| {
-        breaks
-            .binary_search_by_key(&(c.frame as i64), |impact| impact.frame)
-            .is_ok()
-    });
+    contacts.retain(|c| c.frame < stabilized.frames);
     let folder = stabilized
         .project_root
         .join("native_cpu_ball_stabilizer")
@@ -442,6 +484,44 @@ mod tests {
         )
         .unwrap();
         assert!(unobserved_line.is_empty());
+    }
+
+    #[test]
+    fn rolling_ball_ends_rally_even_without_a_touch_break() {
+        let court = CourtTransform::new([[0.06, 1.02], [0.34, 0.294], [0.60, 0.288], [0.89, 1.03]])
+            .unwrap();
+        let mut motion = volley_core::ball_interpolation::StabilizedBallMotion {
+            points: vec![None; 240],
+            interpolated: vec![false; 240],
+            rejected_frames: vec![],
+            confidence_frames: 10,
+            observed_frames: 10,
+        };
+        for (frame, x, y) in [
+            (40, 0.35, 0.25),
+            (41, 0.35, 0.26),
+            (42, 0.35, 0.27),
+            (43, 0.35, 0.28),
+            (44, 0.35, 0.295),
+            (56, 0.358, 0.267),
+            (57, 0.358, 0.267),
+            (58, 0.360, 0.264),
+            (63, 0.362, 0.243),
+            (64, 0.368, 0.240),
+        ] {
+            motion.points[frame] = Some([x, y]);
+        }
+        let cancel = AtomicBool::new(false);
+        let contacts =
+            candidates(&motion, &[], &[(0, 239)], Some(&court), 3840, 2160, &cancel).unwrap();
+        assert_eq!(contacts.len(), 1);
+        assert!((44..=46).contains(&contacts[0].frame));
+        assert!(contacts[0].position[1] > 0.29);
+        assert!(
+            candidates(&motion, &[], &[(0, 239)], None, 3840, 2160, &cancel)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

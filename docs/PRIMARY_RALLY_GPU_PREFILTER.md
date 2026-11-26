@@ -264,11 +264,13 @@ continuous segment does not start a new rally. A subsequent independently
 detected moving segment is eligible for a separate interval; the existing
 five-second minimum and person-scan context padding are unchanged.
 
+Ground Detector additionally detects the transition from flight to rolling using observed ball points, a sustained speed reduction and a coherent path on the calibrated court plane. A short occlusion (up to 12 frames) may bridge the transition near a court boundary. Early rolling candidates must also remain near or outside the boundary; interior contacts retain the near-end safeguard. The estimated contact frame closes the rally, not the end of the rolling path. This is provisional monocular evidence, not measured ball height.
+
 Ground Detector and Touch Detector share the trajectory-break primitive, but
 primary analysis does not publish player-touch candidates or a Touch Detector
 artifact. Touch Detector runs in phase two on the stabilized replay scoped to
 the saved rally intervals; it reuses validated floor evidence where available.
-The primary mask records ground_boundary_version=ground_ends_rally_v3,
+The primary mask records ground_boundary_version=ground_ends_rally_v4,
 Ground Detector version, court revision and the artifact checksum. A new primary
 run does not reuse a mask without this boundary version, or one derived from
 a different court revision. Older immutable masks remain readable for explicit

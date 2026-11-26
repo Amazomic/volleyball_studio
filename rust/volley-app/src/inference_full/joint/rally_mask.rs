@@ -498,6 +498,62 @@ mod tests {
     }
 
     #[test]
+    fn rolling_contact_closes_primary_rally_at_impact_before_padding() {
+        let mut points = vec![None; 400];
+        for (frame, point) in points.iter_mut().enumerate().take(260).skip(60) {
+            let travel = if frame < 160 { frame - 60 } else { 259 - frame };
+            *point = Some([
+                0.35 + travel as f64 * 0.003,
+                0.20 + (frame as f64 - 250.0).max(0.0) * 0.005,
+            ]);
+        }
+        for (frame, x, y) in [
+            (260, 0.35, 0.25),
+            (261, 0.35, 0.26),
+            (262, 0.35, 0.27),
+            (263, 0.35, 0.28),
+            (264, 0.35, 0.295),
+            (276, 0.358, 0.267),
+            (277, 0.358, 0.267),
+            (278, 0.360, 0.264),
+            (283, 0.362, 0.243),
+            (284, 0.368, 0.240),
+        ] {
+            points[frame] = Some([x, y]);
+        }
+        for (frame, point) in points.iter_mut().enumerate().take(340).skip(285) {
+            *point = Some([0.368 + (frame - 284) as f64 * 0.004, 0.240]);
+        }
+        let trajectory = StabilizedBallMotion {
+            observed_frames: points.iter().filter(|p| p.is_some()).count(),
+            confidence_frames: points.iter().filter(|p| p.is_some()).count(),
+            interpolated: vec![false; points.len()],
+            rejected_frames: vec![],
+            points,
+        };
+        let court = CourtTransform::new([[0.06, 1.02], [0.34, 0.294], [0.60, 0.288], [0.89, 1.03]])
+            .unwrap();
+        let (mask, contacts) = RallyMask::detect(
+            &trajectory,
+            PrimaryRallySettings::default(),
+            BallStabilizerSettings::default(),
+            Some(&court),
+            (3840, 2160),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let impact = contacts
+            .iter()
+            .find(|c| (264..=266).contains(&c.frame))
+            .unwrap_or_else(|| {
+                panic!("rolling ground contact; contacts={contacts:?}, mask={mask:?}")
+            });
+        assert_eq!(mask.merged.len(), 1);
+        assert_eq!(mask.merged[0].1, impact.frame);
+        assert_eq!(mask.rally_intervals[0].1, impact.frame + 15);
+    }
+
+    #[test]
     fn first_ground_contact_ends_rally_without_reopening_on_bounce() {
         let mut samples = moving_samples(80, 330);
         samples.extend(moving_samples(500, 710));

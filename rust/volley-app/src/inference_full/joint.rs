@@ -570,7 +570,7 @@ pub(crate) fn run_joint_pair(
         let mut mask_value = serde_json::to_value(&mask)
             .map_err(|error| format!("Serialize primary rally mask: {error}"))?;
         mask_value["selected_frames"] = json!(selected_frames);
-        mask_value["ground_boundary_version"] = json!("ground_ends_rally_v3");
+        mask_value["ground_boundary_version"] = json!("ground_ends_rally_v4");
         mask_value["ground_detector"] = ground_summary;
         mask_value["ball_stabilizer"]["trajectory_sha256"] = json!(trajectory_sha);
         mask_value["ball_stabilizer"]["confidence_frames"] = json!(trajectory.confidence_frames);

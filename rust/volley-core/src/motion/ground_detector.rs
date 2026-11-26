@@ -1,7 +1,7 @@
 use super::{BallObservation, TrajectoryBreak};
 use crate::court_geometry::CourtTransform;
 
-pub const GROUND_DETECTOR_VERSION: &str = "court_ball_rebound_v4";
+pub const GROUND_DETECTOR_VERSION: &str = "court_ball_roll_v5";
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroundContact {
@@ -117,6 +117,159 @@ pub fn classify_ground_contact(
     }
     Some(GroundContact {
         frame: impact.frame as u64,
+        position,
+        landing: landing.to_owned(),
+    })
+}
+
+pub fn rolling_ground_contacts(
+    points: &[BallObservation],
+    court: &CourtTransform,
+    width: u32,
+    height: u32,
+    rally_end_frame: u64,
+) -> Vec<GroundContact> {
+    if width == 0
+        || height == 0
+        || points.windows(2).any(|p| p[0].frame >= p[1].frame)
+        || points.iter().any(|p| {
+            p.frame < 0 || p.frame > i32::MAX as i64 || !p.x.is_finite() || !p.y.is_finite()
+        })
+    {
+        return Vec::new();
+    }
+    let mut contacts: Vec<GroundContact> = Vec::new();
+    for split in 5..points.len().saturating_sub(4) {
+        let before = &points[split - 5..split];
+        let left = before[4];
+        let right = points[split];
+        let gap = right.frame - left.frame - 1;
+        if gap > 12 || before.windows(2).any(|p| p[1].frame - p[0].frame > 2) {
+            continue;
+        }
+        let after_end = if gap <= 1 {
+            points.partition_point(|p| p.frame <= right.frame + 12)
+        } else {
+            split + 5
+        };
+        let after = &points[split..after_end];
+        if after.len() < 5
+            || after.last().unwrap().frame - right.frame < if gap <= 1 { 10 } else { 4 }
+            || after.last().unwrap().frame - right.frame > 12
+            || after
+                .windows(2)
+                .any(|p| p[1].frame - p[0].frame > if gap <= 1 { 2 } else { 6 })
+        {
+            continue;
+        }
+        if let Some(contact) =
+            rolling_transition(before, after, court, width, height, gap, rally_end_frame)
+        {
+            if contacts
+                .last()
+                .is_none_or(|prior| contact.frame.saturating_sub(prior.frame) > 12)
+            {
+                contacts.push(contact);
+            }
+        }
+    }
+    contacts
+}
+
+fn rolling_transition(
+    before: &[BallObservation],
+    after: &[BallObservation],
+    court: &CourtTransform,
+    width: u32,
+    height: u32,
+    gap: i64,
+    rally_end_frame: u64,
+) -> Option<GroundContact> {
+    let [w, h] = [f64::from(width), f64::from(height)];
+    let first = before[0];
+    let left = *before.last()?;
+    let right = after[0];
+    let last = *after.last()?;
+    let slope = |a: BallObservation, b: BallObservation| {
+        let span = (b.frame - a.frame) as f64;
+        [(b.x - a.x) / span / w, (b.y - a.y) / span / h]
+    };
+    let incoming = slope(first, left);
+    let outgoing = slope(right, last);
+    let incoming_speed = incoming[0].hypot(incoming[1]);
+    let outgoing_speed = outgoing[0].hypot(outgoing[1]);
+    if incoming[1] < 0.006
+        || outgoing_speed > incoming_speed * 0.45
+        || before.windows(2).any(|p| p[1].y + h * 0.003 < p[0].y)
+    {
+        return None;
+    }
+    let dt = (right.frame - left.frame) as f64;
+    let difference = incoming[1] - outgoing[1];
+    if difference <= 0.0 {
+        return None;
+    }
+    let offset = ((right.y - left.y) / h - outgoing[1] * dt) / difference;
+    if !(-0.5..=dt + 0.5).contains(&offset) {
+        return None;
+    }
+    let offset = offset.clamp(0.0, dt);
+    let left_x = left.x / w + incoming[0] * offset;
+    let right_x = right.x / w - outgoing[0] * (dt - offset);
+    if (left_x - right_x).abs() > 0.012 {
+        return None;
+    }
+    let position = [(left_x + right_x) * 0.5, left.y / h + incoming[1] * offset];
+    if position.iter().any(|p| !(-0.5..=1.5).contains(p)) {
+        return None;
+    }
+    let origin = court.to_court(position)?;
+    let boundary_distance = |point: [f64; 2]| {
+        (point[0].abs() - crate::court_geometry::COURT_LENGTH_M / 2.0)
+            .max(point[1].abs() - crate::court_geometry::COURT_WIDTH_M / 2.0)
+    };
+    let distance_m = boundary_distance(origin);
+    if !(-0.8..=0.8).contains(&distance_m) && (gap > 1 || distance_m > 0.8) {
+        return None;
+    }
+    let projected = after
+        .iter()
+        .map(|p| court.to_court([p.x / w, p.y / h]))
+        .collect::<Option<Vec<_>>>()?;
+    let end = *projected.last()?;
+    let frame = (left.frame + offset.round() as i64) as u64;
+    if rally_end_frame.saturating_sub(frame) > 45
+        && (distance_m.abs() > 0.8 || boundary_distance(end) < -0.8)
+    {
+        return None;
+    }
+    let direction = [end[0] - origin[0], end[1] - origin[1]];
+    let length = direction[0].hypot(direction[1]);
+    if length < 0.3 || length / (last.frame - left.frame) as f64 > 0.4 {
+        return None;
+    }
+    let mut previous_progress = 0.0_f64;
+    for point in projected {
+        if point[0].abs() > crate::court_geometry::COURT_LENGTH_M / 2.0 + 6.0
+            || point[1].abs() > crate::court_geometry::COURT_WIDTH_M / 2.0 + 1.5
+        {
+            return None;
+        }
+        let delta = [point[0] - origin[0], point[1] - origin[1]];
+        let progress = (delta[0] * direction[0] + delta[1] * direction[1]) / length;
+        let lateral = (delta[0] * direction[1] - delta[1] * direction[0]).abs() / length;
+        if lateral > 0.5 || progress + 0.25 < previous_progress {
+            return None;
+        }
+        previous_progress = previous_progress.max(progress);
+    }
+    let landing = if distance_m.abs() <= 0.25 {
+        "line_uncertain"
+    } else {
+        court.tentative_landing(position)?
+    };
+    Some(GroundContact {
+        frame,
         position,
         landing: landing.to_owned(),
     })
@@ -239,6 +392,30 @@ mod tests {
             }
         }
         assert!(classify_ground_contact(&points, &impact, &court(), 1000, 200, 20).is_some());
+    }
+
+    #[test]
+    fn visible_horizontal_roll_is_not_required_to_rebound() {
+        let mut points = (0..5)
+            .map(|frame| BallObservation {
+                frame,
+                x: 300.0,
+                y: 400.0 + frame as f64 * 12.0,
+            })
+            .collect::<Vec<_>>();
+        points.extend((5..19).map(|frame| BallObservation {
+            frame,
+            x: 300.0 + (frame - 4) as f64 * 2.0,
+            y: 448.0,
+        }));
+        let contacts = rolling_ground_contacts(&points, &court(), 1000, 1000, 30);
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].frame, 4);
+        assert!(rolling_ground_contacts(&points, &court(), 1000, 1000, 200).is_empty());
+        for p in &mut points[5..] {
+            p.y -= (p.frame - 4) as f64 * 16.0;
+        }
+        assert!(rolling_ground_contacts(&points, &court(), 1000, 1000, 30).is_empty());
     }
 
     #[test]
