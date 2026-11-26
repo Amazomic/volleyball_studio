@@ -3071,33 +3071,28 @@
     invalidateTrainingTouchPrediction();
     updateTrainingRallyLayers();
   });
-  const renderRallyVideoMarkers=(list,rail,create)=>{
+  const renderRallyVideoMarkers=list=>{
     const firstCards=new Map();
     for(const card of list.querySelectorAll("[data-rally-video]")){
       const video=card.getAttribute("data-rally-video");
       if(video&&!firstCards.has(video))firstCards.set(video,card);
     }
     const height=list.scrollHeight;
-    rail.hidden=firstCards.size<2||!list.clientHeight||height<=list.clientHeight;
-    if(rail.hidden){rail.replaceChildren();return;}
-    rail.style.setProperty("--rally-scrollbar-width",Math.max(0,list.offsetWidth-list.clientWidth)+"px");
-    const contentTop=card=>card.getBoundingClientRect().top-list.getBoundingClientRect().top+
-      list.scrollTop-list.clientTop;
-    const buttons=[];
-    for(const [video,card] of firstCards){
-      const marker=create("button","rally-video-marker");
-      marker.type="button";
-      marker.title="Перейти к розыгрышам: "+video;
-      marker.setAttribute("aria-label",marker.title);
-      marker.style.top=(Math.max(0,Math.min(1,contentTop(card)/height))*100)+"%";
-      marker.addEventListener("click",()=>{list.scrollTop=contentTop(card);});
-      buttons.push(marker);
+    if(firstCards.size<2||!list.clientHeight||height<=list.clientHeight){
+      list.style.removeProperty("--rally-video-track");return;
     }
-    rail.replaceChildren(...buttons);
+    const top=list.getBoundingClientRect().top;
+    const positions=[...firstCards.values()].map(card=>
+      Math.max(0,Math.min(1,(card.getBoundingClientRect().top-top+list.scrollTop-list.clientTop)/height))*100);
+    const layers=positions.map(percent=>{
+      const start="calc("+percent+"% - 1px)",end="calc("+percent+"% + 1px)";
+      const color="var(--rally-scroll-marker-color)";
+      return "linear-gradient(to bottom, transparent "+start+", "+color+" "+start+", "+color+" "+end+", transparent "+end+")";
+    });
+    list.style.setProperty("--rally-video-track",layers.join(","));
   };
-  const rallyVideoMarkerRail=$("studio-rally-video-markers");
-  const refreshRallyVideoMarkers=()=>renderRallyVideoMarkers(ui.list,rallyVideoMarkerRail,make);
-  if(rallyVideoMarkerRail){
+  const refreshRallyVideoMarkers=()=>renderRallyVideoMarkers(ui.list);
+  if(ui.list){
     if(typeof MutationObserver==="function")new MutationObserver(refreshRallyVideoMarkers).observe(ui.list,{childList:true});
     if(typeof ResizeObserver==="function")new ResizeObserver(refreshRallyVideoMarkers).observe(ui.list);
   }
