@@ -394,6 +394,7 @@ pub(crate) fn verified_ball_trajectory(
                 | "ball_stabilizer_v6"
                 | "ball_stabilizer_v7"
                 | "ball_stabilizer_v8"
+                | "ball_stabilizer_v9"
         )
         || summary["source_replay_id"] != replay_id
         || summary["source_replay_sha256"] != replay_sha256
@@ -889,7 +890,7 @@ pub(crate) fn stabilize_replay_rows(
 }
 
 /// Rewrite only the derived TouchFrame working copy. Synthetic observations
-/// cannot themselves confirm a contact; the emitter checks their provenance.
+/// support motion hypotheses; the emitter checks their provenance.
 fn use_stabilized_ball(
     block: &mut [TouchFrame],
     motion: &volley_core::ball_interpolation::StabilizedBallMotion,

@@ -23,7 +23,7 @@ pub use trajectory_tcn::{evaluate_tcn_peaks, trajectory_features};
 /// impact inside the bounded (at most ten-frame) missing-ball island.
 /// Occluded impacts retain observed flight anchors and a same-frame tracked player.
 pub const MAX_OBSERVED_TOUCH_OFFSET_FRAMES: u64 = 9;
-pub const TRAJECTORY_DETECTOR_VERSION: &str = "piecewise_ballistic_motion_v6";
+pub const TRAJECTORY_DETECTOR_VERSION: &str = "piecewise_ballistic_motion_v7";
 pub const INTERPOLATED_BALL_SOURCE: &str = "ball_stabilizer_interpolated";
 
 use crate::{
@@ -308,12 +308,38 @@ pub fn detect_ball_trajectory_touches(
         let Some(row) = frames.get((frame - first) as usize) else {
             continue;
         };
-        if row
+        let interpolated = row
             .selected_ball
             .as_ref()
-            .is_some_and(|ball| ball.source_model != "vballnet")
-        {
-            continue;
+            .is_some_and(|ball| ball.source_model == INTERPOLATED_BALL_SOURCE);
+        if interpolated {
+            let at = (frame - first) as usize;
+            let observed = |row: &&TouchFrame| {
+                row.selected_ball
+                    .as_ref()
+                    .is_some_and(|ball| ball.source_model == "vballnet")
+            };
+            let before = frames[..at]
+                .iter()
+                .rev()
+                .take(14)
+                .filter(observed)
+                .take(2)
+                .collect::<Vec<_>>();
+            let after = frames[at + 1..]
+                .iter()
+                .take(14)
+                .filter(observed)
+                .take(2)
+                .collect::<Vec<_>>();
+            if before.len() != 2
+                || after.len() != 2
+                || after[0].frame_index - before[0].frame_index > 13
+                || before[0].frame_index - before[1].frame_index > 2
+                || after[1].frame_index - after[0].frame_index > 2
+            {
+                continue;
+            }
         }
         if let Some(contact) = court_scope.and_then(|(court, rally_end_frame)| {
             crate::motion::classify_ground_contact(
@@ -351,7 +377,7 @@ pub fn detect_ball_trajectory_touches(
             body_contact_supported: false,
             contact_landmark: None,
             contact_pose_sample_frame: None,
-            ball_occluded_at_contact: !impact.contact_observed,
+            ball_occluded_at_contact: !impact.contact_observed || interpolated,
             inferred_body_reach_supported: false,
             athlete_identity_verified: false,
         });
@@ -671,6 +697,58 @@ pub fn evaluate_block(
 mod tests {
     use super::*;
 
+    #[test]
+    fn trajectory_detector_emits_a_bracketed_interpolated_rebound() {
+        let frames = (0..21_u64)
+            .map(|frame_index| {
+                let t = frame_index as f64 - 10.0;
+                let x = 0.60 + 0.0015 * t;
+                let y = if t <= 0.0 {
+                    0.54 + 0.022 * t
+                } else {
+                    0.54 - 0.030 * t
+                };
+                TouchFrame {
+                    frame_index,
+                    players: Vec::new(),
+                    selected_ball: Some(TouchBall {
+                        source_model: if (10..=11).contains(&frame_index) {
+                            INTERPOLATED_BALL_SOURCE
+                        } else {
+                            "vballnet"
+                        }
+                        .into(),
+                        score: 0.8,
+                        bbox_xyxy_norm: [x - 0.005, y - 0.005, x + 0.005, y + 0.005],
+                    }),
+                }
+            })
+            .collect::<Vec<_>>();
+        let detect = |frames: &[TouchFrame]| {
+            detect_ball_trajectory_touches(
+                frames,
+                3840,
+                2160,
+                0,
+                21,
+                TouchSettings::default(),
+                None,
+                None,
+                &mut Vec::new(),
+            )
+            .unwrap()
+        };
+        let events = detect(&frames);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].frame_index, 10);
+        assert!(events[0].ball_occluded_at_contact);
+        assert!(events[0].provisional_track_id.is_none());
+        let mut synthetic = frames;
+        for row in &mut synthetic {
+            row.selected_ball.as_mut().unwrap().source_model = INTERPOLATED_BALL_SOURCE.into();
+        }
+        assert!(detect(&synthetic).is_empty());
+    }
     #[test]
     fn supplied_trajectory_breaks_replace_the_late_motion_scan() {
         let frames = (0..20)

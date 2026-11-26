@@ -1,5 +1,5 @@
 //! Bounded VBallNet-only reconstruction of invisible portions of a flight.
-//! Every inferred point is marked synthetic and is NEVER Touch evidence.
+//! Every inferred point is marked synthetic; it supports motion hypotheses, not observed contacts.
 
 /// Maximum interior dropout (0.9 s at 30 fps); never invent an unanchored tail.
 pub const MAX_MISSING_BALL_FRAMES: usize = 27;
@@ -176,7 +176,7 @@ pub struct StabilizedBallMotion {
     pub observed_frames: usize,
 }
 
-pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v8";
+pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v9";
 
 fn reject_unlinked_motion(
     points: &mut [Option<[f64; 2]>],
@@ -585,7 +585,7 @@ fn reconstruct_occluded_rebound(
     max_missing_frames: usize,
 ) -> Option<Vec<[f64; 2]>> {
     let missing = right.checked_sub(left + 1)?;
-    if !(3..=12.min(max_missing_frames)).contains(&missing)
+    if !(1..=12.min(max_missing_frames)).contains(&missing)
         || left < 2
         || right + 2 >= points.len()
         || synthetic[left - 1]
@@ -601,10 +601,18 @@ fn reconstruct_occluded_rebound(
     let before_prev = points[left - 2]?;
     let after = points[right + 1]?;
     let after_next = points[right + 2]?;
-    let incoming = [begin[0] - before[0], begin[1] - before[1]];
+    let incoming_step = [begin[0] - before[0], begin[1] - before[1]];
     let incoming_previous = [before[0] - before_prev[0], before[1] - before_prev[1]];
-    let outgoing = [after[0] - end[0], after[1] - end[1]];
+    let outgoing_step = [after[0] - end[0], after[1] - end[1]];
     let outgoing_next = [after_next[0] - after[0], after_next[1] - after[1]];
+    let incoming = [
+        (begin[0] - before_prev[0]) * 0.5,
+        (begin[1] - before_prev[1]) * 0.5,
+    ];
+    let outgoing = [
+        (after_next[0] - end[0]) * 0.5,
+        (after_next[1] - end[1]) * 0.5,
+    ];
     let norm = |v: [f64; 2]| v[0].hypot(v[1]);
     let speed_in = norm(incoming);
     let speed_out = norm(outgoing);
@@ -613,13 +621,13 @@ fn reconstruct_occluded_rebound(
         || speed_in > MAX_DISPLACEMENT_PER_FRAME
         || speed_out > MAX_DISPLACEMENT_PER_FRAME
         || norm([
-            incoming[0] - incoming_previous[0],
-            incoming[1] - incoming_previous[1],
-        ]) > 0.009
+            incoming_step[0] - incoming_previous[0],
+            incoming_step[1] - incoming_previous[1],
+        ]) > 0.012
         || norm([
-            outgoing[0] - outgoing_next[0],
-            outgoing[1] - outgoing_next[1],
-        ]) > 0.009
+            outgoing_step[0] - outgoing_next[0],
+            outgoing_step[1] - outgoing_next[1],
+        ]) > 0.012
     {
         return None;
     }
@@ -1366,6 +1374,65 @@ mod tests {
             .all(|&frame| (25..=27).contains(&frame)));
     }
 
+    #[test]
+    fn short_confirmed_rebound_gaps_preserve_the_turn() {
+        for missing in 1..=4 {
+            let samples = (0..=20)
+                .filter(|frame| !(10..10 + missing).contains(frame))
+                .map(|frame| {
+                    let t = frame as f64 - 10.0;
+                    let y = if t <= 0.0 {
+                        0.54 + 0.022 * t
+                    } else {
+                        0.54 - 0.030 * t
+                    };
+                    ScoredBallSample {
+                        frame,
+                        point: [0.60 + 0.0015 * t, (y * 288.0).round() / 288.0],
+                        confidence: 0.8,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let result =
+                stabilize_ball_motion(&samples, 21, BallStabilizerSettings::default()).unwrap();
+            assert!(
+                result.interpolated[10..10 + missing]
+                    .iter()
+                    .all(|&flag| flag),
+                "gap {missing}: {:?}",
+                result.points
+            );
+            let peak = result.points[9..=10 + missing]
+                .iter()
+                .flatten()
+                .map(|p| p[1])
+                .fold(0.0_f64, f64::max);
+            assert!(
+                peak > result.points[9].unwrap()[1] + 0.005,
+                "gap {missing}: {peak}"
+            );
+            let points = result
+                .points
+                .iter()
+                .enumerate()
+                .filter_map(|(frame, point)| {
+                    point.map(|p| crate::motion::BallObservation {
+                        frame: frame as i64,
+                        x: p[0] * 3840.0,
+                        y: p[1] * 2160.0,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let breaks = crate::motion::trajectory_direction_breaks(
+                &points,
+                crate::motion::DirectionBreakConfig::default(),
+            );
+            assert!(
+                breaks.iter().any(|b| b.frame.abs_diff(10) <= 1),
+                "gap {missing}: {breaks:?}"
+            );
+        }
+    }
     #[test]
     fn ball_stabilizer_reconstructs_an_occluded_rebound_instead_of_erasing_it() {
         let samples = |offset: f64| {
