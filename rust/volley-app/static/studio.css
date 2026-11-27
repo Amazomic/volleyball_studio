@@ -799,6 +799,11 @@ body[data-ui-theme="light"] #studio-preview-view .rally-grid::-webkit-scrollbar-
   font-size:10px;font-weight:650;letter-spacing:.01em;color:#91add0;
   min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
+#studio-preview-view .rally-card .rally-id-copy{
+  background:none;border:0;padding:0;justify-self:start;max-width:100%;
+  text-align:left;text-decoration:underline;text-underline-offset:2px;
+}
+#studio-preview-view .rally-card .rally-id-copy:hover{color:#d9e7fb}
 #studio-preview-view .rally-card-time-range{min-width:0;white-space:nowrap}
 #studio-preview-view .rally-card-time-value{
   font-size:12px;font-weight:650;line-height:1.2;

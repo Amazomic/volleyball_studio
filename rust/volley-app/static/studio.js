@@ -4785,8 +4785,19 @@
       });
       card.addEventListener("contextmenu",e=>{e.preventDefault();mark();});
       const top=make("div","card-top");
-      const idLabel=make("span","id-label","ID "+id.slice(0,6));
-      idLabel.title="Полный ID: "+id;
+      const idLabel=make("button","id-label rally-id-copy","ID "+id.slice(0,6));
+      idLabel.type="button";
+      idLabel.title="Скопировать полный ID: "+id;
+      idLabel.setAttribute("aria-label",idLabel.title);
+      idLabel.addEventListener("click",async event=>{
+        event.stopPropagation();
+        try{
+          await navigator.clipboard.writeText(id);
+          message("ID розыгрыша скопирован","ok");
+        }catch{
+          message("Не удалось скопировать ID: "+id,"error");
+        }
+      });
       if(trainingList)idLabel.append(make("span","rally-source-label","По касаниям"));
       const duration=make("div","rally-card-duration");
       const durationText=source?((end-start+1)/rate).toFixed(1)+" с":length(item);

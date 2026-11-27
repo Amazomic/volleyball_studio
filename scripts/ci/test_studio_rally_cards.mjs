@@ -34,6 +34,8 @@ const s={video:"sample.mp4",items:[{
 }],offset:0,limit:24,filtered:1,gold:new Set(),current:"",
 selected:{has:()=>false}};
 const playbackCalls=[];
+const copiedIds=[];
+const copyMessages=[];
 const training={active:false};
 const timelineRallyLayers={touches:{checked:true},ball:{checked:true}};
 const comparison={data:null};
@@ -51,12 +53,28 @@ const context={fps:()=>30,ui,s,wasmReady:true,
   make:element, wipe:el=>el.replaceChildren(),
   valid:id=>/^[a-f0-9]{24}$/.test(id),clock:n=>String(n),
   document:{createTextNode:s=>({textContent:s})},
+  navigator:{clipboard:{writeText:async id=>copiedIds.push(id)}},
+  message:(...args)=>copyMessages.push(args),
   view:(...args)=>playbackCalls.push(args),toggleGold(){},toggleSelected(){}};
 runInNewContext(helpers+"\n"+estimates+"\n"+renderer+"\nthis.render=cards;",context);
 s.items[0].metadata={team_1:[4,9],team_2:[10,11],touches:[{kind:"serve",track_id:9},{kind:"attack",track_id:10}],winning_team:"team_2"};
 context.render();
 const card=list.children[0];
 assert.equal(card.attrs["data-rally-video"],"sample.mp4");
+const idButton=card.children[0].children[0];
+assert.equal(idButton.tag,"button");
+assert.equal(idButton.textContent,"ID aaaaaa");
+assert.equal(idButton.type,"button");
+let copyStopped=false;
+await idButton.listeners.click({stopPropagation(){copyStopped=true;}});
+assert.equal(copyStopped,true);
+assert.deepEqual(copiedIds,[s.items[0].candidate_id]);
+assert.equal(playbackCalls.length,0);
+assert.equal(copyMessages.at(-1)[1],"ok");
+context.navigator.clipboard.writeText=async()=>{throw new Error("denied");};
+await idButton.listeners.click({stopPropagation(){}});
+assert.equal(copyMessages.at(-1)[1],"error");
+context.navigator.clipboard.writeText=async id=>copiedIds.push(id);
 const teamBlock=card.children.find(node=>node.klass==="rally-card-teams");
 assert.ok(teamBlock,"Rally card displays team rosters");
 assert.equal(teamBlock.children[0].children[0].klass,"rally-team-label");
@@ -211,6 +229,8 @@ s.run="r";s.projectRallies=new Map([["other",remoteSource]]);
 context.projectRallyEntries=()=>[{kind:"touch",source:remoteSource,item:remote,detail:false}];
 context.render();
 const remoteCard=list.children[0];
+await remoteCard.children[0].children[0].listeners.click({stopPropagation(){}});
+assert.equal(copiedIds.at(-1),remote.candidate_id);
 assert.ok(remoteCard.children.some(node=>node.klass==="rally-card-teams"),"Inactive source must use full card");
 assert.ok(remoteCard.children.some(node=>node.klass==="rally-card-progress"),"Inactive source must show timeline");
 assert.ok(remoteCard.children.some(node=>node.klass==="rally-card-foot"),"Inactive source must show favorite and stats");
