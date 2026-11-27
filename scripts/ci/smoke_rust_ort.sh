@@ -64,7 +64,7 @@ python3 - "$status" <<'PY'
 import json,sys
 item=json.load(open(sys.argv[1], encoding="utf-8"))
 assert item["production_ready"] is False
-assert item["migration_complete"] is False
+assert item["migration_complete"] is True
 assert item["isolated_writes_enabled"] is False
 print("Rust server: read-only development mode")
 PY

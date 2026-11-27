@@ -8,9 +8,9 @@ Documentation: [Index](docs/README.md).
 
 **Branches:** `develop` is the main development branch and the target for day-to-day changes and PRs. `master` is reserved for tested version releases only. See the [development and release workflow](docs/DEVELOPMENT_WORKFLOW.md). [Beta v0.1.0-beta.1](https://github.com/Amazomic/volleyball_studio/releases/tag/v0.1.0-beta.1).
 
-План разработки: 84/85; следующий 85/85
+План разработки: 85/85; миграция завершена
 
-**Rust application migration:** the native runtime is established; product acceptance remains open (stage 84/85, NO-GO; stage 85 pending). See [current status](docs/RUST_REWRITE_SCOPE.md).
+**Rust application migration:** complete (85/85), accepted by the owner on 2026-11-27 after the architecture changed. Historical stage-84 Python parity is no longer a migration gate; production readiness remains separate. See [current status](docs/RUST_REWRITE_SCOPE.md).
 
 ---
 
@@ -86,6 +86,6 @@ Run the complete local gate from the repository root with `powershell -Execution
 
 ## Project status
 
-**Public beta v0.1.0-beta.1 from `master`; ongoing development in `develop`.** Both remain experimental and not production-ready. A visible feature is not proof of accuracy on real matches. End-to-end acceptance, comparison with the historical Python implementation, and comprehensive quality measurements are still pending. Original footage and historical results are not intended to be silently overwritten.
+**Public beta v0.1.0-beta.1 from `master`; ongoing development in `develop`.** Both remain experimental and not production-ready. A visible feature is not proof of accuracy on real matches. The migration acceptance is closed by owner decision; the old Python comparison is historical. Quality measurements and production readiness remain independent ongoing work. Original footage and historical results are not intended to be silently overwritten.
 
 **Documentation:** [Architecture](docs/RUST_ARCHITECTURE.md) · [Roadmap](docs/RUST_ROADMAP.md) · [Migration log](docs/RUST_MIGRATION.md) · [Deployment](docs/RUST_DEPLOYMENT.md) · [Developer guide](rust/README.md).

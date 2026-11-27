@@ -173,8 +173,7 @@ node scripts/ci/test_rust_packaging.mjs
 
 Actual CUDA completed inference requires provisioning native ONNX
 Runtime and passing the optional real-model smoke. Full match GPU,
-memory, cancellation, security and Python-vs-Rust parity remain stage
-83/84 acceptance; stage85 decides on production or rollback.
+memory, cancellation and security remain independent quality checks. Historical stage 85 was closed by owner decision on 2026-11-27 for the changed Rust architecture; this does not certify production readiness.
 
 **Linux ABI gate:** the WSL Ubuntu-25.04 offline prebuilt ELF requires
  GLIBC_2.39. Debian Bookworm (glibc 2.36) is not suitable for that
@@ -305,7 +304,6 @@ results -> fusion -> provisional CPU tracking -> Touch candidates ->
 rally proposals. It is synthetic functional validation, NOT human
 ground truth or measured real-match parity.
 
-The original stage84 NO-GO verdict remains valid until independent
-same-source Python/Rust match quality and Docker acceptance are done.
+The original stage84 NO-GO verdict remains a historical result, not a migration blocker after the 2026-11-27 owner decision. Current match quality and Docker acceptance require independent evidence.
 This hotfix fixes runtime availability, not every possible reel
 selection or lack of qualifying game rallies.

@@ -35,11 +35,12 @@ function check(roadmap,log){
     fail("Migration diary checkpoint 0 missing");
   }
   if(actual.size!==last+1)fail("Migration diary has missing stages");
-  if(roadmap.lastRecorded!==last || roadmap.nextStage!==last+1) {
+  const closed=last===roadmap.plannedTotal;
+  if(roadmap.lastRecorded!==last || roadmap.nextStage!==(closed?null:last+1)) {
     fail("Stale stage counter: diary ends at "+last+
       ", roadmap at "+roadmap.lastRecorded+"/"+roadmap.plannedTotal);
   }
-  if(roadmap.nextStage>roadmap.plannedTotal)fail("Plan exhausted: amend denominator");
+  if(last>roadmap.plannedTotal)fail("Diary exceeds the roadmap");
   for(let i=0;i<roadmap.stages.length;i++){
     const item=roadmap.stages[i],n=i+1;
     if(item.number!==n || typeof item.title!=="string" || !item.title.trim() ||
@@ -52,6 +53,9 @@ function check(roadmap,log){
     if(n===84 && n<=last &&
       !["NO_GO","GO_CANDIDATE","ACCEPTED"].includes(item.acceptanceVerdict)){
       fail("Stage84 real match verdict is required");
+    }
+    if(n===85 && n<=last && item.acceptanceVerdict!=="OWNER_ACCEPTED_ARCHITECTURE"){
+      fail("Stage85 explicit architecture acceptance is required");
     }
     if(n<=last){
       if(item.journalSection!==n || actual.get(n)!==item.title){
@@ -79,8 +83,8 @@ function render(roadmap){
     "",
     "## Общий прогресс",
     "",
-    "**Последний записанный этап: "+last+" / "+total+". Следующий: "+
-      roadmap.nextStage+" / "+total+".**",
+    "**Последний записанный этап: "+last+" / "+total+". "+
+      (roadmap.nextStage===null?"Миграция закрыта.":"Следующий: "+roadmap.nextStage+" / "+total+".")+"**",
     "",
     "В журнале: "+recorded+" практических этапов и 6 начальных архитектурных разделов. "+
       "Осталось по текущему плану: "+planned+".",
@@ -91,6 +95,8 @@ function render(roadmap){
     "",
     roadmap.estimateNote,
     "",
+    roadmap.nextStage===null?
+      "Историческая приёмка миграции закрыта по решению владельца. Старый NO-GO остаётся результатом своего измерения; готовность к production и качество текущей архитектуры оцениваются отдельно. Новые задачи не увеличивают счётчик миграции.":
     "После тестов и коммита следующего этапа добавьте запись в "+
       q+"docs/RUST_MIGRATION.md"+q+", переведите соответствующий JSON-пункт в "+
       q+"recorded"+q+", обновите "+q+"lastRecorded"+q+"/"+q+"nextStage"+q+
@@ -114,7 +120,8 @@ function render(roadmap){
     }
     const label=item.status==="foundation"?"Основа":
       item.status==="recorded"?(item.acceptanceVerdict==="NO_GO"?
-        "Записан (NO-GO: приёмка заблокирована)":"Записан"):"План";
+        "Записан (исторический NO-GO)":item.acceptanceVerdict==="OWNER_ACCEPTED_ARCHITECTURE"?
+        "Записан (архитектура принята владельцем)":"Записан"):"План";
     const details=item.status==="planned"?
       item.title+". Критерий: "+item.acceptance:item.title;
     result.push("| "+item.number+" / "+total+" | "+label+" | "+
@@ -128,7 +135,7 @@ function render(roadmap){
     "- Новые/старые форматы поддерживаются адаптерами, а не двумя бизнес-реализациями.",
     "- Завершение этапа требует тестов, коммита, записи в журнале и обновлённой карты.",
     "- The Python baseline is preserved only by the immutable Git checkpoint. Active application, launcher and UI are Rust-only; original recordings and user caches remain untouched.",
-    "- Готовность приложения подтверждается только реальными матчами и критериями паритета.",
+    "- Закрытие миграции не подтверждает качество модели или готовность к production; проверяйте текущую архитектуру на реальных матчах.",
     "");
   return result.join("\n");
 }
@@ -136,7 +143,7 @@ try {
   const last=check(data,diary);
   const readme=readFileSync(join(root,"README.md"),"utf8");
   const summary="План разработки: "+last+"/"+data.plannedTotal+
-    "; следующий "+data.nextStage+"/"+data.plannedTotal;
+    (data.nextStage===null?"; миграция завершена":"; следующий "+data.nextStage+"/"+data.plannedTotal);
   if(!readme.includes(summary))fail("README.md roadmap progress label is outdated: "+summary);
   const generated=render(data);
   if(process.argv.includes("--self-test")){
@@ -151,8 +158,20 @@ try {
     const duplicate=structuredClone(data);duplicate.stages[12].number=12;
     rejects(duplicate,"duplicate number");
     const falseCompletion=structuredClone(data);
-    falseCompletion.stages[data.nextStage-1].status="recorded";
-    rejects(falseCompletion,"false completion");
+    if(data.nextStage===null){
+      falseCompletion.nextStage=data.plannedTotal+1;
+      rejects(falseCompletion,"next stage after closure");
+      const missingDecision=structuredClone(data);
+      delete missingDecision.stages[84].acceptanceVerdict;
+      rejects(missingDecision,"stage85 omitted owner decision");
+      const falsePending=structuredClone(data);
+      falsePending.stages[84].status="planned";
+      rejects(falsePending,"stage85 falsely pending");
+    }else{
+      falseCompletion.stages[data.nextStage-1].status="recorded";
+      rejects(falseCompletion,"false completion");
+      rejects({...data,nextStage:null},"premature closure");
+    }
     if(last>=84){
       const missingVerdict=structuredClone(data);
       delete missingVerdict.stages[83].acceptanceVerdict;
@@ -170,7 +189,7 @@ try {
     }
   }
   process.stdout.write("Rust roadmap OK: "+last+"/"+data.plannedTotal+
-    " recorded; next "+data.nextStage+"/"+data.plannedTotal+
+    (data.nextStage===null?" recorded; migration closed":" recorded; next "+data.nextStage+"/"+data.plannedTotal)+
     (process.argv.includes("--self-test")?" (negative checks passed)":"")+"\n");
 }catch(error){
   process.stderr.write("Rust roadmap FAILED: "+error.message+"\n");

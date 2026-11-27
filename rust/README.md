@@ -1,6 +1,6 @@
 # Volleyball Studio — developer workspace
 
-This is the **only active application** on develop. The Rust application runtime is established; the formal product acceptance gate remains open.
+This is the **only active application** on develop. Rust migration is complete (85/85, owner acceptance on 2026-11-27); product quality and production readiness remain separate.
 `volley-app` is the Axum server, `volley-core` contains CPU identity,
 motion and rally logic, `volley-inference` loads native ONNX Runtime,
 `volley-media` invokes FFmpeg, and `volley-web` provides actual WASM state.

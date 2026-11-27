@@ -487,7 +487,7 @@ pub(crate) async fn rewrite_status(
     }
     Json(RewriteStatus {
         name: "Volleyball Studio - development instance",
-        migration_complete: false,
+        migration_complete: true,
         production_ready: false,
         person_detector: match volley_inference::person::DetectorVariant::from_env() {
             Ok(variant) => variant.id(),
@@ -816,6 +816,8 @@ mod tests {
             axum::Extension(gate.clone()),
         )
         .await;
+        assert!(status.migration_complete);
+        assert!(!status.production_ready);
         assert!(!status.shutdown_safe);
         assert_eq!(status.active_jobs, vec!["statistics_processing"]);
         let request = gate.enter().unwrap();

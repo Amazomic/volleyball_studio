@@ -1,8 +1,8 @@
 {
     "schema":  "volley-rust-stage-roadmap/1",
     "plannedTotal":  85,
-    "lastRecorded":  84,
-    "nextStage":  85,
+    "lastRecorded":  85,
+    "nextStage":  null,
     "estimateNote":  "85 — текущий ориентир планирования, не обещание неизменного объема; этап != готовая подсистема. При пересмотре плана обновлять JSON, Markdown и журнал в одном коммите.",
     "stages":  [
                    {
@@ -683,8 +683,10 @@
                        "number":  85,
                        "title":  "Финальный выбор Rust-релиза или безопасного отката",
                        "area":  "Приёмка",
-                       "status":  "planned",
-                       "acceptance":  "Accepted results, selected commit, reversible user-data-safe rollout"
+                       "status":  "recorded",
+                       "acceptance":  "Owner accepts the current Rust architecture; historical Python parity is superseded as a migration gate, not certified. Production readiness remains independent.",
+                       "journalSection":  85,
+                       "acceptanceVerdict":  "OWNER_ACCEPTED_ARCHITECTURE"
                    }
                ]
 }

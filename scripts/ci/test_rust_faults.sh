@@ -50,7 +50,7 @@ else
   echo "BLOCKED external: native Linux ONNX Runtime CUDA unavailable; GPU/VRAM peak NOT measured"
 fi
 if [[ "$require_full" == true && ( "$docker_ok" != true || "$cuda_ok" != true ) ]];then
-  echo "ACCEPTANCE FAIL: stage84/85 cannot switch production without missing GPU/Docker checks" >&2
+  echo "ACCEPTANCE FAIL: production readiness requires successful GPU/Docker checks" >&2
   exit 3
 fi
 echo "Stage83 Rust security/SHA/cancel/fault/isolated-memory regression: PASSED"

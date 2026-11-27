@@ -4952,3 +4952,11 @@ Studio показывает кнопку перехода между debug и re
 
 - Base 7056021405daea10a5dcbf455504f2e5cba76639. Documentation only: README.md, README.ru.md, AGENTS.md, docs/README.md, docs/RUST_REWRITE_SCOPE.md, docs/RUST_ARCHITECTURE.md and rust/README.md distinguish the established Rust application runtime from open product acceptance. Python utilities and existing JS/browser adapters are not alternate application runtimes; further compute ports require profiling evidence. Preserve the historical inventory, roadmap 84/85 (NO_GO), runtime flags and the published beta.
 - Checked source tree, current ownership, runtime status and recent WASM/preview profiling history. Ownership and roadmap self-tests PASS; new links/owner paths and git diff --check PASS. No code, data, model, API or generated roadmap changes. Real-match/GPU/full product acceptance NOT TESTED. Apply via the deployment queue after publication.
+
+## 85. Финальный выбор Rust-релиза или безопасного отката — 2026-11-27
+
+- Решение владельца: принять текущую Rust-архитектуру, закрыть историческую приёмку миграции (85/85) без отката. База решения: 4b3a4f5cdc865aafcbd5059644ea57636c22ee76. Rust/Rust-WASM — единственное приложение и владельцы доменных вычислений; браузерные адаптеры и вспомогательные Python-инструменты допустимы.
+- Архитектура изменилась: сравнение с замороженным Python больше не является обязательным gate миграции. Исторический stage84 NO_GO и его evidence не изменены; новый замер не заявляется. Production readiness остаётся false; качество, GPU/Docker и реальные матчи оцениваются отдельно по текущей архитектуре. Никаких изменений моделей, данных, алгоритмов, master или тега.
+- Контракт: nextStage=null при полностью записанной карте, явный OWNER_ACCEPTED_ARCHITECTURE на этапе 85, migration_complete=true отдельно от production_ready=false. Дальнейшие задачи — обычная разработка, не этапы миграции.
+
+- Verification: full scripts/check-all.ps1 PASS (1113 Rust tests, 28 existing ignored, fmt/clippy and 118 Node gates); roadmap/ownership self-tests and historical parity maths PASS. Historical benchmark fixture missing (ENOENT) on both base and candidate; no fresh real-match/GPU/Docker acceptance claimed. Deployment via queue.

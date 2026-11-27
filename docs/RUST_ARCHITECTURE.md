@@ -30,7 +30,7 @@
 
 # Rust migration — canonical architecture and anti-duplication contract
 
-**Status (2026-11-27):** binding architecture for develop. The Rust application runtime is established; complete product parity and release acceptance remain open. The old migration branch is historical. Keep Rust/Rust-WASM as the domain owners, preserve necessary browser adapters, and port remaining compute only after profiling demonstrates a worthwhile gain. Preserve master, the pre-Rust checkpoint and all user media.
+**Status (2026-11-27):** binding architecture for develop. Rust migration is closed (85/85, owner decision 2026-11-27 after the architecture changed); current quality and production readiness remain independently evaluated. The old migration branch is historical. Keep Rust/Rust-WASM as the domain owners, preserve necessary browser adapters, and port remaining compute only after profiling demonstrates a worthwhile gain. Preserve master, the pre-Rust checkpoint and all user media.
 
 ## Root cause / what went wrong
 
@@ -54,7 +54,7 @@ Every input must declare source_kind (legacy_cpu_cache OR native_gpu_cpu_replay)
 
 ## Historical ownership inventory and current canonical ledger
 
-Machine-readable ledger: docs/RUST_CANONICAL_OWNERS.json; mandatory audit: scripts/ci/check_rust_ownership.mjs. The **complete numbered roadmap**, including the last recorded stage X / planned total Y, next stage and explicit future acceptance criteria, is docs/RUST_ROADMAP.md (generated from docs/RUST_ROADMAP.json). Its consistency gate is scripts/ci/check_rust_roadmap.mjs --check --self-test. The current 85-stage denominator is a planning estimate, not an indication of finished-feature percentage.
+Machine-readable ledger: docs/RUST_CANONICAL_OWNERS.json; mandatory audit: scripts/ci/check_rust_ownership.mjs. The **complete numbered roadmap**, including all 85 historical stages and the owner acceptance decision, is docs/RUST_ROADMAP.md (generated from docs/RUST_ROADMAP.json). Its consistency gate is scripts/ci/check_rust_roadmap.mjs --check --self-test. The current 85-stage denominator is a planning estimate, not an indication of finished-feature percentage.
 
 | Domain | Canonical implementation | Adapters; preserve until migrated | Action |
 |---|---|---|---|
@@ -83,7 +83,7 @@ Machine-readable ledger: docs/RUST_CANONICAL_OWNERS.json; mandatory audit: scrip
 
 **3. VERIFY.** Run cargo fmt --all -- --check, cargo test --workspace --offline, cargo check --workspace --offline -q, node scripts/ci/check_rust_ownership.mjs, and targeted Rust/WASM + JavaScript checks for UI modifications. For inference changes run real CUDA smoke; for storage changes use an isolated real-MP4 integration fixture. Check source bytes and invariant statuses, not just HTTP 200. Final full match/benchmark comparison is only after whole rewrite per owner decision.
 
-**4. COMMIT AND PUBLISH EVERY COHERENT STAGE.** Commit code + test + ownership ledger + migration diary + updated 1-to-N roadmap together; a recorded stage must show its number out of the planned total (e.g. 53 / 85), the next stage and the remaining tasks. Run node scripts/ci/check_rust_roadmap.mjs --check --self-test. Record SHA and active branch. Verify published Git tree exactly matches local tree before advancing the migration ref. Never alter master, production port 8765 or original user video/cache. Do not let later agents repeat work only because the diary says PARTIAL.
+**4. COMMIT AND PUBLISH EVERY COHERENT STAGE.** Commit code + test + ownership ledger + migration diary + updated 1-to-N roadmap together; the closed migration roadmap stays at 85/85; subsequent work is recorded in the unnumbered migration journal, not a new numbered migration stage. Run node scripts/ci/check_rust_roadmap.mjs --check --self-test. Record SHA and active branch. Verify published Git tree exactly matches local tree before advancing the migration ref. Never alter master, production port 8765 or original user video/cache. Do not let later agents repeat work only because the diary says PARTIAL.
 
 **5. MARK COMPLETENESS HONESTLY.** COMPLETE means canonical service works on new native evidence, preserves previously saved projects with a tested adapter, connects all consumers and UI, and passes focused tests. Otherwise PARTIAL. Handoff must name tested commit SHA, affected paths, open adapters, and next step.
 

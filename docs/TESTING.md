@@ -66,7 +66,7 @@ done
 | `scripts/ci/test_rust_lifecycle.sh` (WSL) | свободный репозиторный lock: живой сервер на 8875 должен быть остановлен | изменения lifecycle/lock/shutdown |
 | `scripts/ci/test_rust_faults.sh`, `test_rust_shutdown_race.sh` (WSL) | изолированный /tmp, тестовые порты | изменения обработки ошибок/остановки |
 | `scripts/ci/test_rust_cuda_runtime.sh`, `smoke_rust_ort.sh` (WSL) | `libonnxruntime.so` + CUDA provider (`scripts/setup_rust_ort_cuda.sh`, `ORT_DYLIB_PATH`) | изменения GPU-инференса |
-| `scripts/ci/test_rust_real_media_84.mjs`, `test_rust_benchmark_84.mjs`, `benchmark_rust_parity_84.mjs`, `audit_python_baseline_84.mjs` | реальные видео, ffmpeg, GPU, замороженный Python-чекпойнт | изменения распознавания/качества; приёмка этапа 84/85 |
+| `scripts/ci/test_rust_real_media_84.mjs`, `test_rust_benchmark_84.mjs`, `benchmark_rust_parity_84.mjs`, `audit_python_baseline_84.mjs` | реальные видео, ffmpeg, GPU, замороженный Python-чекпойнт | исторические проверки паритета; для текущей архитектуры выбирать актуальные размеченные сцены |
 | `scripts/ci/test_rust_parity_84.mjs` | Node.js; синтетические временные фикстуры, без GPU и реального матча | математика и строгие контракты оценщика; не измерение точности |
 | `scripts/ci/test_rust_docker_smoke.sh` | Docker | изменения Dockerfile/упаковки |
 
@@ -92,8 +92,7 @@ done
 
 Каждый проверенный инкремент = коммит в `develop` + запись в
 `docs/RUST_MIGRATION.md` с фактическими командами и результатами
-PASS/FAIL/NOT TESTED. Исторический критерий production-переключения связан с
-приёмкой этапа 85 (`docs/RUST_ROADMAP.md`). Обычные review и merge — в
+PASS/FAIL/NOT TESTED. Приёмка миграции закрыта на этапе 85 решением владельца; исторический Python-паритет не блокирует изменения. Production и качество текущей архитектуры требуют независимых проверок. Обычные review и merge — в
 `develop`; `master` обновляется исключительно при выпуске проверенной версии.
 Автоматического merge gate нет.
 
