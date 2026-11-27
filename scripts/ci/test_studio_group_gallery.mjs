@@ -22,7 +22,7 @@ const state={
 };
 const items=makeNode("div"),more=makeNode("button"),splits=[];
 const context={
-  state,galleryItems:items,galleryMore:more,
+  state,window:previewWasmWindow(),galleryItems:items,galleryMore:more,
   clear:element=>{element.children=[];},
   node:makeNode,
   path:(url,args)=>url+"?"+new URLSearchParams(args),

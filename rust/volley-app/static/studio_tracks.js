@@ -570,8 +570,9 @@
     return window.VolleyStudioChain.call(7,{kind:"candidates",roster:named,tracks});
   };
 
-  const visibleUnassigned=id=>state.unassignedIds.has(id)&&!state.assignmentPending.has(id);
-  const visibleUnassignedCount=()=>[...state.unassignedIds].filter(visibleUnassigned).length;
+  const visibleUnassigned=ids=>window.VolleyStudioChain.call(7,{kind:"visible",ids,
+    unassigned:[...state.unassignedIds],pending:[...state.assignmentPending]});
+  const visibleUnassignedCount=()=>visibleUnassigned().length;
   const sortBySimilarity=(items,idsOf)=>{
     if(!items.length)return items;
     const cards=items.map(item=>{
@@ -658,9 +659,11 @@
     ui.page.textContent=state.filteredTotal?
       (state.offset+1)+"–"+Math.min(state.offset+state.limit,state.filteredTotal)+" из "+state.filteredTotal:
       "Нет Track ID";
+    const visible=state.viewPlayer||state.viewExcluded||state.viewConflicts?null:
+      new Set(visibleUnassigned(state.rows.map(row=>Number(row.track_id))));
     const singles=state.viewPlayer||state.viewExcluded||state.viewConflicts?
       state.rows:sortBySimilarity(
-        state.rows.filter(row=>visibleUnassigned(Number(row.track_id))),
+        state.rows.filter(row=>visible.has(Number(row.track_id))),
         row=>[Number(row.track_id)]);
     singlesHeader.textContent="Отдельные Track ID · "+
       state.filteredTotal+
@@ -731,39 +734,20 @@
   // Apply the authoritative edit to visible cards immediately. A subsequent
   // read reconciles filtered pages and concurrent edits without blocking UI.
   const applyLocalTrackEdit=(action,ids,owner,result)=>{
-    const changed=new Set(ids.map(Number));
-    const ownerName=state.roster.find(p=>p.id===owner)?.name||"";
-    for(const row of state.rows){
-      if(!changed.has(Number(row.track_id)))continue;
-      if(action==="assign"){
-        row.assigned_player_id=owner;
-        row.assigned_player_name=ownerName;
-        row.identity_source="manual";
-        row.identity_conflict=false;
-      }else if(action==="unassign"){
-        row.assigned_player_id=null;
-        row.assigned_player_name=null;
-        row.identity_source="none";
-      }else if(action==="exclude")row.excluded=true;
-      else if(action==="restore")row.excluded=false;
-    }
-    if(Array.isArray(result.unassigned_track_ids))
-      state.unassignedIds=new Set(result.unassigned_track_ids.map(Number));
-    if(state.unassignedReasons)for(const id of changed)delete state.unassignedReasons[String(id)];
-    if(Array.isArray(result.excluded_track_ids))
-      state.excludedIds=new Set(result.excluded_track_ids.map(Number));
-    if(Array.isArray(result.comparison_track_ids))
-      state.comparisonIds=new Set(result.comparison_track_ids.map(Number));
-    if(!state.viewPlayer&&!state.viewConflicts){
-      const visible=state.viewExcluded?state.excludedIds:state.unassignedIds;
-      state.filteredTotal=visible.size;
-      state.rows=state.rows.filter(row=>visible.has(Number(row.track_id)));
-      if(state.filteredTotal&&state.offset>=state.filteredTotal)
-        state.offset=Math.floor((state.filteredTotal-1)/state.limit)*state.limit;
-      if(!state.filteredTotal)state.offset=0;
-    }else if(state.viewPlayer){
-      state.rows=state.rows.filter(row=>row.assigned_player_id===state.viewPlayer);
-    }
+    const projection=window.VolleyStudioChain.call(7,{kind:"edit",action,ids:ids.map(Number),owner,
+      ownerName:state.roster.find(p=>p.id===owner)?.name||"",
+      rows:state.rows,unassigned:[...state.unassignedIds],excluded:[...(state.excludedIds||[])],
+      comparison:[...(state.comparisonIds||[])],reasons:state.unassignedReasons,
+      viewPlayer:state.viewPlayer,viewConflicts:state.viewConflicts,viewExcluded:state.viewExcluded,
+      offset:state.offset,limit:state.limit,filteredTotal:state.filteredTotal,
+      result:{unassigned_track_ids:result.unassigned_track_ids,excluded_track_ids:result.excluded_track_ids,
+        comparison_track_ids:result.comparison_track_ids}});
+    state.rows.splice(0,state.rows.length,...projection.rows);
+    state.unassignedIds=new Set(projection.unassigned);
+    state.excludedIds=new Set(projection.excluded);
+    state.comparisonIds=new Set(projection.comparison);
+    if(projection.reasons)state.unassignedReasons=projection.reasons;
+    state.offset=projection.offset;state.filteredTotal=projection.filteredTotal;
     updateUnassignedLabel();
     ui.assigned.textContent=String(result.assigned_count||0);
     ui.excluded.textContent=String(result.excluded_count||0);
@@ -1347,8 +1331,8 @@
     if(!state.groups.length&&state.groupLoaded){
       galleryItems.append(node("div","empty-state","Сгруппированных ID пока нет."));
     }
-    const visibleGroups=state.groups.map(group=>({...group,originalCount:group.ids.length,
-      ids:group.ids.filter(id=>visibleUnassigned(id))})).filter(group=>group.ids.length>=2);
+    const visibleGroups=state.groups.length?window.VolleyStudioChain.call(7,{kind:"groups",groups:state.groups,
+      unassigned:[...state.unassignedIds],pending:[...state.assignmentPending]}):[];
     sortBySimilarity(visibleGroups,group=>group.ids);
     if(state.groups.length&&!visibleGroups.length&&state.groupLoaded)
       galleryItems.append(node("div","empty-state","Нет групп с непривязанными Track ID."));

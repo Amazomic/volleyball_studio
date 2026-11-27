@@ -1,4 +1,5 @@
 import {readFileSync} from "node:fs";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 import {runInNewContext} from "node:vm";
 import assert from "node:assert/strict";
 
@@ -49,7 +50,7 @@ const context={
     enrolled++;
     return {revision:"album"+enrolled,photos:[]};
   },
-  window:{dispatchEvent(){}},
+  window:{...previewWasmWindow(),dispatchEvent(){}},
   CustomEvent:class{constructor(type,opts){this.type=type;this.detail=opts?.detail;}},
   Event:class{constructor(type){this.type=type;}}
 };

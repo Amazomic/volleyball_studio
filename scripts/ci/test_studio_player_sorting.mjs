@@ -23,11 +23,11 @@ assert.deepEqual(Array.from(context.sortBySimilarity(grouped,item=>item.ids),x=>
   [4,2,8],"unassigned group cards must also rank by best player similarity");
 state.assignmentPending=new Set([2,4,5]);
 state.unassignedIds=new Set([2,4,5,7,8,9]);
-assert.equal(context.visibleUnassigned(2),false,"a clicked Track ID disappears before network response");
-assert.equal(context.visibleUnassigned(7),true,"unrelated Track IDs remain visible");
+assert.equal(context.visibleUnassigned([2]).length,0,"a clicked Track ID disappears before network response");
+assert.equal(context.visibleUnassigned([7])[0],7,"unrelated Track IDs remain visible");
 assert.equal(context.visibleUnassignedCount(),3,"pending assignments disappear from the unassigned counter");
 state.assignmentPending.clear();
-assert.equal(context.visibleUnassigned(2),true,"a failed assignment can restore the card");
+assert.equal(context.visibleUnassigned([2])[0],2,"a failed assignment can restore the card");
 assert.equal(context.visibleUnassignedCount(),6,"failed assignments restore the unassigned counter");
 assert.match(source,/animateTrackCards\(\(\)=>\{renderRows\(\);renderGroupCards\(\);unlock\(\);\}\);/);
 console.log("Player similarity sorting and optimistic hide/restore: OK");

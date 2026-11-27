@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 import {runInNewContext} from "node:vm";
 
 const js=readFileSync(new URL("../../rust/volley-app/static/studio_tracks.js",import.meta.url),"utf8");
@@ -41,7 +42,7 @@ const context={
     body:{dataset:{}},
     getElementById:()=>({append:card=>ghosts.push(card.id)})
   },
-  window:{matchMedia:()=>({matches:false})},
+  window:{...previewWasmWindow(),matchMedia:()=>({matches:false})},
   updateUnassignedLabel:()=>{},
   renderRows:()=>{cards=state.rows.map((row,index)=>makeCard(row.track_id,index));},
   renderGroupCards:()=>{},unlock:()=>{}

@@ -142,10 +142,160 @@ fn order(input: &Value) -> Value {
     json!(rows.iter().map(|row| row.0).collect::<Vec<_>>())
 }
 
+fn track_id(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str()?.parse().ok())
+        .filter(|id| *id > 0 && *id <= 9_007_199_254_740_991)
+}
+
+fn ids(value: &Value) -> Vec<u64> {
+    let mut seen = BTreeSet::new();
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(track_id)
+        .filter(|id| seen.insert(*id))
+        .collect()
+}
+
+fn visible_ids(input: &Value) -> BTreeSet<u64> {
+    let pending: BTreeSet<_> = ids(&input["pending"]).into_iter().collect();
+    ids(&input["unassigned"])
+        .into_iter()
+        .filter(|id| !pending.contains(id))
+        .collect()
+}
+
+fn visible(input: &Value) -> Value {
+    let allowed = visible_ids(input);
+    let source = input.get("ids").unwrap_or(&input["unassigned"]);
+    json!(source
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(track_id)
+        .filter(|id| allowed.contains(id))
+        .collect::<Vec<_>>())
+}
+
+fn groups(input: &Value) -> Value {
+    let allowed = visible_ids(input);
+    let rows: Vec<_> = input["groups"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|group| {
+            let mut row = group.as_object()?.clone();
+            let original = group["ids"].as_array()?;
+            let members: Vec<_> = original
+                .iter()
+                .filter_map(track_id)
+                .filter(|id| allowed.contains(id))
+                .collect();
+            if members.len() < 2 {
+                return None;
+            }
+            row.insert("ids".to_owned(), json!(members));
+            row.insert("originalCount".to_owned(), json!(original.len()));
+            Some(row)
+        })
+        .collect();
+    json!(rows)
+}
+
+fn confirmed_ids(input: &Value, current: &str, updated: &str) -> Vec<u64> {
+    let result = &input["result"][updated];
+    ids(if result.is_array() {
+        result
+    } else {
+        &input[current]
+    })
+}
+
+fn edit(input: &Value) -> Value {
+    let changed: BTreeSet<_> = ids(&input["ids"]).into_iter().collect();
+    let owner = &input["owner"];
+    let owner_name = input["ownerName"].as_str().unwrap_or_default();
+    let action = input["action"].as_str().unwrap_or_default();
+    let unassigned = confirmed_ids(input, "unassigned", "unassigned_track_ids");
+    let excluded = confirmed_ids(input, "excluded", "excluded_track_ids");
+    let comparison = confirmed_ids(input, "comparison", "comparison_track_ids");
+    let view_player = input["viewPlayer"].as_str().filter(|id| !id.is_empty());
+    let view_conflicts = input["viewConflicts"] == true;
+    let visible = if input["viewExcluded"] == true {
+        &excluded
+    } else {
+        &unassigned
+    };
+    let allowed: BTreeSet<_> = visible.iter().copied().collect();
+    let mut rows = Vec::new();
+    for row in input["rows"].as_array().into_iter().flatten() {
+        let Some(id) = track_id(&row["track_id"]) else {
+            continue;
+        };
+        let Some(mut fields) = row.as_object().cloned() else {
+            continue;
+        };
+        if changed.contains(&id) {
+            match action {
+                "assign" => {
+                    fields.insert("assigned_player_id".into(), owner.clone());
+                    fields.insert("assigned_player_name".into(), json!(owner_name));
+                    fields.insert("identity_source".into(), json!("manual"));
+                    fields.insert("identity_conflict".into(), json!(false));
+                }
+                "unassign" => {
+                    fields.insert("assigned_player_id".into(), Value::Null);
+                    fields.insert("assigned_player_name".into(), Value::Null);
+                    fields.insert("identity_source".into(), json!("none"));
+                }
+                "exclude" | "restore" => {
+                    fields.insert("excluded".into(), json!(action == "exclude"));
+                }
+                _ => {}
+            }
+        }
+        let keep = match view_player {
+            Some(player) => {
+                fields.get("assigned_player_id").and_then(Value::as_str) == Some(player)
+            }
+            None => view_conflicts || allowed.contains(&id),
+        };
+        if keep {
+            rows.push(Value::Object(fields));
+        }
+    }
+    let mut total = input["filteredTotal"].as_u64().unwrap_or_default();
+    let mut offset = input["offset"].as_u64().unwrap_or_default();
+    if view_player.is_none() && !view_conflicts {
+        total = visible.len() as u64;
+        let limit = input["limit"].as_u64().filter(|n| *n > 0).unwrap_or(24);
+        if total == 0 {
+            offset = 0;
+        } else if offset >= total {
+            offset = (total - 1) / limit * limit;
+        }
+    }
+    let mut result = json!({"rows":rows,"unassigned":unassigned,"excluded":excluded,"comparison":comparison,
+        "filteredTotal":total,"offset":offset});
+    if let Some(mut reasons) = input["reasons"].as_object().cloned() {
+        for id in changed {
+            reasons.remove(&id.to_string());
+        }
+        result["reasons"] = json!(reasons);
+    }
+    result
+}
+
 pub(crate) fn call(input: &Value) -> Value {
     match input["kind"].as_str() {
         Some("candidates") => candidates(input),
         Some("order") => order(input),
+        Some("visible") => visible(input),
+        Some("groups") => groups(input),
+        Some("edit") => edit(input),
         _ => Value::Null,
     }
 }
