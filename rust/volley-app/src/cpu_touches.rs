@@ -2032,7 +2032,7 @@ pub(crate) struct InitialServeProposal {
     source: &'static str,
 }
 
-pub(crate) const INITIAL_SERVE_ATTRIBUTION_VERSION: &str = "calibrated_flight_origin_v4";
+pub(crate) const INITIAL_SERVE_ATTRIBUTION_VERSION: &str = "calibrated_flight_origin_v5";
 pub(crate) const INITIAL_SERVE_SEARCH_FRAMES: u64 = 46;
 pub(crate) const INITIAL_SERVE_CONTACT_FRAMES: u64 = 5;
 
@@ -2224,6 +2224,57 @@ fn serve_track_on_origin_side(
     votes.side() == Some(side)
 }
 
+fn highest_far_serve_track(
+    frames: &[TouchFrame],
+    launch: u64,
+    court: &CourtTransform,
+) -> Option<u64> {
+    let mut tops = BTreeMap::<u64, Vec<f64>>::new();
+    for frame in frames.iter().filter(|frame| {
+        (launch..launch.saturating_add(INITIAL_SERVE_CONTACT_FRAMES)).contains(&frame.frame_index)
+    }) {
+        for player in &frame.players {
+            if player.score > 0.0
+                && player
+                    .bbox_xyxy_norm
+                    .iter()
+                    .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                && player.bbox_xyxy_norm[0] < player.bbox_xyxy_norm[2]
+                && player.bbox_xyxy_norm[1] < player.bbox_xyxy_norm[3]
+                && court
+                    .player_evidence(player.bbox_xyxy_norm)
+                    .is_some_and(|e| e.side == CourtSide::Far)
+            {
+                tops.entry(player.track_id)
+                    .or_default()
+                    .push(player.bbox_xyxy_norm[1]);
+            }
+        }
+    }
+    let mut candidates = tops
+        .into_iter()
+        .filter_map(|(id, mut y)| {
+            if !serve_track_on_origin_side(frames, id, court, CourtSide::Far) {
+                return None;
+            }
+            y.sort_by(f64::total_cmp);
+            let middle = y.len() / 2;
+            let median = if y.len() % 2 == 0 {
+                (y[middle - 1] + y[middle]) * 0.5
+            } else {
+                y[middle]
+            };
+            Some((id, median))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let &(id, top) = candidates.first()?;
+    candidates
+        .get(1)
+        .is_none_or(|other| other.1 > top)
+        .then_some(id)
+}
+
 pub(crate) fn initial_serve_proposal(
     frames: &[TouchFrame],
     poses: &[PoseFrame],
@@ -2252,6 +2303,11 @@ pub(crate) fn initial_serve_proposal(
         })
     };
     let candidate = launch.and_then(|launch| {
+        if let Some((court, (_, CourtSide::Far))) = court.zip(origin) {
+            if let Some(id) = highest_far_serve_track(frames, launch, court) {
+                return Some(id);
+            }
+        }
         let mut strikers = visible_serve_strikers(frames, poses, launch, dimensions, settings);
         strikers.retain(|&id| matches_origin(id));
         match strikers.len() {
@@ -4645,6 +4701,88 @@ mod tests {
             })
             .collect();
         (frames, poses)
+    }
+
+    #[test]
+    fn far_serve_uses_highest_opening_box_without_pose() {
+        let project = |[x, y, z]: [f64; 3]| {
+            let d = 1.0 + 0.05 * x;
+            [
+                (0.5 + 0.03 * x + 0.04 * y) / d,
+                (0.5 - 0.01 * x - 0.09 * z) / d,
+            ]
+        };
+        let court = CourtTransform::new(
+            [
+                [-9., -4.5, 0.],
+                [9., -4.5, 0.],
+                [9., 4.5, 0.],
+                [-9., 4.5, 0.],
+            ]
+            .map(project),
+        )
+        .unwrap()
+        .with_net(Some([[0., -4.5, 2.43], [0., 4.5, 2.43]].map(project)))
+        .unwrap();
+        let mut frames = (0..40)
+            .map(|frame_index| {
+                let t = frame_index as f64 / 30.;
+                let [x, y] = project([9. - 12. * t, t, 2.2 + 5.5 * t - 4.905 * t * t]);
+                let players = [
+                    (7, 9., 0., 1.8),
+                    (8, 4., 1., 1.8),
+                    (9, -5., -1., 1.8),
+                    (10, 9., 15., 3.),
+                ]
+                .into_iter()
+                .map(|(track_id, x, y, height)| {
+                    let [cx, bottom] = project([x, y, 0.]);
+                    let top = project([x, y, height])[1];
+                    TouchPlayer {
+                        track_id,
+                        score: 0.9,
+                        bbox_xyxy_norm: [cx - 0.01, top, cx + 0.01, bottom],
+                        touch_probability: None,
+                    }
+                })
+                .collect();
+                TouchFrame {
+                    frame_index,
+                    players,
+                    selected_ball: Some(TouchBall {
+                        source_model: "vballnet".into(),
+                        score: 0.9,
+                        bbox_xyxy_norm: [x - 0.003, y - 0.003, x + 0.003, y + 0.003],
+                    }),
+                }
+            })
+            .collect::<Vec<_>>();
+        let settings = TouchSettings::default();
+        assert_eq!(
+            calibrated_serve_origin(&frames, 0, &court, settings.min_ball_score),
+            Some((0, CourtSide::Far))
+        );
+        let proposal =
+            initial_serve_proposal(&frames, &[], 0, (1920, 1080), settings, Some(&court));
+        assert_eq!(proposal.provisional_track_id, Some(7));
+        assert_eq!(proposal.trajectory_start_frame, Some(0));
+        assert!(!proposal.identity_verified);
+
+        frames[0].players[1].bbox_xyxy_norm[1] = 0.02;
+        for frame in &mut frames {
+            frame.players[2].bbox_xyxy_norm[1] = 0.01;
+        }
+        let mut late = frames[0].players[0].clone();
+        late.track_id = 11;
+        late.bbox_xyxy_norm[1] = 0.01;
+        for frame in &mut frames[6..] {
+            frame.players.push(late.clone());
+        }
+        assert_eq!(
+            initial_serve_proposal(&frames, &[], 0, (1920, 1080), settings, Some(&court))
+                .provisional_track_id,
+            Some(7)
+        );
     }
 
     #[test]
