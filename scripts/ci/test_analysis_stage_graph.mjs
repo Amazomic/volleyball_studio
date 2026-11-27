@@ -68,6 +68,10 @@ assert.equal(format("rallies",{duration_ms:2000,finished_ms:3000},{gpu_rally_cou
 assert.equal(format("rallies",null,{status:"complete",gpu_rally_mask:{merged:[]}},0,false,false),"—");
 assert.equal(format("video",{duration_ms:423000,finished_ms:500000},{status:"complete"},0,true,false),"—");
 assert.equal(format("touches",null,null,0,false,false),"—");
+assert.equal(format("touches",{frames_processed:1186,frames_total:1186},{touch_detector_count:29,touch_attribution_count:20},0,false,true),"20/29 типов касаний определено");
+assert.equal(format("touches",null,{touch_detector_count:29,touch_attribution_count:0},0,false,true),"0/29 типов касаний определено");
+assert.equal(format("touches",{frames_processed:1186,frames_total:1186},{touch_detector_count:29},0,true,false),"—");
+assert.equal(format("touches",null,{touch_detector_count:12,touch_attribution_count:8,project_queue:{touch_detector_count:29,touch_attribution_count:20}},0,true,false),"20/29 типов касаний определено");
 assert.equal(format("pose",{started_ms:1000,frames_processed:30,frames_total:120},run,3000,false,true),"30 / 120 кадров");
 assert.equal(format("pose",{duration_ms:4000,finished_ms:5000,frames_processed:120,frames_total:120},run,5000,true,false),"120 / 120 кадров");
 assert.equal(format("pose",null,{primary_tracking:{pose_ready:true},pose_frame_progress:{processed:120,total:120}},0,true,false),"120 / 120 кадров · Из кэша");

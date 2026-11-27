@@ -1806,7 +1806,7 @@ fn emit_contextual_touch(
     court: Option<&CourtTransform>,
     net: Option<[[f64; 2]; 2]>,
     dimensions: (u32, u32),
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let prior_side = previous_touch_side(
         *previous,
         event.frame_index,
@@ -1822,7 +1822,8 @@ fn emit_contextual_touch(
         && volley_core::court_geometry::observed_net_contact(net, ball_point);
     court_touch::reconcile_block_origin(&mut event, prior_side, net_contact);
     *previous = Some((event.frame_index, event.court.map(|c| c.side)));
-    emit_record(writer, hash, &event)
+    emit_record(writer, hash, &event)?;
+    Ok(event.action_prediction.is_some())
 }
 
 fn emit_record(
@@ -2887,6 +2888,8 @@ fn touch_confidence_passes(probability: f64, threshold: f64) -> bool {
     probability.is_finite() && probability >= threshold
 }
 
+type TouchProgress<'a> = dyn FnMut(u64, u64, u64) -> Result<(), String> + 'a;
+
 #[expect(clippy::too_many_arguments)]
 fn detect_stream_with_pose(
     _tcn: Option<&mut TrajectoryTcn>,
@@ -2907,7 +2910,7 @@ fn detect_stream_with_pose(
     ground_stage: Option<&ground_stage::PrimaryTouchDetection>,
     rally_starts: &[u64],
     preliminary_intervals: Option<&[(u64, u64)]>,
-    mut on_progress: Option<&mut dyn FnMut(u64, u64) -> Result<(), String>>,
+    mut on_progress: Option<&mut TouchProgress<'_>>,
     cancel: Option<&AtomicBool>,
 ) -> Result<(String, u64, u64), String> {
     if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
@@ -2945,6 +2948,7 @@ fn detect_stream_with_pose(
     let mut window_index = 0;
     let mut completed_frames = 0;
     let mut emitted: u64 = 0;
+    let classified = std::cell::Cell::new(0_u64);
     let mut motion_candidates: u64 = 0;
     let mut pending: Option<PhysicalTouchCandidate> = None;
     let mut previous_touch = None;
@@ -3294,7 +3298,7 @@ fn detect_stream_with_pose(
                 motion_candidates += 1;
 
                 if let Some(last) = select_pending_touch(&mut pending, event, separation) {
-                    emit_contextual_touch(
+                    let typed = emit_contextual_touch(
                         &mut writer,
                         &mut output_hash,
                         last,
@@ -3306,6 +3310,7 @@ fn detect_stream_with_pose(
                         net,
                         (width, height),
                     )?;
+                    classified.set(classified.get() + u64::from(typed));
                     emitted += 1;
                 }
             }
@@ -3384,7 +3389,7 @@ fn detect_stream_with_pose(
             completed_frames += end - next_emit;
             next_emit = end;
             if let Some(report) = on_progress.as_deref_mut() {
-                report(completed_frames, scoped_frames)?;
+                report(completed_frames, scoped_frames, classified.get())?;
             }
             while buffer
                 .front()
@@ -3411,7 +3416,7 @@ fn detect_stream_with_pose(
                 completed_frames += end - next_emit;
                 next_emit = end;
                 if let Some(report) = on_progress.as_deref_mut() {
-                    report(completed_frames, scoped_frames)?;
+                    report(completed_frames, scoped_frames, classified.get())?;
                 }
                 while buffer
                     .front()
@@ -3438,7 +3443,7 @@ fn detect_stream_with_pose(
         return Err("CPU replay SHA-256 changed while reading Touch input".into());
     }
     if let Some(last) = pending {
-        emit_contextual_touch(
+        let typed = emit_contextual_touch(
             &mut writer,
             &mut output_hash,
             last,
@@ -3450,7 +3455,11 @@ fn detect_stream_with_pose(
             net,
             (width, height),
         )?;
+        classified.set(classified.get() + u64::from(typed));
         emitted += 1;
+    }
+    if let (Some(report), Some(_)) = (on_progress, primary_breaks) {
+        report(completed_frames, scoped_frames, classified.get())?;
     }
     writer
         .flush()
@@ -3533,7 +3542,7 @@ pub(crate) fn attribute_primary_with_progress_cancel(
     scope: &PrimaryRallyScope,
     stabilized: &StabilizedReplay,
     ground: &ground_stage::PrimaryTouchDetection,
-    report: &mut dyn FnMut(u64, u64) -> Result<(), String>,
+    report: &mut TouchProgress<'_>,
     cancel: &AtomicBool,
 ) -> Result<Value, ApiError> {
     process_with_ball_scope_and_rally_settings_report(
@@ -3558,7 +3567,7 @@ fn process_with_ball_scope_and_rally_settings_report(
     primary_scope: Option<&PrimaryRallyScope>,
     stabilized: Option<&StabilizedReplay>,
     ground: Option<&ground_stage::PrimaryTouchDetection>,
-    mut report: Option<&mut dyn FnMut(u64, u64) -> Result<(), String>>,
+    mut report: Option<&mut TouchProgress<'_>>,
     cancel: Option<&AtomicBool>,
 ) -> Result<Value, ApiError> {
     if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
@@ -3671,7 +3680,7 @@ fn process_with_ball_scope_and_rally_settings_report(
             .as_deref()
             .map(|intervals| intervals.iter().map(|(start, end)| end - start + 1).sum())
             .unwrap_or(frames);
-        update(0, scoped_frames).map_err(storage::internal)?;
+        update(0, scoped_frames, 0).map_err(storage::internal)?;
     }
     let sha = manifest["sha256"]
         .as_str()
@@ -3775,12 +3784,12 @@ fn process_with_ball_scope_and_rally_settings_report(
         if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
             return Err("cancelled".into());
         }
-        let mut checked_progress = |done, total| {
+        let mut checked_progress = |done, total, classified| {
             if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
                 return Err("cancelled".into());
             }
             if let Some(report) = report.as_deref_mut() {
-                report(done, total)?;
+                report(done, total, classified)?;
             }
             Ok(())
         };
@@ -4711,6 +4720,48 @@ mod tests {
     }
 
     #[test]
+    fn attribution_counts_only_final_known_techniques() {
+        use volley_core::action_prediction::{ActionKind, ActionPrediction, PredictionMethod};
+        let root = std::env::temp_dir().join(format!("touch-type-count-{}", Uuid::new_v4()));
+        let mut writer = BufWriter::new(fs::File::create(&root).unwrap());
+        let mut hash = Sha256::new();
+        let mut previous = None;
+        let [unknown, mut typed] = recorded_rebound_and_departure(235);
+        typed.action_prediction = Some(ActionPrediction {
+            kind: ActionKind::Attack,
+            evidence_score: 0.87,
+            method: PredictionMethod::ContactGeometryV1,
+            depth_ratio: -0.1,
+            posture_ratio: 0.4,
+        });
+        let mut rejected_block = typed.clone();
+        rejected_block.frame_index += 4;
+        rejected_block.action_prediction.as_mut().unwrap().kind = ActionKind::Block;
+        let classified: Vec<bool> = [unknown, typed, rejected_block]
+            .into_iter()
+            .map(|event| {
+                emit_contextual_touch(
+                    &mut writer,
+                    &mut hash,
+                    event,
+                    &mut previous,
+                    &[(0, 300)],
+                    &[],
+                    &[],
+                    None,
+                    None,
+                    (640, 360),
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(classified, vec![false, true, false]);
+        writer.flush().unwrap();
+        drop(writer);
+        fs::remove_file(root).unwrap();
+    }
+
+    #[test]
     fn published_settings_do_not_require_identity_or_pose_for_detection() {
         let default = published_touch_settings(None).unwrap();
         assert!(!default.require_pose);
@@ -5238,7 +5289,7 @@ mod tests {
             None,
             &[],
             Some(&[(10, 90), (285, 365)]),
-            Some(&mut |done, total| {
+            Some(&mut |done, total, _classified| {
                 progress.push((done, total));
                 Ok(())
             }),
@@ -5275,7 +5326,7 @@ mod tests {
             None,
             &[],
             Some(&[(0, 80), (450, 530)]),
-            Some(&mut |done, total| {
+            Some(&mut |done, total, _classified| {
                 outside_progress.push((done, total));
                 Ok(())
             }),
@@ -5304,7 +5355,7 @@ mod tests {
             None,
             &[],
             Some(&[]),
-            Some(&mut |done, total| {
+            Some(&mut |done, total, _classified| {
                 empty_progress.push((done, total));
                 Ok(())
             }),

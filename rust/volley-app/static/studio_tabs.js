@@ -554,6 +554,12 @@
         count%10>=2&&count%10<=4&&(count%100<12||count%100>14)?"касания":"касаний";
       return count.toLocaleString("ru-RU")+" "+noun;
     }
+    if(id==="touches"){
+      const count=run?.project_queue?.touch_attribution_count??run?.touch_attribution_count;
+      const total=run?.project_queue?.touch_detector_count??run?.touch_detector_count;
+      if(!Number.isSafeInteger(count)||count<0||!Number.isSafeInteger(total)||total<0)return "—";
+      return count.toLocaleString("ru-RU")+"/"+total.toLocaleString("ru-RU")+" типов касаний определено";
+    }
     if(entry?.rallies_total&&run?.rally_stage_progress&&rallyBlockStages.includes(id)){
       const fmt=value=>Number.isSafeInteger(value)?value.toLocaleString("ru-RU"):"—";
       const count=id==="pose"?fmt(entry.sampled_frames)+" кадров":fmt(entry.tracks)+" Track ID";
@@ -1043,14 +1049,14 @@
       if(heading.textContent!==label)heading.textContent=label;
       const stats=node.nextElementSibling;
       if(stats?.classList.contains("analysis-flow-node-stats")){
-        const statusText=id==="touch_detector"?stageResultText(id,entry,run,Date.now(),done||reused,running):
+        const statusText=(id==="touch_detector"||id==="touches")?stageResultText(id,entry,run,Date.now(),done||reused,running):
           inputFrames?stageResultText(id,{...(focused?entry:null),...inputFrames},run,Date.now(),false,true):
           running&&!focused?
           window.VolleyballUi.translate("Выполняется")+(otherVideos.length?" · "+otherVideos.join(", "):""):
           reused&&id!=="pose"?window.VolleyballUi.translate("Из кэша"):
           node.classList.contains("is-skipped")?window.VolleyballUi.translate("Пропущено"):
           stageResultText(id,entry,run,Date.now(),done||reused,running);
-        stats.textContent=id!=="touch_detector"&&running&&pct!==null?Math.round(pct)+"% · "+statusText:statusText;
+        stats.textContent=id!=="touch_detector"&&id!=="touches"&&running&&pct!==null?Math.round(pct)+"% · "+statusText:statusText;
         const sharedPose=id==="pose"&&!entry&&
           (run?.shared_pose?.source_stage_id==="players"||
             /RF-DETR.*RTMPose/.test(String(seen.get("players")?.name||"")));

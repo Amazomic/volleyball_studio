@@ -405,6 +405,7 @@ fn history_row(path: &Path, id: &str, status: &Value) -> Value {
         "primary_tracking":status["primary_tracking"],
         "gpu_rally_count":status["gpu_rally_mask"]["merged"].as_array().map(Vec::len),
         "touch_detector_count":status["touch_detector_count"],
+        "touch_attribution_count":status["touch_attribution_count"],
         "shared_pose":status["shared_pose"],
         "pose_frame_progress":status["pose_frame_progress"],
         "rally_stage_progress":status["rally_stage_progress"],
@@ -2411,6 +2412,7 @@ async fn pipeline(
         status["touch_detector_count"] = existing["touch_detector_count"].clone();
         status["analysis_frames_processed"] = json!(pipeline_frames_processed(&existing));
         status["gpu_rally_mask_sha256"] = existing["gpu_rally_mask_sha256"].clone();
+        status["touch_attribution_count"] = existing["touch_attribution_count"].clone();
         status["cpu_runs"] = existing["cpu_runs"].clone();
         status["primary_tracking"] = existing["primary_tracking"].clone();
         status["player_tracking_stats"] = existing["player_tracking_stats"].clone();
@@ -2947,6 +2949,7 @@ async fn pipeline(
         settings: Some(request.post.touches),
         pose_classification: request.post.pose_classification,
     };
+    status["touch_attribution_count"] = json!(0);
     progress(path, status, "Touch Attribution", 91.0)?;
     let ground = tokio::task::block_in_place(|| {
         cpu_touches::ground_stage::prepare_touch_detection(
@@ -2961,6 +2964,9 @@ async fn pipeline(
         return Err("Court calibration changed during Ground Detector".into());
     }
     status["ground_detector"] = ground.summary.clone();
+    if status["touch_detector_count"].is_null() {
+        status["touch_detector_count"] = json!(ground.breaks.len());
+    }
     save(path, status)?;
     log_event(
         path,
@@ -2987,7 +2993,8 @@ async fn pipeline(
             &primary,
             &stabilized,
             &ground,
-            &mut |done, total| {
+            &mut |done, total, classified| {
+                status["touch_attribution_count"] = json!(classified);
                 progress_with_frames(
                     path,
                     status,
@@ -4089,6 +4096,7 @@ fn queue_progress(rows: &[Value], active: bool, now: u64) -> Value {
     let mut frames_processed = 0_u64;
     let mut rallies_total = 0_u64;
     let mut touch_detector_count = None::<u64>;
+    let mut touch_attribution_count = None::<u64>;
     let videos: Vec<Value> = rows
         .iter()
         .map(|row| {
@@ -4138,9 +4146,13 @@ fn queue_progress(rows: &[Value], active: bool, now: u64) -> Value {
             if let Some(count) = row["touch_detector_count"].as_u64() {
                 touch_detector_count = Some(touch_detector_count.unwrap_or(0).saturating_add(count));
             }
+            if let Some(count) = row["touch_attribution_count"].as_u64() {
+                touch_attribution_count = Some(touch_attribution_count.unwrap_or(0).saturating_add(count));
+            }
             json!({"id":row["id"],"video":row["video"],"status":state,"progress_percent":percent,
             "frames_processed":frames,"ball_frames_total":ball_frames_total,
             "touch_detector_count":row["touch_detector_count"],
+            "touch_attribution_count":row["touch_attribution_count"],
             "stage":row["stage"],"stage_id":row["stage_id"],
             "rally_stage_progress":if state == "running" { row["rally_stage_progress"].clone() } else { Value::Null },
             "profile":{"gpu":{"person_detector":row["profile"]["gpu"]["person_detector"]}},
@@ -4180,7 +4192,7 @@ fn queue_progress(rows: &[Value], active: bool, now: u64) -> Value {
         "progress_percent":progress_percent,"started_ms":started,"elapsed_ms":elapsed,
         "remaining_ms":remaining,
         "frames_processed":frames_processed,"rallies_total":rallies_total,
-        "touch_detector_count":touch_detector_count,"videos":videos})
+        "touch_detector_count":touch_detector_count,"touch_attribution_count":touch_attribution_count,"videos":videos})
 }
 
 fn queue_focus(rows: &[Value]) -> Option<&Value> {
@@ -4532,9 +4544,9 @@ mod tests {
     fn queue_progress_uses_video_duration_and_never_completes_pending_video() {
         let rows = vec![
             json!({"id":"first","video":"a.mp4","status":"complete","progress_percent":100.0,
-                "queue_weight_sec":20.0,"analysis_frames_processed":100,"rallies_published":30,"touch_detector_count":12,"gpu_rally_mask":{"merged":[[0,30]]}}),
+                "queue_weight_sec":20.0,"analysis_frames_processed":100,"rallies_published":30,"touch_detector_count":12,"touch_attribution_count":8,"gpu_rally_mask":{"merged":[[0,30]]}}),
             json!({"id":"second","video":"b.mp4","status":"running","progress_percent":25.0,
-                "queue_weight_sec":80.0,"stage_id":"players","touch_detector_count":7,"stages":[{"id":"ball","frames_processed":200},{"id":"players","frames_processed":40}],"rally_stage_progress":{"pose":{"rallies_total":20,"state":"running"}}}),
+                "queue_weight_sec":80.0,"stage_id":"players","touch_detector_count":7,"touch_attribution_count":4,"stages":[{"id":"ball","frames_processed":200},{"id":"players","frames_processed":40}],"rally_stage_progress":{"pose":{"rallies_total":20,"state":"running"}}}),
             json!({"id":"third","video":"c.mp4","status":"queued","progress_percent":0.0,
                 "queue_weight_sec":100.0}),
         ];
@@ -4543,6 +4555,8 @@ mod tests {
         assert_eq!(summary["completed_videos"], 1);
         assert_eq!(summary["frames_processed"], 300);
         assert_eq!(summary["touch_detector_count"], 19);
+        assert_eq!(summary["touch_attribution_count"], 12);
+        assert_eq!(summary["videos"][0]["touch_attribution_count"], 8);
         assert_eq!(summary["videos"][0]["touch_detector_count"], 12);
         assert_eq!(summary["videos"][1]["touch_detector_count"], 7);
         assert!(summary["videos"][2]["touch_detector_count"].is_null());
