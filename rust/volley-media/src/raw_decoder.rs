@@ -550,15 +550,164 @@ fn selected_rgb_output_count(ranges: &[(u64, u64)]) -> u64 {
     selected + extra
 }
 
+const RGB_SEEK_GAP_FRAMES: u64 = 900;
+const RGB_SEEK_PREROLL_FRAMES: u64 = 60;
+
+struct RgbSeekWindow<'a> {
+    seek_frame: u64,
+    ranges: &'a [(u64, u64)],
+}
+
+fn plan_rgb_seek_windows(selected: &[(u64, u64)]) -> Vec<RgbSeekWindow<'_>> {
+    let mut windows = Vec::new();
+    let mut first = 0;
+    for i in 1..=selected.len() {
+        if i == selected.len()
+            || i - first == 256
+            || selected[i].0.saturating_sub(selected[i - 1].1) >= RGB_SEEK_GAP_FRAMES
+        {
+            let start = selected[first].0;
+            let seek_frame = if first == 0 && start < RGB_SEEK_GAP_FRAMES {
+                0
+            } else {
+                start.saturating_sub(RGB_SEEK_PREROLL_FRAMES) / 30 * 30
+            };
+            windows.push(RgbSeekWindow {
+                seek_frame,
+                ranges: &selected[first..i],
+            });
+            first = i;
+        }
+    }
+    windows
+}
+
+fn supports_rgb_seek(payload: &serde_json::Value, info: &crate::VideoInfo) -> bool {
+    let Some(video) = payload["streams"].as_array().and_then(|streams| {
+        streams
+            .iter()
+            .find(|stream| stream["codec_type"] == "video")
+    }) else {
+        return false;
+    };
+    matches!(info.codec.as_str(), "h264" | "hevc")
+        && info.fps.is_some_and(|fps| (15.0..=120.0).contains(&fps))
+        && payload["format"]["format_name"]
+            .as_str()
+            .is_some_and(|name| {
+                name.split(',')
+                    .any(|format| format == "mov" || format == "mp4")
+            })
+        && video["time_base"].as_str().is_some_and(|base| {
+            base.strip_prefix("1/")
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_some_and(|denominator| denominator > 0)
+        })
+}
+
+fn read_first_rgb_pts(stderr: impl Read) -> Result<Option<i64>, String> {
+    use std::io::BufRead;
+    let mut reader = io::BufReader::new(stderr);
+    let mut line = Vec::with_capacity(1024);
+    let mut pts = None;
+    loop {
+        let bytes = reader.fill_buf().map_err(|error| error.to_string())?;
+        if bytes.is_empty() {
+            break;
+        }
+        let count = bytes
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(bytes.len(), |index| index + 1);
+        if pts.is_none() {
+            let remaining = 1024usize.saturating_sub(line.len());
+            line.extend_from_slice(&bytes[..count.min(remaining)]);
+            if bytes[count - 1] == b'\n' {
+                let text = String::from_utf8_lossy(&line);
+                if text.contains("Parsed_showinfo") && text.contains("n:") {
+                    pts = text.split_once("pts:").and_then(|(_, value)| {
+                        value.split_whitespace().next()?.parse::<i64>().ok()
+                    });
+                }
+                line.clear();
+            }
+        }
+        reader.consume(count);
+    }
+    Ok(pts)
+}
+
+fn original_rgb_first_pts(
+    source: &Path,
+    range: Option<AnalysisRange>,
+    cancelled: &AtomicBool,
+) -> Result<i64, String> {
+    let (mut ff, prefix) = auto_decode_input_in_range(source, cancelled, range)?;
+    ff.args([
+        "-loglevel",
+        "info",
+        "-nostats",
+        "-map",
+        "0:v:0",
+        "-an",
+        "-sn",
+        "-dn",
+    ])
+    .args(["-filter_threads", "2"])
+    .args(["-vf", &format!("{prefix}fps=30,select='eq(n,0)',showinfo")])
+    .args(["-frames:v", "1", "-f", "null", "-"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped());
+    let mut child = ManagedChild(ff.spawn().map_err(|error| error.to_string())?);
+    let stderr = child
+        .0
+        .stderr
+        .take()
+        .ok_or("Missing RGB timestamp probe stderr")?;
+    let reader = thread::spawn(move || read_first_rgb_pts(stderr));
+    let start = Instant::now();
+    let status = loop {
+        if cancelled.load(Ordering::Acquire) || start.elapsed() >= DECODER_IDLE_LIMIT {
+            let _ = child.0.kill();
+            let _ = child.0.wait();
+            let _ = reader.join();
+            return Err("Original RGB timestamp probe cancelled or timed out".into());
+        }
+        match child.0.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Err(error) => {
+                let _ = child.0.kill();
+                let _ = child.0.wait();
+                let _ = reader.join();
+                return Err(error.to_string());
+            }
+        }
+    };
+    let pts = reader
+        .join()
+        .map_err(|_| "RGB timestamp probe panicked")??;
+    if !status.success() {
+        return Err(format!("Original RGB timestamp probe exited with {status}"));
+    }
+    pts.ok_or_else(|| "Missing first normalized RGB timestamp".into())
+}
+
 fn configure_original_rgb_output(
     ff: &mut Command,
     prefix: &str,
     expected_frames: u64,
     selection: Option<&str>,
+    pts_shift: Option<i64>,
 ) {
-    let filter = match selection {
-        Some(expression) => format!("{prefix}fps=30,select='{expression}',format=rgb24"),
-        None => format!("{prefix}fps=30,format=rgb24"),
+    let filter = match (selection, pts_shift) {
+        (Some(expression), Some(shift)) => {
+            let expression = expression.replace("n,", "pts,");
+            format!("{prefix}fps=30,setpts=PTS-({shift}),select='if(isnan(prev_selected_pts),eq(pts,0),{expression})',format=rgb24")
+        }
+        (Some(expression), None) => format!("{prefix}fps=30,select='{expression}',format=rgb24"),
+        (None, _) => format!("{prefix}fps=30,format=rgb24"),
     };
     if selection.is_some() {
         ff.args(["-fps_mode", "passthrough"]);
@@ -630,7 +779,108 @@ fn decode_original_frames_impl(
     if cancelled.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
-    let info = crate::probe(source)?;
+    let payload = crate::ffprobe(source)?;
+    let info = crate::inspect_probe(&payload)?;
+    if let Some(range) = range {
+        range.validate(info.duration_sec)?;
+    }
+    if let Some(selected) = selected.filter(|_| supports_rgb_seek(&payload, &info)) {
+        let windows = plan_rgb_seek_windows(selected);
+        if windows.iter().any(|window| window.seek_frame != 0) {
+            if let Ok(origin) = original_rgb_first_pts(source, range, cancelled) {
+                for window in windows {
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err("cancelled".into());
+                    }
+                    let last = window.ranges.last().ok_or("Missing RGB seek ranges")?.1;
+                    if window.seek_frame == 0 {
+                        decode_original_rgb_stream(
+                            source,
+                            last + 1,
+                            range,
+                            Some(window.ranges),
+                            cancelled,
+                            &info,
+                            None,
+                            &mut consume,
+                        )?;
+                        continue;
+                    }
+                    let first = window.ranges[0].0;
+                    let local = window
+                        .ranges
+                        .iter()
+                        .map(|&(left, right)| (left - first, right - first))
+                        .collect::<Vec<_>>();
+                    let start = range.map_or(0.0, |item| item.start_sec);
+                    let end = range.map_or(info.duration_sec + 0.1, |item| item.end_sec);
+                    let window_range = AnalysisRange {
+                        start_sec: start + window.seek_frame as f64 / 30.0,
+                        end_sec: end.min(
+                            start
+                                + ((last + RGB_SEEK_PREROLL_FRAMES + 1) as f64 + origin as f64)
+                                    / 30.0,
+                        ),
+                    };
+                    let shift = origin + (first - window.seek_frame) as i64;
+                    let mut delivered = false;
+                    let result = decode_original_rgb_stream(
+                        source,
+                        last - first + 1,
+                        Some(window_range),
+                        Some(&local),
+                        cancelled,
+                        &info,
+                        Some(shift),
+                        |index, pixels, width, height| {
+                            delivered = true;
+                            consume(first + index, pixels, width, height)
+                        },
+                    );
+                    if let Err(error) = result {
+                        if delivered || cancelled.load(Ordering::Acquire) {
+                            return Err(error);
+                        }
+                        eprintln!("RGB seek window {first}..{last} unavailable: {error}; using sequential decode");
+                        decode_original_rgb_stream(
+                            source,
+                            last + 1,
+                            range,
+                            Some(window.ranges),
+                            cancelled,
+                            &info,
+                            None,
+                            &mut consume,
+                        )?;
+                    }
+                }
+                return Ok(());
+            }
+        }
+    }
+    decode_original_rgb_stream(
+        source,
+        expected_frames,
+        range,
+        selected,
+        cancelled,
+        &info,
+        None,
+        consume,
+    )
+}
+
+#[expect(clippy::too_many_arguments)]
+fn decode_original_rgb_stream(
+    source: &Path,
+    expected_frames: u64,
+    range: Option<AnalysisRange>,
+    selected: Option<&[(u64, u64)]>,
+    cancelled: &AtomicBool,
+    info: &crate::VideoInfo,
+    pts_shift: Option<i64>,
+    mut consume: impl FnMut(u64, &[u8], usize, usize) -> Result<(), String>,
+) -> Result<(), String> {
     let (width, height) = (info.width as usize, info.height as usize);
     if width < 2 || height < 2 || width > 8192 || height > 8192 {
         return Err("Original RGB dimensions exceed the bounded decoder".into());
@@ -651,7 +901,13 @@ fn decode_original_frames_impl(
     } else {
         expected_frames
     };
-    configure_original_rgb_output(&mut ff, &prefix, output_count, expression.as_deref());
+    configure_original_rgb_output(
+        &mut ff,
+        &prefix,
+        output_count,
+        expression.as_deref(),
+        pts_shift,
+    );
     ff.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1029,7 +1285,7 @@ mod tests {
         command
             .args(["-hide_banner", "-loglevel", "error", "-i"])
             .arg(&source);
-        configure_original_rgb_output(&mut command, "", 1350, Some(&expression));
+        configure_original_rgb_output(&mut command, "", 1350, Some(&expression), None);
         let output = command.output().unwrap();
         assert!(
             output.status.success(),
@@ -1064,6 +1320,308 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
         assert_eq!(output.stdout.len() / (160 * 90 * 3), 8);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn original_rgb_sparse_seek_preserves_vfr_pixels_and_trimmed_indices() {
+        let root = std::env::temp_dir().join(format!("volley-rgb-seek-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("input.mp4");
+        let created = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=25:duration=78",
+                "-vf",
+                "select='not(eq(mod(n,17),0))'",
+                "-fps_mode",
+                "vfr",
+                "-c:v",
+                "libx264",
+                "-g",
+                "75",
+                "-y",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        let range = Some(AnalysisRange {
+            start_sec: 0.37,
+            end_sec: 76.37,
+        });
+        let selected = [(1, 15), (22, 27), (1199, 1212), (2240, 2250)];
+        let payload = crate::ffprobe(&source).unwrap();
+        assert!(supports_rgb_seek(
+            &payload,
+            &crate::inspect_probe(&payload).unwrap()
+        ));
+        assert!(original_rgb_first_pts(&source, range, &AtomicBool::new(false)).is_ok());
+        let windows = plan_rgb_seek_windows(&selected);
+        assert_eq!(windows.len(), 3);
+        assert!(windows[1].seek_frame > 1000);
+        assert!(windows[2].seek_frame > 2000);
+        let cancel = AtomicBool::new(false);
+        let mut expected = Vec::new();
+        decode_original_frames_in_range(&source, 2280, range, &cancel, |index, pixels, _, _| {
+            if rgb_range_contains(&selected, index) {
+                expected.push((index, pixels.to_vec()));
+            }
+            Ok(())
+        })
+        .unwrap();
+        let mut actual = Vec::new();
+        decode_original_frames_selected_in_range(
+            &source,
+            2280,
+            range,
+            &selected,
+            &cancel,
+            |index, pixels, _, _| {
+                actual.push((index, pixels.to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(actual.len(), 46);
+        assert!(
+            actual == expected,
+            "Seek changed original RGB pixels or source indices"
+        );
+    }
+
+    #[test]
+    fn original_rgb_seek_into_timestamp_gap_falls_back_without_wrong_frames() {
+        let root = std::env::temp_dir().join(format!("volley-rgb-seek-gap-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("input.mp4");
+        let created = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=30:duration=45",
+                "-vf",
+                "select='not(between(n,900,1199))'",
+                "-fps_mode",
+                "vfr",
+                "-c:v",
+                "libx264",
+                "-g",
+                "60",
+                "-y",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        let selected = [(1050, 1053), (1220, 1223)];
+        let cancel = AtomicBool::new(false);
+        let mut expected = Vec::new();
+        decode_original_frames_in_range(&source, 1350, None, &cancel, |index, pixels, _, _| {
+            if rgb_range_contains(&selected, index) {
+                expected.push((index, pixels.to_vec()));
+            }
+            Ok(())
+        })
+        .unwrap();
+        let mut actual = Vec::new();
+        decode_original_frames_selected_in_range(
+            &source,
+            1350,
+            None,
+            &selected,
+            &cancel,
+            |index, pixels, _, _| {
+                actual.push((index, pixels.to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(actual.len(), 8);
+        assert!(
+            actual == expected,
+            "Timestamp gap changed the frame mapping"
+        );
+    }
+
+    #[test]
+    fn original_rgb_hevc_fractional_rate_seek_keeps_last_selected_frames() {
+        let root =
+            std::env::temp_dir().join(format!("volley-rgb-seek-hevc-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("input.mp4");
+        let created = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=30000/1001:duration=66",
+                "-c:v",
+                "libx265",
+                "-preset",
+                "ultrafast",
+                "-x265-params",
+                "pools=1:frame-threads=1:log-level=error:keyint=90",
+                "-y",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        let selected = [(1001, 1003), (1950, 1955)];
+        let range = Some(AnalysisRange {
+            start_sec: 0.19,
+            end_sec: 65.39,
+        });
+        let cancel = AtomicBool::new(false);
+        let payload = crate::ffprobe(&source).unwrap();
+        let info = crate::inspect_probe(&payload).unwrap();
+        assert!(supports_rgb_seek(&payload, &info));
+        let _origin = original_rgb_first_pts(&source, range, &cancel).unwrap();
+        let mut expected = Vec::new();
+        decode_original_rgb_stream(
+            &source,
+            1956,
+            range,
+            Some(&selected),
+            &cancel,
+            &info,
+            None,
+            |index, pixels, _, _| {
+                expected.push((index, pixels.to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        let mut actual = Vec::new();
+        decode_original_frames_selected_in_range(
+            &source,
+            1956,
+            range,
+            &selected,
+            &cancel,
+            |index, pixels, _, _| {
+                actual.push((index, pixels.to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(actual.len(), 9);
+        assert!(
+            actual == expected,
+            "HEVC seek changed the source pixels or frame indices"
+        );
+    }
+
+    #[test]
+    fn original_rgb_seek_accounts_for_video_start_after_audio() {
+        let root =
+            std::env::temp_dir().join(format!("volley-rgb-seek-offset-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("input.mp4");
+        let created = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=30:duration=66",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=8000:cl=mono",
+                "-filter_complex",
+                "[0:v]setpts=PTS+3/TB[v]",
+                "-map",
+                "[v]",
+                "-map",
+                "1:a",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-c:a",
+                "aac",
+                "-t",
+                "69",
+                "-fps_mode",
+                "passthrough",
+                "-y",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        let selected = [(1000, 1008), (1950, 1958)];
+        let cancel = AtomicBool::new(false);
+        assert_eq!(original_rgb_first_pts(&source, None, &cancel).unwrap(), 90);
+        let info = crate::probe(&source).unwrap();
+        let mut expected = Vec::new();
+        decode_original_rgb_stream(
+            &source,
+            1959,
+            None,
+            Some(&selected),
+            &cancel,
+            &info,
+            None,
+            |index, pixels, _, _| {
+                expected.push((index, pixels.to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        let mut actual = Vec::new();
+        decode_original_frames_selected_in_range(
+            &source,
+            1959,
+            None,
+            &selected,
+            &cancel,
+            |index, pixels, _, _| {
+                actual.push((index, pixels.to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(actual.len(), 18);
+        assert!(
+            actual == expected,
+            "Source stream start offset changed seek frames"
+        );
     }
 
     #[test]
@@ -1137,7 +1695,7 @@ mod tests {
                 "-i",
             ])
             .arg(&source);
-        configure_original_rgb_output(&mut command, "", 60, None);
+        configure_original_rgb_output(&mut command, "", 60, None, None);
         let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
