@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 import {runInNewContext} from "node:vm";
 
 const js=readFileSync(new URL("../../rust/volley-app/static/studio.js",import.meta.url),"utf8");
@@ -8,7 +9,7 @@ const end=js.indexOf("  const courtPreview=",start);
 const timeline={data:{schema:"volley-native-rally-timeline/1",project_id:"p",rally_run_id:"r",video:"v",source_replay_sha256:"sha",touch_annotations:[],serve_proposals:[{kind:"serve",trajectory_start_frame:100,rally_start_frame:98,provisional_track_id:7,identity_verified:false}]}};
 const overlay={flags:{touches:true},actionFlags:{serve:true,unknown_touch:true}};
 const overlayLabels={loaded:true,key:"key",names:new Map([["7","Player"]])};
-const context={timeline,overlay,overlayLabels,playerLabelKey:()=>"key",training:{active:false}};
+const context={timeline,overlay,overlayLabels,window:previewWasmWindow(),playerLabelKey:()=>"key",training:{active:false}};
 runInNewContext(js.slice(start,end)+"\nthis.draw=drawCpuTouches;",context);
 const labels=[],arcs=[];
 const ctx={beginPath(){},arc(...args){arcs.push(args)},stroke(){},fillRect(){},measureText:t=>({width:t.length*6}),fillText:t=>labels.push(t)};
@@ -37,3 +38,12 @@ timeline.data.touch_annotations=[];
 timeline.data.serve_proposals[0].provisional_track_id=null;
 assert.deepEqual(draw(),["≈ Подача · не определён"]);
 console.log("Serve proposals are rendered on video with source, time and filter checks: OK");
+
+timeline.data.touch_annotations=[{kind:"serve",frame_index:92,ball_position_px:[300,200],provisional_track_id:7},
+  {kind:"serve",frame_index:108,ball_position_px:[300,200],provisional_track_id:7}];
+timeline.data.serve_proposals=[];
+assert.equal(draw(100).length,2,"Both inclusive range boundaries remain visible");
+timeline.data.touch_annotations=[{kind:"serve",frame_index:200,ball_position_px:[300,200],provisional_track_id:7}];
+assert.deepEqual(draw(100),[],"Replacing the saved event array invalidates the old index");
+assert.equal(draw(200).length,1);
+assert.deepEqual(draw(200,record,"other"),[]);

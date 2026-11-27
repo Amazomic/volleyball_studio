@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 import {runInNewContext} from "node:vm";
 
 const js=readFileSync(new URL("../../rust/volley-app/static/studio.js",import.meta.url),"utf8");
@@ -72,7 +73,7 @@ const overlay={
   fetching:new Set(),failed:new Map()
 };
 const timeline={data:{project_id:"p",rally_run_id:"r",video:"v",total_frames:300}};
-const scope={s,ui,window:{},overlay,overlayLabels,timeline,setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){},
+const scope={s,ui,window:previewWasmWindow(),overlay,overlayLabels,timeline,setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){},
   playerLabelKey:(project,run,video,sha)=>[project,run,video,sha].join(":"),
   requestOverlayLabels:()=>{},
   overlayContext:()=>({ctx,x:0,y:0,width:100,height:100}),

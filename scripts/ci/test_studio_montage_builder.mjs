@@ -98,7 +98,8 @@ const window={addEventListener:(event,fn)=>windowListeners.set(event,fn),
   VolleyballStudioActivity:{fetch}};
 const {instance:{exports:wasm}}=await WebAssembly.instantiate(readFileSync(new URL("../../rust/volley-app/static/volley_web.wasm",import.meta.url)),{});
 window.VolleyballUi={ready:Promise.resolve(),isReady:()=>true,engine:wasm};
-const context={TextEncoder,TextDecoder,document:{getElementById:get,createElement:tag=>new Element(tag)},
+const savedDrafts=new Map();
+const context={sessionStorage:{getItem:key=>savedDrafts.get(key)||null,setItem:(key,value)=>savedDrafts.set(key,value)},TextEncoder,TextDecoder,document:{getElementById:get,createElement:tag=>new Element(tag)},
   window,Event:class {constructor(type){this.type=type;}},
   CustomEvent:class {constructor(type,opts={}){this.type=type;this.detail=opts.detail;}},
   URLSearchParams,setInterval:fn=>{pollTimer=fn;return 1;},clearInterval(){} ,
@@ -210,6 +211,8 @@ assert.equal(montage("sequence").children.length,1);
 const add=(index)=>montage("library").children[index].children[1].children[2].children[0].fire("click");
 await add(0);await add(1);
 assert.deepEqual([...window.VolleyballMontageDraft.ids("1234abcdef01",run)],[a,b]);
+assert.equal(montage("draft-count").textContent,"2 · 5.0 с");
+assert.equal(savedDrafts.get("volley:montage-draft:v1:"+JSON.stringify(["1234abcdef01",run])),JSON.stringify([a,b]));
 assert.equal(montage("sequence").children.length,2);
 assert.equal(montage("play").disabled,false);
 await montage("sequence").children[0].children[1].children[2].children[1].fire("click");

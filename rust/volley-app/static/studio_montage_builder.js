@@ -318,21 +318,25 @@
     });
     syncCreative();
   };
-  const favoriteId=id=>typeof id==="string"&&/^[a-f0-9]{24}$/.test(id);
+
   const draftStoreKey=()=>st.sourceKey?"volley:montage-draft:v1:"+st.sourceKey:"";
   const readDraft=()=>{
     try{
       const raw=sessionStorage.getItem(draftStoreKey());
-      if(!raw||raw.length>2400)return [];
-      const ids=JSON.parse(raw);
-      return Array.isArray(ids)&&ids.length<=80&&ids.every(favoriteId)&&
-        new Set(ids).size===ids.length?ids:[];
+      return window.VolleyStudioChain.call(8,{kind:"draft_read",raw});
     }catch{return [];}
   };
   const saveDraft=()=>{
     try{if(st.sourceKey)sessionStorage.setItem(draftStoreKey(),JSON.stringify(st.order));}catch{}
   };
-  const chosen=()=>st.order.map(id=>st.favoriteItems.find(item=>item.id===id)).filter(Boolean);
+  const chosenProjection=()=>window.VolleyballUi?.isReady()?
+    window.VolleyStudioChain.call(8,{kind:"draft_chosen",items:st.favoriteItems,order:st.order}):{indices:[],duration:0};
+  const chosen=()=>chosenProjection().indices.map(index=>st.favoriteItems[index]);
+  const editDraft=(action,id,index)=>{
+    const order=window.VolleyStudioChain.call(8,{kind:"draft_edit",action,id,index,order:st.order});
+    if(JSON.stringify(order)===JSON.stringify(st.order))return;
+    st.order=order;notifyDraft();
+  };
   window.VolleyballMontageDraft={
     ids:(project,run)=>st.sourceKey===JSON.stringify([project,run])?
       chosen().map(item=>item.id):[]
@@ -380,9 +384,7 @@
       card.addEventListener("drop",event=>{
         event.preventDefault();card.classList.remove("drag-over");
         const id=event.dataTransfer?.getData("text/plain");
-        const from=st.order.indexOf(id);
-        if(from<0||from===index)return;
-        st.order.splice(from,1);st.order.splice(index,0,id);notifyDraft();
+        editDraft("move",id,index);
       });
     }
     const poster=document.createElement("div");poster.className="montage-clip-poster";
@@ -404,16 +406,14 @@
       controls.append(
         clipButton("←","Переместить раньше",()=>{
           if(index===0)return;
-          [st.order[index-1],st.order[index]]=[st.order[index],st.order[index-1]];
-          notifyDraft();
+          editDraft("move",clip.id,index-1);
         },index===0),
         clipButton("→","Переместить позже",()=>{
           if(index===st.order.length-1)return;
-          [st.order[index+1],st.order[index]]=[st.order[index],st.order[index+1]];
-          notifyDraft();
+          editDraft("move",clip.id,index+1);
         },index===st.order.length-1),
         clipButton("×","Убрать из монтажа",()=>{
-          st.order.splice(index,1);notifyDraft();
+          editDraft("remove",clip.id);
         })
       );
     }else{
@@ -421,7 +421,7 @@
       controls.append(clipButton(included?"✓ В монтаже":"+ Добавить в монтаж",
         included?"Розыгрыш уже в монтаже":"Добавить розыгрыш в монтаж",()=>{
           if(st.order.length>=80||st.order.includes(clip.id))return;
-          st.order.push(clip.id);notifyDraft();
+          editDraft("add",clip.id);
         },included||st.order.length>=80));
     }
     body.append(title,detail,controls);card.append(poster,body);
@@ -443,12 +443,14 @@
       empty.textContent="Нет размеченного избранного для выбранной CPU-версии. Отметьте розыгрыши в предпросмотре.";
       ui.library.append(empty);
     }
-    ui.draftCount.textContent=st.order.length+" · "+chosen().reduce((total,clip)=>
-      total+Math.max(0,clip.end-clip.start),0).toFixed(1)+" с";
+    ui.draftCount.textContent=st.order.length+" · "+chosenProjection().duration.toFixed(1)+" с";
     ui.play.disabled=st.busy||!st.order.length||mode()!=="favorites";
     ui.restart.disabled=ui.play.disabled;
   };
   const acceptFavorites=event=>{
+    if(!window.VolleyballUi?.isReady()){
+      window.VolleyballUi?.ready.then(()=>acceptFavorites(event)).catch(()=>{});return;
+    }
     const data=event.detail;
     if(!data||data.project_id!==ui.project.value||!data.rally_run_id||
       (ui.run.value&&ui.run.value!==data.rally_run_id))return;
@@ -458,12 +460,8 @@
       stopPreview();st.sourceKey=key;st.order=readDraft();st.favoriteItems=[];
     }
     if(!data.ready)return;
-    const items=Array.isArray(data.items)?data.items.filter(clip=>
-      favoriteId(clip.id)&&typeof clip.video==="string"&&
-      clip.video===data.video&&Number.isFinite(clip.start)&&
-      Number.isFinite(clip.end)&&clip.start>=0&&clip.end>clip.start).slice(0,80):[];
-    const ids=new Set(items.map(item=>item.id));
-    const filtered=st.order.filter(id=>ids.has(id));
+    const projection=window.VolleyStudioChain.call(8,{kind:"draft_accept",items:data.items,video:data.video,order:st.order});
+    const items=projection.indices.map(index=>data.items[index]),filtered=projection.order;
     if(JSON.stringify(items)===JSON.stringify(st.favoriteItems)&&
       filtered.length===st.order.length)return;
     const changed=filtered.length!==st.order.length;
