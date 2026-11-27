@@ -502,7 +502,9 @@ pub fn decode_full_video_in_range(
     })
 }
 
-fn balanced_selection_expression(ranges: &[(u64, u64)]) -> String {
+const RGB_HEARTBEAT_FRAMES: u64 = 300;
+
+fn balanced_ranges_expression(ranges: &[(u64, u64)]) -> String {
     match ranges {
         [] => "0".into(),
         [(left, right)] => format!("between(n,{left},{right})"),
@@ -510,11 +512,42 @@ fn balanced_selection_expression(ranges: &[(u64, u64)]) -> String {
             let (left, right) = ranges.split_at(ranges.len() / 2);
             format!(
                 "({}+{})",
-                balanced_selection_expression(left),
-                balanced_selection_expression(right)
+                balanced_ranges_expression(left),
+                balanced_ranges_expression(right)
             )
         }
     }
+}
+
+fn balanced_selection_expression(ranges: &[(u64, u64)]) -> String {
+    let expression = balanced_ranges_expression(ranges);
+    match ranges.last() {
+        Some(&(_, last)) => {
+            format!("({expression})+lte(n,{last})*not(mod(n,{RGB_HEARTBEAT_FRAMES}))")
+        }
+        None => expression,
+    }
+}
+
+fn rgb_range_contains(ranges: &[(u64, u64)], index: u64) -> bool {
+    let i = ranges.partition_point(|&(left, _)| left <= index);
+    i > 0 && index <= ranges[i - 1].1
+}
+
+fn rgb_heartbeat(ranges: &[(u64, u64)], index: u64) -> bool {
+    index.is_multiple_of(RGB_HEARTBEAT_FRAMES)
+        && ranges.last().is_some_and(|&(_, last)| index <= last)
+}
+
+fn selected_rgb_output_count(ranges: &[(u64, u64)]) -> u64 {
+    let selected: u64 = ranges.iter().map(|&(left, right)| right - left + 1).sum();
+    let extra = ranges.last().map_or(0, |&(_, last)| {
+        (0..=last)
+            .step_by(RGB_HEARTBEAT_FRAMES as usize)
+            .filter(|&index| !rgb_range_contains(ranges, index))
+            .count() as u64
+    });
+    selected + extra
 }
 
 fn configure_original_rgb_output(
@@ -614,11 +647,7 @@ fn decode_original_frames_impl(
         .filter(|ranges| ranges.len() <= 256)
         .map(balanced_selection_expression);
     let output_count = if expression.is_some() {
-        selected
-            .unwrap_or_default()
-            .iter()
-            .map(|&(left, right)| right - left + 1)
-            .sum()
+        selected_rgb_output_count(selected.unwrap_or_default())
     } else {
         expected_frames
     };
@@ -668,11 +697,11 @@ fn decode_original_frames_impl(
                 if cancelled.load(Ordering::Acquire) {
                     return Err("cancelled".into());
                 }
-                let included = selected.is_none_or(|ranges| {
-                    let i = ranges.partition_point(|&(left, _)| left <= index);
-                    i > 0 && index <= ranges[i - 1].1
-                });
-                if expression.is_some() && !included {
+                let included = selected.is_none_or(|ranges| rgb_range_contains(ranges, index));
+                if expression.is_some()
+                    && !included
+                    && !selected.is_some_and(|ranges| rgb_heartbeat(ranges, index))
+                {
                     continue;
                 }
                 pipe.read_exact(&mut frame)
@@ -970,6 +999,71 @@ mod tests {
             actual == expected,
             "Selected RGB pixels and source frame indices differ"
         );
+    }
+
+    #[test]
+    fn sparse_original_rgb_filter_keeps_pipe_alive_between_rallies() {
+        let root = std::env::temp_dir().join(format!("volley-sparse-rgb-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("input.mp4");
+        let created = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=30:duration=45",
+                "-c:v",
+                "libx264",
+                "-y",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(created.status.success());
+        let selected = [(1, 2), (1199, 1200)];
+        let expression = balanced_selection_expression(&selected);
+        let mut command = Command::new("ffmpeg");
+        command
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&source);
+        configure_original_rgb_output(&mut command, "", 1350, Some(&expression));
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let cancel = AtomicBool::new(false);
+        let mut expected = Vec::new();
+        decode_original_frames_in_range(&source, 1350, None, &cancel, |index, pixels, _, _| {
+            if selected
+                .iter()
+                .any(|&(left, right)| (left..=right).contains(&index))
+            {
+                expected.push((index, pixels.to_vec()));
+            }
+            Ok(())
+        })
+        .unwrap();
+        let mut actual = Vec::new();
+        decode_original_frames_selected_in_range(
+            &source,
+            1350,
+            None,
+            &selected,
+            &cancel,
+            |index, pixels, _, _| {
+                actual.push((index, pixels.to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(output.stdout.len() / (160 * 90 * 3), 8);
+        assert_eq!(actual, expected);
     }
 
     #[test]
