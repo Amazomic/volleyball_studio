@@ -8,7 +8,9 @@ Import a match video. Studio tracks the ball and players, detects touches and ra
 
 [![Actual Volleyball Studio preview with ball trajectory, player skeletons and court markings](docs/images/studio-preview.png)](docs/images/studio-preview.png)
 
-**[Watch a real 15-second annotated rally (MP4)](docs/images/studio-demo.mp4)**
+![15-second annotated rally](docs/images/studio-demo.gif)
+
+[Full-quality MP4](docs/images/studio-demo.mp4?raw=true)
 
 ## From match video to highlights
 
