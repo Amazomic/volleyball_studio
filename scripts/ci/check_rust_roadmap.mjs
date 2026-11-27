@@ -141,10 +141,10 @@ function render(roadmap){
 }
 try {
   const last=check(data,diary);
-  const readme=readFileSync(join(root,"README.md"),"utf8");
+  const readme=readFileSync(join(root,"docs","README.md"),"utf8");
   const summary="План разработки: "+last+"/"+data.plannedTotal+
     (data.nextStage===null?"; миграция завершена":"; следующий "+data.nextStage+"/"+data.plannedTotal);
-  if(!readme.includes(summary))fail("README.md roadmap progress label is outdated: "+summary);
+  if(!readme.includes(summary))fail("docs/README.md roadmap progress label is outdated: "+summary);
   const generated=render(data);
   if(process.argv.includes("--self-test")){
     const rejects=(mutated,label)=>{
