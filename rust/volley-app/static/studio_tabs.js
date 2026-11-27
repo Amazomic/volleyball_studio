@@ -517,53 +517,8 @@
     }
     return svg;
   };
-  const pipelineId=entry=>{
-    const name=String(typeof entry==="string"?entry:entry?.name||"");
-    if(name.startsWith("Ожидание очереди"))return "";
-    if(entry?.id==="ground_detector")return "rallies";
-    if(entry?.id==="touch_types")return "touches";
-    if(entry?.id&&pipelineNames.has(entry.id))return entry.id;
-    if(/Проверка исходного видео|Подготовка исходного видео/.test(name))return "video";
-    if(/ball_stabilizer|Ball Stabilizer|Интерполяция траектории мяча/.test(name))return "ball_stabilizer";
-    if(name==="Ground Detector"||name==="ground_detector"||name==="Rally Detector")return "rallies";
-    if(name==="Touch Detector")return "touch_detector";
-    if(name==="Touch Attribution"||name==="Pose Geometry")return "touches";
-    if(/Поиск розыгрышей/.test(name))return "rallies";
-    if(/Связывание рамок игроков/.test(name))return "boxes";
-    if(/GPU.*V[Bb]allNet/.test(name))return "ball";
-    if(/RTMPose/.test(name)&&!/RF-DETR/.test(name))return "pose";
-    if(/Объединение/.test(name))return "fusion";
-    if(/RF-DETR|RTMDet|игровые интервалы|общий поток/.test(name))return "players";
-    if(/GPU-анализ завершён/.test(name))return "fusion";
-    if(/Track ID/.test(name))return "tracking";
-    if(/касания в первичных|физические касания/.test(name))return "touches";
-    if(/Публикация розыгрышей/.test(name))return "publish";
-    if(/автоматическая привязка/.test(name))return "identity";
-    if(/Монтажная временная разметка/.test(name))return "material";
-    if(/сохранённые версии|Сохранённый GPU-анализ|сохранённый GPU-анализ/.test(name))return "cache";
-    return "";
-  };
-  const combineRallyStages=stages=>{
-    const result=[];
-    for(const item of stages){
-      const prev=result.at(-1);
-      const wasGround=prev&&(prev.id==="ground_detector"||["Ground Detector","ground_detector"].includes(prev.name));
-      if(wasGround&&pipelineId(item)==="rallies"&&prev.finished_ms!=null){
-        result[result.length-1]={...item,id:"rallies",
-          started_ms:prev.started_ms??item.started_ms,
-          duration_ms:Number.isFinite(prev.duration_ms)&&Number.isFinite(item.duration_ms)?
-            prev.duration_ms+item.duration_ms:item.duration_ms};
-      }else if(prev&&pipelineId(prev)==="touches"&&pipelineId(item)==="touches"&&
-        (item.id==="touch_types"||item.name==="Pose Geometry"||prev.id==="touch_types"||prev.name==="Pose Geometry")){
-        const start=prev.started_ms??item.started_ms;
-        const finish=item.finished_ms;
-        const duration=Number.isFinite(start)&&Number.isFinite(finish)?Math.max(0,finish-start):
-          Number.isFinite(prev.duration_ms)&&Number.isFinite(item.duration_ms)?prev.duration_ms+item.duration_ms:item.duration_ms;
-        result[result.length-1]={...item,id:"touches",name:"Touch Attribution",started_ms:start,duration_ms:duration};
-      }else result.push(item);
-    }
-    return result;
-  };
+  const pipelineId=entry=>window.VolleyStudioChain.call(6,{kind:"id",entry});
+  const combineRallyStages=stages=>window.VolleyStudioChain.call(6,{kind:"combine",stages});
   const pipelineLabel=entry=>window.VolleyballUi.translate(pipelineNames.get(pipelineId(entry))||String(entry?.name||"Стадия"));
   const playerTrackingSummary=(run,id)=>{
     const stats=run?.player_tracking_stats;
@@ -587,39 +542,10 @@
     return null;
   };
   const rallyBlockStages=["boxes","touch_detector","pose"];
-  const touchStageDuration=(entry,now)=>Number.isFinite(entry?.active_duration_ms)?
-    entry.active_duration_ms+(entry.state==="running"&&Number.isFinite(entry.block_started_ms)?
-      Math.max(0,now-entry.block_started_ms):0):null;
-  const rallyStageEntry=(id,entry,run)=>{
-    const blocks=run?.rally_stage_progress;
-    if(!blocks)return entry;
-    if(id==="players"&&entry&&Number.isFinite(blocks.detector_finished_ms)){
-      return {...entry,state:"complete",finished_ms:blocks.detector_finished_ms,
-        duration_ms:Math.max(0,blocks.detector_finished_ms-entry.started_ms)};
-    }
-    const block=blocks[id];
-    if(!rallyBlockStages.includes(id)||!block?.rallies_total)return entry;
-    return {...block,duration_ms:id==="touch_detector"?touchStageDuration(block,Date.now()):Number.isFinite(block.finished_ms)&&Number.isFinite(block.started_ms)?
-      Math.max(0,block.finished_ms-block.started_ms):null};
-  };
-  const rallyStageState=(id,entry,run)=>{
-    const blocks=run?.rally_stage_progress;
-    if(!blocks)return null;
-    if(id==="players"&&Number.isFinite(blocks.detector_finished_ms))return "complete";
-    if(rallyBlockStages.includes(id)&&blocks[id]?.rallies_total)return entry?.state||null;
-    return null;
-  };
-  const rallyStageHistory=(stages,run)=>{
-    if(!run?.rally_stage_progress)return stages;
-    const entries=stages.filter(entry=>!["boxes","pose"].includes(entry.id)&&
-      !(entry.id==="touch_detector"&&run.rally_stage_progress.touch_detector?.rallies_total))
-      .map(entry=>rallyStageEntry(entry.id,entry,run));
-    for(const id of rallyBlockStages){
-      const entry=rallyStageEntry(id,null,run);
-      if(entry?.started_ms!=null)entries.push({...entry,id,name:id});
-    }
-    return entries.sort((a,b)=>(a.started_ms??0)-(b.started_ms??0));
-  };
+  const touchStageDuration=(entry,now)=>window.VolleyStudioChain.call(6,{kind:"touch_duration",entry,now});
+  const rallyStageEntry=(id,entry,run)=>window.VolleyStudioChain.call(6,{kind:"entry",id,entry,blocks:run?.rally_stage_progress,now:Date.now()});
+  const rallyStageState=(id,entry,run)=>window.VolleyStudioChain.call(6,{kind:"state",id,entry,blocks:run?.rally_stage_progress});
+  const rallyStageHistory=(stages,run)=>window.VolleyStudioChain.call(6,{kind:"history",stages,blocks:run?.rally_stage_progress,now:Date.now()});
   const stageResultText=(id,entry,run,now,done,running)=>{
     if(id==="touch_detector"){
       const count=run?.project_queue?.touch_detector_count??run?.touch_detector_count;
@@ -668,18 +594,7 @@
     if(!result)return "—";
     return result;
   };
-  const stageProgressPercent=(entry,running,done)=>{
-    if(done)return 100;
-    if(!running)return 0;
-    const reported=entry?.progress_percent;
-    if(typeof reported==="number"&&Number.isFinite(reported))
-      return Math.max(0,Math.min(100,reported));
-    const processed=entry?.frames_processed,total=entry?.frames_total;
-    if(typeof processed==="number"&&Number.isFinite(processed)&&
-      typeof total==="number"&&Number.isFinite(total)&&total>0)
-      return Math.max(0,Math.min(100,processed/total*100));
-    return null;
-  };
+  const stageProgressPercent=(entry,running,done)=>window.VolleyStudioChain.call(6,{kind:"percent",entry,running:!!running,done:!!done});
   const pipelineEdges=[
     ["video","ball"],
     ["ball","ball_stabilizer"],
@@ -705,15 +620,9 @@
     ["tracking","identity"],
     ["publish","identity"],
   ];
-  const graphLinkState=(condition,run)=>{
-    if(condition==="no_pose"){
-      if(run?.gpu_jobs?.pose||run?.primary_tracking?.pose_ready||Number(run?.player_tracking_stats?.refined_poses)>0)return "disabled";
-      return run?.profile?.gpu?.pose_enabled===false?"available":run?"disabled":"optional";
-    }
-    if(condition!=="pose")return "available";
-    if(run?.gpu_jobs?.pose||run?.primary_tracking?.pose_ready||Number(run?.player_tracking_stats?.refined_poses)>0)return "available";
-    return run?.profile?.gpu?.pose_enabled===false?"disabled":"optional";
-  };
+  const graphLinkState=(condition,run)=>window.VolleyStudioChain.call(6,{kind:"link",condition,
+    poseReady:!!(run?.gpu_jobs?.pose||run?.primary_tracking?.pose_ready||Number(run?.player_tracking_stats?.refined_poses)>0),
+    poseEnabled:run?.profile?.gpu?.pose_enabled,hasRun:!!run});
   const graphSettings={
     video:[".analysis-profile-source","#studio-analysis-editor"],
     ball:["#studio-gpu-stride","#studio-gpu-memory","#studio-gpu-threads"],
@@ -1064,6 +973,7 @@
   const updatePipelineGraph=(target,run)=>{
     target._graphRun=run;
     if(!target.querySelector(".analysis-flow-grid"))createPipelineGraph(target,run);
+    if(!window.VolleyballUi.isReady())return;
     const stages=combineRallyStages(Array.isArray(run?.stages)?run.stages:[]);
     const seen=new Map();
     for(const item of stages){const id=pipelineId(item);if(id)seen.set(id,item);}

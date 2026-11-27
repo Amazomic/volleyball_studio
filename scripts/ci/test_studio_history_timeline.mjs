@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {runInNewContext} from "node:vm";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 
 const source=readFileSync(new URL("../../rust/volley-app/static/studio_tabs.js",import.meta.url),"utf8");
 const registry=source.slice(source.indexOf("  const pipelineStages="),
@@ -72,7 +73,7 @@ const {renderHistory,updateLiveHistory,recordHistoryRun}=runInNewContext(registr
     make:(tag,klass,text)=>new Node(tag,klass,text),
     clear:node=>node.textContent="",historyDuration:ms=>ms===null?"—":Math.floor(ms/1000)+" с",
     historyLog:async()=>true,
-    window:{VolleyballUi:{translate:x=>x},sessionStorage},mainGraph:host,
+    window:{...previewWasmWindow(),VolleyballUi:{translate:x=>x},sessionStorage},mainGraph:host,
     showGraphResult:source=>{graphSource=source;},updatePipelineGraph:()=>{},
     requestAnimationFrame:()=>{}
   });
@@ -139,7 +140,7 @@ const showGraphResult=runInNewContext(registry+graphLabel+activity+source.slice(
   clear:node=>node.textContent="",
   make:(tag,klass,text)=>new Node(tag,klass,text),
   ui:{video:{options:[{value:"game.mp4",textContent:"game.mp4"}]}},
-  window:{VolleyballUi:{translate:text=>text}},historyDuration:ms=>Math.floor(ms/1000)+" с"
+  window:{...previewWasmWindow(),VolleyballUi:{translate:text=>text}},historyDuration:ms=>Math.floor(ms/1000)+" с"
 });
 showGraphResult({...finished,elapsed_ms:91000});
 assert.match(resultPanel.textContent,/Последний запуск · 1 фаза.*Завершён · 91 с/);

@@ -2,6 +2,7 @@
 //! No JS framework or wasm-bindgen dependencies; the browser reads/writes
 //! exactly 24 ASCII bytes through a fixed per-thread WASM memory buffer.
 //! The backend remains authoritative for source ownership and clip safety.
+mod analysis_stages;
 mod domain;
 mod preview_scrub;
 mod preview_timeline;

@@ -410,6 +410,7 @@ pub extern "C" fn volley_domain_call(operation: u32) -> i32 {
         3 => creative_catalog(&input),
         4 => creative_filter(&input),
         5 => crate::preview_timeline::next_rally(&input),
+        6 => crate::analysis_stages::call(&input),
         _ => return 0,
     };
     match serde_json::to_vec(&value) {

@@ -3,6 +3,7 @@ import {readFileSync} from "node:fs";
 import {join} from "node:path";
 import {fileURLToPath} from "node:url";
 import vm from "node:vm";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 
 const root=fileURLToPath(new URL("../..",import.meta.url));
 const js=readFileSync(join(root,"rust/volley-app/static/studio_tabs.js"),"utf8");
@@ -15,7 +16,7 @@ assert.match(css,/\.analysis-flow-node-stats\{[^}]*font-size:/);
 assert.match(js,/cell\.append\(node,stats\)/);
 const metricsSource=js.slice(js.indexOf("const playerTrackingSummary="),js.indexOf("const pipelineEdges="));
 assert.ok(metricsSource.startsWith("const playerTrackingSummary="));
-const metricsContext=vm.createContext({});
+const metricsContext=vm.createContext({window:previewWasmWindow()});
 vm.runInContext(metricsSource+"this.format=stageResultText;",metricsContext);
 const format=metricsContext.format;
 const blockRun={status:"running",stage_id:"players",rally_stage_progress:{
@@ -23,7 +24,7 @@ const blockRun={status:"running",stage_id:"players",rally_stage_progress:{
   pose:{state:"running",started_ms:2000,finished_ms:null,frames_processed:40,frames_total:100,rallies_completed:1,rallies_total:2,sampled_frames:20},
   detector_finished_ms:3000
 }};
-const blockContext=vm.createContext({});
+const blockContext=vm.createContext({window:previewWasmWindow()});
 vm.runInContext(metricsSource+"this.block=rallyStageEntry;this.state=rallyStageState;this.history=rallyStageHistory;",blockContext);
 const detector=blockContext.block("players",{started_ms:500,frames_processed:100,frames_total:100},blockRun);
 assert.equal(detector.finished_ms,3000);
@@ -105,7 +106,7 @@ const extract=(begin,end)=>{
   return js.slice(start,stop);
 };
 const definitions=extract("const pipelineStages=","const pipelineEdges=");
-const context=vm.createContext({});
+const context=vm.createContext({window:previewWasmWindow()});
 context.$=()=>({checked:false});
 vm.runInContext(definitions+"this.stages=pipelineStages;this.id=pipelineId;this.model=pipelineModelMeta;this.combine=combineRallyStages;this.icon=pipelineIcon;",context);
 assert.equal(context.model("ball")[0],"VballNetV4c");
@@ -140,7 +141,7 @@ assert.equal(context.combine([oldTouch,{...oldPose,started_ms:5000,finished_ms:6
 assert.equal(legacyRally.duration_ms,1000);
 assert.equal(context.model("touch_types"),null);
 assert.equal(context.model("rallies")[1],"algorithm");
-const labelContext=vm.createContext({window:{VolleyballUi:{translate:x=>x}},$:context.$});
+const labelContext=vm.createContext({window:{...previewWasmWindow(),VolleyballUi:{translate:x=>x}},$:context.$});
 vm.runInContext(definitions+extract("const graphLabel=","const graphText=")+"this.label=graphLabel;",labelContext);
 for(const [id,name] of [["ball","VballNetV4c"],["ball_stabilizer","Ball Stabilizer"],["players","RF-DETR Medium"],["touch_detector","Touch Detector"],["boxes","ByteTrack · BBox"],["tracking","ByteTrack · Track ID"],["touches","Touch Attribution"],["rallies","Rally Detector"],["identity","ReID"]])assert.equal(labelContext.label(id),name,id);
 assert.equal(labelContext.label("players",{profile:{gpu:{person_detector:"rfdetr-large"}}}),"RF-DETR Large");
@@ -199,7 +200,7 @@ assert.match(js,/graphDialog\.addEventListener\("scroll",hideGraphHint,true\)/);
 assert.match(js,/for\(const \[node,placeholder,wasOpen\] of graphMoved\)/);
 assert.match(js,/placeholder\.replaceWith\(node\)/);
 const stagePercent=extract("const stageProgressPercent=","const pipelineEdges=");
-const pctContext=vm.createContext({});
+const pctContext=vm.createContext({window:previewWasmWindow()});
 vm.runInContext(stagePercent+"this.percent=stageProgressPercent;",pctContext);
 assert.equal(pctContext.percent({frames_processed:50,frames_total:100},true,false),50);
 assert.equal(pctContext.percent({progress_percent:42.5},true,false),42.5);
@@ -272,7 +273,7 @@ assert.match(js,/stationary_ball_ms:inputValue\("studio-gpu-rally-stationary-ms"
 
 assert.match(js,/identity:"[^"]*исходных кадров[^"]*"/);
 const dataLinks=vm.runInNewContext(extract("const pipelineEdges=","const graphSettings=")
-  +"({links:pipelineEdges,state:graphLinkState});");
+  +"({links:pipelineEdges,state:graphLinkState});",{window:previewWasmWindow()});
 const actualInputs=target=>Array.from(dataLinks.links.filter(link=>link[1]===target),link=>link[0]).sort();
 assert.deepEqual(actualInputs("ball_stabilizer"),["ball"]);
 assert.deepEqual(actualInputs("rallies"),["ball_stabilizer"]);
@@ -324,8 +325,8 @@ const diagram={querySelectorAll(selector){
   return selector===".analysis-flow-node"?
     [playerNode,trackingNode]:[link];
 }};
-const edgeContext=vm.createContext({diagram,window:{VolleyballUi:{
-  locale:"en",
+const edgeContext=vm.createContext({diagram,window:{...previewWasmWindow(),VolleyballUi:{
+  locale:"en",isReady:()=>true,
   translate(value){return this.locale==="en"?{"Поиск игроков":"Player detection","Трекинг ID":"Track IDs"}[value]||value:value;}
 }}});
 vm.runInContext(definitions+extract("const pipelineEdges=","const graphSettings=")+
@@ -365,6 +366,14 @@ vm.runInContext(definitions+extract("const pipelineEdges=","const graphSettings=
   extract("const graphDescriptions=","let graphMoved=")+
   extract("const graphLabel=",'$("analysis-flow-feedback")')+
   'updatePipelineGraph(graph,{status:"complete",gpu_jobs:{pose:"saved"},stages:[{id:"ball",finished_ms:2000}]});',stageContext);
+const bridge=stageContext.window.VolleyStudioChain;
+stageContext.window.VolleyballUi.isReady=()=>false;
+stageContext.window.VolleyStudioChain={call(){throw Error("WASM must not be called before initialization");}};
+vm.runInContext('updatePipelineGraph(graph,{status:"running",stage_id:"pose"});',stageContext);
+assert.equal(graph._graphRun.stage_id,"pose");
+stageContext.window.VolleyStudioChain=bridge;
+stageContext.window.VolleyballUi.isReady=()=>true;
+vm.runInContext('updatePipelineGraph(graph,{status:"complete",gpu_jobs:{pose:"saved"},stages:[{id:"ball",finished_ms:2000}]});',stageContext);
 assert.equal(ballCard.classList["is-complete"],true);
 assert.equal(ballCard.title,"Находит мяч на кадрах видео.");
 assert.equal(ballCard.dataset.status,"complete");

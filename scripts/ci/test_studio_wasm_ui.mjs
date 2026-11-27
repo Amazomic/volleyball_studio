@@ -243,6 +243,7 @@ function createTestEnvironment(initialHash="#preview",flags={}){
     requestAnimationFrame:()=>1
   };
   runInNewContext(boot,context,{filename:"studio_ui.js"});
+  runInNewContext(readFileSync(join(root,"rust/volley-app/static/studio_chain.js"),"utf8"),context,{filename:"studio_chain.js"});
   runInNewContext(tabsCode,context,{filename:"studio_tabs.js"});
   state.runtime=win.VolleyballUi;
   state.brandBall=brandBall;

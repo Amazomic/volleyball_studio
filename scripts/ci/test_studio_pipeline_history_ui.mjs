@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {runInNewContext} from "node:vm";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 
 const source=readFileSync(new URL("../../rust/volley-app/static/studio_tabs.js",import.meta.url),"utf8");
 const registry=source.slice(source.indexOf("  const pipelineStages="),
@@ -68,7 +69,7 @@ const helpers={
   clear:node=>node.textContent="",
   historyDuration:()=> "—",
   historyLog:async()=>true,
-  window:{VolleyballUi:{translate:x=>x},sessionStorage},showGraphResult:()=>{},updatePipelineGraph:()=>{},
+  window:{...previewWasmWindow(),VolleyballUi:{translate:x=>x},sessionStorage},showGraphResult:()=>{},updatePipelineGraph:()=>{},
   requestAnimationFrame:()=>{}
 };
 const result=runInNewContext(registry+source.slice(from,to)+
