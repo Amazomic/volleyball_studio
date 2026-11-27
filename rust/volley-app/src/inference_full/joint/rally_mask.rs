@@ -411,20 +411,41 @@ impl RallyMask {
         let mut rejected_no_serve = Vec::new();
         if let Some(detector) = serve_detector {
             let mut earliest = 0;
-            merged.retain(|&(start, end)| {
+            merged.retain_mut(|interval| {
+                let (start, end) = *interval;
                 let previous_ground = ground_frames.partition_point(|&frame| frame < start);
                 let floor_limit = previous_ground
                     .checked_sub(1)
                     .map_or(0, |index| ground_frames[index].saturating_add(1));
-                let supported =
-                    detector.supports_opening(trajectory, (start, end), earliest.max(floor_limit));
-                if supported {
-                    earliest = end.saturating_add(1);
-                } else {
+                let previous_idle = motion
+                    .stationary
+                    .partition_point(|&(_, right)| right < start);
+                let idle_limit = previous_idle
+                    .checked_sub(1)
+                    .map_or(0, |index| motion.stationary[index].1.saturating_add(1));
+                let limit = earliest.max(floor_limit).max(idle_limit);
+                let Some((launch, _)) = detector.opening_origin(trajectory, (start, end), limit)
+                else {
                     rejected_no_serve.push((start, end));
+                    return false;
+                };
+                let lead = launch.saturating_sub(30).max(limit);
+                let opening = trajectory.points[lead as usize..launch as usize]
+                    .iter()
+                    .rposition(Option::is_none)
+                    .map_or(lead, |index| lead + index as u64 + 1);
+                *interval = (opening, end);
+                for candidates in [&mut short_lost, &mut terminal_loss_intervals] {
+                    if let Some(previous) =
+                        candidates.iter_mut().find(|item| **item == (start, end))
+                    {
+                        *previous = *interval;
+                    }
                 }
-                supported
+                earliest = end.saturating_add(1);
+                true
             });
+            short_lost.sort_unstable();
         }
         let padded = pad_rally_intervals(
             &merged,
@@ -715,6 +736,65 @@ mod tests {
             RallyMask::from_stabilized(&motion, settings, stabilizer, None, |_, _| Ok(vec![100]))
                 .unwrap();
         assert!(no_serve.merged.is_empty());
+    }
+
+    #[test]
+    fn short_opening_high_flight_is_recovered_before_later_moving_segment() {
+        let project = |[x, y, z]: [f64; 3]| {
+            [
+                (0.5 + 0.03 * x + 0.04 * y) / (1.0 + 0.05 * x),
+                (0.5 - 0.01 * x - 0.09 * z) / (1.0 + 0.05 * x),
+            ]
+        };
+        let court = CourtTransform::new(
+            [
+                [-9., -4.5, 0.],
+                [9., -4.5, 0.],
+                [9., 4.5, 0.],
+                [-9., 4.5, 0.],
+            ]
+            .map(project),
+        )
+        .unwrap()
+        .with_net(Some([[0., -4.5, 2.43], [0., 4.5, 2.43]].map(project)))
+        .unwrap();
+        let detector = ServeFlightDetector::new(&court).unwrap();
+        let mut points = vec![None; 330];
+        for (frame, point) in points.iter_mut().enumerate().take(91).skip(30) {
+            let t = (frame - 30) as f64 / 30.;
+            let projected = project([9. - 10. * t, 0., 2.2 + 9. * t - 4.905 * t * t]);
+            *point = (projected[1] >= 0.).then_some(projected);
+        }
+        for (frame, point) in points.iter_mut().enumerate().take(161).skip(150) {
+            let t = (frame - 150) as f64 / 30.;
+            *point = Some(project([-9. + 12. * t, t, 2.2 + 5.5 * t - 4.905 * t * t]));
+        }
+        for (frame, point) in points.iter_mut().enumerate().take(291).skip(161) {
+            let t = (frame - 150) as f64 / 30.;
+            *point = Some(if frame <= 189 {
+                project([-9. + 12. * t, t, 2.2 + 5.5 * t - 4.905 * t * t])
+            } else {
+                [0.35 + (frame - 190) as f64 * 0.002, 0.55]
+            });
+        }
+        let motion = StabilizedBallMotion {
+            observed_frames: points.iter().flatten().count(),
+            confidence_frames: points.iter().flatten().count(),
+            interpolated: vec![false; points.len()],
+            rejected_frames: Vec::new(),
+            points,
+        };
+        let mask = RallyMask::from_stabilized(
+            &motion,
+            PrimaryRallySettings::default(),
+            BallStabilizerSettings::default(),
+            Some(&detector),
+            |_, _| Ok(vec![280]),
+        )
+        .unwrap();
+        assert_eq!(mask.merged, vec![(30, 280)], "{mask:?}");
+        assert_eq!(mask.rally_intervals, vec![(15, 295)]);
+        assert!(mask.includes(30));
     }
 
     #[test]

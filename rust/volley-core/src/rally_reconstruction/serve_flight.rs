@@ -3,7 +3,7 @@ use crate::{
     court_geometry::{CourtSide, CourtTransform},
 };
 
-pub const SERVE_FLIGHT_VERSION: &str = "calibrated_opening_serve_flight_v1";
+pub const SERVE_FLIGHT_VERSION: &str = "calibrated_opening_serve_flight_v2";
 const NET_HEIGHT_M: f64 = 2.43;
 const GRAVITY_HALF: f64 = 4.905;
 
@@ -50,9 +50,13 @@ impl ServeFlightDetector {
         {
             return None;
         }
-        let first = start.saturating_sub(60).max(earliest);
+        let first = start.saturating_sub(150).max(earliest);
         let last = start.saturating_add(45).min(end.saturating_sub(24));
-        for launch in (first..=last).step_by(3) {
+        if first > last {
+            return None;
+        }
+        let mut regular = None;
+        'regular: for launch in (first..=last).step_by(3) {
             for span in [24, 30, 36, 45, 54, 63] {
                 if launch + span <= end {
                     if let Some((side, crossing)) = self.flight_origin(
@@ -60,12 +64,24 @@ impl ServeFlightDetector {
                         &trajectory.interpolated[launch as usize..=(launch + span) as usize],
                         None,
                     ) {
-                        return Some((launch, side, launch + crossing));
+                        regular = Some((launch, side, launch + crossing));
+                        break 'regular;
                     }
                 }
             }
         }
-        self.supports_high_flight(trajectory, first as usize, last as usize, end as usize)
+        let high_last = regular.map_or(last, |(launch, _, _)| launch.saturating_sub(1));
+        if regular.is_none_or(|(launch, _, _)| launch > first) {
+            if let Some(high) = self.supports_high_flight(
+                trajectory,
+                first as usize,
+                high_last as usize,
+                end as usize,
+            ) {
+                return Some(high);
+            }
+        }
+        regular
     }
 
     fn supports_high_flight(
@@ -410,6 +426,36 @@ mod tests {
         assert!(detector.supports_opening(&flight, (0, 60), 0));
         flight.points[40..].fill(None);
         assert!(!detector.supports_opening(&flight, (0, 60), 0));
+    }
+
+    #[test]
+    fn opening_recovers_earlier_high_serve_instead_of_later_opposite_flight() {
+        let early = (0..=60).map(|frame| {
+            let t = f64::from(frame) / 30.0;
+            let point = project([9.0 - 10.0 * t, 0.0, 2.2 + 9.0 * t - GRAVITY_HALF * t * t]);
+            (point[1] >= 0.0).then_some(point)
+        });
+        let mut points = vec![None; 180];
+        for (frame, point) in early.enumerate() {
+            points[frame + 10] = point;
+        }
+        let later = trajectory([-9.0, 0.0, 2.2], [12.0, 1.0, 5.5]);
+        points[130..170].copy_from_slice(&later.points);
+        let motion = StabilizedBallMotion {
+            observed_frames: points.iter().flatten().count(),
+            confidence_frames: points.iter().flatten().count(),
+            interpolated: vec![false; points.len()],
+            rejected_frames: Vec::new(),
+            points,
+        };
+        let detector = detector();
+        let (launch, side, crossing) = detector.opening_flight(&motion, (130, 179), 0).unwrap();
+        assert!((10..=20).contains(&launch), "launch={launch}");
+        assert_eq!(side, CourtSide::Far);
+        assert!(crossing < 100);
+        let (launch, side, _) = detector.opening_flight(&motion, (130, 179), 100).unwrap();
+        assert_eq!(launch, 130);
+        assert_eq!(side, CourtSide::Near);
     }
 
     #[test]

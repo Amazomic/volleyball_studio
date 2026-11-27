@@ -2039,7 +2039,7 @@ pub(crate) struct InitialServeProposal {
     source: &'static str,
 }
 
-pub(crate) const INITIAL_SERVE_ATTRIBUTION_VERSION: &str = "calibrated_flight_origin_v8";
+pub(crate) const INITIAL_SERVE_ATTRIBUTION_VERSION: &str = "calibrated_flight_origin_v9";
 pub(crate) const INITIAL_SERVE_SEARCH_FRAMES: u64 = 50;
 pub(crate) const INITIAL_SERVE_FLIGHT_FRAMES: u64 = 120;
 pub(crate) const INITIAL_SERVE_CONTACT_FRAMES: u64 = 5;
