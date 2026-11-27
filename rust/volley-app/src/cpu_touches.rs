@@ -2031,13 +2031,15 @@ fn emit_record(
 pub(crate) struct InitialServeProposal {
     rally_start_frame: u64,
     trajectory_start_frame: Option<u64>,
+    #[serde(skip)]
+    first_crossing_frame: Option<u64>,
     provisional_track_id: Option<u64>,
     kind: &'static str,
     identity_verified: bool,
     source: &'static str,
 }
 
-pub(crate) const INITIAL_SERVE_ATTRIBUTION_VERSION: &str = "calibrated_flight_origin_v7";
+pub(crate) const INITIAL_SERVE_ATTRIBUTION_VERSION: &str = "calibrated_flight_origin_v8";
 pub(crate) const INITIAL_SERVE_SEARCH_FRAMES: u64 = 50;
 pub(crate) const INITIAL_SERVE_FLIGHT_FRAMES: u64 = 120;
 pub(crate) const INITIAL_SERVE_CONTACT_FRAMES: u64 = 5;
@@ -2171,12 +2173,23 @@ fn visible_serve_strikers(
     strikers
 }
 
+#[cfg(test)]
 fn calibrated_serve_origin(
     frames: &[TouchFrame],
     rally_start: u64,
     court: &CourtTransform,
     min_score: f64,
 ) -> Option<(u64, CourtSide)> {
+    calibrated_serve_flight(frames, rally_start, court, min_score)
+        .map(|(launch, side, _)| (launch, side))
+}
+
+fn calibrated_serve_flight(
+    frames: &[TouchFrame],
+    rally_start: u64,
+    court: &CourtTransform,
+    min_score: f64,
+) -> Option<(u64, CourtSide, u64)> {
     use volley_core::{
         ball_interpolation::StabilizedBallMotion,
         rally_reconstruction::serve_flight::ServeFlightDetector,
@@ -2209,8 +2222,9 @@ fn calibrated_serve_origin(
         confidence_frames: observed,
         observed_frames: observed,
     };
-    let (launch, side) = ServeFlightDetector::new(court)?.opening_origin(&motion, (0, end), 0)?;
-    Some((rally_start + launch, side))
+    let (launch, side, crossing) =
+        ServeFlightDetector::new(court)?.opening_flight(&motion, (0, end), 0)?;
+    Some((rally_start + launch, side, rally_start + crossing))
 }
 
 fn serve_track_on_origin_side(
@@ -2300,19 +2314,19 @@ pub(crate) fn initial_serve_proposal(
             })
     });
     let origin = court.and_then(|court| {
-        calibrated_serve_origin(frames, rally_start, court, settings.min_ball_score)
+        calibrated_serve_flight(frames, rally_start, court, settings.min_ball_score)
     });
     let launch = match court {
-        Some(_) => origin.map(|(frame, _)| frame),
+        Some(_) => origin.map(|(frame, _, _)| frame),
         None => first_ball.map(|frame| frame.frame_index),
     };
     let matches_origin = |id| {
         court.is_none_or(|court| {
-            origin.is_some_and(|(_, side)| serve_track_on_origin_side(frames, id, court, side))
+            origin.is_some_and(|(_, side, _)| serve_track_on_origin_side(frames, id, court, side))
         })
     };
     let candidate = launch.and_then(|launch| {
-        if let Some((court, (_, CourtSide::Far))) = court.zip(origin) {
+        if let Some((court, (_, CourtSide::Far, _))) = court.zip(origin) {
             if let Some(id) = deepest_far_serve_track(frames, launch, court) {
                 return Some(id);
             }
@@ -2329,6 +2343,7 @@ pub(crate) fn initial_serve_proposal(
     InitialServeProposal {
         rally_start_frame: rally_start,
         trajectory_start_frame: launch,
+        first_crossing_frame: origin.map(|(_, _, crossing)| crossing),
         provisional_track_id: candidate,
         kind: "serve",
         identity_verified: false,
@@ -2394,6 +2409,35 @@ fn classify_opening_serve(
     }
 }
 
+fn retain_serve_sequence_event(
+    event: &mut PhysicalTouchCandidate,
+    proposal: &InitialServeProposal,
+) -> bool {
+    use volley_core::action_prediction::ActionKind;
+    let is_serve = event
+        .action_prediction
+        .as_ref()
+        .is_some_and(|p| p.kind == ActionKind::Serve);
+    let at_launch = proposal
+        .trajectory_start_frame
+        .is_some_and(|launch| launch.abs_diff(event.frame_index) < INITIAL_SERVE_CONTACT_FRAMES);
+    let matching_serve = is_serve
+        && at_launch
+        && proposal.provisional_track_id.is_some()
+        && proposal.provisional_track_id == event.provisional_track_id;
+    if proposal
+        .first_crossing_frame
+        .is_some_and(|crossing| event.frame_index < crossing)
+        || at_launch
+    {
+        return matching_serve;
+    }
+    if is_serve && proposal.first_crossing_frame.is_some() {
+        event.action_prediction = None;
+    }
+    true
+}
+
 fn snap_initial_serve(proposals: &mut [InitialServeProposal], event: &PhysicalTouchCandidate) {
     use volley_core::action_prediction::ActionKind;
     if !event
@@ -2435,7 +2479,17 @@ fn select_pending_touch(
         if is_launch_departure_echo(last, &event, separation) {
             return None;
         }
-        if event.frame_index.saturating_sub(last.frame_index) <= separation {
+        let same_serve = event.provisional_track_id.is_some()
+            && event.provisional_track_id == last.provisional_track_id
+            && [&event, &*last].iter().all(|candidate| {
+                candidate
+                    .action_prediction
+                    .as_ref()
+                    .is_some_and(|p| p.kind == volley_core::action_prediction::ActionKind::Serve)
+            })
+            && event.frame_index.saturating_sub(last.frame_index)
+                <= 2 * (INITIAL_SERVE_CONTACT_FRAMES - 1);
+        if same_serve || event.frame_index.saturating_sub(last.frame_index) <= separation {
             let better = match (event.contact_landmark, last.contact_landmark) {
                 (Some(next), Some(previous))
                     if event.body_contact_supported && last.body_contact_supported =>
@@ -3668,6 +3722,9 @@ fn detect_stream_with_pose(
                     .filter(|p| preliminary_intervals.is_some() && p.rally_start_frame == window.0)
                 {
                     classify_opening_serve(&mut event, proposal, evidence_frames, (width, height));
+                    if !retain_serve_sequence_event(&mut event, proposal) {
+                        continue;
+                    }
                 }
                 motion_candidates += 1;
 
@@ -4812,6 +4869,7 @@ mod tests {
         let mut proposal = InitialServeProposal {
             rally_start_frame: 100,
             trajectory_start_frame: Some(145),
+            first_crossing_frame: Some(170),
             provisional_track_id: Some(6),
             kind: "serve",
             identity_verified: false,
@@ -4848,6 +4906,32 @@ mod tests {
         );
         snap_initial_serve(std::slice::from_mut(&mut proposal), &event);
         assert_eq!(proposal.trajectory_start_frame, Some(146));
+        assert!(retain_serve_sequence_event(&mut event, &proposal));
+        let mut duplicate = event.clone();
+        duplicate.frame_index = 150;
+        duplicate.motion_frame_index = 150;
+        duplicate.direction_change_deg = 90.0;
+        duplicate.probability = 0.99;
+        let mut pending = Some(event.clone());
+        assert!(select_pending_touch(&mut pending, duplicate, 3).is_none());
+        let mut same_track_echo = event.clone();
+        same_track_echo.frame_index = 149;
+        same_track_echo.action_prediction = None;
+        assert!(!retain_serve_sequence_event(
+            &mut same_track_echo,
+            &proposal
+        ));
+        assert!(!retain_serve_sequence_event(&mut other, &proposal));
+        let mut echo = reception.clone();
+        echo.frame_index = 169;
+        assert!(!retain_serve_sequence_event(&mut echo, &proposal));
+        assert!(retain_serve_sequence_event(&mut reception, &proposal));
+        let mut late_serve = event.clone();
+        late_serve.frame_index = 180;
+        assert!(retain_serve_sequence_event(&mut late_serve, &proposal));
+        assert!(late_serve.action_prediction.is_none());
+        proposal.provisional_track_id = None;
+        assert!(!retain_serve_sequence_event(&mut event, &proposal));
     }
 
     #[test]

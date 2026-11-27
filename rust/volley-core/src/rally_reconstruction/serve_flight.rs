@@ -33,6 +33,16 @@ impl ServeFlightDetector {
         interval: (u64, u64),
         earliest: u64,
     ) -> Option<(u64, CourtSide)> {
+        self.opening_flight(trajectory, interval, earliest)
+            .map(|(launch, side, _)| (launch, side))
+    }
+
+    pub fn opening_flight(
+        &self,
+        trajectory: &StabilizedBallMotion,
+        interval: (u64, u64),
+        earliest: u64,
+    ) -> Option<(u64, CourtSide, u64)> {
         let (start, end) = interval;
         if start > end
             || end >= trajectory.points.len() as u64
@@ -45,12 +55,12 @@ impl ServeFlightDetector {
         for launch in (first..=last).step_by(3) {
             for span in [24, 30, 36, 45, 54, 63] {
                 if launch + span <= end {
-                    if let Some(side) = self.flight_origin(
+                    if let Some((side, crossing)) = self.flight_origin(
                         &trajectory.points[launch as usize..=(launch + span) as usize],
                         &trajectory.interpolated[launch as usize..=(launch + span) as usize],
                         None,
                     ) {
-                        return Some((launch, side));
+                        return Some((launch, side, launch + crossing));
                     }
                 }
             }
@@ -64,7 +74,7 @@ impl ServeFlightDetector {
         first: usize,
         last: usize,
         end: usize,
-    ) -> Option<(u64, CourtSide)> {
+    ) -> Option<(u64, CourtSide, u64)> {
         let points = &trajectory.points;
         for exit in first.saturating_add(8)..=last.saturating_add(28).min(end) {
             let (Some(upper), Some(before)) = (points[exit], points[exit - 6]) else {
@@ -96,12 +106,12 @@ impl ServeFlightDetector {
                         if finish > end || finish - launch > 84 {
                             continue;
                         }
-                        if let Some(side) = self.flight_origin(
+                        if let Some((side, crossing)) = self.flight_origin(
                             &points[launch..=finish],
                             &trajectory.interpolated[launch..=finish],
                             Some((exit + 1 - launch, entry - launch)),
                         ) {
-                            return Some((launch as u64, side));
+                            return Some((launch as u64, side, launch as u64 + crossing));
                         }
                     }
                 }
@@ -115,7 +125,7 @@ impl ServeFlightDetector {
         points: &[Option<[f64; 2]>],
         interpolated: &[bool],
         gap: Option<(usize, usize)>,
-    ) -> Option<CourtSide> {
+    ) -> Option<(CourtSide, u64)> {
         let real = |range: std::ops::Range<usize>| {
             range
                 .filter(|&i| points[i].is_some() && !interpolated[i])
@@ -202,11 +212,14 @@ impl ServeFlightDetector {
         (count > 0
             && (error / f64::from(count)).sqrt() <= 0.018
             && gap.is_none_or(|(left, right)| hidden_top && hidden_high * 3 >= right - left))
-        .then_some(if x < 0.0 {
-            CourtSide::Near
-        } else {
-            CourtSide::Far
-        })
+        .then_some((
+            if x < 0.0 {
+                CourtSide::Near
+            } else {
+                CourtSide::Far
+            },
+            (crossing * 30.0).ceil() as u64,
+        ))
     }
 }
 
@@ -318,6 +331,8 @@ mod tests {
             assert!(detector.supports_opening(&flight, (0, 39), 0));
             let (launch, side) = detector.opening_origin(&flight, (0, 39), 0).unwrap();
             assert_eq!(launch, 0);
+            let (_, _, crossing) = detector.opening_flight(&flight, (0, 39), 0).unwrap();
+            assert!((22..=23).contains(&crossing));
             assert_eq!(
                 side,
                 if direction < 0.0 {
