@@ -10,4 +10,4 @@ Captured on 2026-11-27 from the running Windows-native Volleyball Studio at `htt
 
 Screenshots are unmodified browser captures. No original match video, project database or personal photo library was copied into the repository. The captures document the interface and are not a benchmark of detection accuracy.
 
-The old `examples/output.gif` is retained solely because two opt-in RF-DETR CUDA parity tests in `rust/volley-inference/src/person.rs` use it as an input fixture. It is not a current Studio demonstration.
+The optional RF-DETR CUDA parity tests use an explicit external media path (`VOLLEY_AB_SOURCE`); demonstration media is not a test fixture.

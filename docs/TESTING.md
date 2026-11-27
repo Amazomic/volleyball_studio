@@ -17,8 +17,7 @@ workspace `rust/Cargo.toml` (контракт: `AGENTS.md`).
 ## Полный локальный прогон (для изменений приложения перед коммитом/PR)
 
 Windows native, требуется Rust (stable, clippy, таргет
-`wasm32-unknown-unknown`), Node.js 22+ и git-lfs (модели `models/`, `ov/` и
-медиа `examples/` хранятся в LFS; после клона — `git lfs install && git lfs pull`):
+`wasm32-unknown-unknown`), Node.js 22+ и git-lfs (модели `models/`, `ov/` хранятся в LFS; после клона — `git lfs install && git lfs pull`):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\check-all.ps1
@@ -97,3 +96,7 @@ PASS/FAIL/NOT TESTED. Приёмка миграции закрыта на эта
 Автоматического merge gate нет.
 
 Документационные исправления уже опубликованной версии не меняют тег и бинарные артефакты; для них достаточно проверки ссылок, путей и `git diff --check`, если не затронуты исполняемые контракты.
+
+### Внешнее медиа для опциональных RF-DETR CUDA-тестов
+
+Укажите `VOLLEY_AB_MODEL_ROOT` (репозиторий с весами моделей) и `VOLLEY_AB_SOURCE` (внешний тестовый клип с видимыми людьми, не менее 11 кадров при 5 fps). Оба ignored-теста в `rust/volley-inference/src/person.rs` требуют эти пути. Бенчмарк `scripts/benchmark_pose_models.py` требует явного `--source <path>`. Исторические отчёты сохраняют исходные пути.

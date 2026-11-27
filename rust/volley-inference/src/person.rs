@@ -1084,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires verified batch model, CUDA and repository fixture"]
+    #[ignore = "requires verified batch model, CUDA and external media"]
     fn primary_rfdetr_batch4_fp32_matches_single_frame_cuda() -> Result<(), String> {
         use crate::gpu_preprocess::{GpuBuffer, GpuPreprocessor};
         let root = std::path::PathBuf::from(
@@ -1092,7 +1092,7 @@ mod tests {
         );
         let video = std::process::Command::new("ffmpeg")
             .args(["-hide_banner", "-loglevel", "error", "-i"])
-            .arg(root.join("examples/output.gif"))
+            .arg(std::env::var_os("VOLLEY_AB_SOURCE").expect("Set VOLLEY_AB_SOURCE"))
             .args([
                 "-vf",
                 "fps=5,scale=640:360,format=nv12",
@@ -1259,12 +1259,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires local CUDA/ORT and repository model fixture"]
+    #[ignore = "requires local CUDA/ORT, model weights and external media"]
     fn reused_rfdetr_cuda_binding_matches_fresh_binding() {
         let root = std::path::PathBuf::from(std::env::var("VOLLEY_AB_MODEL_ROOT").unwrap());
         let rgb = std::process::Command::new("ffmpeg")
             .args(["-hide_banner", "-loglevel", "error", "-i"])
-            .arg(root.join("examples/output.gif"))
+            .arg(std::env::var_os("VOLLEY_AB_SOURCE").expect("Set VOLLEY_AB_SOURCE"))
             .args([
                 "-vf",
                 "fps=5,scale=640:360,format=rgb24",

@@ -112,3 +112,5 @@ models/rf-detr-large.onnx
 models/rf-detr-medium-batch4.onnx
 
 models/rf-detr-medium-batch8-fp16.onnx
+
+/examples/

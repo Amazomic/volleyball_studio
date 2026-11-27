@@ -20,7 +20,6 @@ import numpy as np
 import onnxruntime as ort
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE = ROOT / "examples" / "gtu_20250316_002.mp4"
 OUT_DIR = ROOT / "results" / "pose_model_benchmark_20261115"
 POSE_H, POSE_W = 256, 192
 DET_H = DET_W = 576
@@ -326,7 +325,7 @@ def pose(args):
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--stage",choices=["detect","rtmpose","rtmpose_l384","vitpose"],required=True)
-    ap.add_argument("--source",type=Path,default=SOURCE)
+    ap.add_argument("--source",type=Path,required=True)
     ap.add_argument("--out",type=Path,default=OUT_DIR)
     ap.add_argument("--vitpose",default="/home/amazomic/.cache/volley-pose-benchmark/models/vitpose-l.onnx")
     ap.add_argument("--device",choices=["cuda","cpu"],default="cuda")
