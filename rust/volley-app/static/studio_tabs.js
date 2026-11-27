@@ -499,11 +499,11 @@
     publish:[["path",{d:"M4 12h16m-6-6 6 6-6 6"}]],
     identity:[["path",{d:"M10 13a5 5 0 0 0 7 .5l3-3a5 5 0 0 0-7-7l-2 2m3 5a5 5 0 0 0-7-.5l-3 3a5 5 0 0 0 7 7l2-2"}]],
   };
-  pipelineGlyphs.touch_detector=pipelineGlyphs.touches;
+  pipelineGlyphs.touch_detector=[["path",{d:"M3 19C10 8 21 3 32 6",opacity:.75,"data-part":"trajectory"}],["path",{d:"M17 16l-2-2a1.5 1.5 0 0 0-2 2l4 5 2 2h7c3-2 4-5 4-8v-3a1.5 1.5 0 0 0-3 0v3-5a1.5 1.5 0 0 0-3 0v5-6a1.5 1.5 0 0 0-3 0v6-4a1.5 1.5 0 0 0-3 0v7l-1-2Z","data-part":"palm"}],["circle",{cx:40,cy:7,r:6}],["path",{d:"M36 3c3 0 5 2 5 5m3-5c-3 2-4 5-3 9m-6-2c2-3 6-4 10-2","data-part":"ball-seams"}],["path",{d:"m33 13 1-2m0 5 3-1","stroke-width":1.3}]];
   const pipelineIcon=id=>{
     const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
     svg.setAttribute("class","analysis-flow-node-icon");
-    svg.setAttribute("viewBox",id==="ball"?"0 0 48 24":"0 0 24 24");
+    svg.setAttribute("viewBox",(id==="ball"||id==="touch_detector")?"0 0 48 24":"0 0 24 24");
     svg.setAttribute("fill","none");
     svg.setAttribute("stroke","currentColor");
     svg.setAttribute("stroke-width","1.7");
