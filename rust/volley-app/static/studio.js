@@ -3314,30 +3314,44 @@
       timeline.status.textContent="Шкала недоступна: "+String(error?.message||error);
     }
   };
-  const rallyAtTimelineTime=seconds=>{
-    if(training.active){
-      const frame=(seconds-(Number(s.analysisOffset)||0))*fps();
-      if(reference.active){
-        const match=annotationSourceValid()&&annotation.data?.reviewed?
-          annotation.data.rallies.find(rally=>rally.start<=frame&&rally.end>=frame):null;
+  const rallyAtTimelineTime=(()=>{
+    let indexedRows=null;
+    return seconds=>{
+      if(training.active){
+        const frame=(seconds-(Number(s.analysisOffset)||0))*fps();
+        if(reference.active){
+          const match=annotationSourceValid()&&annotation.data?.reviewed?
+            annotation.data.rallies.find(rally=>rally.start<=frame&&rally.end>=frame):null;
+          return match?{start_frame:match.start,end_frame:match.end}:null;
+        }
+        const groups=trainingRallyGroups();
+        const match=(timelineRallyLayers.touches.checked?groups.touches:[])
+          .find(group=>group.start<=frame&&group.end>=frame)||
+          (timelineRallyLayers.ball.checked?groups.ball:[])
+          .find(group=>group.start<=frame&&group.end>=frame);
         return match?{start_frame:match.start,end_frame:match.end}:null;
       }
-      const groups=trainingRallyGroups();
-      const match=(timelineRallyLayers.touches.checked?groups.touches:[])
-        .find(group=>group.start<=frame&&group.end>=frame)||
-        (timelineRallyLayers.ball.checked?groups.ball:[])
-        .find(group=>group.start<=frame&&group.end>=frame);
-      return match?{start_frame:match.start,end_frame:match.end}:null;
-    }
-    const rows=timeline.data?.rallies||[];
-    let left=0,right=rows.length;
-    const frame=(seconds-(Number(s.analysisOffset)||0))*fps();
-    while(left<right){
-      const mid=(left+right)>>>1;
-      if(rows[mid].start_frame<=frame)left=mid+1;else right=mid;
-    }
-    return left>0&&frame<rows[left-1].end_frame+1?rows[left-1]:null;
-  };
+      const rows=timeline.data?.rallies;
+      if(!rows?.length){indexedRows=null;return null;}
+      if(!window.VolleyballUi?.isReady())return null;
+      const engine=window.VolleyballUi.engine;
+      if(indexedRows!==rows){
+        indexedRows=null;
+        const ptr=engine.volley_preview_rally_reserve(rows.length);
+        if(!ptr)throw Error("Индекс розыгрышей превышает лимит WASM");
+        const bounds=new Float64Array(engine.memory.buffer,ptr,rows.length*2);
+        for(let i=0;i<rows.length;i++){
+          bounds[i*2]=Number(rows[i].start_frame);
+          bounds[i*2+1]=Number(rows[i].end_frame);
+        }
+        if(engine.volley_preview_rally_commit()!==1)throw Error("Некорректный индекс розыгрышей");
+        indexedRows=rows;
+      }
+      const frame=(seconds-(Number(s.analysisOffset)||0))*fps();
+      const index=engine.volley_preview_rally_at(frame);
+      return index>=0?rows[index]:null;
+    };
+  })();
   const schedulePreviewRecovery=key=>{
     if(s.videoKey!==key||previewLoad.key!==key||previewLoad.pending||
        previewLoad.timer||previewLoad.retries>=2)return;
@@ -4610,7 +4624,8 @@
         if(!valid()||s.projectRallies.get(source.run)?.analysis!==analysis)return;
         s.projectRallies.set(source.run,source);
       }
-      const first=[...source.rows].sort((a,b)=>a.start_frame-b.start_frame)[0];
+      const index=window.VolleyStudioChain.call(5,{rows:source.rows.map(row=>({start:row.start_frame})),first:true});
+      const first=index===null?null:source.rows[index];
       if(first){await openProjectRally(source,first,true);return;}
     }
   };
@@ -5396,13 +5411,11 @@
     const rows=timeline.data?.project_id===s.project&&
       timeline.data?.rally_run_id===s.run?timeline.data.rallies:
       s.projectRallies?.get(s.run)?.rows||s.items;
-    const start=row=>Number(row.detected_start_frame??row.start_frame??
-      row.manual_clip?.start_frame??Infinity);
-    const ordered=[...rows].filter(row=>Number.isFinite(start(row)))
-      .sort((a,b)=>start(a)-start(b));
-    const index=ordered.findIndex(row=>row.candidate_id===s.current);
-    const row=index>=0?ordered[index+1]:
-      ordered.find(entry=>(Number(s.analysisOffset)||0)+start(entry)/fps()>=(s.clipEnd??ui.video.currentTime)-0.02);
+    const index=window.VolleyStudioChain.call(5,{
+      rows:rows.map(row=>({id:row.candidate_id,start:Number(row.detected_start_frame??row.start_frame??row.manual_clip?.start_frame??Infinity)})),
+      current:s.current,offset:Number(s.analysisOffset)||0,fps:fps(),boundary:s.clipEnd??ui.video.currentTime
+    });
+    const row=index===null?null:rows[index];
     return row?(s.items.find(item=>item.candidate_id===row.candidate_id)||row):null;
   };
   const onRallyBoundary=()=>{
