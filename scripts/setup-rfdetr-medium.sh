@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install ONLY the previously benchmarked RF-DETR Medium ONNX artifact.
 set -euo pipefail
-repo="$(cd "$(dirname "$0")/../../.." && pwd)"
+repo="$(cd "$(dirname "$0")/.." && pwd)"
 model="$repo/models/rf-detr-medium.onnx"
 expected=18250b5a3a9552ae117d592f8e8c27fe52438d70c914a77a8913fc45d8f29e69
 url=https://huggingface.co/PierreMarieCurie/rf-detr-onnx/resolve/main/rf-detr-medium.onnx
@@ -23,4 +23,4 @@ printf '%s  %s\n' "$expected" "$tmp" | sha256sum --check --status || {
 }
 chmod 0644 "$tmp"
 mv "$tmp" "$model"
-echo "Installed verified experimental RF-DETR Medium at $model"
+echo "Installed verified RF-DETR Medium at $model"

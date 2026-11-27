@@ -56,6 +56,8 @@
 
 ## Датированные исследования и свидетельства
 
+- [Исторический эксперимент RF-DETR Medium](RFDETR_MEDIUM_NATIVE_EXPERIMENT.md) (старый SAM/RF-DETR harness в истории Git, действующий установщик: ../scripts/setup-rfdetr-medium.sh)
+
 - [Аудит GPU-настроек](GPU_DEFAULTS_AUDIT.md)
 - [A/B семплирования рамок, 15.11.2026](PLAYER_BOX_SAMPLING_AB_20261115.md)
 - [Журнал задач калибровки площадки](COURT_CALIBRATION_AGENTS.md)

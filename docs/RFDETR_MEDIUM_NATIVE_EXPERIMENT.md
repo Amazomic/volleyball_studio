@@ -1,6 +1,6 @@
 # RF-DETR Medium — нативный эксперимент для Volley
 
-**Статус:** отдельная ветка, RTMDet-Nano остаётся выбором по умолчанию. Studio пользователя и текущие задания не перезаписываются. SAM 3.1 по-прежнему ожидает доступа к весам.
+**Историческое исследование от 15.11.2026.** Сейчас RF-DETR Medium — штатный детектор, старый RTMDet-Nano удалён из runtime. Экспериментальный SAM/RF-DETR Python harness и его отдельные Rust-примеры удалены из рабочего дерева 27.11.2026. Исходники и измерения сохранены в Git на коммите 0af4b3d821e4457df2d1a44ade1fd9127a64750b (каталог scripts/experiments/sam31 и rust/volley-app/examples). Ниже — исторические условия, не команды актуального runtime.
 
 ## Точки интеграции
 
@@ -20,7 +20,7 @@ https://huggingface.co/PierreMarieCurie/rf-detr-onnx
 Установка в изолированный checkout из WSL:
 
 ```bash
-bash scripts/experiments/sam31/install_rfdetr_medium.sh
+bash scripts/setup-rfdetr-medium.sh
 ```
 
 Скрипт проверяет SHA-256 и не перезаписывает посторонние веса.
@@ -32,7 +32,7 @@ bash scripts/experiments/sam31/install_rfdetr_medium.sh
 - Не задана или `VOLLEY_PERSON_DETECTOR=rtmdet-nano`: исходное поведение.
 - `VOLLEY_PERSON_DETECTOR=rfdetr-medium`: альтернативный RF-DETR Medium.
 
-**Переменная должна присутствовать в окружении процесса самого Rust-сервера**; установка переменной в PowerShell не гарантирует автоматической передачи в WSL. UI-переключатель параметров анализа пока не добавлялся. Для теста из WSL:
+**Переменная должна присутствовать в окружении процесса самого Rust-сервера**; установка переменной в PowerShell не гарантирует автоматической передачи в WSL. UI-переключатель параметров анализа пока не добавлялся. Историческая команда из архивного коммита (не выполняется на текущей ветке):
 
 ```bash
 source /mnt/c/Users/amazomic/Desktop/github/fast-volleyball-tracking-inference/scripts/setup_rust_ort_cuda.sh check
@@ -42,7 +42,7 @@ cargo run --manifest-path rust/Cargo.toml -p volley-app --release --offline --ex
   "$PWD" /tmp/volley-sam31/sample_640x360.mp4 /tmp/volley-sam31/rfdetr_native_medium.jsonl
 ```
 
-Отмена: `unset VOLLEY_PERSON_DETECTOR`. Вернуть прежний детектор можно без удаления данных и модели.
+Для актуального runtime поддерживаются RF-DETR Medium и Large; старые значения RTMDet не поддерживаются.
 
 ## Проверки и ограничения
 

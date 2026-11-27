@@ -4960,3 +4960,9 @@ Studio показывает кнопку перехода между debug и re
 - Контракт: nextStage=null при полностью записанной карте, явный OWNER_ACCEPTED_ARCHITECTURE на этапе 85, migration_complete=true отдельно от production_ready=false. Дальнейшие задачи — обычная разработка, не этапы миграции.
 
 - Verification: full scripts/check-all.ps1 PASS (1113 Rust tests, 28 existing ignored, fmt/clippy and 118 Node gates); roadmap/ownership self-tests and historical parity maths PASS. Historical benchmark fixture missing (ENOENT) on both base and candidate; no fresh real-match/GPU/Docker acceptance claimed. Deployment via queue.
+
+### 2026-11-27 - Retired experiment and source backup cleanup
+
+- Base 0af4b3d821e4457df2d1a44ade1fd9127a64750b. Removed the obsolete standalone SAM 3.1/Python RF-DETR experiment (13 files) and its two Rust examples; these were never part of the current native runtime. Historical code and reports remain available at the base SHA. Retained the SHA-verified RF-DETR Medium installer at scripts/setup-rfdetr-medium.sh; current inference, training, benchmark tools, compatibility adapters and data untouched.
+- Local project: removed 1269 ignored timestamped source backups and 8 historical patch/snapshot files (80208560 bytes), after verifying a single external ZIP archive (1277 entries). No user media, models, results, active worktrees or other agents' changes deleted. Added ignore rules for local worktree/temp/build-context clutter.
+- Checks: no live references to retired experiments; installer Bash syntax and isolated invalid-existing-model refusal PASS; ownership/roadmap and removed archive routes PASS; git diff --check PASS; full scripts/check-all.ps1 PASS (1113 Rust tests, 28 existing ignored, fmt/clippy and 118 Node gates). Real GPU, match and MP4 checks NOT TESTED (runtime algorithms unchanged). Apply via deployment queue.

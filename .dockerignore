@@ -20,6 +20,14 @@ rust/target/
 results/
 project/
 *.bak.*
+*.bak
+*.orig
+*.old
+.studio-runtime/
+.worktrees/
+.tmp/
+output/
+outputs/
 *.log
 *.mp4
 *.mov
