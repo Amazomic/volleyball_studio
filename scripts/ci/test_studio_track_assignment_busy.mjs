@@ -22,3 +22,10 @@ context.unlock();
 assert.equal(button.disabled,true,"assignment is disabled while work is running");
 console.log("Track assignment controls follow processing state: OK");
 
+
+const html=readFileSync(new URL("../../rust/volley-app/static/studio.html",import.meta.url),"utf8");
+const css=readFileSync(new URL("../../rust/volley-app/static/studio.css",import.meta.url),"utf8");
+assert.match(html,/id="studio-track-status" class="sr-only"/,"routine status has no layout row");
+assert.doesNotMatch(css,/#studio-players-view #studio-track-status\{[^}]*min-height/);
+assert.match(source,/state\.rosterBusy=false;renderRosterBar\(\);unlock\(\);/);
+assert.match(source,/state\.rosterBusy=false;unlock\(\);void loadLibraryRoster\(\)/);

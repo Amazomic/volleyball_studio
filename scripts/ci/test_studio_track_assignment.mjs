@@ -177,10 +177,15 @@ assert.equal(await editContext.edit("assign",[7],"player"),false);
 assert.match(editState.pendingEditFailure,/ID 7: Identity constraint: ID 7 conflicts with ID 3/);
 const noteStart=source.indexOf("  const note=(value,error=false)=>{");
 const noteEnd=source.indexOf("  const options=(",noteStart);
-const stickyStatus={textContent:"",classList:{toggle(_,error){this.error=error;}}};
+const stickyStatus={textContent:"",classList:{toggle(name,value){this[name]=value;}}};
 const stickyContext={state:editState,ui:{status:stickyStatus}};
 runInNewContext(source.slice(noteStart,noteEnd)+"\nthis.note=note;",stickyContext);
 stickyContext.note("New gallery results");
 assert.match(stickyStatus.textContent,/ID 7: Identity constraint/);
-assert.equal(stickyStatus.classList.error,true,
+assert.equal(stickyStatus.classList["track-error"],true,
   "The gallery refresh must not erase the last manual assignment failure");
+
+assert.equal(stickyStatus.classList["sr-only"],false,"Actual errors remain visible without a routine status row");
+editState.pendingEditFailure="";
+stickyContext.note("Normal refresh");
+assert.equal(stickyStatus.classList["sr-only"],true,"Routine status never occupies the gallery");

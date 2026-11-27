@@ -109,7 +109,7 @@ fn automatic_links_reject_nearly_equal_athlete_scores() {
 }
 
 #[test]
-fn gallery_photo_hints_omit_heavy_evidence_and_limit_candidates() {
+fn gallery_photo_hints_omit_heavy_evidence_and_keep_all_candidates() {
     let doc = json!({"automatic_identity_evidence":{"photo_sample_policy":"five_observations_v2","matches":{"7":[
         {"player_id":"a","cosine_similarity":0.89,"samples_used":5,"sample_similarities":[0.8,0.9,0.97],"reference_track_id":11,"reference_kind":"saved_photo","name":"Player A"},
         {"player_id":"b","cosine_similarity":0.85,"samples_used":5,"sample_similarities":[0.8,0.87,0.88],"reference_track_id":12,"reference_kind":"saved_photo"},
@@ -117,9 +117,10 @@ fn gallery_photo_hints_omit_heavy_evidence_and_limit_candidates() {
     ]}}});
     let hints = gallery_photo_hints(&doc);
     let options = hints["7"].as_array().unwrap();
-    assert_eq!(options.len(), 2);
+    assert_eq!(options.len(), 3);
     assert_eq!(options[0]["cosine_similarity"], 0.89);
     assert_eq!(options[1]["player_id"], "b");
+    assert_eq!(options[2]["player_id"], "c");
     assert!(options[0].get("sample_similarities").is_none());
     assert!(options[0].get("name").is_none());
     assert_eq!(

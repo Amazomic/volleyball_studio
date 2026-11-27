@@ -57,6 +57,7 @@
     ui.status.textContent=String(value);
     ui.status.title=String(value);
     ui.status.classList.toggle("track-error",error);
+    ui.status.classList.toggle("sr-only",!error);
   };
   const options=(select,rows,valueField,labelField,placeholder)=>{
     clear(select);
@@ -193,7 +194,7 @@
       return false;
     }finally{
       if(project===state.project){
-        state.rosterBusy=false;renderRosterBar();
+        state.rosterBusy=false;renderRosterBar();unlock();
         // Reconcile the roster and any concurrent project edits.
         void loadLibraryRoster();
       }
@@ -213,7 +214,7 @@
       if(state.viewPlayer===id)viewBack.click();
       note("Игрок удалён из проекта.");
     }catch(error){if(project===state.project)note("Не удалось удалить игрока: "+error.message,true);}
-    finally{if(project===state.project){state.rosterBusy=false;void loadLibraryRoster();}}
+    finally{if(project===state.project){state.rosterBusy=false;unlock();void loadLibraryRoster();}}
   });
   rosterAddAll.addEventListener("click",()=>attachPlayers(
     state.libraryPlayers.filter(p=>!state.projectPlayerIds.has(p.id)).map(p=>p.id)

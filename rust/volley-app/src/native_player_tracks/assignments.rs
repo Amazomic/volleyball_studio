@@ -782,7 +782,6 @@ pub(super) fn gallery_photo_hints(doc: &Value) -> Value {
             if let Some(rows) = rows.as_array() {
                 let candidates = rows
                     .iter()
-                    .take(2)
                     .map(|row| {
                         json!({
                             "player_id": row["player_id"],

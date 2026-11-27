@@ -24,6 +24,10 @@ assert.deepEqual(select.children.map(option=>option.text),["Борис · 79.0%"
 assert.equal(binds.length,0,"selecting a suggestion never assigns automatically");
 button.events.click();
 assert.equal(binds[0].player,"b");
+state.playerMatches={"7":[{player_id:"a",cosine_similarity:.37},{player_id:"b",cosine_similarity:.79},{player_id:"c",cosine_similarity:.21}]};
+const all=node("article");context.attachSuggestions(all,[7]);
+assert.deepEqual(all.children[0].children[1].children[0].children.map(option=>option.text),
+  ["Борис · 79.0%","Анна · 37.0%","Вера · 21.0%"]);
 state.playerMatches={};
 const unmatched=node("article");context.attachSuggestions(unmatched,[7]);
 assert.equal(unmatched.children[0].children[1].children[0].children[0].value,"", "no guess when similarity is unavailable");
