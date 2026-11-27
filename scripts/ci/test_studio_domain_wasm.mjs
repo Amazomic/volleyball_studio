@@ -209,3 +209,29 @@ assert.equal(summary([{...sampleClip,end_frame:17970}],sampleClip).canAdd,false)
 assert.equal(summary([sampleClip],{...sampleClip,start_frame:40}).canAdd,false);
 assert.equal(summary([sampleClip],{...sampleClip,video:"b.mp4"}).canAdd,false);
 console.log("PASS: Rust/WASM ReID group projection and creative clip bounds/limits");
+
+const draftIdA="a".repeat(24),draftIdB="b".repeat(24),draftIdC="c".repeat(24);
+const draft=(kind,data)=>call(8,{kind,...data});
+assert.deepEqual(draft("draft_read",{raw:JSON.stringify([draftIdB,draftIdA])}),[draftIdB,draftIdA]);
+assert.deepEqual(draft("draft_read",{raw:JSON.stringify([draftIdA,draftIdA])}),[]);
+assert.deepEqual(draft("draft_read",{raw:"bad"}),[]);
+assert.deepEqual(draft("draft_read",{raw:JSON.stringify(["A".repeat(24)])}),[]);
+const draftItems=[{id:draftIdA,video:"a.mp4",start:2,end:5},{id:draftIdB,video:"a.mp4",start:7,end:9},{id:draftIdC,video:"b.mp4",start:0,end:1},null,{id:draftIdA,video:"a.mp4",start:0,end:1}];
+const draftView=draft("draft_accept",{items:draftItems,video:"a.mp4",order:[draftIdB,draftIdC,draftIdA]});
+assert.deepEqual(draftView.indices,[0,1]);assert.deepEqual(draftView.order,[draftIdB,draftIdA]);
+assert.deepEqual(draft("draft_chosen",{items:draftItems.slice(0,2),order:[draftIdB,draftIdA]}),{indices:[1,0],duration:5});
+assert.deepEqual(draft("draft_edit",{action:"move",order:[draftIdA,draftIdB],id:draftIdA,index:1}),[draftIdB,draftIdA]);
+assert.deepEqual(draft("draft_edit",{action:"add",order:[draftIdA],id:draftIdA}),[draftIdA]);
+assert.deepEqual(draft("draft_edit",{action:"remove",order:[draftIdA,draftIdB],id:draftIdA}),[draftIdB]);
+function touchIndex(frames){const ptr=e.volley_preview_touch_reserve(frames.length);assert.ok(ptr);new Float64Array(e.memory.buffer,ptr,frames.length).set(frames);return e.volley_preview_touch_commit();}
+function touchRange(frame,radius){const lo=e.volley_preview_touch_range(frame,radius);return [lo,e.volley_preview_touch_end()];}
+assert.equal(touchIndex([0,5,8,8,16,17,100]),1);
+assert.deepEqual(touchRange(8,8),[0,5]);
+assert.deepEqual(touchRange(100,8),[6,7]);
+assert.deepEqual(touchRange(50,8),[6,6]);
+assert.deepEqual(touchRange(8,0),[2,4]);
+assert.equal(touchIndex([9,8]),0);assert.deepEqual(touchRange(8,8),[-1,-1]);
+assert.equal(touchIndex([0,NaN]),0);
+assert.equal(touchIndex([]),1);assert.deepEqual(touchRange(0,8),[0,0]);
+assert.deepEqual(touchRange(NaN,8),[-1,-1]);assert.deepEqual(touchRange(0,-1),[-1,-1]);
+console.log("PASS: Rust/WASM montage drafts and indexed touch ranges");

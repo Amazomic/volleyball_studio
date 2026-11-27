@@ -674,23 +674,30 @@
         event.position.every(v=>Number.isFinite(v)&&v>=-0.5&&v<=1.5))));
   // The timeline belongs to the selected saved CPU postprocessing snapshot.
   // Raw GPU detections and limited rally-card motion_events are never Touchs.
-  const cpuTouchesForFrame=(project,run,video,sha,frame)=>{
-    const data=timeline.data;
-    if(!data||data.schema!=="volley-native-rally-timeline/1"||
-       data.project_id!==project||data.rally_run_id!==run||
-       data.video!==video||data.source_replay_sha256!==sha||
-       !Array.isArray(data.touch_annotations))return [];
-    const events=data.touch_annotations;
-    let left=0,right=events.length;
-    while(left<right){
-      const mid=(left+right)>>>1;
-      if(events[mid].frame_index<frame-8)left=mid+1;else right=mid;
-    }
-    const near=[];
-    for(let i=left;i<events.length&&events[i].frame_index<=frame+8;i++)
-      near.push(events[i]);
-    return near;
-  };
+  const cpuTouchesForFrame=(()=>{
+    let indexedRows=null;
+    return (project,run,video,sha,frame)=>{
+      const data=timeline.data;
+      if(!data||data.schema!=="volley-native-rally-timeline/1"||
+         data.project_id!==project||data.rally_run_id!==run||
+         data.video!==video||data.source_replay_sha256!==sha||
+         !Array.isArray(data.touch_annotations))return [];
+      const events=data.touch_annotations;
+      if(!events.length||!window.VolleyballUi?.isReady())return [];
+      const engine=window.VolleyballUi.engine;
+      if(indexedRows!==events){
+        indexedRows=null;
+        const ptr=engine.volley_preview_touch_reserve(events.length);
+        if(!ptr)return [];
+        const frames=new Float64Array(engine.memory.buffer,ptr,events.length);
+        for(let i=0;i<events.length;i++)frames[i]=events[i].frame_index;
+        if(engine.volley_preview_touch_commit()!==1)return [];
+        indexedRows=events;
+      }
+      const start=engine.volley_preview_touch_range(frame,8);
+      return start<0?[]:events.slice(start,engine.volley_preview_touch_end());
+    };
+  })();
   const drawCpuTouches=(ctx,record,project,run,video,frame,x,y,width,height)=>{
     if(typeof training!=="undefined"&&training.active||!overlay.flags.touches||!record.width||!record.height)return;
     const events=cpuTouchesForFrame(project,run,video,record.replay_sha256,frame);

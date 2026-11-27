@@ -90,3 +90,67 @@ pub(crate) fn next_rally(input: &serde_json::Value) -> serde_json::Value {
         .find(|row| offset + row.1 / fps >= boundary - 0.02)
         .map(|row| row.0))
 }
+
+#[derive(Default)]
+struct TouchIndex {
+    frames: Vec<f64>,
+    committed: bool,
+    end: i32,
+}
+
+thread_local! {
+    static TOUCH_INDEX: RefCell<TouchIndex> = RefCell::new(TouchIndex::default());
+}
+
+#[no_mangle]
+pub extern "C" fn volley_preview_touch_reserve(count: u32) -> *mut f64 {
+    TOUCH_INDEX.with(|cell| {
+        let mut index = cell.borrow_mut();
+        index.committed = false;
+        index.end = -1;
+        index.frames.clear();
+        let count = count as usize;
+        if count > MAX_RALLIES || index.frames.try_reserve_exact(count).is_err() {
+            return std::ptr::null_mut();
+        }
+        index.frames.resize(count, f64::NAN);
+        index.frames.as_mut_ptr()
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn volley_preview_touch_commit() -> i32 {
+    TOUCH_INDEX.with(|cell| {
+        let mut index = cell.borrow_mut();
+        index.committed = index
+            .frames
+            .iter()
+            .all(|&frame| (0.0..=MAX_SAFE_FRAME).contains(&frame) && frame.fract() == 0.0)
+            && index.frames.windows(2).all(|pair| pair[0] <= pair[1]);
+        index.end = -1;
+        i32::from(index.committed)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn volley_preview_touch_range(frame: f64, radius: f64) -> i32 {
+    TOUCH_INDEX.with(|cell| {
+        let mut index = cell.borrow_mut();
+        index.end = -1;
+        if !index.committed || !frame.is_finite() || !radius.is_finite() || radius < 0.0 {
+            return -1;
+        }
+        let start = index
+            .frames
+            .partition_point(|&value| value < frame - radius);
+        index.end = index
+            .frames
+            .partition_point(|&value| value <= frame + radius) as i32;
+        start as i32
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn volley_preview_touch_end() -> i32 {
+    TOUCH_INDEX.with(|cell| cell.borrow().end)
+}
