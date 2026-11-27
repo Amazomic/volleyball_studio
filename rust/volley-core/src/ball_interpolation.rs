@@ -176,7 +176,7 @@ pub struct StabilizedBallMotion {
     pub observed_frames: usize,
 }
 
-pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v17";
+pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v18";
 
 fn reject_preexisting_remote_ball(
     points: &[Option<[f64; 2]>],
@@ -877,6 +877,124 @@ fn reject_unsupported_weak_branches(
     }
 }
 
+fn recover_slow_reception_gaps(
+    raw: &[Option<[f64; 2]>],
+    points: &mut [Option<[f64; 2]>],
+    scores: &[f32],
+    settings: BallStabilizerSettings,
+) -> Vec<(usize, [f64; 2])> {
+    let mut repairs = Vec::new();
+    let distance = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+    let mut left = 3;
+    while left + 6 < points.len() {
+        if points[left - 3..=left].iter().any(Option::is_none)
+            || scores[left - 3..=left].iter().any(|&s| s < 0.45)
+            || scores[left + 1] >= 0.45
+        {
+            left += 1;
+            continue;
+        }
+        let max_right = (left + settings.max_gap_frames + 1).min(points.len() - 4);
+        let Some(right) = (left + 2..=max_right).find(|&i| scores[i] >= 0.45) else {
+            left += 1;
+            continue;
+        };
+        if raw[right..right + 4].iter().any(Option::is_none)
+            || scores[right..right + 4].iter().any(|&s| s < 0.45)
+            || points[left + 1..right].iter().all(Option::is_some)
+        {
+            left += 1;
+            continue;
+        }
+        let Some(rejoin) = (right..(right + 8).min(points.len()))
+            .find(|&i| points[i].is_some() && points[i] == raw[i])
+        else {
+            left += 1;
+            continue;
+        };
+        let end = raw[right].unwrap();
+        let later = raw[right + 3].unwrap();
+        let begin = points[left].unwrap();
+        let earlier = points[left - 3].unwrap();
+        let incoming = [(begin[0] - earlier[0]) / 3.0, (begin[1] - earlier[1]) / 3.0];
+        let outgoing = [(later[0] - end[0]) / 3.0, (later[1] - end[1]) / 3.0];
+        let speed_in = incoming[0].hypot(incoming[1]);
+        let speed_out = outgoing[0].hypot(outgoing[1]);
+        if incoming[1] < 0.005
+            || outgoing[1] > -0.005
+            || speed_in.max(speed_out) > settings.max_step_fraction
+            || (incoming[0] * outgoing[0] + incoming[1] * outgoing[1]) > 0.15 * speed_in * speed_out
+            || distance(incoming, outgoing) < 0.015
+        {
+            left += 1;
+            continue;
+        }
+        let continuous = (left - 3..left).all(|i| {
+            let t = (left - i) as f64;
+            distance(
+                points[i].unwrap(),
+                [begin[0] - incoming[0] * t, begin[1] - incoming[1] * t],
+            ) <= 0.009
+        }) && (right..=rejoin.max(right + 3)).all(|i| {
+            let t = (i - right) as f64;
+            scores[i] >= 0.45
+                && raw[i].is_some_and(|p| {
+                    distance(p, [end[0] + outgoing[0] * t, end[1] + outgoing[1] * t]) <= 0.012
+                })
+        });
+        if !continuous {
+            left += 1;
+            continue;
+        }
+        let best = (left + 1..right)
+            .filter_map(|impact| {
+                let a = (impact - left) as f64;
+                let b = (right - impact) as f64;
+                let from_left = [begin[0] + incoming[0] * a, begin[1] + incoming[1] * a];
+                let from_right = [end[0] - outgoing[0] * b, end[1] - outgoing[1] * b];
+                let error = distance(from_left, from_right);
+                let joint = [
+                    (from_left[0] + from_right[0]) * 0.5,
+                    (from_left[1] + from_right[1]) * 0.5,
+                ];
+                let first = [(joint[0] - begin[0]) / a, (joint[1] - begin[1]) / a];
+                let second = [(end[0] - joint[0]) / b, (end[1] - joint[1]) / b];
+                (error <= 0.025
+                    && valid_point(joint)
+                    && joint[1] > begin[1].max(end[1]) + 0.008
+                    && distance(first, incoming) <= 0.008
+                    && distance(second, outgoing) <= 0.008
+                    && first[0].hypot(first[1]).max(second[0].hypot(second[1]))
+                        <= settings.max_step_fraction)
+                    .then_some((error, impact, joint))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        let Some((_, impact, joint)) = best else {
+            left += 1;
+            continue;
+        };
+        points[left + 1..right].fill(None);
+        for i in left + 1..right {
+            let (origin, target, elapsed, span) = if i <= impact {
+                (begin, joint, i - left, impact - left)
+            } else {
+                (joint, end, i - impact, right - impact)
+            };
+            let t = elapsed as f64 / span as f64;
+            repairs.push((
+                i,
+                [
+                    origin[0] + (target[0] - origin[0]) * t,
+                    origin[1] + (target[1] - origin[1]) * t,
+                ],
+            ));
+        }
+        points[right..=rejoin.max(right + 3)].copy_from_slice(&raw[right..=rejoin.max(right + 3)]);
+        left = right;
+    }
+    repairs
+}
+
 pub fn stabilize_ball_motion(
     samples: &[ScoredBallSample],
     frames: usize,
@@ -1020,6 +1138,8 @@ pub fn stabilize_ball_motion(
         restore_rebound_after_weak_detour(&raw_points, &mut points, &scores, settings);
     let weak_repairs = reject_weak_rebound_islands(&mut points, &scores, settings.max_gap_frames);
     reject_unsupported_weak_branches(&mut points, &scores, settings);
+    let reception_repairs =
+        recover_slow_reception_gaps(&raw_points, &mut points, &scores, settings);
     let rejected_frames: Vec<_> = raw_points
         .iter()
         .zip(&points)
@@ -1039,6 +1159,10 @@ pub fn stabilize_ball_motion(
             points[frame] = Some(point);
             interpolated[frame] = true;
         }
+    }
+    for (frame, point) in reception_repairs {
+        points[frame] = Some(point);
+        interpolated[frame] = true;
     }
     interpolate_stabilizer_rebounds(&mut points, &mut interpolated, settings.max_gap_frames);
     Ok(StabilizedBallMotion {
@@ -1552,6 +1676,75 @@ fn valid_point(point: [f64; 2]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_reception_recovers_after_weak_foreign_ball() {
+        let coords = [
+            (0.432, 0.254, 0.7),
+            (0.427, 0.261, 0.7),
+            (0.422, 0.270, 0.7),
+            (0.416, 0.275, 0.7),
+            (0.412, 0.281, 0.7),
+            (0.410, 0.288, 0.7),
+            (0.405, 0.294, 0.7),
+            (0.406, 0.293, 0.39),
+            (0.406, 0.289, 0.28),
+            (0.404, 0.312, 0.23),
+            (0.404, 0.312, 0.20),
+            (0.665, 0.906, 0.17),
+            (0.650, 0.877, 0.19),
+            (0.650, 0.877, 0.27),
+            (0.650, 0.877, 0.35),
+            (0.648, 0.875, 0.36),
+            (0.400, 0.278, 0.56),
+            (0.400, 0.267, 0.64),
+            (0.404, 0.253, 0.65),
+            (0.406, 0.239, 0.67),
+            (0.410, 0.225, 0.67),
+            (0.412, 0.212, 0.66),
+            (0.414, 0.201, 0.67),
+            (0.418, 0.188, 0.65),
+            (0.420, 0.181, 0.70),
+            (0.424, 0.167, 0.70),
+        ];
+        let samples = coords
+            .iter()
+            .enumerate()
+            .map(|(frame, &(x, y, confidence))| ScoredBallSample {
+                frame,
+                point: [x, y],
+                confidence,
+            })
+            .collect::<Vec<_>>();
+        let result = stabilize_ball_motion(&samples, coords.len(), Default::default()).unwrap();
+        assert!(
+            result.points[6..=21].iter().all(Option::is_some),
+            "{:?}",
+            result.points
+        );
+        assert!(result.interpolated[11..16].iter().all(|&flag| flag));
+        assert_eq!(result.points[16], Some([0.400, 0.278]));
+        assert!(!result.interpolated[16]);
+        assert!(result.points[7..16].iter().flatten().any(|p| p[1] > 0.315));
+        let points = result
+            .points
+            .iter()
+            .enumerate()
+            .filter_map(|(frame, p)| {
+                let [x, y] = (*p)?;
+                Some(crate::motion::BallObservation {
+                    frame: frame as i64,
+                    x: x * 3840.0,
+                    y: y * 2160.0,
+                })
+            })
+            .collect::<Vec<_>>();
+        let breaks = crate::motion::trajectory_direction_breaks(&points, Default::default());
+        assert!(
+            breaks.iter().any(|b| b.frame.abs_diff(11) <= 3),
+            "{breaks:?}"
+        );
+    }
 
     #[test]
     fn supported_reception_survives_weak_detour_before_contact() {

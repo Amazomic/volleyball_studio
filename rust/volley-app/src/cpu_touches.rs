@@ -403,6 +403,7 @@ pub(crate) fn verified_ball_trajectory(
                 | "ball_stabilizer_v15"
                 | "ball_stabilizer_v16"
                 | "ball_stabilizer_v17"
+                | "ball_stabilizer_v18"
         )
         || summary["source_replay_id"] != replay_id
         || summary["source_replay_sha256"] != replay_sha256
@@ -756,6 +757,7 @@ fn load_primary_ball_trajectory(
                     | "ball_stabilizer_v14"
                     | "ball_stabilizer_v15"
                     | "ball_stabilizer_v16"
+                    | "ball_stabilizer_v17"
             )
         ) {
             return Ok(None);
@@ -1047,7 +1049,7 @@ mod ball_stabilizer_postprocessing_tests {
         let evidence = serde_json::to_vec(&json!({
             "ball_job_id":job,
             "mask":{
-                "ball_stabilizer":{"algorithm":"ball_stabilizer_v13"},
+                "ball_stabilizer":{"algorithm":"ball_stabilizer_v17"},
                 "touch_detector_sha256":"a".repeat(64)
             }
         }))
