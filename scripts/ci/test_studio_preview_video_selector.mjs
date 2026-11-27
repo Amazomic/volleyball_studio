@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {runInNewContext} from "node:vm";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 
 const js=readFileSync(new URL("../../rust/volley-app/static/studio.js",import.meta.url),"utf8");
 const html=readFileSync(new URL("../../rust/volley-app/static/studio.html",import.meta.url),"utf8");
@@ -20,7 +21,7 @@ const s={project:"project",projectVideos:["a.mp4","b.mp4","unprocessed.mp4"],cha
   run:"run-a",projectRallies:new Map(),playbackMode:"sequence",current:itemA.candidate_id,generation:1};
 const ui={analysis:{value:"launch-a"},list:{scrollTop:24},video:{currentTime:20,paused:false,pause(){this.paused=true;}}};
 const opened=[],requests=[],messages=[],followed=[];
-const context={s,ui,cards(){},valid:id=>/^[a-f0-9]{24}$/.test(id),message:value=>messages.push(value),
+const context={window:previewWasmWindow(),s,ui,cards(){},valid:id=>/^[a-f0-9]{24}$/.test(id),message:value=>messages.push(value),
   rallyClipFrames:row=>({start:row.start_frame,end:row.end_frame}),
   url:(path,query)=>({path,...query}),
   previewCache:{load:async query=>{
@@ -75,7 +76,7 @@ s.run="run-a";s.video="a.mp4";s.current=itemA.candidate_id;s.analysisOffset=17;s
 const boundaryFrom=js.indexOf("  const nextRally=()=>{");
 const boundaryTo=js.indexOf('  ui.video.addEventListener("timeupdate"',boundaryFrom);
 const boundary=runInNewContext(js.slice(boundaryFrom,boundaryTo)+"\n({onRallyBoundary})",{
-  s,ui,timeline:{data:{project_id:"project",rally_run_id:"run-a",rallies:[itemA]}},
+  window:previewWasmWindow(),s,ui,timeline:{data:{project_id:"project",rally_run_id:"run-a",rallies:[itemA]}},
   fps:()=>30,training:{active:false},advanceProjectRally:api.advanceProjectRally,
   failed:error=>{throw error;},view(){throw Error("Unexpected same-video rally");},
   followSequenceRally(){}
@@ -109,7 +110,7 @@ console.log("PASS: project rally list, per-source versions, filters and cross-vi
   let cleared=0;
   const block=(first,last)=>js.slice(js.indexOf(first),js.indexOf(last,js.indexOf(first)));
   const runtime={s:state,ui:controls,timeline:data,overlay:{raw:false},training:{active:false},
-    window:{VolleyStudioChain:{stamp:()=>"",latestRun:(rows,id)=>rows.some(row=>row.rally_run_id===id)?id:rows[0]?.rally_run_id||""},dispatchEvent(){}},
+    window:{...previewWasmWindow(),dispatchEvent(){}},
     CustomEvent:class{},sourceSelection:{save(){}},refreshPicker(){},
     options:(select,rows,key)=>{select.options=rows.map(row=>({value:row[key]}));},
     setOverlaySource(){},updateRawDetectorLabel(){},prefetchOverlayAtFrame(){},rawFusion:()=>null,

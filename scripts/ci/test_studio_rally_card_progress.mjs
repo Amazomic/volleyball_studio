@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {runInNewContext} from "node:vm";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 
 const source=readFileSync(
   new URL("../../rust/volley-app/static/studio.js",import.meta.url),"utf8"
@@ -178,6 +179,7 @@ const rowA={candidate_id:"a",detected_start_frame:174,detected_end_frame:366,
 const rowB={candidate_id:"b",detected_start_frame:533,detected_end_frame:656,
   manual_clip:{start_frame:488,end_frame:701}};
 const nextContext={
+  window:previewWasmWindow(),
   s:{project:"p",run:"r",current:"",analysisOffset:0,clipEnd:520/30,
     items:[rowA,rowB]},
   timeline:{data:null},ui:{video:{currentTime:520/30}},fps:()=>30,

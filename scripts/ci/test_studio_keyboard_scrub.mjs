@@ -281,7 +281,7 @@ assert.equal(follows,3);
 
 const lookupStart=js.indexOf("  const rallyAtTimelineTime=");
 const lookupEnd=js.indexOf("  const schedulePreviewRecovery=",lookupStart);
-const lookupContext={s:{analysisOffset:2},training:{active:false},fps:()=>30,
+const lookupContext={window:{VolleyballUi:{engine,isReady:()=>true}},s:{analysisOffset:2},training:{active:false},fps:()=>30,
   timeline:{data:{rallies:[{candidate_id:"b",start_frame:300,end_frame:359},
     {candidate_id:"c",start_frame:360,end_frame:419}]}}};
 runInNewContext(js.slice(lookupStart,lookupEnd)+"\nthis.lookup=rallyAtTimelineTime;",lookupContext);
@@ -290,6 +290,13 @@ assert.equal(lookupContext.lookup(12).candidate_id,"b");
 assert.equal(lookupContext.lookup(13.999).candidate_id,"b","Last frame remains selected for its full duration");
 assert.equal(lookupContext.lookup(14).candidate_id,"c","Adjacent rally starts at its exact boundary");
 assert.equal(lookupContext.lookup(16),null);
+lookupContext.timeline.data={rallies:[{candidate_id:"d",start_frame:0,end_frame:29}]};
+lookupContext.s.analysisOffset=80;
+assert.equal(lookupContext.lookup(12),null,"Previous video index must be discarded");
+assert.equal(lookupContext.lookup(80).candidate_id,"d");
+assert.equal(lookupContext.lookup(81),null);
+lookupContext.timeline.data=null;
+assert.equal(lookupContext.lookup(80),null);
 
 const alignStart=js.indexOf("  const alignActiveRally=");
 const alignEnd=js.indexOf("  const view=",alignStart);

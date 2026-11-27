@@ -3,6 +3,7 @@ import {readFileSync} from "node:fs";
 import {join} from "node:path";
 import {fileURLToPath} from "node:url";
 import {runInNewContext} from "node:vm";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 
 const root=fileURLToPath(new URL("../..",import.meta.url));
 const html=readFileSync(join(root,"rust/volley-app/static/studio.html"),"utf8");
@@ -46,7 +47,7 @@ let paused=0;const played=[],followed=[];
 const ui={video:{currentTime:10,paused:false,play:()=>Promise.resolve(),
   pause:()=>{paused++;}}};
 const timeline={data:{project_id:"p",rally_run_id:"r",rallies}};
-const ctx={fps:()=>30,s,ui,timeline,view:item=>{played.push(item.candidate_id);s.current=item.candidate_id;},followSequenceRally:()=>followed.push(s.current),message:()=>{}};
+const ctx={window:previewWasmWindow(),fps:()=>30,s,ui,timeline,view:item=>{played.push(item.candidate_id);s.current=item.candidate_id;},followSequenceRally:()=>followed.push(s.current),message:()=>{}};
 runInNewContext(script,ctx,{filename:"studio-rally-boundary.js"});
 ctx.onRallyBoundary();
 assert.deepEqual(played,["b"],"Sequence must use full timeline, not paginated cards");

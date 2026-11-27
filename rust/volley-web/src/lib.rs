@@ -4,6 +4,7 @@
 //! The backend remains authoritative for source ownership and clip safety.
 mod domain;
 mod preview_scrub;
+mod preview_timeline;
 use std::cell::{Cell, RefCell};
 
 const ID_BYTES: usize = 24;
