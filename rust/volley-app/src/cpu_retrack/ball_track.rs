@@ -17,12 +17,16 @@ pub(crate) const CONTINUOUS_MIN_SECONDS: f64 = 1.5;
 pub(crate) const CONTINUOUS_MERGE_SECONDS: f64 = 4.0;
 pub(crate) const MIN_RALLY_FRAMES: u64 = 5 * 30;
 pub(crate) const MIN_CONFIRMED_GROUNDED_RALLY_FRAMES: u64 = 45;
-pub(crate) const MOVEMENT_FILTER_VERSION: &str = "stationary_ball_min_rally_5s_v4";
+pub(crate) const MOVEMENT_FILTER_VERSION: &str = "stationary_ball_min_rally_5s_v5";
 
 pub(crate) fn movement_filter_supported(version: Option<&str>) -> bool {
     matches!(
         version,
-        Some("stationary_ball_min_rally_5s_v3" | MOVEMENT_FILTER_VERSION)
+        Some(
+            "stationary_ball_min_rally_5s_v3"
+                | "stationary_ball_min_rally_5s_v4"
+                | MOVEMENT_FILTER_VERSION
+        )
     )
 }
 
@@ -62,11 +66,12 @@ pub(crate) fn merge_continuous_intervals(
 pub(crate) const DEFAULT_STATIONARY_BALL_MS: u32 = 1000;
 const STATIONARY_REGION_SIZE: f64 = 0.035;
 const MIN_RALLY_FIELD_TRAVEL: f64 = 0.10;
-const MIN_UNOBSERVED_STOP_MS: u64 = 3000;
+const MIN_UNOBSERVED_STOP_MS: u64 = 2000;
 
 #[derive(Debug)]
 pub(crate) struct MovingBallIntervals {
     pub detected: Vec<(u64, u64)>,
+    pub preliminary: Vec<(u64, u64)>,
     pub merged: Vec<(u64, u64)>,
     pub stationary: Vec<(u64, u64)>,
     pub unobserved: Vec<(u64, u64)>,
@@ -171,7 +176,19 @@ fn prolonged_unobserved_ball_intervals(
         if point.is_none() {
             first.get_or_insert(frame);
         } else if let Some(start) = first.take() {
-            if frame - start >= minimum {
+            let high_ball_return = start
+                .checked_sub(1)
+                .and_then(|i| points[i])
+                .zip(points.get(frame).copied().flatten())
+                .is_some_and(|(exit, entry)| {
+                    exit[1] <= 0.05 && entry[1] <= 0.10 && (exit[0] - entry[0]).abs() <= 0.12
+                });
+            let threshold = if high_ball_return {
+                minimum.max(90)
+            } else {
+                minimum
+            };
+            if frame - start >= threshold {
                 ranges.push((start as u64, frame as u64 - 1));
             }
         }
@@ -302,9 +319,11 @@ pub(crate) fn analyze_moving_ball(
     let mut merged =
         merge_continuous_intervals_with_pauses(&detected, merge_gap_seconds, &barriers)?;
     extend_high_ball_returns(&moving, &mut merged, &barriers, merge_gap_seconds);
-    let merged = filter_short_rallies(merged);
+    let preliminary = merged;
+    let merged = filter_short_rallies(preliminary.clone());
     Ok(MovingBallIntervals {
         detected,
+        preliminary,
         merged,
         stationary,
         unobserved,

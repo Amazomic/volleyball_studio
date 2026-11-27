@@ -401,6 +401,7 @@ pub(crate) fn verified_ball_trajectory(
                 | "ball_stabilizer_v13"
                 | "ball_stabilizer_v14"
                 | "ball_stabilizer_v15"
+                | "ball_stabilizer_v16"
         )
         || summary["source_replay_id"] != replay_id
         || summary["source_replay_sha256"] != replay_sha256

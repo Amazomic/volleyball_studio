@@ -1289,8 +1289,10 @@ fn parse_primary_rally_scope(
             .clone(),
     )
     .map_err(|_| "Некорректные границы первичных розыгрышей")?;
-    let short_minimum = if mask["ground_boundary_version"] == "ground_ends_rally_v6"
-        && mask["serve_flight_geometry_available"] == true
+    let short_minimum = if matches!(
+        mask["ground_boundary_version"].as_str(),
+        Some("ground_ends_rally_v6" | "ground_ends_rally_v7")
+    ) && mask["serve_flight_geometry_available"] == true
     {
         crate::cpu_retrack::ball_track::MIN_CONFIRMED_GROUNDED_RALLY_FRAMES
     } else {
@@ -1438,7 +1440,7 @@ fn gpu_lineage_valid(
                 != json!(request.post.ball_stabilizer)
             || saved["gpu_rally_mask"]["serve_flight_version"]
                 != volley_core::rally_reconstruction::serve_flight::SERVE_FLIGHT_VERSION
-            || saved["gpu_rally_mask"]["ground_boundary_version"] != "ground_ends_rally_v6"
+            || saved["gpu_rally_mask"]["ground_boundary_version"] != "ground_ends_rally_v7"
             || saved["gpu_rally_mask"]["ground_detector"]["version"]
                 != volley_core::motion::GROUND_DETECTOR_VERSION
             || !valid_sha(&saved["gpu_rally_mask"]["ground_detector"]["sha256"])
@@ -6277,7 +6279,7 @@ mod branching_tests {
                 "movement_filter_version":crate::cpu_retrack::ball_track::MOVEMENT_FILTER_VERSION,
                 "min_rally_seconds":5.0,
                 "serve_flight_version":volley_core::rally_reconstruction::serve_flight::SERVE_FLIGHT_VERSION,
-                "ground_boundary_version":"ground_ends_rally_v6",
+                "ground_boundary_version":"ground_ends_rally_v7",
                 "ground_detector":{"version":volley_core::motion::GROUND_DETECTOR_VERSION,"sha256":sha},
                 "ball_stabilizer":{
                     "algorithm":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,

@@ -1,7 +1,10 @@
 use super::{BallObservation, TrajectoryBreak};
-use crate::court_geometry::CourtTransform;
+use crate::{
+    court_geometry::CourtTransform,
+    rally_reconstruction::serve_flight::fit_projected_ballistic_flight,
+};
 
-pub const GROUND_DETECTOR_VERSION: &str = "court_ball_roll_v12";
+pub const GROUND_DETECTOR_VERSION: &str = "court_ball_roll_v13";
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroundContact {
@@ -18,12 +21,35 @@ pub fn classify_ground_contact(
     height: u32,
     rally_end_frame: u64,
 ) -> Option<GroundContact> {
+    classify_ground_contact_with_observed(
+        points,
+        points,
+        impact,
+        court,
+        width,
+        height,
+        rally_end_frame,
+    )
+}
+
+pub fn classify_ground_contact_with_observed(
+    points: &[BallObservation],
+    observed: &[BallObservation],
+    impact: &TrajectoryBreak,
+    court: &CourtTransform,
+    width: u32,
+    height: u32,
+    rally_end_frame: u64,
+) -> Option<GroundContact> {
     if width == 0
         || height == 0
         || impact.frame < 0
         || impact.before_frames.len() < 4
         || impact.after_frames.len() < 4
     {
+        return None;
+    }
+    if airborne_contact_supported(observed, impact.frame, court, width, height) {
         return None;
     }
     if let Some(contact) = short_damped_out_rebound(points, impact, court, width, height) {
@@ -126,6 +152,168 @@ pub fn classify_ground_contact(
         position,
         landing: landing.to_owned(),
     })
+}
+
+fn contact_flight_fit(
+    points: &[BallObservation],
+    frame: i64,
+    before: bool,
+    projection: &[[f64; 4]; 3],
+    dimensions: [f64; 2],
+    window: i64,
+) -> Option<[f64; 6]> {
+    if !(0..=i32::MAX as i64).contains(&frame) {
+        return None;
+    }
+    let (start, end) = if before {
+        (frame - window, frame)
+    } else {
+        (frame, frame + window)
+    };
+    let lo = points.partition_point(|p| p.frame < start);
+    let hi = points.partition_point(|p| p.frame <= end);
+    let samples = points.get(lo..hi)?;
+    if samples.len() * 10 < (window as usize + 1) * 7
+        || (samples.first()?.frame - start) > 3
+        || (end - samples.last()?.frame) > 3
+        || samples
+            .windows(2)
+            .any(|p| p[1].frame <= p[0].frame || p[1].frame - p[0].frame > 4)
+    {
+        return None;
+    }
+    let normalized = |p: &BallObservation| {
+        (
+            (p.frame - frame) as f64 / 30.0,
+            [p.x / dimensions[0], p.y / dimensions[1]],
+        )
+    };
+    let fit = fit_projected_ballistic_flight(projection, samples.iter().map(normalized))?;
+    let [x, y, z, vx, vy, vz] = fit;
+    if x.abs() > 20.0
+        || y.abs() > 10.0
+        || !(-1.0..=8.0).contains(&z)
+        || vx.hypot(vy).hypot(vz) > 35.0
+    {
+        return None;
+    }
+    let mut squared_error = 0.0;
+    for (t, point) in samples.iter().map(normalized) {
+        let position = [x + vx * t, y + vy * t, z + vz * t - 4.905 * t * t, 1.0];
+        let projected =
+            projection.map(|row| row.iter().zip(position).map(|(a, b)| a * b).sum::<f64>());
+        if projected[2] <= 0.0 {
+            return None;
+        }
+        let residual =
+            (projected[0] / projected[2] - point[0]).hypot(projected[1] / projected[2] - point[1]);
+        if !residual.is_finite() || residual > 0.05 {
+            return None;
+        }
+        squared_error += residual * residual;
+    }
+    ((squared_error / samples.len() as f64).sqrt() <= 0.015).then_some(fit)
+}
+
+fn consistent_contact_fits(
+    points: &[BallObservation],
+    frame: i64,
+    before: bool,
+    projection: &[[f64; 4]; 3],
+    dimensions: [f64; 2],
+) -> Option<[[f64; 6]; 2]> {
+    let a = contact_flight_fit(points, frame, before, projection, dimensions, 24)?;
+    let b = contact_flight_fit(points, frame, before, projection, dimensions, 30)?;
+    ((a[2] - b[2]).abs() <= 0.6 && (a[0] - b[0]).hypot(a[1] - b[1]) <= 2.5).then_some([a, b])
+}
+
+fn airborne_contact_supported(
+    points: &[BallObservation],
+    frame: i64,
+    court: &CourtTransform,
+    width: u32,
+    height: u32,
+) -> bool {
+    if width == 0 || height == 0 {
+        return false;
+    }
+    let Some(projection) = court.flight_projection(2.43) else {
+        return false;
+    };
+    let dimensions = [f64::from(width), f64::from(height)];
+    let Some(before) = consistent_contact_fits(points, frame, true, &projection, dimensions) else {
+        return false;
+    };
+    let Some(after) = consistent_contact_fits(points, frame, false, &projection, dimensions) else {
+        return false;
+    };
+    before.iter().chain(&after).all(|fit| fit[2] >= 0.75)
+        && (before[1][2] - after[1][2]).abs() <= 0.75
+}
+
+pub fn terminal_loss_ground_contacts(
+    observed: &[BallObservation],
+    court: &CourtTransform,
+    width: u32,
+    height: u32,
+    rally_end_frame: u64,
+) -> Vec<GroundContact> {
+    if width == 0
+        || height == 0
+        || observed
+            .iter()
+            .any(|p| !(0..=i32::MAX as i64).contains(&p.frame))
+        || observed.windows(2).any(|p| p[0].frame >= p[1].frame)
+    {
+        return Vec::new();
+    }
+    let Some(projection) = court.flight_projection(2.43) else {
+        return Vec::new();
+    };
+    let dimensions = [f64::from(width), f64::from(height)];
+    observed
+        .windows(2)
+        .filter_map(|pair| {
+            let last = pair[0];
+            if last.frame < 0
+                || last.frame as u64 > rally_end_frame
+                || pair[1].frame - last.frame < 12
+            {
+                return None;
+            }
+            let first = observed.partition_point(|p| p.frame < last.frame - 2);
+            let stop = observed.partition_point(|p| p.frame <= last.frame);
+            let (impact, x, y, position) = observed[first..stop].iter().find_map(|p| {
+                let fits =
+                    consistent_contact_fits(observed, p.frame, true, &projection, dimensions)?;
+                if !fits
+                    .iter()
+                    .all(|f| (-0.25..=0.40).contains(&f[2]) && f[5] < -2.0)
+                {
+                    return None;
+                }
+                let [x, y, ..] = fits[1];
+                let position = court.floor_to_image([x, y])?;
+                let measured = [p.x / dimensions[0], p.y / dimensions[1]];
+                ((position[0] - measured[0]).hypot(position[1] - measured[1]) <= 0.05
+                    && x.abs() <= 12.0
+                    && y.abs() <= 7.5)
+                    .then_some((p.frame, x, y, position))
+            })?;
+            let distance = (x.abs() - crate::court_geometry::COURT_LENGTH_M / 2.0)
+                .max(y.abs() - crate::court_geometry::COURT_WIDTH_M / 2.0);
+            let landing = if distance.abs() <= 0.25 {
+                "line_uncertain"
+            } else {
+                court.tentative_landing(position)?
+            };
+            Some(GroundContact {
+                frame: impact as u64,
+                position,
+                landing: landing.to_owned(),
+            })
+        })
+        .collect()
 }
 
 fn short_damped_out_rebound(
@@ -717,6 +905,97 @@ mod tests {
             contact_observed: true,
         };
         (points, impact)
+    }
+
+    #[test]
+    fn calibrated_terminal_loss_requires_measured_descent_to_floor() {
+        let project = |[x, y, z]: [f64; 3]| {
+            let depth = 1.0 + 0.05 * x;
+            [
+                (0.5 + 0.03 * x + 0.04 * y) / depth,
+                (0.5 - 0.01 * x - 0.09 * z) / depth,
+            ]
+        };
+        let court = CourtTransform::new(
+            [
+                [-9., -4.5, 0.],
+                [9., -4.5, 0.],
+                [9., 4.5, 0.],
+                [-9., 4.5, 0.],
+            ]
+            .map(project),
+        )
+        .unwrap()
+        .with_net(Some([[0., -4.5, 2.43], [0., 4.5, 2.43]].map(project)))
+        .unwrap();
+        for (height, expected) in [(0.15, true), (1.3, false)] {
+            let mut points = (0..=30)
+                .map(|frame| {
+                    let t = (frame - 30) as f64 / 30.0;
+                    let [x, y] =
+                        project([2.0 + 2.0 * t, 1.0 + t, height - 7.0 * t - 4.905 * t * t]);
+                    BallObservation {
+                        frame,
+                        x: x * 1920.,
+                        y: y * 1080.,
+                    }
+                })
+                .collect::<Vec<_>>();
+            points.push(BallObservation {
+                frame: 51,
+                x: 1200.,
+                y: 450.,
+            });
+            let contacts = terminal_loss_ground_contacts(&points, &court, 1920, 1080, 51);
+            assert_eq!(!contacts.is_empty(), expected, "{contacts:?}");
+            if expected {
+                assert!((28..=30).contains(&contacts[0].frame));
+            }
+        }
+    }
+    #[test]
+    fn calibrated_airborne_reception_is_not_ground_contact() {
+        let project = |[x, y, z]: [f64; 3]| {
+            [
+                (0.5 + 0.03 * x + 0.04 * y) / (1.0 + 0.05 * x),
+                (0.5 - 0.01 * x - 0.09 * z) / (1.0 + 0.05 * x),
+            ]
+        };
+        let court = CourtTransform::new(
+            [
+                [-9., -4.5, 0.],
+                [9., -4.5, 0.],
+                [9., 4.5, 0.],
+                [-9., 4.5, 0.],
+            ]
+            .map(project),
+        )
+        .unwrap()
+        .with_net(Some([[0., -4.5, 2.43], [0., 4.5, 2.43]].map(project)))
+        .unwrap();
+        let points = (0..=60)
+            .map(|frame| {
+                let t = (frame - 30) as f64 / 30.;
+                let vz = if frame <= 30 { -8. } else { 4. };
+                let [x, y] = project([-6. + t * 1.5, -3. + t * 0.5, 1.3 + vz * t - 4.905 * t * t]);
+                BallObservation {
+                    frame,
+                    x: x * 1920.,
+                    y: y * 1080.,
+                }
+            })
+            .collect::<Vec<_>>();
+        let peak = points[30];
+        let impact = TrajectoryBreak {
+            frame: 30,
+            position: [peak.x, peak.y],
+            motion: MotionEvidence::default(),
+            fit_error: 0.5,
+            before_frames: vec![25, 26, 27, 28],
+            after_frames: vec![31, 32, 33, 34],
+            contact_observed: true,
+        };
+        assert!(classify_ground_contact(&points, &impact, &court, 1920, 1080, 50).is_none());
     }
 
     #[test]

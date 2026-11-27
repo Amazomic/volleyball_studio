@@ -176,7 +176,7 @@ pub struct StabilizedBallMotion {
     pub observed_frames: usize,
 }
 
-pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v15";
+pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v16";
 
 fn reject_preexisting_remote_ball(
     points: &[Option<[f64; 2]>],
@@ -694,6 +694,66 @@ fn restore_supported_vertical_rebounds(
     }
 }
 
+fn reject_unsupported_weak_branches(
+    points: &mut [Option<[f64; 2]>],
+    scores: &[f32],
+    settings: BallStabilizerSettings,
+) {
+    const ANCHOR_SCORE: f32 = 0.35;
+    const ANCHOR_CONTEXT: usize = 90;
+    const EDGE_SUPPORT: usize = 4;
+    let reliable: Vec<_> = (0..points.len())
+        .filter_map(|frame| {
+            let point = points[frame]?;
+            (scores[frame] >= ANCHOR_SCORE
+                && (frame.saturating_sub(4)..(frame + 5).min(points.len()))
+                    .filter(|&neighbor| {
+                        points[neighbor].is_some() && scores[neighbor] >= ANCHOR_SCORE
+                    })
+                    .take(3)
+                    .count()
+                    == 3)
+                .then_some((frame, point))
+        })
+        .collect();
+    let mut next = 0;
+    for (frame, slot) in points.iter_mut().enumerate() {
+        while next < reliable.len() && reliable[next].0 < frame {
+            next += 1;
+        }
+        let Some(point) = *slot else { continue };
+        if scores[frame] >= ANCHOR_SCORE {
+            continue;
+        }
+        let before = next.checked_sub(1).map(|i| reliable[i]);
+        let after = reliable.get(next).copied();
+        let distance = |(i, anchor): (usize, [f64; 2])| {
+            let elapsed = frame.abs_diff(i);
+            let reachable = (point[0] - anchor[0]).hypot(point[1] - anchor[1])
+                <= settings.max_step_fraction * elapsed as f64;
+            (elapsed, reachable)
+        };
+        let left = before.map(distance);
+        let right = after.map(distance);
+        let nearest = left
+            .into_iter()
+            .chain(right)
+            .map(|(elapsed, _)| elapsed)
+            .min()
+            .unwrap_or(usize::MAX);
+        let bounded = left
+            .zip(right)
+            .is_some_and(|((l, a), (r, b))| a && b && l + r <= settings.max_gap_frames + 1);
+        let edge = left
+            .into_iter()
+            .chain(right)
+            .any(|(elapsed, reachable)| reachable && elapsed <= EDGE_SUPPORT);
+        if nearest <= ANCHOR_CONTEXT && !edge && !bounded {
+            *slot = None;
+        }
+    }
+}
+
 pub fn stabilize_ball_motion(
     samples: &[ScoredBallSample],
     frames: usize,
@@ -830,9 +890,11 @@ pub fn stabilize_ball_motion(
             }
         }
     }
+    reject_unsupported_weak_branches(&mut points, &scores, settings);
     reject_unlinked_motion(&raw_points, &mut points, settings);
     restore_supported_vertical_rebounds(&raw_points, &mut points, settings.max_step_fraction);
     let weak_repairs = reject_weak_rebound_islands(&mut points, &scores, settings.max_gap_frames);
+    reject_unsupported_weak_branches(&mut points, &scores, settings);
     let rejected_frames: Vec<_> = raw_points
         .iter()
         .zip(&points)
@@ -2144,6 +2206,62 @@ mod tests {
         assert!(result.points[15].is_some());
         assert!(result.points[40].is_none());
         assert!(result.points[20].is_some());
+    }
+
+    #[test]
+    fn weak_foreign_prefix_cannot_block_a_supported_fast_flight() {
+        let samples = (0..60)
+            .map(|frame| {
+                let (point, confidence) = if frame < 16 {
+                    ([0.20 + frame as f64 * 0.001, 0.65], 0.09)
+                } else {
+                    (
+                        [
+                            0.85 - (frame - 16) as f64 * 0.009,
+                            0.8 - (frame - 16) as f64 * 0.015,
+                        ],
+                        0.65,
+                    )
+                };
+                ScoredBallSample {
+                    frame,
+                    point,
+                    confidence,
+                }
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 60, BallStabilizerSettings::default()).unwrap();
+        assert_eq!(result.points[16], Some(samples[16].point));
+        assert_eq!(result.points[20], Some(samples[20].point));
+        assert!(!result.interpolated[16]);
+        assert!(result.points[10].is_none());
+    }
+
+    #[test]
+    fn weak_motion_between_supported_flights_does_not_create_a_false_bridge() {
+        let samples = (0..120)
+            .map(|frame| {
+                let (point, confidence) = if frame < 30 {
+                    ([0.2 + frame as f64 * 0.003, 0.3], 0.65)
+                } else if frame < 90 {
+                    ([0.29 + (frame - 30) as f64 * 0.003, 0.3], 0.09)
+                } else {
+                    ([0.47 + (frame - 90) as f64 * 0.003, 0.3], 0.65)
+                };
+                ScoredBallSample {
+                    frame,
+                    point,
+                    confidence,
+                }
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 120, BallStabilizerSettings::default()).unwrap();
+        assert!(result.points[45..75].iter().all(Option::is_none));
+        assert!(result.rejected_frames.contains(&60));
+        assert!(result.points[10].is_some());
+        assert!(result.points[100].is_some());
     }
 
     #[test]

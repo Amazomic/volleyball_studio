@@ -67,6 +67,23 @@ impl PrimaryRallySettings {
     }
 }
 
+fn terminal_loss_end(trajectory: &StabilizedBallMotion, end: u64) -> Option<u64> {
+    let end = usize::try_from(end).ok()?;
+    let mut last = end;
+    for (frame, point) in trajectory.points.iter().enumerate().skip(end + 1).take(9) {
+        if frame - last > 4 {
+            break;
+        }
+        if point.is_some() {
+            last = frame;
+        }
+    }
+    let point = trajectory.points.get(last).copied().flatten()?;
+    let following = trajectory.points.get(last + 1..=last + 45)?;
+    (point[1] > 0.10 && !trajectory.interpolated[last] && following.iter().all(Option::is_none))
+        .then_some(last as u64)
+}
+
 fn pad_rally_intervals(
     intervals: &[(u64, u64)],
     frames: u64,
@@ -123,6 +140,7 @@ pub(super) struct RallyMask {
     serve_flight_version: &'static str,
     serve_flight_geometry_available: bool,
     rejected_no_serve: Vec<(u64, u64)>,
+    terminal_loss_intervals: Vec<(u64, u64)>,
     context_seconds: f64,
     observed_ball_frames: usize,
     ball_stabilizer: RallyBallStabilizer,
@@ -320,12 +338,19 @@ impl RallyMask {
             settings.merge_gap_seconds,
             settings.stationary_ball_ms,
         )?;
-        let mut ground_frames = ground_candidates(trajectory, &motion.merged)?;
+        let candidates = if serve_detector.is_some() {
+            motion.preliminary
+        } else {
+            motion.merged
+        };
+        let mut ground_frames = ground_candidates(trajectory, &candidates)?;
         ground_frames.sort_unstable();
         ground_frames.dedup();
         let detected = motion.detected;
         let mut grounded_intervals = Vec::new();
         let mut short_grounded = Vec::new();
+        let mut short_lost = Vec::new();
+        let mut terminal_loss_intervals = Vec::new();
         let minimum = crate::cpu_retrack::ball_track::MIN_RALLY_FRAMES;
         let confirmed_minimum = crate::cpu_retrack::ball_track::MIN_CONFIRMED_GROUNDED_RALLY_FRAMES;
         let preroll = u64::from(
@@ -334,11 +359,32 @@ impl RallyMask {
                 .min(PrimaryRallySettings::default().padding_before_ms),
         ) * 30
             / 1000;
-        for (mut start, end) in motion.merged {
+        let postroll = u64::from(
+            settings
+                .padding_after_ms
+                .min(PrimaryRallySettings::default().padding_after_ms),
+        ) * 30
+            / 1000;
+        for (mut start, end) in candidates {
             let initial_start = start;
             loop {
                 let index = ground_frames.partition_point(|&frame| frame < start);
                 let Some(&ground) = ground_frames.get(index).filter(|&&frame| frame <= end) else {
+                    let lost = serve_detector
+                        .is_some()
+                        .then(|| terminal_loss_end(trajectory, end))
+                        .flatten();
+                    let end = lost.unwrap_or(end);
+                    if lost.is_some() {
+                        terminal_loss_intervals.push((start, end));
+                    }
+                    let length = end - start + 1;
+                    if lost.is_some()
+                        && length < minimum
+                        && length + start.min(preroll) + postroll >= minimum
+                    {
+                        short_lost.push((start, end));
+                    }
                     grounded_intervals.push((start, end));
                     break;
                 };
@@ -360,6 +406,7 @@ impl RallyMask {
         }
         let mut merged = crate::cpu_retrack::ball_track::filter_short_rallies(grounded_intervals);
         merged.extend(short_grounded);
+        merged.extend(short_lost.iter().copied());
         merged.sort_unstable();
         let mut rejected_no_serve = Vec::new();
         if let Some(detector) = serve_detector {
@@ -371,8 +418,9 @@ impl RallyMask {
                     .map_or(0, |index| ground_frames[index].saturating_add(1));
                 let supported =
                     detector.supports_opening(trajectory, (start, end), earliest.max(floor_limit));
-                earliest = end.saturating_add(1);
-                if !supported {
+                if supported {
+                    earliest = end.saturating_add(1);
+                } else {
                     rejected_no_serve.push((start, end));
                 }
                 supported
@@ -387,14 +435,17 @@ impl RallyMask {
         let merged = merged
             .into_iter()
             .zip(padded)
-            .filter_map(|((start, end), (padded_start, _))| {
+            .filter_map(|((start, end), (padded_start, padded_end))| {
                 (end - padded_start + 1 >= minimum
                     || (serve_detector.is_some()
                         && end - start + 1 >= confirmed_minimum
-                        && ground_frames.binary_search(&end).is_ok()))
-                .then_some((start, end))
+                        && ground_frames.binary_search(&end).is_ok())
+                    || (short_lost.binary_search(&(start, end)).is_ok()
+                        && padded_end - padded_start + 1 >= minimum))
+                    .then_some((start, end))
             })
             .collect::<Vec<_>>();
+        terminal_loss_intervals.retain(|interval| merged.binary_search(interval).is_ok());
         let rally_intervals = pad_rally_intervals(
             &merged,
             frames,
@@ -493,6 +544,7 @@ impl RallyMask {
             serve_flight_version: SERVE_FLIGHT_VERSION,
             serve_flight_geometry_available: serve_detector.is_some(),
             rejected_no_serve,
+            terminal_loss_intervals,
             context_seconds: CONTEXT_FRAMES as f64 / 30.0,
             observed_ball_frames,
             ball_stabilizer: RallyBallStabilizer {
@@ -1095,6 +1147,70 @@ mod tests {
     }
 
     #[test]
+    fn terminal_loss_does_not_merge_unrelated_motion_after_two_seconds() {
+        let mut samples = moving_samples(100, 300);
+        samples.extend(moving_samples(370, 570));
+        let mask =
+            RallyMask::from_ball_samples(&samples, 800, PrimaryRallySettings::default()).unwrap();
+        assert_eq!(mask.merged.len(), 2, "{:?}", mask.merged);
+        assert!(mask
+            .unobserved_intervals
+            .iter()
+            .any(|&(a, b)| a == 301 && b == 369));
+    }
+
+    #[test]
+    fn calibrated_short_flight_with_terminal_loss_keeps_provisional_rally() {
+        let project = |[x, y, z]: [f64; 3]| {
+            [
+                (0.5 + 0.03 * x + 0.04 * y) / (1.0 + 0.05 * x),
+                (0.5 - 0.01 * x - 0.09 * z) / (1.0 + 0.05 * x),
+            ]
+        };
+        let court = CourtTransform::new(
+            [
+                [-9., -4.5, 0.],
+                [9., -4.5, 0.],
+                [9., 4.5, 0.],
+                [-9., 4.5, 0.],
+            ]
+            .map(project),
+        )
+        .unwrap()
+        .with_net(Some([[0., -4.5, 2.43], [0., 4.5, 2.43]].map(project)))
+        .unwrap();
+        let detector = ServeFlightDetector::new(&court).unwrap();
+        let mut points = vec![None; 300];
+        for (frame, point) in points.iter_mut().enumerate().take(163).skip(30) {
+            let t = (frame - 30) as f64 / 30.;
+            *point = Some(if frame <= 70 {
+                project([9. - 12. * t, t, 2.2 + 5.5 * t - 4.905 * t * t])
+            } else {
+                [
+                    0.35 + (frame - 70) as f64 * 0.003,
+                    0.55 + (frame - 70) as f64 * 0.001,
+                ]
+            });
+        }
+        let trajectory = StabilizedBallMotion {
+            observed_frames: 133,
+            confidence_frames: 133,
+            interpolated: vec![false; points.len()],
+            rejected_frames: Vec::new(),
+            points,
+        };
+        let mask = RallyMask::from_stabilized(
+            &trajectory,
+            PrimaryRallySettings::default(),
+            BallStabilizerSettings::default(),
+            Some(&detector),
+            |_, _| Ok(Vec::new()),
+        )
+        .unwrap();
+        assert_eq!(mask.merged, vec![(30, 162)]);
+    }
+
+    #[test]
     fn short_occlusion_can_still_merge_segments_of_one_rally() {
         let mut samples = moving_samples(120, 305);
         samples.extend(moving_samples(350, 550));
@@ -1291,6 +1407,73 @@ mod tests {
                 .iter()
                 .filter(|&&(start, end)| start <= bounds[1] && end >= bounds[0])
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[ignore = "read-only replay from saved VBallNet evidence"]
+    fn readonly_saved_primary_rally_replay() {
+        use std::io::BufRead;
+        let folder = std::path::PathBuf::from(std::env::var("VOLLEY_RALLY_EVIDENCE").unwrap());
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(folder.join("manifest.json")).unwrap()).unwrap();
+        let raw = std::fs::read(folder.join("detections.jsonl")).unwrap();
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&raw)),
+            manifest["sha256"].as_str().unwrap()
+        );
+        let frames = manifest["decoded_frames"].as_u64().unwrap();
+        let source = &manifest["original_source"]["video"];
+        let dimensions = (
+            source["width"].as_u64().unwrap() as u32,
+            source["height"].as_u64().unwrap() as u32,
+        );
+        let edit: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(std::env::var("VOLLEY_RALLY_COURT").unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(edit["video"], manifest["video"]);
+        assert_eq!(edit["project_id"], manifest["project_id"]);
+        let court = CourtTransform::new(serde_json::from_value(edit["court"].clone()).unwrap())
+            .unwrap()
+            .with_net(serde_json::from_value(edit["net"].clone()).unwrap())
+            .unwrap();
+        let mut samples = Vec::new();
+        for line in raw.lines() {
+            let row: serde_json::Value = serde_json::from_str(&line.unwrap()).unwrap();
+            for item in row["raw_detections"].as_array().unwrap() {
+                if item["class_name"] == "ball" {
+                    samples.push(RawDetection {
+                        frame_index: item["frame_index"].as_u64().unwrap(),
+                        class_name: "ball",
+                        score: item["score"].as_f64().unwrap() as f32,
+                        bbox_xyxy_norm: serde_json::from_value(item["bbox_xyxy_norm"].clone())
+                            .unwrap(),
+                        query_index: None,
+                        touch_probability: None,
+                        head_point_norm: None,
+                    });
+                }
+            }
+        }
+        let stabilizer = BallStabilizerSettings::default();
+        let trajectory = RallyMask::stabilize(&samples, frames, stabilizer).unwrap();
+        let RallyDetection { mask, contacts, .. } = RallyMask::detect(
+            &trajectory,
+            PrimaryRallySettings::default(),
+            stabilizer,
+            Some(&court),
+            dimensions,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        println!(
+            "REPLAY_RESULT {}",
+            serde_json::json!({
+                "mask": mask,
+                "ground_frames": contacts.iter().map(|contact| contact.frame).collect::<Vec<_>>(),
+            })
         );
     }
 

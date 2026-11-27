@@ -141,31 +141,15 @@ impl ServeFlightDetector {
             return None;
         }
         let hidden = |frame| gap.is_some_and(|(left, right)| (left..right).contains(&frame));
-        let mut normal = [[0.0; 7]; 6];
-        for (frame, point) in points.iter().enumerate() {
-            if hidden(frame) {
-                continue;
-            }
-            let Some(point) = point else { continue };
-            if !point.iter().all(|coordinate| coordinate.is_finite()) {
-                return None;
-            }
-            let t = frame as f64 / 30.0;
-            for (axis, coordinate) in point.iter().copied().enumerate() {
-                let q = std::array::from_fn::<_, 4, _>(|j| {
-                    self.projection[axis][j] - coordinate * self.projection[2][j]
-                });
-                let row = [q[0], q[1], q[2], q[0] * t, q[1] * t, q[2] * t];
-                let rhs = -q[3] + q[2] * GRAVITY_HALF * t * t;
-                for (i, &a) in row.iter().enumerate() {
-                    for (j, &b) in row.iter().enumerate() {
-                        normal[i][j] += a * b;
-                    }
-                    normal[i][6] += a * rhs;
+        let [x, y, z, vx, vy, vz] = fit_projected_ballistic_flight(
+            &self.projection,
+            points.iter().enumerate().filter_map(|(frame, point)| {
+                if hidden(frame) {
+                    return None;
                 }
-            }
-        }
-        let [x, y, z, vx, vy, vz] = solve(normal)?;
+                Some((frame as f64 / 30.0, (*point)?))
+            }),
+        )?;
         let duration = (points.len() - 1) as f64 / 30.0;
         if !(6.5..=17.0).contains(&x.abs())
             || !(0.3..=4.0).contains(&z)
@@ -224,6 +208,32 @@ impl ServeFlightDetector {
             CourtSide::Far
         })
     }
+}
+
+pub(crate) fn fit_projected_ballistic_flight(
+    projection: &[[f64; 4]; 3],
+    observations: impl IntoIterator<Item = (f64, [f64; 2])>,
+) -> Option<[f64; 6]> {
+    let mut normal = [[0.0; 7]; 6];
+    for (t, point) in observations {
+        if !t.is_finite() || !point.iter().all(|coordinate| coordinate.is_finite()) {
+            return None;
+        }
+        for (axis, coordinate) in point.iter().copied().enumerate() {
+            let q = std::array::from_fn::<_, 4, _>(|j| {
+                projection[axis][j] - coordinate * projection[2][j]
+            });
+            let row = [q[0], q[1], q[2], q[0] * t, q[1] * t, q[2] * t];
+            let rhs = -q[3] + q[2] * GRAVITY_HALF * t * t;
+            for (i, &a) in row.iter().enumerate() {
+                for (j, &b) in row.iter().enumerate() {
+                    normal[i][j] += a * b;
+                }
+                normal[i][6] += a * rhs;
+            }
+        }
+    }
+    solve(normal)
 }
 
 fn solve(mut rows: [[f64; 7]; 6]) -> Option<[f64; 6]> {

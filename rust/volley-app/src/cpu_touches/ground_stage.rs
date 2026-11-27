@@ -36,7 +36,7 @@ pub(crate) fn candidates(
         if frame < start {
             continue;
         }
-        let first = impact.frame.saturating_sub(18).max(0);
+        let first = impact.frame.saturating_sub(32).max(0);
         let last = impact
             .frame
             .saturating_add(48)
@@ -57,9 +57,20 @@ pub(crate) fn candidates(
                 })
             })
             .collect::<Vec<_>>();
-        if let Some(contact) =
-            volley_core::motion::classify_ground_contact(&points, impact, court, width, height, end)
-        {
+        let observed = points
+            .iter()
+            .copied()
+            .filter(|point| {
+                !motion
+                    .interpolated
+                    .get(point.frame as usize)
+                    .copied()
+                    .unwrap_or(true)
+            })
+            .collect::<Vec<_>>();
+        if let Some(contact) = volley_core::motion::classify_ground_contact_with_observed(
+            &points, &observed, impact, court, width, height, end,
+        ) {
             if result.len() >= LIMIT {
                 return Err("Ground candidate limit exceeded".into());
             }
@@ -129,6 +140,9 @@ pub(crate) fn candidates(
             volley_core::motion::rolling_ground_contacts(&observed, court, width, height, end)
                 .into_iter()
                 .chain(terminal)
+                .chain(volley_core::motion::terminal_loss_ground_contacts(
+                    &observed, court, width, height, end,
+                ))
         {
             if !(start..=end).contains(&contact.frame) {
                 continue;

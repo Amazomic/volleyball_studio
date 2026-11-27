@@ -278,3 +278,14 @@ postprocessing; their original boundaries are not rewritten. Without a valid
 court transform Ground Detector emits no floor candidates and movement-only
 boundaries are retained. Ground candidates remain heuristic, not manually
 confirmed events.
+
+## Primary rally recovery (2026-11-27)
+
+Movement filter v5 uses a two-second observation-loss barrier (or the higher configured stationary-ball duration). A compatible high-ball exit and return near the upper image edge retains the previous three-second tolerance. Ground boundary v7 checks the height of measured ball observations using two consistent calibrated ballistic fits on each side of an impact. An airborne impact is not floor evidence. A measured descending flight immediately before observation loss can produce a provisional floor candidate only with two consistent fits near the floor and a matching projected location. The last three measured-frame positions before the gap are eligible, without inventing ball coordinates in the gap.
+
+A calibrated opening serve and a short visible flight ending in sustained observation loss may retain a provisional rally when the actual padded interval reaches five seconds with at most the default pre/post-roll contributing to eligibility. The unpadded observation-loss intervals are recorded separately in terminal_loss_intervals; they do not imply ground contacts. Rejected opening candidates do not advance the start search for a subsequent candidate. Older masks remain readable, but new primary runs require the new versions.
+
+Read-only CPU replay (PowerShell, from rust; uses the existing production algorithm, not another GPU inference):
+Set VOLLEY_RALLY_EVIDENCE to a saved native_gpu_runs/<ball-job-id> directory and VOLLEY_RALLY_COURT to the corresponding video_edits JSON file, then run:
+cargo test -p volley-app --offline --locked readonly_saved_primary_rally_replay -- --ignored --nocapture
+The test verifies the raw detection SHA and project/video identity and prints the new mask and ground candidate frames without publishing artifacts. Check that the selected court revision matches the original analysis. Use original_source analysis offset when comparing video timestamps. Newly admitted intervals may require downstream player inference; this replay does not regenerate player or pose data.
