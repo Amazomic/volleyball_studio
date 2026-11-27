@@ -297,11 +297,7 @@ pub(super) fn fill(
         }
         let mut boxes = BTreeMap::<Key, Vec<(usize, Value)>>::new();
         let mut poses = BTreeMap::<Key, Vec<(usize, Value)>>::new();
-        let mut balls = Vec::new();
         for (i, row) in rows.iter().enumerate() {
-            if row["ball"].is_array() && row["ball_interpolated"] != true {
-                balls.push((i, row["ball"].clone()));
-            }
             for p in row["players"].as_array().into_iter().flatten() {
                 if !interpolate_players {
                     break;
@@ -391,26 +387,6 @@ pub(super) fn fill(
                 }
             }
         }
-        for pair in balls.windows(2) {
-            let ((a, left), (b, right)) = (&pair[0], &pair[1]);
-            if b <= &(a + 1) {
-                continue;
-            }
-            for (i, row) in rows.iter_mut().enumerate().take(*b).skip(a + 1) {
-                if !row["ball"].is_null() {
-                    continue;
-                }
-                let t = (i - a) as f64 / (b - a) as f64;
-                if let Some(point) = blend(left, right, t, 2) {
-                    row["ball"] = point;
-                    row["ball_interpolated"] = json!(true);
-                    row["ball_origin"] = json!("vballnet_interpolated");
-                    row["ball_interpolation_source"] = json!("cpu_rally_linear_v1");
-                    row["ball_interpolation_frames"] =
-                        json!([offset + *a as u64, offset + *b as u64]);
-                }
-            }
-        }
     }
 }
 
@@ -470,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn fills_long_internal_box_pose_and_ball_gaps_without_extrapolation() {
+    fn fills_player_gaps_without_changing_canonical_ball() {
         let mut rows = frames(125);
         rows[1]["players"] = json!([player(7, 0.1)]);
         rows[121]["players"] = json!([player(7, 0.5)]);
@@ -481,9 +457,9 @@ mod tests {
         assert!((rows[61]["players"][0]["pose"][0][0].as_f64().unwrap() - 0.35).abs() < 1e-9);
         assert_eq!(rows[61]["players"][0]["interpolated"], true);
         assert_eq!(rows[61]["players"][0]["pose_interpolated"], true);
-        assert!((rows[61]["ball"][0].as_f64().unwrap() - 0.4).abs() < 1e-9);
-        assert!((rows[61]["ball"][1].as_f64().unwrap() - 0.5).abs() < 1e-9);
-        assert_eq!(rows[61]["ball_interpolated"], true);
+        assert_eq!(rows[61]["ball"], Value::Null);
+        assert!(rows[61]["ball_interpolated"].is_null());
+        assert_eq!(rows[1]["ball"], json!([0.1, 0.2]));
         assert_eq!(rows[0]["players"], json!([]));
         assert_eq!(rows[124]["ball"], Value::Null);
         assert_eq!(rows[1]["players"][0], player(7, 0.1));
@@ -635,14 +611,19 @@ mod tests {
     }
 
     #[test]
-    fn disabled_player_interpolation_keeps_gaps_while_ball_continues() {
+    fn disabled_player_interpolation_keeps_canonical_ball_unchanged() {
         let mut rows = frames(5);
         rows[0]["players"] = json!([player(7, 0.1)]);
         rows[4]["players"] = json!([player(7, 0.5)]);
         rows[0]["ball"] = json!([0.2, 0.3]);
+        rows[2]["ball"] = json!([0.41, 0.52]);
+        rows[2]["ball_interpolated"] = json!(true);
+        rows[2]["ball_rejected"] = json!(true);
         rows[4]["ball"] = json!([0.6, 0.7]);
+        let original = rows.clone();
         super::fill(&mut rows, &[(0, 4)], &BTreeMap::new(), false);
+        assert_eq!(rows, original);
         assert_eq!(rows[2]["players"], json!([]));
-        assert!(rows[2]["ball"].is_array());
+        assert_eq!(rows[1]["ball"], Value::Null);
     }
 }

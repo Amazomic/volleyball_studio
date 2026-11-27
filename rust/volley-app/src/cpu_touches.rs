@@ -399,6 +399,7 @@ pub(crate) fn verified_ball_trajectory(
                 | "ball_stabilizer_v11"
                 | "ball_stabilizer_v12"
                 | "ball_stabilizer_v13"
+                | "ball_stabilizer_v14"
         )
         || summary["source_replay_id"] != replay_id
         || summary["source_replay_sha256"] != replay_sha256
@@ -568,6 +569,11 @@ fn read_primary_touch_breaks(
         return Err("Primary rally mask changed before Touch Detector reuse".into());
     }
     let evidence: Value = serde_json::from_slice(&mask).map_err(|e| e.to_string())?;
+    if evidence["mask"]["ball_stabilizer"]["algorithm"]
+        != volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION
+    {
+        return Ok(None);
+    }
     let checksum = &evidence["mask"]["touch_detector_sha256"];
     if checksum.is_null() {
         return Ok(None);
@@ -724,9 +730,30 @@ fn load_primary_ball_trajectory(
     if source.is_null() {
         return Ok(None);
     }
-    if source["algorithm"] != volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION
-        || evidence["ball_job_id"] != job
-    {
+    if evidence["ball_job_id"] != job {
+        return Err("Incompatible primary Ball Stabilizer artifact".into());
+    }
+    if source["algorithm"] != volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION {
+        if matches!(
+            source["algorithm"].as_str(),
+            Some(
+                "ball_stabilizer_v1"
+                    | "ball_stabilizer_v2"
+                    | "ball_stabilizer_v3"
+                    | "ball_stabilizer_v4"
+                    | "ball_stabilizer_v5"
+                    | "ball_stabilizer_v6"
+                    | "ball_stabilizer_v7"
+                    | "ball_stabilizer_v8"
+                    | "ball_stabilizer_v9"
+                    | "ball_stabilizer_v10"
+                    | "ball_stabilizer_v11"
+                    | "ball_stabilizer_v12"
+                    | "ball_stabilizer_v13"
+            )
+        ) {
+            return Ok(None);
+        }
         return Err("Incompatible primary Ball Stabilizer artifact".into());
     }
     let file_sha = source["trajectory_sha256"]
@@ -1001,6 +1028,35 @@ mod ball_stabilizer_postprocessing_tests {
             load_primary_ball_trajectory(&project, &replay, 2).unwrap_err(),
             "Primary rally mask changed before Ball Stabilizer reuse"
         );
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn old_primary_ball_version_recomputes_without_reusing_old_impacts() {
+        let project =
+            std::env::temp_dir().join(format!("volley-old-primary-ball-{}", Uuid::new_v4()));
+        let job = Uuid::new_v4().simple().to_string();
+        let folder = project.join("native_gpu_runs").join(&job);
+        fs::create_dir_all(&folder).unwrap();
+        let evidence = serde_json::to_vec(&json!({
+            "ball_job_id":job,
+            "mask":{
+                "ball_stabilizer":{"algorithm":"ball_stabilizer_v13"},
+                "touch_detector_sha256":"a".repeat(64)
+            }
+        }))
+        .unwrap();
+        fs::write(folder.join("rally_mask.json"), &evidence).unwrap();
+        let replay = json!({
+            "player_frame_scope_ball_job_id":job,
+            "player_frame_scope_sha256":format!("{:x}", Sha256::digest(&evidence))
+        });
+        assert!(load_primary_ball_trajectory(&project, &replay, 30)
+            .unwrap()
+            .is_none());
+        assert!(read_primary_touch_breaks(&project, &replay, 1920, 1080, 30)
+            .unwrap()
+            .is_none());
         fs::remove_dir_all(project).unwrap();
     }
 
@@ -2928,7 +2984,23 @@ fn detect_stream_with_pose(
     if count == 0 || count > 48 * 3600 * 30 {
         return Err("Touch source frame count exceeds limit".into());
     }
-    let primary_breaks = ground_stage.map(|stage| stage.breaks.as_slice());
+    let local_cancel = AtomicBool::new(false);
+    let canonical_breaks = if ground_stage.is_none() {
+        stabilized
+            .map(|value| {
+                trajectory_breaks(
+                    &value.motion,
+                    (width, height),
+                    cancel.unwrap_or(&local_cancel),
+                )
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let primary_breaks = ground_stage
+        .map(|stage| stage.breaks.as_slice())
+        .or(canonical_breaks.as_deref());
     let full_range = [(0, count - 1)];
     let windows = preliminary_intervals.unwrap_or(&full_range);
     let scoped_frames: u64 = windows.iter().map(|(start, end)| end - start + 1).sum();
@@ -3693,7 +3765,25 @@ fn process_with_ball_scope_and_rally_settings_report(
         .to_owned();
     let source = safe_file(&replay_dir, "tracked_frames.jsonl", MAX_INPUT_BYTES)
         .map_err(storage::bad_request)?;
-    if let Some(stabilized) = stabilized {
+    let local_cancel = AtomicBool::new(false);
+    let owned_stabilized;
+    let stabilized = match stabilized {
+        Some(value) => value,
+        None => {
+            owned_stabilized = stabilize_primary_replay(
+                state,
+                &req.project_id,
+                &req.video,
+                &req.replay_id,
+                Default::default(),
+                cancel.unwrap_or(&local_cancel),
+                |_, _| Ok(()),
+            )
+            .map_err(storage::bad_request)?;
+            &owned_stabilized
+        }
+    };
+    {
         if stabilized.source_sha256 != sha
             || stabilized.motion.points.len() as u64 != frames
             || stabilized.replay_id != req.replay_id
@@ -3742,36 +3832,15 @@ fn process_with_ball_scope_and_rally_settings_report(
         } else {
             None
         };
-        let ball_mask = if stabilized.is_none() {
-            Some(crate::cpu_retrack::ball_track::read_with_cancel(
-                &source,
-                &sha,
-                frames,
-                (dimensions.width, dimensions.height),
-                settings.min_ball_score,
-                if primary_scope.is_some() {
-                    &[]
-                } else {
-                    rally_starts
-                },
-                cancel,
-            )?)
-        } else {
-            None
-        };
         if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
             return Err("cancelled".into());
         }
         let preliminary = if let Some(intervals) = &primary_intervals {
             intervals.clone()
         } else {
-            let continuous = crate::cpu_retrack::ball_track::continuous_ball_intervals_with_cancel(
-                &source,
-                &sha,
-                frames,
-                settings.min_ball_score,
+            let continuous = crate::cpu_retrack::ball_track::continuous_intervals_from_positions(
+                &stabilized.motion.points,
                 crate::cpu_retrack::ball_track::CONTINUOUS_MIN_SECONDS,
-                cancel,
             )?;
             crate::cpu_retrack::ball_track::filter_short_rallies(
                 crate::cpu_retrack::ball_track::merge_continuous_intervals(
@@ -3793,7 +3862,7 @@ fn process_with_ball_scope_and_rally_settings_report(
             }
             Ok(())
         };
-        let persisted = if let Some(stabilized) = stabilized {
+        let persisted = {
             let (path, file_sha) = verified_ball_trajectory(
                 &project_dir,
                 &stabilized.summary(),
@@ -3810,7 +3879,7 @@ fn process_with_ball_scope_and_rally_settings_report(
                 stabilized.motion.confidence_frames,
                 stabilized.motion.observed_frames,
             )?;
-            Some(StabilizedReplay {
+            StabilizedReplay {
                 motion,
                 source_sha256: sha.clone(),
                 settings: stabilized.settings,
@@ -3819,15 +3888,10 @@ fn process_with_ball_scope_and_rally_settings_report(
                 frames,
                 project_root: project_dir.clone(),
                 replay_id: req.replay_id.clone(),
-            })
-        } else {
-            None
+            }
         };
         if let Some(stage) = ground {
-            if stage.summary["source_trajectory_sha256"]
-                != stabilized
-                    .ok_or("Missing Ground Detector trajectory")?
-                    .trajectory_sha256
+            if stage.summary["source_trajectory_sha256"] != stabilized.trajectory_sha256
                 || stage.summary["court_revision"]
                     != json!(court_calibration.as_ref().map(|c| c.revision.as_str()))
                 || stage.summary["width"] != dimensions.width
@@ -3856,8 +3920,8 @@ fn process_with_ball_scope_and_rally_settings_report(
                 .and_then(|value| value.transform.as_ref()),
             court_calibration.as_ref().and_then(|value| value.net),
             &training_examples,
-            ball_mask.as_deref(),
-            persisted.as_ref(),
+            None,
+            Some(&persisted),
             ground,
             rally_starts,
             preliminary_scope_applied.then_some(preliminary.as_slice()),
@@ -3934,9 +3998,7 @@ fn process_with_ball_scope_and_rally_settings_report(
         if let Some(stage) = ground {
             record["ground_detector"] = stage.summary.clone();
         }
-        if let Some(stabilized) = stabilized {
-            record["ball_stabilizer"] = stabilized.summary();
-        }
+        record["ball_stabilizer"] = stabilized.summary();
         let serve_proposals_file = folder.join("initial_serve_proposals.partial.json");
         let mut surface_data: Value = serde_json::from_slice(
             &fs::read(&serve_proposals_file)
