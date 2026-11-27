@@ -1420,6 +1420,7 @@ body[data-ui-theme="light"] #studio-preview-view .rally-card-progress-filled{
 #studio-players-view #studio-native-track-panel{border:0;padding:0;margin:0}
 #studio-players-view #studio-native-track-panel>#studio-track-status{display:block}
 #studio-players-view .track-mode-switch{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 4px}
+#studio-players-view .track-mode-switch[hidden]{display:none}
 #studio-players-view .track-mode-switch>.track-view-bar{margin:0;flex-wrap:nowrap;justify-content:flex-start}
 #studio-players-view .track-mode-switch>.track-view-bar button{white-space:nowrap}
 #studio-players-view .track-mode-tabs{display:inline-flex;align-items:center;padding:3px;gap:2px;border:1px solid #344d70;background:#101e31;border-radius:9px}
@@ -1430,8 +1431,6 @@ body[data-ui-theme="light"] #studio-preview-view .rally-card-progress-filled{
 #studio-players-view .track-grouping-controls button{padding:7px 11px;font-size:12px}
 #studio-players-view .track-auto-assign-controls{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap;width:100%;max-width:100%;min-width:0;box-sizing:border-box;padding:9px 12px;margin:0 0 8px;border:1px solid #344d70;border-radius:9px;background:#15253b}
 #studio-players-view .track-auto-assign-controls[hidden]{display:none}
-#studio-players-view .track-filter-buttons{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-right:auto}
-#studio-players-view .track-filter-buttons[hidden]{display:none}
 #studio-players-view .track-mode-info{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-right:auto;min-width:0}
 #studio-players-view .track-mode-info>.track-view-label{margin-left:0}
 #studio-players-view .track-auto-assign-controls .track-mode-button{padding:6px 12px}

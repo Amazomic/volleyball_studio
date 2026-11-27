@@ -1243,7 +1243,7 @@
     playerGallery.hidden=mode!=="player";
     groupingControls.hidden=mode!=="groups";
     autoAssignControls.hidden=viewingPlayer;
-    filterBar.hidden=viewingPlayer;
+    modeSwitch.hidden=!viewingPlayer&&mode!=="groups";
     modeInfo.append(viewLabel);
   };
   singlesMode.addEventListener("click",()=>setMode("singles"));
@@ -1264,18 +1264,7 @@
   modeInfo.append(modeTabs,viewLabel);
   autoAssignControls.prepend(modeInfo);
   const updateUnassignedLabel=()=>{
-    if(!state.viewPlayer)viewLabel.textContent=state.viewExcluded?
-      "Исключённые Track ID · "+state.excludedIds.size:state.viewConflicts?
-      "Конфликты одновременной видимости · "+state.identityConflictIds.size:
-      "Непривязанные Track ID · "+visibleUnassignedCount();
-    conflictToggle.hidden=Boolean(state.viewPlayer);
-    conflictToggle.textContent=state.viewConflicts?
-      "Показать непривязанные · "+visibleUnassignedCount():
-      "Конфликты · "+state.identityConflictIds.size;
-    excludedToggle.hidden=Boolean(state.viewPlayer);
-    excludedToggle.textContent=state.viewExcluded?
-      "Показать непривязанные · "+visibleUnassignedCount():
-      "Исключённые · "+state.excludedIds.size;
+    if(!state.viewPlayer)viewLabel.textContent="Непривязанные Track ID · "+visibleUnassignedCount();
   };
   const viewBack=node("button","secondary","Все непривязанные ID");
   viewBack.type="button";viewBack.hidden=true;
@@ -1290,22 +1279,8 @@
     viewLabel.textContent=String(detail.name||"");
     viewBack.hidden=false;groupsMode.hidden=true;playerMode.hidden=false;setMode("singles");void loadPage();
   });
-  const conflictToggle=node("button","secondary","Конфликты");
-  conflictToggle.type="button";
-  conflictToggle.addEventListener("click",()=>{
-    state.viewConflicts=!state.viewConflicts;state.viewExcluded=false;state.offset=0;
-    state.selected.clear();updateUnassignedLabel();void loadPage();
-  });
-  const excludedToggle=node("button","secondary","Исключённые");
-  excludedToggle.type="button";
-  excludedToggle.addEventListener("click",()=>{
-    state.viewExcluded=!state.viewExcluded;state.viewConflicts=false;state.offset=0;
-    state.selected.clear();setMode("singles");updateUnassignedLabel();void loadPage();
-  });
-  const filterBar=node("div","track-filter-buttons");
-  filterBar.append(conflictToggle,excludedToggle);
   viewBar.append(viewBack);
-  modeSwitch.append(filterBar,viewBar,groupingControls);
+  modeSwitch.append(viewBar,groupingControls);
   ui.status.before(modeSwitch);
   ui.status.before(autoAssignControls);
   ui.list.before(playerGallery);
