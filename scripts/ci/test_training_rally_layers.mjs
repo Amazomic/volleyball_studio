@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 import {runInNewContext} from "node:vm";
 
 const read=path=>readFileSync(new URL("../../"+path,import.meta.url),"utf8");
@@ -72,7 +73,7 @@ const {timeline,drawTimeline,timelineRallyLayers}=runInNewContext(
   js.slice(mergeStart,mergeEnd)+"\n"+js.slice(start,end)+
     "\n({timeline,drawTimeline,timelineRallyLayers})",{
     $,s,ui,training,overlay,comparison,annotation,reference,
-    window:{devicePixelRatio:1},requestAnimationFrame:()=>{},
+    window:{...previewWasmWindow(),devicePixelRatio:1},requestAnimationFrame:()=>{},
     document:{querySelector:()=>({append(){}})},
     comparisonMatches:()=>true,annotationReady:()=>true,
     annotationSourceValid:()=>true,fps:()=>30,

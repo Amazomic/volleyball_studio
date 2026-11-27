@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 import {runInNewContext} from "node:vm";
 
 const read=path=>readFileSync(new URL("../../"+path,import.meta.url),"utf8");
@@ -10,7 +11,7 @@ assert.equal((html.match(/id="studio-training-merge-gap-seconds"/g)||[]).length,
 const start=js.indexOf("  const mergeTrainingIntervals=");
 const end=js.indexOf("  const comparisonTime=",start);
 assert.ok(start>0&&end>start);
-const merge=runInNewContext(js.slice(start,end)+"\nmergeTrainingIntervals");
+const merge=runInNewContext(js.slice(start,end)+"\nmergeTrainingIntervals",{window:previewWasmWindow()});
 const input=[
   {start:330,end:389,members:[{id:"cpu3"}]},
   {start:0,end:89,members:[{id:"cpu1"}]},

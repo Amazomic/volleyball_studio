@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 import {runInNewContext} from "node:vm";
 
 const read=path=>readFileSync(new URL("../../"+path,import.meta.url),"utf8");
@@ -94,7 +95,7 @@ const context={
   comparisonMatches:data=>data?.trajectory_status==="ready",
   trainingGapSeconds:()=>4,
   document:{createElement:()=>new Element()},
-  window:{crypto:{randomUUID:()=>`00000000-0000-4000-8000-${String(++uuid).padStart(12,"0")}`},
+  window:{...previewWasmWindow(),crypto:{randomUUID:()=>`00000000-0000-4000-8000-${String(++uuid).padStart(12,"0")}`},
     addEventListener(){},confirm:()=>true,VolleyballTasks:{
       set:(key,task)=>logs.push({key,task}),clear:key=>logs.push({clear:key})
     }},

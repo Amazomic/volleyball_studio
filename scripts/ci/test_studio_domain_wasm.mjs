@@ -235,3 +235,14 @@ assert.equal(touchIndex([0,NaN]),0);
 assert.equal(touchIndex([]),1);assert.deepEqual(touchRange(0,8),[0,0]);
 assert.deepEqual(touchRange(NaN,8),[-1,-1]);assert.deepEqual(touchRange(0,-1),[-1,-1]);
 console.log("PASS: Rust/WASM montage drafts and indexed touch ranges");
+
+const trainingDomain=(kind,data)=>call(9,{kind,...data});
+const trainingRows=[{start:330,end:389},{start:0,end:89},{start:150,end:209},{start:12.5,end:20},{start:-1,end:10}];
+assert.deepEqual(trainingDomain("merge",{items:trainingRows,gapFrames:120}),[{start:0,end:209,indices:[1,2]},{start:330,end:389,indices:[0]}]);
+assert.deepEqual(trainingDomain("merge",{items:trainingRows,gapFrames:150,stops:[[90,149]]}),[{start:0,end:89,indices:[1]},{start:150,end:389,indices:[2,0]}]);
+assert.deepEqual(trainingDomain("merge",{items:[{start:0,end:5},{start:6,end:10},{start:10,end:15}],gapFrames:0}),[{start:0,end:15,indices:[0,1,2]}]);
+assert.deepEqual(trainingDomain("merge",{items:[null,{start:1,end:0}],gapFrames:0}),[]);
+assert.deepEqual(trainingDomain("seeds",{source:"calculated_ball_trajectory_rallies",totalFrames:300,intervals:[{start:30,end:180},{start:200,end:300},{start:0,end:0},{start:2.5,end:7},null]}),[{start:30,end:180}]);
+assert.deepEqual(trainingDomain("seeds",{source:"other",totalFrames:300,intervals:[{start:30,end:180}]}),[]);
+assert.equal(trainingDomain("seeds",{source:"calculated_ball_trajectory_rallies",totalFrames:300,intervals:Array(1025).fill({start:0,end:1})}).length,1024);
+console.log("PASS: Rust/WASM training interval merging and annotation seed validation");
