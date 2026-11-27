@@ -17,8 +17,47 @@
        !result.media_url.startsWith("/api/video-primary-preview?"))throw Error("Некорректный предпросмотр видео");
     return result.media_url;
   };
+  const warmLoads=new WeakMap();
+  const releaseWarm=video=>{
+    const current=warmLoads.get(video);
+    if(!current)return;
+    warmLoads.delete(video);
+    current.media.pause();
+    current.media.removeAttribute("src");
+    current.media.load();
+  };
+  const warm=(video,seek)=>{
+    const source=video.getAttribute("src");
+    if(!source||!Number.isFinite(seek)||seek<0){releaseWarm(video);return;}
+    const url=new URL(source,location.href);
+    if(url.origin!==location.origin||url.pathname!=="/api/video-primary-preview"||
+       !/^[a-f0-9]{64}$/.test(url.searchParams.get("media_sha")||"")){
+      releaseWarm(video);return;
+    }
+    for(let i=0;i<video.buffered.length;i++)
+      if(video.buffered.start(i)<=seek&&video.buffered.end(i)>seek+0.5){
+        releaseWarm(video);return;
+      }
+    const previous=warmLoads.get(video);
+    if(previous?.source===source&&previous.seek===seek)return;
+    releaseWarm(video);
+    const media=document.createElement("video");
+    const entry={media,source,seek};
+    warmLoads.set(video,entry);
+    media.muted=true;media.playsInline=true;media.preload="metadata";
+    media.addEventListener("loadedmetadata",()=>{
+      if(warmLoads.get(video)!==entry)return;
+      media.preload="auto";
+      try{media.currentTime=seek;}catch{releaseWarm(video);}
+    },{once:true});
+    media.addEventListener("error",()=>{
+      if(warmLoads.get(video)===entry)releaseWarm(video);
+    },{once:true});
+    media.src=source;media.load();
+  };
   const directLoads=new WeakMap();
   const direct=(video,source,{seek=0,autoplay=false}={})=>{
+    releaseWarm(video);
     const token=Symbol("primary-load");
     directLoads.set(video,token);
     video.pause();
@@ -136,5 +175,5 @@
       video.src=media;video.load();
     }).catch(failed).finally(()=>{if(busy.get(video)===src)busy.delete(video);});
   },true);
-  window.VolleyballPlayback={resolve,primary,direct};
+  window.VolleyballPlayback={resolve,primary,direct,warm,releaseWarm};
 })();

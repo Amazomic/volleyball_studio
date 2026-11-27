@@ -1,0 +1,33 @@
+import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
+import {runInNewContext} from "node:vm";
+
+const js=readFileSync(new URL("../../rust/volley-app/static/studio_playback.js",import.meta.url),"utf8");
+const created=[];
+const window={addEventListener(){}};
+const document={addEventListener(){},createElement(){
+  const handlers=new Map();
+  const video={currentTime:0,src:"",readyState:0,addEventListener(name,fn){handlers.set(name,fn);},pause(){},load(){},removeAttribute(){this.src="";},emit(name){handlers.get(name)?.();}};
+  created.push(video);return video;
+}};
+runInNewContext(js,{window,document,URL,URLSearchParams,location:{href:"http://localhost/studio",origin:"http://localhost"},console});
+const sha="a".repeat(64);
+const source="/api/video-primary-preview?project_id=p&video=v&media=1&preview_id=id&media_sha="+sha;
+const owner={getAttribute:()=>source,buffered:{length:0}};
+const {warm,releaseWarm}=window.VolleyballPlayback;
+warm(owner,37);
+assert.equal(created.length,1);
+assert.equal(created[0].src,source);
+created[0].emit("loadedmetadata");
+assert.equal(created[0].currentTime,37);
+warm(owner,37);
+assert.equal(created.length,1,"Do not restart the same preload");
+warm(owner,91);
+assert.equal(created[0].src,"","Obsolete preload must release its source");
+assert.equal(created.length,2);
+releaseWarm(owner);
+assert.equal(created[1].src,"");
+const original={getAttribute:()=>"/api/video-media?project_id=p&video=v",buffered:{length:0}};
+warm(original,10);
+assert.equal(created.length,2,"Mutable media must not be warmed through the cache");
+console.log("Prepared media preloads exactly one versioned target and releases obsolete loads");
