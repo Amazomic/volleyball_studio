@@ -141,10 +141,14 @@
     preview:ui.preview,montage:ui.montage,quick:ui.quick,
     analysis:ui.analysis,players:ui.players,report:ui.report
   };
+  const mediaIsActive=(media,activeTab)=>{
+    if(document.hidden||!activeTab)return false;
+    const library=document.getElementById("studio-video-library-player");
+    return !!(views[activeTab]?.contains(media)||(library?.open&&library.contains(media)));
+  };
   const pauseInactiveMedia=(activeTab)=>{
-    const active=views[activeTab];
     for(const media of document.querySelectorAll("video, audio")){
-      if(!media.paused&&(document.hidden||!active?.contains(media)))media.pause();
+      if(!media.paused&&(!mediaIsActive(media,activeTab)))media.pause();
     }
   };
   const switchTab=(requested)=>{
@@ -178,7 +182,7 @@
   document.addEventListener("play",event=>{
     const media=event.target;
     if(media?.tagName!=="VIDEO"&&media?.tagName!=="AUDIO")return;
-    if(document.hidden||!views[state.tab]?.contains(media))media.pause();
+    if(!mediaIsActive(media,state.tab))media.pause();
   },true);
   const projectId=()=>ui.project.value;
   const inputValue=(id)=>{

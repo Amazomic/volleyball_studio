@@ -31,9 +31,12 @@ const makeMedia=(parent,tagName="VIDEO")=>({
 const previewVideo=makeMedia(ui.preview);
 const editorVideo=makeMedia(ui.analysis);
 const reportAudio=makeMedia(ui.report,"AUDIO");
-const media=[previewVideo,editorVideo,reportAudio];
+const libraryDialog={open:false,contains:media=>media.parent===libraryDialog};
+const libraryVideo=makeMedia(libraryDialog);
+const media=[previewVideo,editorVideo,reportAudio,libraryVideo];
 const document={
   hidden:false,
+  getElementById:id=>id==="studio-video-library-player"?libraryDialog:null,
   querySelectorAll:selector=>selector==="video, audio"?media:[],
   addEventListener:(name,handler)=>handlers.document.set(name,handler)
 };
@@ -86,6 +89,23 @@ context.switchTab("report");
 reportAudio.paused=false;
 handlers.window.get("pagehide")();
 assert.equal(reportAudio.paused,true,"Leaving the page must pause active audio/video");
+libraryDialog.open=true;
+libraryVideo.paused=false;
+fire("play",libraryVideo);
+assert.equal(libraryVideo.paused,false,"Open library player is allowed outside active workspace");
+context.switchTab("preview");
+assert.equal(libraryVideo.paused,false,"Navigation must not pause open library player");
+document.hidden=true;
+handlers.document.get("visibilitychange")();
+assert.equal(libraryVideo.paused,true,"Background must pause open library player");
+document.hidden=false;
+libraryVideo.paused=false;
+handlers.window.get("pagehide")();
+assert.equal(libraryVideo.paused,true,"Page exit must pause open library player");
+libraryDialog.open=false;
+libraryVideo.paused=false;
+fire("play",libraryVideo);
+assert.equal(libraryVideo.paused,true,"Closed library player must not play");
 assert.match(preview,/const previewIsVisible=\(\)=>!document\.hidden&&/);
 assert.match(preview,/if\(!s\.videoKey\|\|!previewIsVisible\(\)\)return;/);
 assert.match(preview,/if\(previewIsVisible\(\)(?:&&!deferredPlay)?\)ui\.video\.play\(\)/);
