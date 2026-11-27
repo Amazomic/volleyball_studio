@@ -387,6 +387,69 @@ fn photo_result(input: &Value) -> Value {
     output
 }
 
+fn review_groups(input: &Value) -> Value {
+    let record = &input["record"];
+    if record["schema"] != "volley-native-reid-group-review/1"
+        || record["confirmed"] != false
+        || record["auto_assign_enabled"] != false
+        || input["sourceSha"].as_str().is_none()
+        || record["source_replay_sha256"] != input["sourceSha"]
+        || !record["groups"].is_array()
+        || !record["unmatched_ids"].is_array()
+    {
+        return json!({"error":"source"});
+    }
+    let rally: BTreeSet<_> = ids(&input["rallyIds"]).into_iter().collect();
+    let comparison: BTreeSet<_> = ids(&input["comparisonIds"]).into_iter().collect();
+    let existing: BTreeSet<_> = ids(&input["existingMatches"]).into_iter().collect();
+    let mut used = BTreeSet::new();
+    let mut grouped = Vec::new();
+    let mut groups = Vec::new();
+    for group in record["groups"].as_array().into_iter().flatten() {
+        let Some(members) = group["track_ids"].as_array() else {
+            continue;
+        };
+        let Some(all) = members.iter().map(track_id).collect::<Option<Vec<_>>>() else {
+            return json!({"error":"invalid"});
+        };
+        let scoped: Vec<_> = all
+            .iter()
+            .copied()
+            .filter(|id| rally.contains(id))
+            .collect();
+        let unique: BTreeSet<_> = scoped.iter().copied().collect();
+        if unique.len() != scoped.len() || scoped.iter().any(|id| used.contains(id)) {
+            return json!({"error":"overlap"});
+        }
+        if scoped.len() < 2 {
+            continue;
+        }
+        used.extend(scoped.iter().copied());
+        grouped.extend(scoped.iter().copied());
+        let mut row = json!({"ids":scoped});
+        for key in ["source", "similarity"] {
+            if let Some(value) = group.get(key) {
+                row[key] = value.clone();
+            }
+        }
+        if scoped.len() != all.len() {
+            row["averageSimilarity"] = Value::Null;
+        } else if let Some(value) = group.get("average_similarity") {
+            row["averageSimilarity"] = value.clone();
+        }
+        groups.push(row);
+    }
+    let reviewed: Vec<_> = input["reviewedIds"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|value| {
+            track_id(value).is_some_and(|id| comparison.contains(&id) && !existing.contains(&id))
+        })
+        .collect();
+    json!({"groups":groups,"grouped":grouped,"singleCount":rally.len()-used.len(),"reviewedIds":reviewed})
+}
+
 pub(crate) fn call(input: &Value) -> Value {
     match input["kind"].as_str() {
         Some("candidates") => candidates(input),
@@ -396,6 +459,7 @@ pub(crate) fn call(input: &Value) -> Value {
         Some("edit") => edit(input),
         Some("auto_result") => auto_result(input),
         Some("photo_result") => photo_result(input),
+        Some("review_groups") => review_groups(input),
         _ => Value::Null,
     }
 }

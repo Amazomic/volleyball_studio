@@ -144,3 +144,32 @@ assert.match(css,/transition:scale \.18s ease/,
 assert.match(css,/@media\(prefers-reduced-motion:reduce\)/,
   "button animation respects reduced-motion preferences");
 console.log("ReID photo/ID navigation, controls layout, and refreshed photo matches: OK");
+
+const reviewStart=source.indexOf("  const reviewRender=");
+const reviewEnd=source.indexOf("  const reviewLoad=",reviewStart);
+assert.ok(reviewStart>0&&reviewEnd>reviewStart);
+const savedPhoto={player_id:"athlete",cosine_similarity:.8,reference_kind:"photo"};
+const reviewState={sourceSha:"sha",rallyIds:new Set([101,102,103,104]),comparisonIds:new Set([101,102,103]),
+  playerMatches:{"101":[savedPhoto],"102":[]}};
+let renders=0;
+const reviewContext={state:reviewState,window:previewWasmWindow(),galleryStatus:{},
+  renderGroupCards(){renders++;},renderRows(){renders++;},reviewNote(){}};
+runInNewContext(source.slice(reviewStart,reviewEnd)+"\nthis.reviewRender=reviewRender;",reviewContext);
+const reviewRecord={schema:"volley-native-reid-group-review/1",confirmed:false,auto_assign_enabled:false,
+  source_replay_sha256:"sha",groups:[{track_ids:[101,102,999],source:"auto",average_similarity:.9}],
+  unmatched_ids:[103,104],player_matches:{"101":[{player_id:"other"}],"102":[{player_id:"athlete",cosine_similarity:.9}],
+    "104":[{player_id:"other"}]},embedded_count:4};
+reviewContext.reviewRender(reviewRecord,{deferRender:true});
+assert.equal(renders,0);
+assert.deepEqual(Array.from(reviewState.groups[0].ids),[101,102]);
+assert.equal(reviewState.groups[0].averageSimilarity,null);
+assert.equal(reviewState.singleCount,2);
+assert.equal(reviewState.playerMatches["101"][0],savedPhoto,"Never overwrite saved photo matches");
+assert.equal(reviewState.playerMatches["102"][0].reference_kind,"reviewed_track");
+assert.equal(reviewState.playerMatches["104"],undefined,"Only comparison-scope IDs receive suggestions");
+const previousGroups=reviewState.groups;
+assert.throws(()=>reviewContext.reviewRender({...reviewRecord,groups:[{track_ids:[101,102]},{track_ids:[102,103]}]}),/Пересекающиеся/);
+assert.equal(reviewState.groups,previousGroups,"Invalid response must not partially replace the groups");
+reviewContext.reviewRender(reviewRecord);
+assert.equal(renders,2);
+console.log("ReID group review WASM projection preserves photo matches and rejects overlap: OK");

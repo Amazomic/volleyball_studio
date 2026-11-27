@@ -4,6 +4,7 @@
 //! The backend remains authoritative for source ownership and clip safety.
 mod analysis_stages;
 mod domain;
+mod montage_review;
 mod player_review;
 mod preview_scrub;
 mod preview_timeline;

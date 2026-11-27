@@ -1608,43 +1608,23 @@
     finally{state.busy=false;unlock();reidUnlock();}
   };
   const reviewRender=(record,{deferRender=false}={})=>{
-    if(record.schema!=="volley-native-reid-group-review/1"||
-      record.confirmed!==false||record.auto_assign_enabled!==false||
-      record.source_replay_sha256!==state.sourceSha||
-      !Array.isArray(record.groups)||!Array.isArray(record.unmatched_ids))
-      throw Error("Неподдерживаемый источник ReID");
-    const used=new Set();
-    const groups=[];
-    for(const group of record.groups){
-      const ids=Array.isArray(group.track_ids)?
-        group.track_ids.map(Number):[];
-      if(ids.some(id=>!Number.isSafeInteger(id)||id<=0))
-        throw Error("Некорректные ReID-группы");
-      const scoped=ids.filter(id=>state.rallyIds.has(id));
-      if(scoped.some(id=>used.has(id)))
-        throw Error("Пересекающиеся ReID-группы");
-      if(scoped.length<2)continue;
-      scoped.forEach(id=>used.add(id));
-      groups.push({ids:scoped,source:group.source,similarity:group.similarity,
-        averageSimilarity:scoped.length===ids.length?group.average_similarity:null});
-    }
-    state.groups=groups;state.grouped=used;state.groupLoaded=true;
-    // The initial track page has persisted photo matches only. When no
-    // photo score exists for an ID, reuse the already verified OpenVINO
-    // comparison against manually linked tracks from this replay. Do not
-    // replace any photo score, or persist track-to-track scores as photos.
+    // Keep the large match arrays in the transport adapter; Rust chooses eligible IDs.
     const reviewed=record.player_matches;
-    if(reviewed&&typeof reviewed==="object"&&!Array.isArray(reviewed)){
-      for(const [id,candidates] of Object.entries(reviewed)){
-        if(!state.comparisonIds.has(Number(id))||
-           (Array.isArray(state.playerMatches[id])&&state.playerMatches[id].length)||
-           !Array.isArray(candidates)||!candidates.length)continue;
-        state.playerMatches[id]=candidates.map(candidate=>({
-          ...candidate,reference_kind:"reviewed_track"
-        }));
-      }
-    }
-    state.singleCount=state.rallyIds.size-used.size;
+    const reviewedIds=reviewed&&typeof reviewed==="object"&&!Array.isArray(reviewed)?
+      Object.keys(reviewed).filter(id=>Array.isArray(reviewed[id])&&reviewed[id].length):[];
+    const projection=window.VolleyStudioChain.call(7,{kind:"review_groups",sourceSha:state.sourceSha,
+      record:{schema:record.schema,confirmed:record.confirmed,auto_assign_enabled:record.auto_assign_enabled,
+        source_replay_sha256:record.source_replay_sha256,groups:record.groups,unmatched_ids:record.unmatched_ids},
+      rallyIds:[...state.rallyIds],comparisonIds:[...state.comparisonIds],reviewedIds,
+      existingMatches:Object.keys(state.playerMatches).filter(id=>Array.isArray(state.playerMatches[id])&&state.playerMatches[id].length)});
+    if(projection.error==="source")throw Error("Неподдерживаемый источник ReID");
+    if(projection.error==="invalid")throw Error("Некорректные ReID-группы");
+    if(projection.error==="overlap")throw Error("Пересекающиеся ReID-группы");
+    const groups=projection.groups;
+    state.groups=groups;state.grouped=new Set(projection.grouped);state.groupLoaded=true;
+    for(const id of projection.reviewedIds)
+      state.playerMatches[id]=reviewed[id].map(candidate=>({...candidate,reference_kind:"reviewed_track"}));
+    state.singleCount=projection.singleCount;
     galleryStatus.textContent="";
     if(!deferRender){renderGroupCards();renderRows();}
     reviewNote("Групп: "+groups.length+" · признаков: "+record.embedded_count+

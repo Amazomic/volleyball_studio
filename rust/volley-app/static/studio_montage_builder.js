@@ -181,7 +181,7 @@
   };
   const addCreative=clip=>{
     if(st.busy||!clip||!st.creativeVideos.includes(clip.video))return;
-    if(st.creativeClips.length>=80||creativeFrames()+clip.end_frame-clip.start_frame+1>18000){
+    if(!creativeSummary(clip).canAdd){
       show("Монтаж поддерживает до 80 фрагментов и 600 секунд.",true);return;
     }
     cancelCreativePlayback();st.creativeClips.push({...clip});renderCreative();invalidate();
@@ -268,20 +268,20 @@
     if(failures)ui.creativeCatalogStatus.textContent+=" · Часть источников недоступна.";
   };
   const creativeBounds=()=>{
-    const video=ui.creativeSource.value,duration=ui.creativeVideo.duration;
-    if(!st.creativeVideos.includes(video)||!Number.isFinite(duration)||duration<=0||
-       ui.creativeStart.value===""||ui.creativeEnd.value==="")return null;
-    const start=Number(ui.creativeStart.value),end=Number(ui.creativeEnd.value);
-    if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end>duration||end<=start)return null;
-    const start_frame=Math.round(start*30),end_frame=Math.min(Math.round(end*30),Math.floor(duration*30))-1;
-    return end_frame>=start_frame?{video,start_frame,end_frame}:null;
+    if(!window.VolleyballUi?.isReady()||ui.creativeStart.value===""||ui.creativeEnd.value==="")return null;
+    return window.VolleyStudioChain.call(8,{kind:"bounds",video:ui.creativeSource.value,
+      videos:st.creativeVideos,duration:ui.creativeVideo.duration,
+      start:Number(ui.creativeStart.value),end:Number(ui.creativeEnd.value)});
   };
-  const creativeFrames=()=>st.creativeClips.reduce((sum,c)=>sum+c.end_frame-c.start_frame+1,0);
+  const creativeSummary=next=>window.VolleyballUi?.isReady()?
+    window.VolleyStudioChain.call(8,{kind:"summary",videos:st.creativeVideos,clips:st.creativeClips,next}):
+    {frames:0,canAdd:false,canExport:false};
+  const creativeFrames=()=>creativeSummary().frames;
   const syncCreative=()=>{
     const clip=creativeBounds(),ready=Number.isFinite(ui.creativeVideo.duration)&&ui.creativeVideo.duration>0;
     ui.creativeIn.disabled=ui.creativeOut.disabled=st.busy||!ready;
     ui.creativePlay.disabled=st.busy||!st.creativeClips.length;
-    ui.creativeAdd.disabled=st.busy||!clip||st.creativeClips.length>=80||creativeFrames()+(clip?clip.end_frame-clip.start_frame+1:0)>18000;
+    ui.creativeAdd.disabled=st.busy||!clip||!creativeSummary(clip).canAdd;
     ui.creativeStatus.textContent=clip?
       "Длительность фрагмента: "+((clip.end_frame-clip.start_frame+1)/30).toFixed(1)+" сек.":
       "Отметьте начало и конец фрагмента.";
@@ -669,7 +669,7 @@
   };
   const preview=async()=>{
     if(mode()==="creative"){
-      if(creativeFrames()<30){show("Добавьте не менее одной секунды видео.",true);return false;}
+      if(!creativeSummary().canExport){show("Добавьте не менее одной секунды видео.",true);return false;}
       show("Фрагментов: "+st.creativeClips.length+" · "+(creativeFrames()/30).toFixed(1)+" сек.");return true;
     }
     if(mode()==="favorites"){
