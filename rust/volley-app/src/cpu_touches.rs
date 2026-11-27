@@ -30,7 +30,7 @@ use uuid::Uuid;
 #[cfg(test)]
 use volley_core::touch_pipeline::evaluate_block;
 use volley_core::{
-    court_geometry::CourtTransform,
+    court_geometry::{CourtSide, CourtTransform, TeamSideVotes},
     fusion::Candidate,
     touch_pipeline::{
         attach_touch_source_evidence, detect_ball_trajectory_touches, exclude_ball_teleports,
@@ -1850,8 +1850,8 @@ pub(crate) struct InitialServeProposal {
     source: &'static str,
 }
 
-pub(crate) const INITIAL_SERVE_ATTRIBUTION_VERSION: &str = "track_arm_strike_v3";
-pub(crate) const INITIAL_SERVE_SEARCH_FRAMES: u64 = 30;
+pub(crate) const INITIAL_SERVE_ATTRIBUTION_VERSION: &str = "calibrated_flight_origin_v4";
+pub(crate) const INITIAL_SERVE_SEARCH_FRAMES: u64 = 46;
 pub(crate) const INITIAL_SERVE_CONTACT_FRAMES: u64 = 5;
 
 fn unique_post_serve_entry(
@@ -1983,12 +1983,72 @@ fn visible_serve_strikers(
     strikers
 }
 
+fn calibrated_serve_origin(
+    frames: &[TouchFrame],
+    rally_start: u64,
+    court: &CourtTransform,
+    min_score: f64,
+) -> Option<(u64, CourtSide)> {
+    use volley_core::{
+        ball_interpolation::StabilizedBallMotion,
+        rally_reconstruction::serve_flight::ServeFlightDetector,
+    };
+    let end = frames.last()?.frame_index.checked_sub(rally_start)?;
+    if end >= 90 {
+        return None;
+    }
+    let mut points = vec![None; end as usize + 1];
+    let mut interpolated = vec![false; points.len()];
+    let mut observed = 0;
+    for frame in frames {
+        let index = frame.frame_index.checked_sub(rally_start)? as usize;
+        let Some(ball) = frame.selected_ball.as_ref() else {
+            continue;
+        };
+        let synthetic = ball.source_model == volley_core::touch_pipeline::INTERPOLATED_BALL_SOURCE;
+        if !synthetic && (ball.source_model != "vballnet" || ball.score < min_score) {
+            continue;
+        }
+        let [x1, y1, x2, y2] = ball.bbox_xyxy_norm;
+        points[index] = Some([(x1 + x2) * 0.5, (y1 + y2) * 0.5]);
+        interpolated[index] = synthetic;
+        observed += usize::from(!synthetic);
+    }
+    let motion = StabilizedBallMotion {
+        points,
+        interpolated,
+        rejected_frames: Vec::new(),
+        confidence_frames: observed,
+        observed_frames: observed,
+    };
+    let (launch, side) = ServeFlightDetector::new(court)?.opening_origin(&motion, (0, end), 0)?;
+    Some((rally_start + launch, side))
+}
+
+fn serve_track_on_origin_side(
+    frames: &[TouchFrame],
+    id: u64,
+    court: &CourtTransform,
+    side: CourtSide,
+) -> bool {
+    let mut votes = TeamSideVotes::default();
+    for player in frames
+        .iter()
+        .flat_map(|frame| &frame.players)
+        .filter(|p| p.track_id == id)
+    {
+        votes.observe(court, player.bbox_xyxy_norm);
+    }
+    votes.side() == Some(side)
+}
+
 pub(crate) fn initial_serve_proposal(
     frames: &[TouchFrame],
     poses: &[PoseFrame],
     rally_start: u64,
     dimensions: (u32, u32),
     settings: TouchSettings,
+    court: Option<&CourtTransform>,
 ) -> InitialServeProposal {
     let first_ball = frames.iter().find(|frame| {
         frame.frame_index >= rally_start
@@ -1997,18 +2057,31 @@ pub(crate) fn initial_serve_proposal(
                 ball.source_model == "vballnet" && ball.score >= settings.min_ball_score
             })
     });
-    let candidate = first_ball.and_then(|launch| {
-        let strikers =
-            visible_serve_strikers(frames, poses, launch.frame_index, dimensions, settings);
+    let origin = court.and_then(|court| {
+        calibrated_serve_origin(frames, rally_start, court, settings.min_ball_score)
+    });
+    let launch = match court {
+        Some(_) => origin.map(|(frame, _)| frame),
+        None => first_ball.map(|frame| frame.frame_index),
+    };
+    let matches_origin = |id| {
+        court.is_none_or(|court| {
+            origin.is_some_and(|(_, side)| serve_track_on_origin_side(frames, id, court, side))
+        })
+    };
+    let candidate = launch.and_then(|launch| {
+        let mut strikers = visible_serve_strikers(frames, poses, launch, dimensions, settings);
+        strikers.retain(|&id| matches_origin(id));
         match strikers.len() {
-            0 => unique_post_serve_entry(frames, rally_start, launch.frame_index),
+            0 => unique_post_serve_entry(frames, rally_start, launch)
+                .filter(|&id| matches_origin(id)),
             1 => strikers.first().copied(),
             _ => None,
         }
     });
     InitialServeProposal {
         rally_start_frame: rally_start,
-        trajectory_start_frame: first_ball.map(|frame| frame.frame_index),
+        trajectory_start_frame: launch,
         provisional_track_id: candidate,
         kind: "serve",
         identity_verified: false,
@@ -2948,6 +3021,7 @@ fn detect_stream_with_pose(
                 window.0,
                 (width, height),
                 settings,
+                court,
             ));
         }
         // Reconstruct bounded positions of existing tracked skeletons only.
@@ -4274,8 +4348,14 @@ mod tests {
     fn offscreen_serve_links_unique_stable_edge_entry() {
         for delay in [24, 50] {
             let frames = serve_entry_fixture(100, delay);
-            let proposal =
-                initial_serve_proposal(&frames, &[], 100, (1920, 1080), TouchSettings::default());
+            let proposal = initial_serve_proposal(
+                &frames,
+                &[],
+                100,
+                (1920, 1080),
+                TouchSettings::default(),
+                None,
+            );
             assert_eq!(proposal.provisional_track_id, Some(42));
             assert!(!proposal.identity_verified);
         }
@@ -4288,8 +4368,15 @@ mod tests {
             frame.players[0].bbox_xyxy_norm = [0.40, 0.30, 0.45, 0.50];
         }
         assert_eq!(
-            initial_serve_proposal(&frames, &[], 100, (1920, 1080), TouchSettings::default())
-                .provisional_track_id,
+            initial_serve_proposal(
+                &frames,
+                &[],
+                100,
+                (1920, 1080),
+                TouchSettings::default(),
+                None
+            )
+            .provisional_track_id,
             Some(42)
         );
     }
@@ -4343,11 +4430,58 @@ mod tests {
     }
 
     #[test]
+    fn calibrated_serve_does_not_promote_unverified_arm_motion() {
+        let (frames, poses) = visible_serve_fixture(&[7], true);
+        let court = CourtTransform::new([[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]])
+            .unwrap()
+            .with_net(Some([[0.5, 0.05], [0.5, 0.65]]))
+            .unwrap();
+        let result = initial_serve_proposal(
+            &frames,
+            &poses,
+            100,
+            (1920, 1080),
+            TouchSettings::default(),
+            Some(&court),
+        );
+        assert_eq!(result.provisional_track_id, None);
+        assert_eq!(result.trajectory_start_frame, None);
+    }
+
+    #[test]
+    fn serve_track_must_be_on_ballistic_origin_side() {
+        let court = CourtTransform::new([[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]]).unwrap();
+        let mut frames = serve_entry_fixture(100, 24);
+        for frame in &mut frames {
+            frame.players[0].bbox_xyxy_norm = [0.65, 0.25, 0.75, 0.65];
+        }
+        assert!(!serve_track_on_origin_side(
+            &frames,
+            7,
+            &court,
+            CourtSide::Near
+        ));
+        assert!(serve_track_on_origin_side(
+            &frames,
+            7,
+            &court,
+            CourtSide::Far
+        ));
+    }
+
+    #[test]
     fn visible_serve_takes_precedence_over_late_entry() {
         let (frames, poses) = visible_serve_fixture(&[7], true);
         assert_eq!(
-            initial_serve_proposal(&frames, &poses, 100, (1920, 1080), TouchSettings::default())
-                .provisional_track_id,
+            initial_serve_proposal(
+                &frames,
+                &poses,
+                100,
+                (1920, 1080),
+                TouchSettings::default(),
+                None
+            )
+            .provisional_track_id,
             Some(7)
         );
     }
@@ -4356,8 +4490,15 @@ mod tests {
     fn stationary_arm_does_not_claim_serve() {
         let (frames, poses) = visible_serve_fixture(&[7], false);
         assert_eq!(
-            initial_serve_proposal(&frames, &poses, 100, (1920, 1080), TouchSettings::default())
-                .provisional_track_id,
+            initial_serve_proposal(
+                &frames,
+                &poses,
+                100,
+                (1920, 1080),
+                TouchSettings::default(),
+                None
+            )
+            .provisional_track_id,
             Some(42)
         );
     }
@@ -4366,8 +4507,15 @@ mod tests {
     fn ambiguous_visible_contact_blocks_offscreen_fallback() {
         let (frames, poses) = visible_serve_fixture(&[7, 8], true);
         assert_eq!(
-            initial_serve_proposal(&frames, &poses, 100, (1920, 1080), TouchSettings::default())
-                .provisional_track_id,
+            initial_serve_proposal(
+                &frames,
+                &poses,
+                100,
+                (1920, 1080),
+                TouchSettings::default(),
+                None
+            )
+            .provisional_track_id,
             None
         );
     }
@@ -4381,8 +4529,15 @@ mod tests {
             frame.players.push(another);
         }
         assert_eq!(
-            initial_serve_proposal(&frames, &[], 100, (1920, 1080), TouchSettings::default())
-                .provisional_track_id,
+            initial_serve_proposal(
+                &frames,
+                &[],
+                100,
+                (1920, 1080),
+                TouchSettings::default(),
+                None
+            )
+            .provisional_track_id,
             None
         );
         let mut frames = serve_entry_fixture(100, 24);
@@ -4390,8 +4545,15 @@ mod tests {
             frame.players[1].bbox_xyxy_norm = [0.60, 0.60, 0.65, 0.80];
         }
         assert_eq!(
-            initial_serve_proposal(&frames, &[], 100, (1920, 1080), TouchSettings::default())
-                .provisional_track_id,
+            initial_serve_proposal(
+                &frames,
+                &[],
+                100,
+                (1920, 1080),
+                TouchSettings::default(),
+                None
+            )
+            .provisional_track_id,
             None
         );
     }
@@ -4415,8 +4577,14 @@ mod tests {
             bbox_xyxy_norm: [0.44, 0.3, 0.56, 0.75],
             touch_probability: None,
         });
-        let proposal =
-            initial_serve_proposal(&frames, &[], 100, (1920, 1080), TouchSettings::default());
+        let proposal = initial_serve_proposal(
+            &frames,
+            &[],
+            100,
+            (1920, 1080),
+            TouchSettings::default(),
+            None,
+        );
         assert_eq!(proposal.rally_start_frame, 100);
         assert_eq!(proposal.trajectory_start_frame, Some(100));
         assert_eq!(proposal.provisional_track_id, None);
@@ -4441,8 +4609,14 @@ mod tests {
                 })
                 .to_vec(),
         }];
-        let proposal =
-            initial_serve_proposal(&frames, &[], 200, (1920, 1080), TouchSettings::default());
+        let proposal = initial_serve_proposal(
+            &frames,
+            &[],
+            200,
+            (1920, 1080),
+            TouchSettings::default(),
+            None,
+        );
         assert_eq!(proposal.provisional_track_id, None);
     }
     #[test]

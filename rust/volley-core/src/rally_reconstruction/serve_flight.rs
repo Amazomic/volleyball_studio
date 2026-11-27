@@ -1,4 +1,7 @@
-use crate::{ball_interpolation::StabilizedBallMotion, court_geometry::CourtTransform};
+use crate::{
+    ball_interpolation::StabilizedBallMotion,
+    court_geometry::{CourtSide, CourtTransform},
+};
 
 pub const SERVE_FLIGHT_VERSION: &str = "calibrated_opening_serve_flight_v1";
 const NET_HEIGHT_M: f64 = 2.43;
@@ -20,25 +23,35 @@ impl ServeFlightDetector {
         interval: (u64, u64),
         earliest: u64,
     ) -> bool {
+        self.opening_origin(trajectory, interval, earliest)
+            .is_some()
+    }
+
+    pub fn opening_origin(
+        &self,
+        trajectory: &StabilizedBallMotion,
+        interval: (u64, u64),
+        earliest: u64,
+    ) -> Option<(u64, CourtSide)> {
         let (start, end) = interval;
         if start > end
             || end >= trajectory.points.len() as u64
             || trajectory.interpolated.len() != trajectory.points.len()
         {
-            return false;
+            return None;
         }
         let first = start.saturating_sub(60).max(earliest);
         let last = start.saturating_add(45).min(end.saturating_sub(24));
         for launch in (first..=last).step_by(3) {
             for span in [24, 30, 36, 45, 54, 63] {
-                if launch + span <= end
-                    && self.supports_flight(
+                if launch + span <= end {
+                    if let Some(side) = self.flight_origin(
                         &trajectory.points[launch as usize..=(launch + span) as usize],
                         &trajectory.interpolated[launch as usize..=(launch + span) as usize],
                         None,
-                    )
-                {
-                    return true;
+                    ) {
+                        return Some((launch, side));
+                    }
                 }
             }
         }
@@ -51,7 +64,7 @@ impl ServeFlightDetector {
         first: usize,
         last: usize,
         end: usize,
-    ) -> bool {
+    ) -> Option<(u64, CourtSide)> {
         let points = &trajectory.points;
         for exit in first.saturating_add(8)..=last.saturating_add(28).min(end) {
             let (Some(upper), Some(before)) = (points[exit], points[exit - 6]) else {
@@ -83,26 +96,26 @@ impl ServeFlightDetector {
                         if finish > end || finish - launch > 84 {
                             continue;
                         }
-                        if self.supports_flight(
+                        if let Some(side) = self.flight_origin(
                             &points[launch..=finish],
                             &trajectory.interpolated[launch..=finish],
                             Some((exit + 1 - launch, entry - launch)),
                         ) {
-                            return true;
+                            return Some((launch as u64, side));
                         }
                     }
                 }
             }
         }
-        false
+        None
     }
 
-    fn supports_flight(
+    fn flight_origin(
         &self,
         points: &[Option<[f64; 2]>],
         interpolated: &[bool],
         gap: Option<(usize, usize)>,
-    ) -> bool {
+    ) -> Option<CourtSide> {
         let real = |range: std::ops::Range<usize>| {
             range
                 .filter(|&i| points[i].is_some() && !interpolated[i])
@@ -114,7 +127,7 @@ impl ServeFlightDetector {
                 .any(|window| window.iter().all(Option::is_none))
         };
         if points.first().is_none_or(Option::is_none) || points.last().is_none_or(Option::is_none) {
-            return false;
+            return None;
         }
         if let Some((left, right)) = gap {
             if real(0..left) < 8
@@ -122,10 +135,10 @@ impl ServeFlightDetector {
                 || !continuous(&points[..left])
                 || !continuous(&points[right..])
             {
-                return false;
+                return None;
             }
         } else if !continuous(points) || real(0..points.len()) * 10 < (points.len() - 1) * 7 {
-            return false;
+            return None;
         }
         let hidden = |frame| gap.is_some_and(|(left, right)| (left..right).contains(&frame));
         let mut normal = [[0.0; 7]; 6];
@@ -135,7 +148,7 @@ impl ServeFlightDetector {
             }
             let Some(point) = point else { continue };
             if !point.iter().all(|coordinate| coordinate.is_finite()) {
-                return false;
+                return None;
             }
             let t = frame as f64 / 30.0;
             for (axis, coordinate) in point.iter().copied().enumerate() {
@@ -152,16 +165,14 @@ impl ServeFlightDetector {
                 }
             }
         }
-        let Some([x, y, z, vx, vy, vz]) = solve(normal) else {
-            return false;
-        };
+        let [x, y, z, vx, vy, vz] = solve(normal)?;
         let duration = (points.len() - 1) as f64 / 30.0;
         if !(6.5..=17.0).contains(&x.abs())
             || !(0.3..=4.0).contains(&z)
             || y.abs() > 8.0
             || vx.abs() < 1.0
         {
-            return false;
+            return None;
         }
         let crossing = -x / vx;
         let height = |t: f64| z + vz * t - GRAVITY_HALF * t * t;
@@ -174,7 +185,7 @@ impl ServeFlightDetector {
             || final_x.abs() < 1.0
             || height(duration) < 0.0
         {
-            return false;
+            return None;
         }
         let mut error = 0.0;
         let mut count = 0;
@@ -187,7 +198,7 @@ impl ServeFlightDetector {
                 .projection
                 .map(|row| row.iter().zip(position).map(|(a, b)| a * b).sum::<f64>());
             if projected[2] <= 0.0 {
-                return false;
+                return None;
             }
             if hidden(frame) {
                 let py = projected[1] / projected[2];
@@ -199,14 +210,19 @@ impl ServeFlightDetector {
             let residual = (projected[0] / projected[2] - point[0])
                 .hypot(projected[1] / projected[2] - point[1]);
             if !residual.is_finite() || residual > 0.07 {
-                return false;
+                return None;
             }
             error += residual * residual;
             count += 1;
         }
-        count > 0
+        (count > 0
             && (error / f64::from(count)).sqrt() <= 0.018
-            && gap.is_none_or(|(left, right)| hidden_top && hidden_high * 3 >= right - left)
+            && gap.is_none_or(|(left, right)| hidden_top && hidden_high * 3 >= right - left))
+        .then_some(if x < 0.0 {
+            CourtSide::Near
+        } else {
+            CourtSide::Far
+        })
     }
 }
 
@@ -290,6 +306,16 @@ mod tests {
         for direction in [-1.0, 1.0] {
             let flight = trajectory([direction * 9.0, 0.0, 2.2], [-direction * 12.0, 1.0, 5.5]);
             assert!(detector.supports_opening(&flight, (0, 39), 0));
+            let (launch, side) = detector.opening_origin(&flight, (0, 39), 0).unwrap();
+            assert_eq!(launch, 0);
+            assert_eq!(
+                side,
+                if direction < 0.0 {
+                    crate::court_geometry::CourtSide::Near
+                } else {
+                    crate::court_geometry::CourtSide::Far
+                }
+            );
         }
     }
 
