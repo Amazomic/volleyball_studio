@@ -400,6 +400,7 @@ pub(crate) fn verified_ball_trajectory(
                 | "ball_stabilizer_v12"
                 | "ball_stabilizer_v13"
                 | "ball_stabilizer_v14"
+                | "ball_stabilizer_v15"
         )
         || summary["source_replay_id"] != replay_id
         || summary["source_replay_sha256"] != replay_sha256
@@ -750,6 +751,7 @@ fn load_primary_ball_trajectory(
                     | "ball_stabilizer_v11"
                     | "ball_stabilizer_v12"
                     | "ball_stabilizer_v13"
+                    | "ball_stabilizer_v14"
             )
         ) {
             return Ok(None);

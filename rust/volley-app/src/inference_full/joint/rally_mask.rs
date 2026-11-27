@@ -199,7 +199,7 @@ impl RallyMask {
             return Err("Rally mask video duration out of range".into());
         }
         let mut points = vec![None; len];
-        let mut scores = vec![0.35f32; len];
+        let mut scores = vec![f32::NEG_INFINITY; len];
         for sample in samples.iter().filter(|sample| sample.class_name == "ball") {
             let Ok(frame) = usize::try_from(sample.frame_index) else {
                 continue;
@@ -578,6 +578,27 @@ mod tests {
             "local motion must not become a rally: {:?}",
             mask.merged
         );
+    }
+
+    #[test]
+    fn primary_stabilizer_keeps_coherent_low_score_samples() {
+        let samples = (0..20)
+            .map(|frame| {
+                let x = 0.25 + frame as f32 * 0.004;
+                RawDetection {
+                    frame_index: frame,
+                    class_name: "ball",
+                    score: if (8..=11).contains(&frame) { 0.32 } else { 0.7 },
+                    bbox_xyxy_norm: [x - 0.005, 0.40, x + 0.005, 0.42],
+                    query_index: None,
+                    touch_probability: None,
+                    head_point_norm: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let motion = RallyMask::stabilize(&samples, 20, BallStabilizerSettings::default()).unwrap();
+        assert_eq!(motion.observed_frames, 20);
+        assert!(!motion.interpolated[8..=11].iter().any(|&v| v));
     }
 
     #[test]

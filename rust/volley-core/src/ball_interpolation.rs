@@ -176,7 +176,7 @@ pub struct StabilizedBallMotion {
     pub observed_frames: usize,
 }
 
-pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v14";
+pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v15";
 
 fn reject_preexisting_remote_ball(
     points: &[Option<[f64; 2]>],
@@ -832,6 +832,7 @@ pub fn stabilize_ball_motion(
     }
     reject_unlinked_motion(&raw_points, &mut points, settings);
     restore_supported_vertical_rebounds(&raw_points, &mut points, settings.max_step_fraction);
+    let weak_repairs = reject_weak_rebound_islands(&mut points, &scores, settings.max_gap_frames);
     let rejected_frames: Vec<_> = raw_points
         .iter()
         .zip(&points)
@@ -840,6 +841,12 @@ pub fn stabilize_ball_motion(
         .collect();
     let observed_frames = confidence_frames - rejected_frames.len();
     let mut interpolated = interpolate_short_gaps_bounded(&mut points, settings.max_gap_frames);
+    for (start, estimates) in weak_repairs {
+        for (offset, point) in estimates.into_iter().enumerate() {
+            points[start + offset] = Some(point);
+            interpolated[start + offset] = true;
+        }
+    }
     interpolate_stabilizer_rebounds(&mut points, &mut interpolated, settings.max_gap_frames);
     Ok(StabilizedBallMotion {
         points,
@@ -854,12 +861,86 @@ pub fn interpolate_short_gaps(points: &mut [Option<[f64; 2]>]) -> Vec<bool> {
     interpolate_short_gaps_bounded(points, MAX_MISSING_BALL_FRAMES)
 }
 
+fn reject_weak_rebound_islands(
+    points: &mut [Option<[f64; 2]>],
+    scores: &[f32],
+    max_missing_frames: usize,
+) -> Vec<(usize, Vec<[f64; 2]>)> {
+    let mut repairs = Vec::new();
+    let synthetic = vec![false; points.len()];
+    let mut left = 3;
+    while left + 6 < points.len() {
+        let start = left + 1;
+        if points[left - 3..=left].iter().any(Option::is_none)
+            || scores[left - 3..=left]
+                .iter()
+                .filter(|&&s| s >= 0.5)
+                .count()
+                < 2
+            || scores[start] >= 0.45
+        {
+            left += 1;
+            continue;
+        }
+        let max_right = (left + 1 + max_missing_frames.min(12)).min(points.len() - 4);
+        let mut repair = None;
+        for right in left + 4..=max_right {
+            if scores[start..right].iter().any(|&s| s >= 0.45) {
+                break;
+            }
+            if points[right..right + 4].iter().any(Option::is_none)
+                || scores[right..right + 4]
+                    .iter()
+                    .filter(|&&s| s >= 0.5)
+                    .count()
+                    < 2
+            {
+                continue;
+            }
+            let Some(estimates) = reconstruct_occluded_rebound(
+                points,
+                left,
+                right,
+                &synthetic,
+                max_missing_frames,
+                true,
+            ) else {
+                continue;
+            };
+            let mut contradictions = 0;
+            let incompatible =
+                points[start..right]
+                    .iter()
+                    .zip(&estimates)
+                    .all(|(point, estimate)| {
+                        let Some(point) = point else { return true };
+                        let contradicts = estimate[1] - point[1] >= 0.014;
+                        contradictions += usize::from(contradicts);
+                        contradicts
+                    });
+            if incompatible && contradictions >= 3 {
+                repair = Some((right, estimates));
+                break;
+            }
+        }
+        if let Some((right, estimates)) = repair {
+            points[start..right].fill(None);
+            repairs.push((start, estimates));
+            left = right;
+        } else {
+            left += 1;
+        }
+    }
+    repairs
+}
+
 fn reconstruct_occluded_rebound(
     points: &[Option<[f64; 2]>],
     left: usize,
     right: usize,
     synthetic: &[bool],
     max_missing_frames: usize,
+    weak_island: bool,
 ) -> Option<Vec<[f64; 2]>> {
     let missing = right.checked_sub(left + 1)?;
     if !(1..=12.min(max_missing_frames)).contains(&missing)
@@ -893,8 +974,8 @@ fn reconstruct_occluded_rebound(
     let norm = |v: [f64; 2]| v[0].hypot(v[1]);
     let speed_in = norm(incoming);
     let speed_out = norm(outgoing);
-    if speed_in < 0.012
-        || speed_out < 0.012
+    if speed_in < if weak_island { 0.009 } else { 0.012 }
+        || speed_out < if weak_island { 0.004 } else { 0.012 }
         || speed_in > MAX_DISPLACEMENT_PER_FRAME
         || speed_out > MAX_DISPLACEMENT_PER_FRAME
         || norm([
@@ -910,7 +991,9 @@ fn reconstruct_occluded_rebound(
     }
     let cosine = (incoming[0] * outgoing[0] + incoming[1] * outgoing[1]) / (speed_in * speed_out);
     if cosine > 0.15
-        || norm([outgoing[0] - incoming[0], outgoing[1] - incoming[1]]) < 0.028
+        || norm([outgoing[0] - incoming[0], outgoing[1] - incoming[1]])
+            < if weak_island { 0.015 } else { 0.028 }
+        || (weak_island && (incoming[1] < 0.009 || outgoing[1] > -0.002))
         || (incoming[1] < -0.004 && outgoing[1] > 0.004)
     {
         return None;
@@ -928,7 +1011,9 @@ fn reconstruct_occluded_rebound(
             predicted_in[0] - predicted_out[0],
             predicted_in[1] - predicted_out[1],
         ]);
-        if (predicted_in[0] - predicted_out[0]).abs() > 0.024 || separation > 0.055 {
+        if (predicted_in[0] - predicted_out[0]).abs() > if weak_island { 0.012 } else { 0.024 }
+            || separation > if weak_island { 0.025 } else { 0.055 }
+        {
             continue;
         }
         let joint = if impact == left {
@@ -999,9 +1084,14 @@ fn interpolate_stabilizer_rebounds(
         }
         if let Some(left) = previous {
             if !synthetic[left] && !synthetic[right] {
-                if let Some(estimates) =
-                    reconstruct_occluded_rebound(points, left, right, synthetic, max_missing_frames)
-                {
+                if let Some(estimates) = reconstruct_occluded_rebound(
+                    points,
+                    left,
+                    right,
+                    synthetic,
+                    max_missing_frames,
+                    false,
+                ) {
                     for (offset, point) in estimates.into_iter().enumerate() {
                         let frame = left + offset + 1;
                         points[frame] = Some(point);
@@ -1817,6 +1907,105 @@ mod tests {
             .rejected_frames
             .iter()
             .all(|&frame| (25..=27).contains(&frame)));
+    }
+
+    #[test]
+    fn weak_false_island_does_not_erase_a_supported_rebound() {
+        let data = [
+            (0.4727, 0.1944, 0.67),
+            (0.4707, 0.2049, 0.65),
+            (0.4707, 0.2188, 0.62),
+            (0.4707, 0.2326, 0.65),
+            (0.4668, 0.2465, 0.67),
+            (0.4668, 0.2639, 0.65),
+            (0.4648, 0.2812, 0.67),
+            (0.4668, 0.2986, 0.53),
+            (0.4668, 0.3090, 0.39),
+            (0.4668, 0.3264, 0.326),
+            (0.4805, 0.3125, 0.32),
+            (0.4805, 0.3090, 0.327),
+            (0.4785, 0.3056, 318.0 / 1000.0),
+            (0.4785, 0.3056, 0.357),
+            (0.4805, 0.3056, 0.38),
+            (0.4766, 0.2917, 0.433),
+            (0.4883, 0.3299, 0.322),
+            (0.4961, 0.3229, 0.394),
+            (0.4980, 0.3194, 0.518),
+            (0.5039, 0.3125, 0.616),
+            (0.5098, 0.3125, 0.599),
+            (0.5117, 0.3090, 0.477),
+            (0.5156, 0.3056, 0.339),
+            (0.5254, 0.3021, 0.34),
+            (0.5410, 0.2917, 0.382),
+            (0.5410, 0.3021, 0.644),
+            (0.5469, 0.3056, 0.684),
+            (0.5508, 0.3090, 0.656),
+        ];
+        let samples = data
+            .iter()
+            .enumerate()
+            .map(|(frame, &(x, y, confidence))| ScoredBallSample {
+                frame,
+                point: [x, y],
+                confidence,
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, data.len(), BallStabilizerSettings::default()).unwrap();
+        assert_eq!(result.points[9], Some(samples[9].point));
+        assert_eq!(result.points[16], Some(samples[16].point));
+        assert!(
+            result.interpolated[10..16].iter().all(|&b| b),
+            "{:?}",
+            result.points
+        );
+        let peak = result.points[10..16]
+            .iter()
+            .flatten()
+            .map(|p| p[1])
+            .fold(0.0_f64, f64::max);
+        assert!(peak > 0.345, "peak {peak}");
+        let observations = result
+            .points
+            .iter()
+            .enumerate()
+            .filter_map(|(frame, point)| {
+                point.map(|[x, y]| crate::motion::BallObservation {
+                    frame: frame as i64,
+                    x: x * 3840.0,
+                    y: y * 2160.0,
+                })
+            })
+            .collect::<Vec<_>>();
+        let breaks = crate::motion::trajectory_direction_breaks(
+            &observations,
+            crate::motion::DirectionBreakConfig::default(),
+        );
+        assert!(
+            breaks
+                .iter()
+                .any(|b| b.frame.abs_diff(11) <= 1 && b.motion.angle >= 90.0),
+            "{breaks:?}"
+        );
+        assert!(
+            result
+                .rejected_frames
+                .iter()
+                .filter(|&&f| (10..16).contains(&f))
+                .count()
+                == 6
+        );
+        let strong = samples
+            .iter()
+            .cloned()
+            .map(|mut p| {
+                p.confidence = 0.9;
+                p
+            })
+            .collect::<Vec<_>>();
+        let protected =
+            stabilize_ball_motion(&strong, data.len(), BallStabilizerSettings::default()).unwrap();
+        assert!(!protected.interpolated[10..16].iter().all(|&b| b));
     }
 
     #[test]
