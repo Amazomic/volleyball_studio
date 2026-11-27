@@ -118,7 +118,7 @@ const context={
         proposals:[{frame:100,score:9},{frame:140,score:3}],
         serve_proposals:[{kind:"serve",identity_verified:false,
           source:"rally_trajectory_start_v1",rally_start_frame:80,
-          trajectory_start_frame:80,provisional_track_id:null}],
+          trajectory_start_frame:125,provisional_track_id:7}],
         ground_contacts:[{frame:120,position:[0.4,0.7],landing:"near_half"}],
         court_filter_active:true,
         method:"touch_detector_v4",

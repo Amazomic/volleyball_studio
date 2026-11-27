@@ -237,8 +237,10 @@ fn append_initial_serves(
     for &frame in frames {
         let index = rally_for_frame(intervals, frame)
             .ok_or("Report initial serve falls outside montage rallies")?;
-        per_rally[index].push(frame);
-        per_rally_serves[index] += 1;
+        if !per_rally[index].contains(&frame) {
+            per_rally[index].push(frame);
+            per_rally_serves[index] += 1;
+        }
     }
     Ok(())
 }
@@ -828,6 +830,9 @@ mod tests {
         append_initial_serves(&intervals, &selected, &mut contacts, &mut counts).unwrap();
         assert_eq!(contacts, vec![vec![12], Vec::<u64>::new()]);
         assert_eq!(counts, vec![1, 0]);
+        append_initial_serves(&intervals, &selected, &mut contacts, &mut counts).unwrap();
+        assert_eq!(counts, vec![1, 0]);
+        assert_eq!(contacts, vec![vec![12], Vec::<u64>::new()]);
         assert!(append_initial_serves(&intervals, &[21], &mut contacts, &mut counts).is_err());
         assert_eq!(
             select_initial_serve_frames(&proposals, &owners, "player-b"),

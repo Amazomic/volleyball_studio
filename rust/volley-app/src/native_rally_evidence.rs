@@ -802,7 +802,7 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
         }
     }
     if timeline {
-        let serve_proposals = if run
+        let mut serve_proposals = if run
             .touch_file
             .parent()
             .is_some_and(|dir| dir.join("manifest.json").is_file())
@@ -868,6 +868,7 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
         // Complete postprocessing result, including physical Touch candidates
         // whose action type could not be classified. Never mix with GPU boxes.
         let mut touch_annotations = Vec::<Value>::new();
+        let mut measured_serves = BTreeSet::new();
         let mut prior = None;
         while let Some(bytes) = contacts.line()? {
             let event: NativeMotion = serde_json::from_slice(&bytes)
@@ -906,6 +907,11 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
             let touch_attributed = final_touch.attributed;
             let verified_contact = final_touch.pose_supported;
             let predicted_kind = final_touch.kind;
+            if predicted_kind == Some(ActionKind::Serve) {
+                if let Some(id) = event.provisional_track_id {
+                    measured_serves.insert((event.frame_index, id));
+                }
+            }
             touch_annotations.push(json!({
                 "frame_index":event.frame_index,
                 "kind":predicted_kind.map(ActionKind::as_str).unwrap_or("unknown_touch"),
@@ -927,6 +933,15 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
         }
         if raw_touch_count != run.expected_touches || contacts.finish() != run.touch_sha {
             return Err("Touch count or SHA-256 mismatch during rally timeline".into());
+        }
+        for proposal in &mut serve_proposals {
+            if proposal["trajectory_start_frame"]
+                .as_u64()
+                .zip(proposal["provisional_track_id"].as_u64())
+                .is_some_and(|key| measured_serves.contains(&key))
+            {
+                proposal["matched_physical_touch"] = json!(true);
+            }
         }
         return Ok(PreviewContent {
             value: json!({

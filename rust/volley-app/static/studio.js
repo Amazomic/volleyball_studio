@@ -2057,7 +2057,7 @@
               item.source!=="rally_trajectory_start_v1"||
               item.rally_start_frame!==interval.start||
               !Number.isSafeInteger(frame)||frame<interval.start||
-              frame>Math.min(interval.end,interval.start+29)||
+              frame>Math.min(interval.end,interval.start+49)||
               (item.provisional_track_id!==null&&
                 (!Number.isSafeInteger(item.provisional_track_id)||item.provisional_track_id<=0));
           })||
@@ -3206,6 +3206,7 @@
       if(!training.active&&overlay.flags.touches&&overlay.actionFlags.serve&&
         Array.isArray(data.serve_proposals)){
         for(const serve of data.serve_proposals){
+          if(serve.matched_physical_touch)continue;
           const frame=Number(serve.trajectory_start_frame??serve.rally_start_frame);
           const x=Math.floor(((Number(s.analysisOffset)||0)+frame/fps())/duration*width);
           if(Number.isFinite(x)&&x>=0&&x<width){
@@ -4203,7 +4204,7 @@
         data.rally_run_id===run&&data.video===video&&Array.isArray(data.touch_annotations);
       const serves=validTimeline&&!overlay.raw&&overlay.flags.touches&&
         overlay.actionFlags.serve&&Array.isArray(data.serve_proposals)?
-        data.serve_proposals:[];
+        data.serve_proposals.filter(serve=>!serve.matched_physical_touch):[];
       const touches=validTimeline&&(typeof training==="undefined"||!training.active)&&
         !overlay.raw&&overlay.flags.touches?data.touch_annotations.filter(event=>
         overlay.actionFlags[cpuTouchKind(event.kind)]):[];
@@ -4289,7 +4290,7 @@
     }
     const serves=Array.isArray(data.serve_proposals)?data.serve_proposals.filter(item=>{
       const frame=Number(item.trajectory_start_frame??item.rally_start_frame);
-      return Number.isSafeInteger(frame)&&frame>=start&&frame<=end;
+      return Number.isSafeInteger(frame)&&frame>=start&&frame<=end&&!item.matched_physical_touch;
     }):[];
     const touches=data.touch_annotations.filter(event=>
       event.frame_index>=start&&event.frame_index<=end);

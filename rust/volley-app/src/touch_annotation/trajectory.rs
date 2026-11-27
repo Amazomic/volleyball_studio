@@ -254,7 +254,12 @@ fn initial_rally_serve_proposals(
     .map_err(storage::bad_request)?;
     let scope = intervals
         .iter()
-        .map(|&(start, end)| (start, end.min(start.saturating_add(89))))
+        .map(|&(start, end)| {
+            (
+                start,
+                end.min(start.saturating_add(crate::cpu_touches::INITIAL_SERVE_FLIGHT_FRAMES - 1)),
+            )
+        })
         .collect::<Vec<_>>();
     let mut collected = Vec::new();
     let mut poses = Vec::new();

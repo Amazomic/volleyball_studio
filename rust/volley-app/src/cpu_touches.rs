@@ -2037,8 +2037,9 @@ pub(crate) struct InitialServeProposal {
     source: &'static str,
 }
 
-pub(crate) const INITIAL_SERVE_ATTRIBUTION_VERSION: &str = "calibrated_flight_origin_v6";
-pub(crate) const INITIAL_SERVE_SEARCH_FRAMES: u64 = 46;
+pub(crate) const INITIAL_SERVE_ATTRIBUTION_VERSION: &str = "calibrated_flight_origin_v7";
+pub(crate) const INITIAL_SERVE_SEARCH_FRAMES: u64 = 50;
+pub(crate) const INITIAL_SERVE_FLIGHT_FRAMES: u64 = 120;
 pub(crate) const INITIAL_SERVE_CONTACT_FRAMES: u64 = 5;
 
 fn unique_post_serve_entry(
@@ -2181,7 +2182,7 @@ fn calibrated_serve_origin(
         rally_reconstruction::serve_flight::ServeFlightDetector,
     };
     let end = frames.last()?.frame_index.checked_sub(rally_start)?;
-    if end >= 90 {
+    if end >= INITIAL_SERVE_FLIGHT_FRAMES {
         return None;
     }
     let mut points = vec![None; end as usize + 1];
@@ -2334,6 +2335,90 @@ pub(crate) fn initial_serve_proposal(
         source: "rally_trajectory_start_v1",
     }
 }
+fn classify_opening_serve(
+    event: &mut PhysicalTouchCandidate,
+    proposal: &InitialServeProposal,
+    frames: &[TouchFrame],
+    dimensions: (u32, u32),
+) {
+    use volley_core::action_prediction::{ActionKind, ActionPrediction, PredictionMethod};
+
+    let Some((launch, id)) = proposal
+        .trajectory_start_frame
+        .zip(proposal.provisional_track_id)
+    else {
+        return;
+    };
+    if event.provisional_track_id != Some(id)
+        || event.frame_index < proposal.rally_start_frame
+        || event.frame_index
+            >= proposal
+                .rally_start_frame
+                .saturating_add(INITIAL_SERVE_SEARCH_FRAMES)
+        || event.frame_index.abs_diff(launch) >= INITIAL_SERVE_CONTACT_FRAMES
+        || !event.physical_motion_supported
+        || !event.body_contact_supported
+        || event.ball_occluded_at_contact
+        || event.court.is_none()
+        || event.speed_after_px_frame < 1.2 * event.speed_before_px_frame.max(0.1)
+    {
+        return;
+    }
+    let Some(contact) = event
+        .contact_landmark
+        .filter(|contact| contact.is_arm_contact())
+    else {
+        return;
+    };
+    let Some(player) = frames
+        .iter()
+        .find(|row| row.frame_index == event.frame_index)
+        .and_then(|row| row.players.iter().find(|player| player.track_id == id))
+    else {
+        return;
+    };
+    let [x1, y1, x2, y2] = player.bbox_xyxy_norm;
+    let height = (y2 - y1) * f64::from(dimensions.1);
+    if height <= 0.0 {
+        return;
+    }
+    let prediction = ActionPrediction {
+        kind: ActionKind::Serve,
+        method: PredictionMethod::CourtPoseMotionV1,
+        evidence_score: (event.probability * (1.0 - contact.normalized_distance)).clamp(0.0, 1.0),
+        depth_ratio: ((event.ball_y_px - y1 * f64::from(dimensions.1)) / height).clamp(-2.0, 3.0),
+        posture_ratio: ((x2 - x1) * f64::from(dimensions.0) / height).clamp(0.0, 4.0),
+    };
+    if prediction.valid() {
+        event.action_prediction = Some(prediction);
+    }
+}
+
+fn snap_initial_serve(proposals: &mut [InitialServeProposal], event: &PhysicalTouchCandidate) {
+    use volley_core::action_prediction::ActionKind;
+    if !event
+        .action_prediction
+        .as_ref()
+        .is_some_and(|p| p.kind == ActionKind::Serve)
+    {
+        return;
+    }
+    let index = proposals.partition_point(|p| p.rally_start_frame <= event.frame_index);
+    if let Some(proposal) = index.checked_sub(1).and_then(|i| proposals.get_mut(i)) {
+        if proposal.provisional_track_id == event.provisional_track_id
+            && proposal.trajectory_start_frame.is_some_and(|launch| {
+                launch.abs_diff(event.frame_index) < INITIAL_SERVE_CONTACT_FRAMES
+            })
+            && event.frame_index
+                < proposal
+                    .rally_start_frame
+                    .saturating_add(INITIAL_SERVE_SEARCH_FRAMES)
+        {
+            proposal.trajectory_start_frame = Some(event.frame_index);
+        }
+    }
+}
+
 fn select_pending_touch(
     pending: &mut Option<PhysicalTouchCandidate>,
     event: PhysicalTouchCandidate,
@@ -3290,12 +3375,12 @@ fn detect_stream_with_pose(
             exclude_ball_teleports(&block, width, height)
         };
         if start == window.0 {
-            let serve_frames = &clean[..clean.len().min(90)];
+            let serve_frames = &clean[..clean.len().min(INITIAL_SERVE_FLIGHT_FRAMES as usize)];
             let poses = if let Some((root, fusion, interpolation)) = pose_source {
                 pose_frames_policy(root, fusion, serve_frames, Some(interpolation), refined)?
             } else {
                 refined
-                    .range(window.0..window.0.saturating_add(90))
+                    .range(window.0..window.0.saturating_add(INITIAL_SERVE_FLIGHT_FRAMES))
                     .map(|(&frame_index, players)| PoseFrame {
                         frame_index,
                         players: players.clone(),
@@ -3577,10 +3662,17 @@ fn detect_stream_with_pose(
                 return Err("Ground contact count exceeds limit".into());
             }
             ground_contacts.extend(possible_ground);
-            for event in events {
+            for mut event in events {
+                if let Some(proposal) = initial_serves
+                    .last()
+                    .filter(|p| preliminary_intervals.is_some() && p.rally_start_frame == window.0)
+                {
+                    classify_opening_serve(&mut event, proposal, evidence_frames, (width, height));
+                }
                 motion_candidates += 1;
 
                 if let Some(last) = select_pending_touch(&mut pending, event, separation) {
+                    snap_initial_serve(&mut initial_serves, &last);
                     let typed = emit_contextual_touch(
                         &mut writer,
                         &mut output_hash,
@@ -3726,6 +3818,7 @@ fn detect_stream_with_pose(
         return Err("CPU replay SHA-256 changed while reading Touch input".into());
     }
     if let Some(last) = pending {
+        snap_initial_serve(&mut initial_serves, &last);
         let typed = emit_contextual_touch(
             &mut writer,
             &mut output_hash,
@@ -4709,6 +4802,102 @@ mod tests {
             })
             .collect();
         (frames, poses)
+    }
+
+    #[test]
+    fn opening_serve_classifies_observed_strike_not_opponent_reception() {
+        use volley_core::action_prediction::ActionKind;
+        let mut frames = serve_entry_fixture(100, 24);
+        frames[46].players[0].track_id = 6;
+        let mut proposal = InitialServeProposal {
+            rally_start_frame: 100,
+            trajectory_start_frame: Some(145),
+            provisional_track_id: Some(6),
+            kind: "serve",
+            identity_verified: false,
+            source: "rally_trajectory_start_v1",
+        };
+        let [mut event, _] = recorded_rebound_and_departure(146);
+        event.ball_occluded_at_contact = false;
+        event.speed_after_px_frame = 32.0;
+        event.contact_landmark = Some(volley_core::pose_contact::BodyContact {
+            joint_indices: [8, 10],
+            point_px: [496.0, 350.0],
+            distance_px: 0.25,
+            normalized_distance: 0.0,
+        });
+        event.court = Some(volley_core::court_geometry::CourtContactEvidence {
+            x_m: 9.5,
+            y_m: 0.0,
+            side: CourtSide::Far,
+            near_net: false,
+            in_serve_zone: true,
+        });
+        let mut other = event.clone();
+        other.provisional_track_id = Some(42);
+        classify_opening_serve(&mut other, &proposal, &frames, (1280, 720));
+        assert!(other.action_prediction.is_none());
+        let mut reception = event.clone();
+        reception.frame_index = 180;
+        classify_opening_serve(&mut reception, &proposal, &frames, (1280, 720));
+        assert!(reception.action_prediction.is_none());
+        classify_opening_serve(&mut event, &proposal, &frames, (1280, 720));
+        assert_eq!(
+            event.action_prediction.as_ref().map(|p| p.kind),
+            Some(ActionKind::Serve)
+        );
+        snap_initial_serve(std::slice::from_mut(&mut proposal), &event);
+        assert_eq!(proposal.trajectory_start_frame, Some(146));
+    }
+
+    #[test]
+    fn delayed_high_serve_uses_return_after_the_initial_player_window() {
+        let project = |[x, y, z]: [f64; 3]| {
+            let d = 1.0 + 0.05 * x;
+            [
+                (0.5 + 0.03 * x + 0.04 * y) / d,
+                (0.5 - 0.01 * x - 0.09 * z) / d,
+            ]
+        };
+        let court = CourtTransform::new(
+            [
+                [-9., -4.5, 0.],
+                [9., -4.5, 0.],
+                [9., 4.5, 0.],
+                [-9., 4.5, 0.],
+            ]
+            .map(project),
+        )
+        .unwrap()
+        .with_net(Some([[0., -4.5, 2.43], [0., 4.5, 2.43]].map(project)))
+        .unwrap();
+        let launch = 45;
+        let frames = (0..120)
+            .map(|frame_index| {
+                let t = (frame_index as f64 - launch as f64) / 30.;
+                let [x, y] = project([9. - 10. * t, 0., 2.2 + 9.8 * t - 4.905 * t * t]);
+                TouchFrame {
+                    frame_index,
+                    players: vec![],
+                    selected_ball: (frame_index >= launch && t <= 2.4 && y >= 0.).then_some(
+                        TouchBall {
+                            source_model: "vballnet".into(),
+                            score: 0.9,
+                            bbox_xyxy_norm: [x - 0.003, y - 0.003, x + 0.003, y + 0.003],
+                        },
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        let settings = TouchSettings::default();
+        assert_eq!(
+            calibrated_serve_origin(&frames[..90], 0, &court, settings.min_ball_score),
+            None
+        );
+        assert_eq!(
+            calibrated_serve_origin(&frames, 0, &court, settings.min_ball_score),
+            Some((launch, CourtSide::Far))
+        );
     }
 
     #[test]

@@ -86,6 +86,17 @@ assert.equal(markers.children[3].style.backgroundColor,"#c6bf96",
   "Untyped touches have the same color as in the video");
 assert.match(progress.attrs["aria-label"],/4 касаний/);
 assert.match(markers.children[1].title,/12.5 с/);
+timeline.data.touch_annotations.push({frame_index:105,kind:"serve",provisional_track_id:7});
+timeline.data.serve_proposals=[
+  {kind:"serve",trajectory_start_frame:105,rally_start_frame:100,provisional_track_id:7,matched_physical_touch:true},
+  {kind:"serve",trajectory_start_frame:110,rally_start_frame:100,provisional_track_id:8}
+];
+refreshRallyCardTouchTicks();
+assert.equal(markers.children.length,6,"One marker for the measured serve, plus an unmatched proposal");
+assert.equal(markers.children.filter(x=>x.style.left==="10%").length,1);
+timeline.data.touch_annotations.pop();
+delete timeline.data.serve_proposals;
+refreshRallyCardTouchTicks();
 overlay.actionFlags.unknown_touch=false;
 refreshRallyCardTouchTicks();
 assert.equal(markers.children.length,3,"Unknown-type checkbox filters card timeline");

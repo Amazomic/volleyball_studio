@@ -446,6 +446,54 @@ fn timeline_exposes_initial_serves_without_adding_physical_contacts() {
 }
 
 #[test]
+fn timeline_links_opening_serve_proposal_to_the_same_physical_event() {
+    let (mut run, root) = fixture();
+    let mut events: Vec<Value> = fs::read_to_string(&run.touch_file)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    events[0]["action_prediction"] = json!({
+        "kind":"serve","method":"court_pose_motion_v1","evidence_score":0.8,
+        "depth_ratio":0.02,"posture_ratio":0.4
+    });
+    let bytes = events
+        .iter()
+        .map(|event| format!("{event}\n"))
+        .collect::<String>();
+    fs::write(&run.touch_file, &bytes).unwrap();
+    run.touch_sha = format!("{:x}", Sha256::digest(bytes.as_bytes()));
+    let preliminary = serde_json::to_vec(&json!({"initial_serve_proposals":[
+        {"rally_start_frame":30,"trajectory_start_frame":40,
+         "provisional_track_id":3,"kind":"serve",
+         "identity_verified":false,"source":"rally_trajectory_start_v1"},
+        {"rally_start_frame":95,"trajectory_start_frame":115,
+         "provisional_track_id":3,"kind":"serve",
+         "identity_verified":false,"source":"rally_trajectory_start_v1"}
+    ]}))
+    .unwrap();
+    fs::write(root.join("preliminary_rallies.json"), &preliminary).unwrap();
+    fs::write(
+        root.join("manifest.json"),
+        serde_json::to_vec(&json!({
+            "initial_serve_proposal_count":2,
+            "preliminary_rally_sha256":format!("{:x}", Sha256::digest(&preliminary))
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let timeline = generate(&run, Choice::Timeline).unwrap().value;
+    assert_eq!(timeline["touch_annotations"][0]["kind"], "serve");
+    assert_eq!(
+        timeline["serve_proposals"][0]["matched_physical_touch"],
+        true
+    );
+    assert!(timeline["serve_proposals"][1]["matched_physical_touch"].is_null());
+    assert_eq!(timeline["raw_touch_candidates"], 6);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn timeline_keeps_unattributed_motion_inside_rally_without_inventing_player() {
     let (mut run, root) = fixture();
     let mut events = fs::read_to_string(&run.touch_file)
