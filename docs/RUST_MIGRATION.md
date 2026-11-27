@@ -4976,3 +4976,9 @@ Studio показывает кнопку перехода между debug и re
 
 - База 58db84bb59bd24e78fc1b080f0bb607e5798d983, исправления cceaf794d66ee53389142a8e5f0b50b0b094f504. Регистрация проекта повторно разрешает путь к видео под блокировкой реестра. Поиск дубликатов пропускает непригодную запись загрузки. Сборка без проверенного Git SHA запускает анализ без возобновления по чекпоинтам. Windows-очередь сохраняет подтверждённый путь к предыдущей сборке и её данные, а при ошибке запуска проверяет SHA восстановленной Studio.
 - RED и GREEN подтверждены для удаления между валидацией и записью проекта, коррумпированной записи загрузки и отказа запуска кандидата. Полный scripts/check-all.ps1 PASS (1116 Rust, 28 ignored, 118 Node, fmt, clippy). cargo check --offline --locked -p volley-app из снимка без .git PASS. Реальные GPU и матч, Docker-образ и принудительный откат на действующем сервере NOT TESTED. Применение через штатную очередь после публикации.
+
+## 2026-11-27 — Concise bilingual project README
+
+- Base: 320a0a378b3f1cf6425839cc830f4aa6bfcf9518. Owners: README.md, README.ru.md (documentation only).
+- Replaced release/migration details and stale WSL launch instructions with a short product overview, existing interface screenshot, feature table, Mermaid workflow and links to examples, setup and documentation.
+- Checks: all relative README targets exist; git diff --check passed. No runtime changes or GPU/model quality claims. Deployment via the standard queue after publication; live result reported separately.
