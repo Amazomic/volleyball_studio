@@ -1608,6 +1608,128 @@ mod source_track_integrity_tests {
     }
 
     #[test]
+    fn occluded_rebound_with_unique_forearm_motion_is_dig() {
+        let root = std::env::temp_dir().join(format!("volley-touch-pose-{}", uuid::Uuid::new_v4()));
+        let mut event = occluded_launch(10);
+        event.provisional_track_id = None;
+        event.inferred_body_reach_supported = false;
+        event.ball_x_px = 0.517 * 1920.0;
+        event.ball_y_px = 0.458 * 1080.0;
+        event.direction_change_deg = 160.0;
+        event.speed_before_px_frame = 15.0;
+        event.speed_after_px_frame = 30.0;
+        event.velocity_residual_px_frame = 45.0;
+        let player = TouchPlayer {
+            track_id: 2,
+            score: 0.9,
+            touch_probability: None,
+            bbox_xyxy_norm: [0.51, 0.415, 0.57, 0.585],
+        };
+        let pose = |frame: u64| {
+            let t = (frame as f64 - 6.0) / 8.0;
+            let mut k = [[0.0; 3]; 17];
+            let points = [
+                (0, [0.54, 0.45], [0.55, 0.42]),
+                (5, [0.55, 0.48], [0.56, 0.44]),
+                (6, [0.54, 0.47], [0.55, 0.43]),
+                (7, [0.537, 0.50], [0.546, 0.435]),
+                (8, [0.530, 0.49], [0.539, 0.425]),
+                (9, [0.524, 0.52], [0.532, 0.43]),
+                (10, [0.520, 0.51], [0.528, 0.42]),
+                (11, [0.55, 0.52], [0.55, 0.49]),
+                (12, [0.54, 0.51], [0.54, 0.49]),
+            ];
+            for (joint, a, b) in points {
+                k[joint] = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 0.9];
+            }
+            if frame == 10 {
+                k[7] = [0.538, 0.458, 0.9];
+                k[8] = [0.533, 0.455, 0.9];
+                k[9] = [0.525, 0.458, 0.9];
+                k[10] = [0.521, 0.460, 0.9];
+            }
+            PosePlayer {
+                track_id: 2,
+                keypoints: k,
+                interpolated: false,
+            }
+        };
+        let mut frames = (6..=14)
+            .map(|frame_index| {
+                let point = match frame_index {
+                    6 => Some([0.49, 0.37]),
+                    7 => Some([0.50, 0.40]),
+                    8 => Some([0.51, 0.42]),
+                    11 => Some([0.52, 0.415]),
+                    12 => Some([0.518, 0.38]),
+                    13 => Some([0.517, 0.35]),
+                    14 => Some([0.516, 0.32]),
+                    _ => None,
+                };
+                TouchFrame {
+                    frame_index,
+                    players: vec![player.clone()],
+                    selected_ball: point.map(|[x, y]| TouchBall {
+                        source_model: "vballnet".into(),
+                        score: 0.9,
+                        bbox_xyxy_norm: [x - 0.008, y - 0.014, x + 0.008, y + 0.014],
+                    }),
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut refined = (6..=14)
+            .map(|f| (f, vec![pose(f)]))
+            .collect::<BTreeMap<_, _>>();
+        let run = |frames: &[TouchFrame], refined: &BTreeMap<u64, Vec<PosePlayer>>| {
+            let mut events = vec![event.clone()];
+            refine_pose_events_policy(
+                &mut events,
+                frames,
+                (1920, 1080),
+                &root,
+                "00000000000000000000000000000000",
+                TouchSettings::default(),
+                None,
+                refined,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(events.len(), 1);
+            events.remove(0)
+        };
+        let attributed = run(&frames, &refined);
+        assert_eq!(attributed.frame_index, 10);
+        assert_eq!(attributed.provisional_track_id, Some(2));
+        assert_eq!(
+            attributed.action_prediction.unwrap().kind,
+            volley_core::action_prediction::ActionKind::Dig
+        );
+        assert!(attributed.body_contact_supported);
+        assert!(attributed.ball_occluded_at_contact);
+        for f in &mut frames {
+            let mut other = player.clone();
+            other.track_id = 3;
+            f.players.push(other);
+            let mut other_pose = pose(f.frame_index);
+            other_pose.track_id = 3;
+            refined.get_mut(&f.frame_index).unwrap().push(other_pose);
+        }
+        assert_eq!(run(&frames, &refined).provisional_track_id, None);
+        for f in &mut frames {
+            if f.frame_index > 10 {
+                f.selected_ball = None;
+            }
+            f.players.retain(|p| p.track_id == 2);
+            refined
+                .get_mut(&f.frame_index)
+                .unwrap()
+                .retain(|p| p.track_id == 2);
+        }
+        assert_eq!(run(&frames, &refined).provisional_track_id, None);
+    }
+
+    #[test]
     fn measured_pose_rejects_distant_geometry_assignment() {
         let root = std::env::temp_dir().join(format!("volley-touch-pose-{}", uuid::Uuid::new_v4()));
         let mut event = occluded_launch(10);
@@ -2660,6 +2782,20 @@ fn refine_pose_events_policy(
         else {
             continue;
         };
+        if event.ball_occluded_at_contact && event.provisional_track_id.is_none() {
+            if let Some(radius) = nearby_event_ball_radius(event, frames, dimensions, settings) {
+                supported[index] = volley_core::touch_pipeline::refine_occluded_dig(
+                    event,
+                    frames,
+                    &poses,
+                    dimensions,
+                    settings,
+                    eligible_tracks.get(&frame.frame_index).map(Vec::as_slice),
+                    radius,
+                );
+            }
+            continue;
+        }
         let Some(ball) = frame
             .selected_ball
             .as_ref()

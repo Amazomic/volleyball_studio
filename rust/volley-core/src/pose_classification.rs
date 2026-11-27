@@ -3,7 +3,7 @@
 //! No serving or blocking verdict without verified rally/court context.
 use crate::action_prediction::{ActionKind, ActionPrediction, PredictionMethod};
 
-pub const ACTION_PREDICTION_POLICY_VERSION: &str = "pose_keypoints_motion_v10_or_unknown_touch";
+pub const ACTION_PREDICTION_POLICY_VERSION: &str = "pose_keypoints_motion_v11_or_unknown_touch";
 
 #[derive(Clone, Copy, Debug)]
 pub struct PoseEvidence {

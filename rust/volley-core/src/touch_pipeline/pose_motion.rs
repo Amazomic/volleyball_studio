@@ -225,10 +225,10 @@ fn pose_contact_with_ball(
                 if frame.frame_index != at {
                     return None;
                 }
-                let ball = frame
-                    .selected_ball
-                    .as_ref()
-                    .filter(|b| b.source_model == "vballnet")?;
+                let ball = frame.selected_ball.as_ref().filter(|b| {
+                    b.source_model == "vballnet"
+                        && (inferred_ball.is_none() || b.score >= settings.min_ball_score)
+                })?;
                 let [x, y] = center(ball.bbox_xyxy_norm);
                 Some((at.abs_diff(sample.frame_index), [x * w, y * h]))
             })
@@ -319,6 +319,101 @@ fn pose_contact_with_ball(
         },
         separation,
     ))
+}
+
+#[must_use]
+pub fn refine_occluded_dig(
+    event: &mut PhysicalTouchCandidate,
+    frames: &[TouchFrame],
+    poses: &[PoseFrame],
+    dimensions: (u32, u32),
+    settings: TouchSettings,
+    eligible: Option<&[u64]>,
+    radius: f64,
+) -> bool {
+    if !event.physical_motion_supported
+        || !event.ball_occluded_at_contact
+        || event.provisional_track_id.is_some()
+        || event.body_contact_supported
+        || event.direction_change_deg < 75.0
+        || event.velocity_residual_px_frame < 18.0
+        || event.motion_frame_index.abs_diff(event.frame_index) > 3
+    {
+        return false;
+    }
+    let Some(index) = frames
+        .iter()
+        .position(|f| f.frame_index == event.frame_index)
+    else {
+        return false;
+    };
+    let frame = &frames[index];
+    let (w, h) = (f64::from(dimensions.0), f64::from(dimensions.1));
+    let precise = TouchSettings {
+        pose_max_distance: settings.pose_max_distance.min(0.06),
+        ..settings
+    };
+    let mut contacts = frame.players.iter().filter_map(|player| {
+        let id = player.track_id;
+        if eligible.is_some_and(|ids| !ids.contains(&id))
+            || !poses.iter().any(|row| {
+                row.frame_index == frame.frame_index
+                    && row
+                        .players
+                        .iter()
+                        .any(|p| p.track_id == id && !p.interpolated)
+            })
+        {
+            return None;
+        }
+        let (evidence, landmark) = pose_contact_with_ball(
+            frames,
+            poses,
+            frame,
+            id,
+            dimensions,
+            precise,
+            Some(([event.ball_x_px, event.ball_y_px], radius)),
+        )?;
+        Some((player, evidence, landmark))
+    });
+    let Some((player, evidence, landmark)) = contacts.next() else {
+        return false;
+    };
+    if contacts.next().is_some() || !landmark.joint_indices.iter().all(|i| (7..=10).contains(i)) {
+        return false;
+    }
+    let Some(standing_height_px) = standing_height(frames, index, player.track_id, h) else {
+        return false;
+    };
+    let Some(geometry) = action_prediction::predict(PositionEvidence {
+        ball_y_px: event.ball_y_px,
+        ball_radius_px: radius,
+        player_bbox_px: pixel_bbox(player.bbox_xyxy_norm, w, h),
+        standing_height_px,
+        touch_score: event.probability,
+        track_score: player.score,
+        context: CourtContext::Unavailable,
+    }) else {
+        return false;
+    };
+    let Some(prediction) = refine_observed_pose_motion(
+        poses,
+        event.frame_index,
+        player.track_id,
+        &evidence,
+        &geometry,
+    )
+    .filter(|p| p.kind == action_prediction::ActionKind::Dig) else {
+        return false;
+    };
+    event.provisional_track_id = Some(player.track_id);
+    event.action_prediction = Some(prediction);
+    event.body_contact_supported = true;
+    event.inferred_body_reach_supported = false;
+    event.contact_landmark = Some(landmark);
+    event.contact_pose_sample_frame = None;
+    true
 }
 
 #[must_use]
