@@ -4982,3 +4982,10 @@ Studio показывает кнопку перехода между debug и re
 - Base: 320a0a378b3f1cf6425839cc830f4aa6bfcf9518. Owners: README.md, README.ru.md (documentation only).
 - Replaced release/migration details and stale WSL launch instructions with a short product overview, existing interface screenshot, feature table, Mermaid workflow and links to examples, setup and documentation.
 - Checks: all relative README targets exist; git diff --check passed. No runtime changes or GPU/model quality claims. Deployment via the standard queue after publication; live result reported separately.
+
+## 2026-11-27 — Replace obsolete README media with live Studio captures
+
+- Base and captured build: c789d8190730d31fb795daffc0b1c29c095eabf9. Owners: README.md, README.ru.md, docs/images/, unused examples/.
+- Removed seven unreferenced outdated media/prediction files. Retained examples/output.gif for two opt-in RF-DETR CUDA parity tests; no application or fixture behavior changed.
+- Captured the actual Preview and Analysis tabs in isolated Edge browser against the running Windows Studio, all seven preview overlays enabled; recorded 120 distinct playback samples (source 6.0009–20.8805 s) into a 15.000 s MP4. Provenance: docs/images/README.md.
+- Checks: all README links tracked and present, no references to removed assets outside historical journal, retained fixture present, PNG/MP4 decoded, screenshots and video frames visually inspected, git diff --check PASS. No new GPU inference, no claim of recognition accuracy. Deployment via standard queue after publication; live result reported separately.
