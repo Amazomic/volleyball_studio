@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 import {runInNewContext} from "node:vm";
 
 const read=path=>readFileSync(new URL("../../"+path,import.meta.url),"utf8");
@@ -181,7 +182,7 @@ assert.ok(!js.slice(calculateStart,calculateEnd).includes("refreshComparison"),
     trajectory_status:"ready",trajectory_rallies:[{start:15,end:260}]}};
   const {annotationFromPrediction}=runInNewContext(js.slice(first,last)+
     "\n({annotationFromPrediction})",{
-    annotation:edited,comparison:proposed,timeline:{data:{rallies:[]}},
+    window:previewWasmWindow(),annotation:edited,comparison:proposed,timeline:{data:{rallies:[]}},
     comparisonMatches:data=>data===proposed.data,
     annotationNewId:()=>String(++nextId)
   });

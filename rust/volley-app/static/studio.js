@@ -1547,11 +1547,10 @@
   const annotationCurrentData=()=>annotation.data&&annotationSourceValid();
   const annotationTrajectoryRallySeeds=()=>{
     const proposed=annotation.prediction;
-    if(!proposed||proposed.rally_source!=="calculated_ball_trajectory_rallies"||!Array.isArray(proposed.rally_intervals))return [];
-    return proposed.rally_intervals.slice(0,1024)
-      .filter(r=>Number.isSafeInteger(r.start)&&Number.isSafeInteger(r.end)&&
-        r.start>=0&&r.start<r.end&&r.end<(annotation.prediction?.total_frames||annotation.data?.total_frames||0))
-      .map(r=>({id:annotationNewId(),start:r.start,end:r.end}));
+    if(!proposed||!window.VolleyballUi?.isReady())return [];
+    const intervals=window.VolleyStudioChain.call(9,{kind:"seeds",source:proposed.rally_source,
+      intervals:proposed.rally_intervals,totalFrames:proposed.total_frames||annotation.data?.total_frames||0});
+    return intervals.map(r=>({id:annotationNewId(),start:r.start,end:r.end}));
   };
   const annotationFromPrediction=()=>({
     ...annotation.data,total_frames:annotation.prediction.total_frames,
@@ -2277,21 +2276,10 @@
     data.schema==="volley-rally-training-comparison/1"&&
     data.project_id===s.project&&data.rally_run_id===s.run&&data.video===s.video;
   const mergeTrainingIntervals=(items,gapFrames,stops=[])=>{
-    const sorted=items.filter(item=>Number.isSafeInteger(item.start)&&
-      Number.isSafeInteger(item.end)&&item.start>=0&&item.end>=item.start)
-      .sort((a,b)=>a.start-b.start||a.end-b.end);
-    const merged=[];
-    for(const item of sorted){
-      const previous=merged[merged.length-1];
-      const hold=previous&&stops.some(stop=>Number(stop[0])<item.start&&
-        Number(stop[1])>previous.end);
-      if(previous&&!hold&&(item.start<=previous.end+1||
-        item.start-previous.end-1<gapFrames)){
-        previous.end=Math.max(previous.end,item.end);
-        previous.members.push(...item.members);
-      }else merged.push({start:item.start,end:item.end,members:[...item.members]});
-    }
-    return merged;
+    if(!window.VolleyballUi?.isReady())return [];
+    const groups=window.VolleyStudioChain.call(9,{kind:"merge",items:items.map(item=>({start:item.start,end:item.end})),
+      gapFrames,stops:stops.map(stop=>[Number(stop[0]),Number(stop[1])])});
+    return groups.map(group=>({start:group.start,end:group.end,members:group.indices.flatMap(index=>items[index].members)}));
   };
   const comparisonTime=frame=>(Number(frame)/fps()).toFixed(2)+" с";
   const comparisonRange=value=>value?

@@ -413,6 +413,7 @@ pub extern "C" fn volley_domain_call(operation: u32) -> i32 {
         6 => crate::analysis_stages::call(&input),
         7 => crate::player_review::call(&input),
         8 => crate::montage_review::call(&input),
+        9 => crate::training_review::call(&input),
         _ => return 0,
     };
     match serde_json::to_vec(&value) {

@@ -8,6 +8,7 @@ mod montage_review;
 mod player_review;
 mod preview_scrub;
 mod preview_timeline;
+mod training_review;
 use std::cell::{Cell, RefCell};
 
 const ID_BYTES: usize = 24;
