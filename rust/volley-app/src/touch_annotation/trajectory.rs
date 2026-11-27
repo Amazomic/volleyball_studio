@@ -238,6 +238,7 @@ pub(super) fn scan_collision_trajectory(
 fn initial_rally_serve_proposals(
     run: &ValidatedRun,
     intervals: &[(u64, u64)],
+    court: Option<&volley_core::court_geometry::CourtTransform>,
 ) -> Result<Vec<crate::cpu_touches::InitialServeProposal>, ApiError> {
     let project_root = run
         .touch_file
@@ -286,6 +287,7 @@ fn initial_rally_serve_proposals(
                         min_ball_score: run.min_ball_score,
                         ..Default::default()
                     },
+                    court,
                 ));
                 collected.clear();
                 poses.clear();
@@ -366,7 +368,9 @@ pub async fn calculate(
         let court_filter_active = scan.court_filter_active;
         let court_revision = scan.court_calibration_revision;
         let selected = collision_frames(&scores, run.frames);
-        let initial_serves = initial_rally_serve_proposals(&run, &intervals)?;
+        let snapshot = crate::video_edits::court_snapshot(&state, &run.project_id, &run.video)?;
+        let court = snapshot.as_ref().and_then(|value| value.transform.as_ref());
+        let initial_serves = initial_rally_serve_proposals(&run, &intervals, court)?;
         let calibration = TrajectoryProfile {
             min_score: 0.0,
             shift_frames: 0,

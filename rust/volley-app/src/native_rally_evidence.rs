@@ -846,7 +846,7 @@ pub(crate) fn generate(run: &ValidatedRun, choice: Choice) -> Result<PreviewCont
                     || proposal["source"] != "rally_trajectory_start_v1"
                     || proposal["identity_verified"] != false
                     || at < start
-                    || at >= start.saturating_add(30)
+                    || at >= start.saturating_add(crate::cpu_touches::INITIAL_SERVE_SEARCH_FRAMES)
                     || !intervals
                         .iter()
                         .any(|interval| interval.start <= at && at <= interval.end)
