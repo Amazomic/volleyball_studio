@@ -1,40 +1,27 @@
 # Volleyball Studio
 
-**Turn volleyball match recordings into searchable rallies, player analysis and highlight videos with AI.**
+**AI-powered volleyball match analysis and highlight editing.**
 
-**English** · [Русский](README.ru.md) · [Documentation](docs/README.md)
+Import a match video. Studio tracks the ball and players, detects touches and rallies, and lets you review the game or create highlight videos from the original recording.
 
-![Volleyball Studio interface](docs/images/volley-studio-interface.png)
+[Русский](README.ru.md) · [Documentation](docs/README.md) · [Installation](docs/RUST_DEPLOYMENT.md)
 
-## What it does
+[![Actual Volleyball Studio preview with ball trajectory, player skeletons and court markings](docs/images/studio-preview.png)](docs/images/studio-preview.png)
 
-| Feature | Result |
-| --- | --- |
-| Ball and player tracking | Ball trajectory, player positions and body keypoints |
-| Touch recognition | Serves, receptions, sets, attacks and blocks |
-| Rally detection | A list of rallies across one or more match videos |
-| Player identification | Match tracked players to reference photos and confirm their identities |
-| Match review | Navigate rallies, inspect overlays and filter events |
-| Video editing | Assemble selected rallies, player highlights and custom clips |
+**[Watch a real 15-second annotated rally (MP4)](docs/images/studio-demo.mp4)**
 
-## How it works
+## From match video to highlights
 
-```mermaid
-flowchart TD
-    A["Match video(s) + court calibration"] --> B["AI: ball, players, poses"]
-    B --> C["Tracking and ball trajectory"]
-    C --> D["Touches and rally detection"]
-    D --> E["Player identification and review"]
-    E --> F["Statistics and highlight videos"]
-```
+- **Analyze:** ball trajectory, player tracking, body poses, court and net, touches and rally boundaries.
+- **Review:** navigate rallies, verify touch types and player identities, inspect statistics.
+- **Edit:** select rallies and individual player moments, assemble clips and export video.
 
-[Ball tracking example](examples/output.gif) · [Touch detection example](examples/player-touch.gif)
+## Analysis pipeline
 
-## Get started
+![Current two-phase analysis pipeline in Volleyball Studio](docs/images/studio-analysis.png)
 
-Volleyball Studio runs locally with a browser interface. The application uses Rust, WebAssembly, ONNX Runtime, CUDA and FFmpeg. AI analysis requires compatible models and GPU dependencies.
+GPU detection uses VBallNet V4c, RF-DETR Medium and RTMPose-M Body7. Ball stabilization, rally and touch detection, tracking and touch attribution turn observations into reviewable game events. ReID suggests player identities for confirmation.
 
-- [Installation and launch](docs/RUST_DEPLOYMENT.md)
-- [Full documentation](docs/README.md)
+The application runs locally on Rust with a browser interface. The screenshots and video show an actual analysis in the current Studio, not a mockup. AI results may require human review.
 
-> The project is experimental. AI-generated events and player matches may require human verification.
+**[Full documentation →](docs/README.md)**
