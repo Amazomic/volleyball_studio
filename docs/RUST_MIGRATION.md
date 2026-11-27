@@ -4994,3 +4994,9 @@ Studio показывает кнопку перехода между debug и re
 
 - Base: 04800df7660311f0fa6b4e537ce8611af10b0163. The GitHub MP4 blob viewer refused to display the demonstration. Added an inline looping GIF derived from the verified live recording and retained a direct raw MP4 link in both READMEs.
 - Checks: FFprobe GIF 540x340, 90 frames, 15.000 seconds, 3,646,841 bytes; FFmpeg full decode PASS, link targets present and tracked, git diff --check PASS. No runtime changes; deployment via standard queue.
+
+## 2026-11-27 — Canonical ball trajectory for touch detection and preview
+
+- Base: c789d8190730d31fb795daffc0b1c29c095eabf9; task commit 1f41d4ec947843636d20ca7825d09a61fe9c1feb. Owners: volley-core ball interpolation; volley-app CPU touches, ground stage, preview continuity and overlay contracts.
+- Stabilizer V14 preserves a supported vertical rebound across a short false-ball island. Touch detection consumes the persisted stabilized trajectory, and preview no longer invents additional ball positions. Historical artifacts remain unchanged; CPU reprocessing recomputes outdated stabilization and invalidates incompatible touch/ground evidence.
+- Regression: synthetic rebound RED/GREEN; read-only probe on saved VBallNet and CPU replay evidence from the short project recovered frame 420 (14.000 s), direction change 172.26 degrees. No new GPU inference. Full local non-GPU gate: 1118 Rust tests passed, 28 ignored; fmt, clippy and Node gates passed except pre-existing README roadmap label mismatch, reproduced on unmodified 04800df7. Integration includes intervening documentation-only commits; runtime diff identical to tested task. GPU/media quality suites not run. Deployment via standard queue.
