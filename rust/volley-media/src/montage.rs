@@ -493,25 +493,33 @@ fn follow_expression(points: &[CameraPoint], x_axis: bool) -> Result<String, Str
         previous = point.time_sec;
     }
     let ordinate = |point: &CameraPoint| if x_axis { point.x } else { point.y };
-    let mut expr = format!("{:.6}", ordinate(points.last().unwrap()));
-    for pair in points.windows(2).rev() {
-        let a = &pair[0];
-        let b = &pair[1];
-        let delta = b.time_sec - a.time_sec;
-        let interpolate = format!(
-            "({:.6}+({:.6})*(t-{:.6})/{:.6})",
-            ordinate(a),
-            ordinate(b) - ordinate(a),
-            a.time_sec,
-            delta
-        );
-        expr = format!("if(lt(t,{:.4}),{interpolate},{expr})", b.time_sec);
+    fn interpolate(points: &[CameraPoint], ordinate: &impl Fn(&CameraPoint) -> f64) -> String {
+        match points {
+            [point] => format!("{:.6}", ordinate(point)),
+            [a, b] => format!(
+                "({:.6}+({:.6})*(t-{:.6})/{:.6})",
+                ordinate(a),
+                ordinate(b) - ordinate(a),
+                a.time_sec,
+                b.time_sec - a.time_sec
+            ),
+            _ => {
+                let middle = points.len() / 2;
+                let left = interpolate(&points[..=middle], ordinate);
+                let right = interpolate(&points[middle..], ordinate);
+                format!("if(lt(t,{:.4}),{left},{right})", points[middle].time_sec)
+            }
+        }
     }
-    let first = points.first().unwrap();
+    let first = &points[0];
+    let last = &points[points.len() - 1];
+    let expr = interpolate(points, &ordinate);
     let result = format!(
-        "if(lt(t,{:.4}),{:.6},{expr})",
+        "if(lt(t,{:.4}),{:.6},if(lt(t,{:.4}),{expr},{:.6}))",
         first.time_sec,
-        ordinate(first)
+        ordinate(first),
+        last.time_sec,
+        ordinate(last)
     );
     Ok(result.replace(',', "\\,"))
 }

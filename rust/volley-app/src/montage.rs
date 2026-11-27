@@ -210,7 +210,7 @@ fn validate_audio(state: &AppState, request: &MontageRequest) -> Result<Option<P
     Ok(Some(path))
 }
 
-fn prepare_request(state: &AppState, request: MontageRequest) -> Result<Planned, ApiError> {
+fn prepare_request(state: &AppState, mut request: MontageRequest) -> Result<Planned, ApiError> {
     if !state.writes_enabled {
         return Err(storage::conflict(
             "Монтаж разрешён только в рабочем хранилище",
@@ -345,6 +345,9 @@ fn prepare_request(state: &AppState, request: MontageRequest) -> Result<Planned,
             fitted.push(clip);
         }
         clips = fitted;
+        if let Some(tracks) = request.camera_tracks.as_mut() {
+            tracks.truncate(clips.len());
+        }
         total = clips.iter().map(OriginalClip::duration_sec).sum();
     }
     if total > MAX_TOTAL_SECONDS {
@@ -613,6 +616,19 @@ fn validate_rendered(path: &Path, expected_duration: f64) -> Result<(), String> 
     Ok(())
 }
 
+fn externalize_follow_filter(args: &mut [String], path: &Path) -> Result<(), String> {
+    let index = args
+        .iter()
+        .position(|arg| arg == "-filter_complex")
+        .filter(|index| index + 1 < args.len())
+        .ok_or("Missing follow camera filter graph")?;
+    fs::write(path, &args[index + 1])
+        .map_err(|error| format!("Cannot save follow camera filter graph: {error}"))?;
+    args[index] = "-/filter_complex".into();
+    args[index + 1] = path.to_string_lossy().into_owned();
+    Ok(())
+}
+
 async fn render(plan: Planned, status: Arc<Mutex<JobStatus>>, mut cancel: watch::Receiver<bool>) {
     let receipt_path = plan.output_dir.join("selection.json");
     let output = plan.output_dir.join("montage.mp4");
@@ -753,16 +769,20 @@ async fn render(plan: Planned, status: Arc<Mutex<JobStatus>>, mut cancel: watch:
         if !used_copy {
             // Construct and validate both encoder plans BEFORE starting
             // FFmpeg. Never silently run an empty command on plan failure.
-            let gpu_args = if plan.layout == VideoLayout::VerticalFollow {
+            let mut gpu_args = if plan.layout == VideoLayout::VerticalFollow {
                 compose_follow_args(&paths, &formats, &follow_tracks, plan.camera_zoom, &joined, true)?
             } else {
                 compose_args_for_layout(&paths, &formats, &joined, None, true, plan.layout)?
             };
-            let cpu_args = if plan.layout == VideoLayout::VerticalFollow {
+            let mut cpu_args = if plan.layout == VideoLayout::VerticalFollow {
                 compose_follow_args(&paths, &formats, &follow_tracks, plan.camera_zoom, &joined, false)?
             } else {
                 compose_args_for_layout(&paths, &formats, &joined, None, false, plan.layout)?
             };
+            if plan.layout == VideoLayout::VerticalFollow {
+                externalize_follow_filter(&mut gpu_args, &segments.join("follow-gpu.filtergraph"))?;
+                externalize_follow_filter(&mut cpu_args, &segments.join("follow-cpu.filtergraph"))?;
+            }
             encode_with_fallback(
                 |gpu| {
                     if gpu {
@@ -1745,6 +1765,195 @@ mod highlight_cancellation_tests {
             );
             drop(snapshot);
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn duration_fitting_keeps_follow_tracks_aligned_and_renders_portrait() {
+        let root = std::env::temp_dir().join(format!("volley-follow-fit-{}", Uuid::new_v4()));
+        let repository_root = root.join("original");
+        let data_root = root.join("sandbox");
+        let project_id = "abcdef012345";
+        fs::create_dir_all(repository_root.join("project")).unwrap();
+        fs::create_dir_all(data_root.join("projects").join(project_id)).unwrap();
+        let source = repository_root.join("project/match.mp4");
+        let generated = std::process::Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=30:duration=3",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:sample_rate=48000:duration=3",
+                "-c:v",
+                "libx264",
+                "-threads",
+                "1",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-shortest",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        storage::write_json_atomic(
+            &data_root.join("projects/projects.json"),
+            &json!({"schema":1,"projects":[{"id":project_id,"name":"Match","videos":["match.mp4"]}]}),
+        ).unwrap();
+        let state = AppState {
+            repository_root,
+            data_root,
+            writes_enabled: true,
+            montage: MontageManager::new(),
+            preparation: preparation::PreparationManager::new(),
+            preview_limit: tokio::sync::Semaphore::new(1),
+            touch_limit: tokio::sync::Semaphore::new(1),
+            continuity_limit: tokio::sync::Semaphore::new(1),
+            reid_limit: tokio::sync::Semaphore::new(1),
+            identity_limit: tokio::sync::Semaphore::new(1),
+            statistics_limit: tokio::sync::Semaphore::new(1),
+            marks_limit: tokio::sync::Semaphore::new(1),
+            quick_reel: crate::quick_reel::QuickReelManager::new(),
+            inference_limit: tokio::sync::Semaphore::new(1),
+            full_inference: crate::inference_full::FullInferenceManager::new(),
+        };
+        let clips = (0..3)
+            .map(|i| SelectedClip {
+                video: "match.mp4".into(),
+                start_frame: i * 30,
+                end_frame: i * 30 + 29,
+                analysis_offset_sec: None,
+            })
+            .collect();
+        let tracks: Vec<Vec<CameraPoint>> = [0.2, 0.4, 0.6]
+            .into_iter()
+            .map(|x| {
+                vec![
+                    CameraPoint {
+                        time_sec: 0.0,
+                        x,
+                        y: 0.5,
+                    },
+                    CameraPoint {
+                        time_sec: 0.9,
+                        x: x + 0.1,
+                        y: 0.5,
+                    },
+                ]
+            })
+            .collect();
+        let audio_root = state.data_root.join("uploads/music");
+        fs::create_dir_all(&audio_root).unwrap();
+        let audio_name = format!("track_{}.m4a", "a".repeat(32));
+        let music = std::process::Command::new("ffmpeg")
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&source)
+            .args(["-vn", "-c:a", "copy"])
+            .arg(audio_root.join(&audio_name))
+            .output()
+            .unwrap();
+        assert!(music.status.success());
+        let plan = prepare_request(
+            &state,
+            MontageRequest {
+                project_id: project_id.into(),
+                clips,
+                materials: Vec::new(),
+                preferred_rally_run_id: None,
+                audio_file: Some(audio_name),
+                audio_volume: 40.0,
+                encoder: Some("cpu".into()),
+                layout: VideoLayout::VerticalFollow,
+                include_recognition_data: false,
+                target_duration_sec: Some(1.5),
+                camera_zoom: 1.0,
+                camera_tracks: Some(tracks.clone()),
+                report_outro: None,
+                verified_highlights: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.clips.len(), 2);
+        assert_eq!(plan.clips[1].end_frame, 44);
+        assert_eq!(plan.camera_tracks.as_deref(), Some(&tracks[..2]));
+        let output = plan.output_dir.clone();
+        let status = fixture_status();
+        let (_tx, rx) = watch::channel(false);
+        render(plan, status.clone(), rx).await;
+        let snapshot = status.lock().await;
+        assert_eq!(snapshot.state, "complete", "{}", snapshot.error);
+        verify_mp4_quality(&output.join("montage.mp4"), (102, 180, 30.0), 1.5, true).unwrap();
+        let receipt: Value =
+            serde_json::from_slice(&fs::read(output.join("selection.json")).unwrap()).unwrap();
+        assert_eq!(receipt["layout"], "vertical_follow");
+        assert_eq!(receipt["camera_tracking_sha_verified"], true);
+        drop(snapshot);
+        let long_tracks: Vec<Vec<CameraPoint>> = (0..5)
+            .map(|clip| {
+                (0..100)
+                    .map(|i| CameraPoint {
+                        time_sec: i as f64 * 0.03,
+                        x: 0.15 + clip as f64 * 0.1 + i as f64 * 0.001,
+                        y: 0.5,
+                    })
+                    .collect()
+            })
+            .collect();
+        let long_plan = prepare_request(
+            &state,
+            MontageRequest {
+                project_id: project_id.into(),
+                clips: (0..5)
+                    .map(|_| SelectedClip {
+                        video: "match.mp4".into(),
+                        start_frame: 0,
+                        end_frame: 89,
+                        analysis_offset_sec: None,
+                    })
+                    .collect(),
+                materials: Vec::new(),
+                preferred_rally_run_id: None,
+                audio_file: None,
+                audio_volume: 40.0,
+                encoder: Some("cpu".into()),
+                layout: VideoLayout::VerticalFollow,
+                include_recognition_data: false,
+                target_duration_sec: Some(10.5),
+                camera_zoom: 1.0,
+                camera_tracks: Some(long_tracks.clone()),
+                report_outro: None,
+                verified_highlights: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(long_plan.camera_tracks.as_deref(), Some(&long_tracks[..4]));
+        let long_output = long_plan.output_dir.clone();
+        let long_status = fixture_status();
+        let (_tx, rx) = watch::channel(false);
+        render(long_plan, long_status.clone(), rx).await;
+        let snapshot = long_status.lock().await;
+        assert_eq!(snapshot.state, "complete", "{}", snapshot.error);
+        verify_mp4_quality(
+            &long_output.join("montage.mp4"),
+            (102, 180, 30.0),
+            10.5,
+            true,
+        )
+        .unwrap();
+        drop(snapshot);
         fs::remove_dir_all(root).unwrap();
     }
 
