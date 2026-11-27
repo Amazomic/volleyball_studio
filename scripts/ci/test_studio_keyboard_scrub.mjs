@@ -44,6 +44,10 @@ assert.equal(engine.volley_preview_seek_hold_delta(1,180,100),0.1);
 const window={VolleyballUi:{engine},
   addEventListener:(name,handler)=>windowHandlers.set(name,handler)};
 const context={overlay:{presentedTime:null},
+  timeline:{data:null},training:{active:false},
+  rallyAtTimelineTime:(position,direction=0)=>direction<0?{candidate_id:"past"}:direction>0?{candidate_id:"future"}:null,
+  view:row=>{visited.push(row.candidate_id);s.current=row.candidate_id;},
+  followSequenceRally:async()=>{},
   document,window,s,ui:{video,list},alignActiveRally:()=>aligned.push(s.current),performance:{now:()=>now},
   previewIsVisible:()=>visible&&!document.hidden,
   timelineDuration:()=>duration,previewLoad:{sourceFps:60},fps:()=>30,
@@ -222,6 +226,32 @@ s.current="";
 key("ArrowUp");
 assert.equal(visited.at(-1),"c","Navigation retains its anchor after leaving a rally");
 
+context.timeline.data={rallies:[{candidate_id:"past"},{candidate_id:"future"}]};
+s.items=[];
+s.current="";
+s.keyboardRallyAnchor=null;
+video.currentTime=150;
+key("ArrowUp");
+assert.equal(visited.at(-1),"past","Up in a timeline gap selects the preceding rally");
+s.current="b";
+video.currentTime=150;
+key("ArrowDown");
+assert.equal(visited.at(-1),"future","Down in a timeline gap ignores stale card selection");
+video.seeking=true;
+s.seekAt=151;
+video.currentTime=5;
+context.rallyAtTimelineTime=(position,direction=0)=>{
+  assert.equal(position,151,"Pending seek uses the requested timeline position");
+  return direction<0?{candidate_id:"past"}:null;
+};
+key("ArrowUp");
+assert.equal(visited.at(-1),"past");
+const visitedCount=visited.length;
+key("ArrowDown");
+assert.equal(visited.length,visitedCount,"No following rally means no jump");
+video.seeking=false;
+context.timeline.data=null;
+
 const seekStart=js.indexOf("  const seekTimeline=");
 const seekEnd=js.indexOf("  const timelinePosition=",seekStart);
 const state={project:"p",video:"match.mp4",videoKey:"p:match.mp4",run:"r",
@@ -290,6 +320,14 @@ assert.equal(lookupContext.lookup(12).candidate_id,"b");
 assert.equal(lookupContext.lookup(13.999).candidate_id,"b","Last frame remains selected for its full duration");
 assert.equal(lookupContext.lookup(14).candidate_id,"c","Adjacent rally starts at its exact boundary");
 assert.equal(lookupContext.lookup(16),null);
+assert.equal(lookupContext.lookup(16,-1).candidate_id,"c");
+assert.equal(lookupContext.lookup(16,1),null);
+assert.equal(lookupContext.lookup(11.9,-1),null);
+assert.equal(lookupContext.lookup(11.9,1).candidate_id,"b");
+lookupContext.timeline.data={rallies:[{candidate_id:"b",start_frame:300,end_frame:359},
+  {candidate_id:"c",start_frame:600,end_frame:629}]};
+assert.equal(lookupContext.lookup(15,-1).candidate_id,"b");
+assert.equal(lookupContext.lookup(15,1).candidate_id,"c");
 lookupContext.timeline.data={rallies:[{candidate_id:"d",start_frame:0,end_frame:29}]};
 lookupContext.s.analysisOffset=80;
 assert.equal(lookupContext.lookup(12),null,"Previous video index must be discarded");

@@ -3311,7 +3311,7 @@
   };
   const rallyAtTimelineTime=(()=>{
     let indexedRows=null;
-    return seconds=>{
+    return (seconds,direction=0)=>{
       if(training.active){
         const frame=(seconds-(Number(s.analysisOffset)||0))*fps();
         if(reference.active){
@@ -3343,7 +3343,8 @@
         indexedRows=rows;
       }
       const frame=(seconds-(Number(s.analysisOffset)||0))*fps();
-      const index=engine.volley_preview_rally_at(frame);
+      const index=direction===0?engine.volley_preview_rally_at(frame):
+        engine.volley_preview_rally_neighbor(frame,direction);
       return index>=0?rows[index]:null;
     };
   })();
@@ -5570,6 +5571,19 @@
     const mounted=()=>Array.from(ui.list.querySelectorAll(".rally-card[data-rally-id]"));
     const id=card=>card.getAttribute("data-rally-id");
     const navigation=++arrowScrub.navigation;
+    if(!training.active&&timeline.data?.rallies){
+      const position=ui.video.seeking?s.seekAt:
+        !ui.video.paused&&Number.isFinite(overlay.presentedTime)?overlay.presentedTime:
+        Number.isFinite(ui.video.currentTime)?ui.video.currentTime:s.seekAt;
+      if(!rallyAtTimelineTime(position)?.candidate_id){
+        const row=rallyAtTimelineTime(position,direction);
+        if(!row?.candidate_id)return;
+        view(s.items.find(item=>item.candidate_id===row.candidate_id)||row);
+        alignActiveRally();
+        void followSequenceRally(true);
+        return;
+      }
+    }
     const anchor=s.keyboardRallyAnchor;
     const current=s.current||(anchor?.key===s.videoKey&&anchor.generation===s.generation?anchor.id:"");
     let rows=mounted();

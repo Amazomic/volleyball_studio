@@ -57,6 +57,25 @@ pub extern "C" fn volley_preview_rally_at(frame: f64) -> i32 {
     })
 }
 
+#[no_mangle]
+pub extern "C" fn volley_preview_rally_neighbor(frame: f64, direction: i32) -> i32 {
+    INDEX.with(|cell| {
+        let index = cell.borrow();
+        if !index.committed || !frame.is_finite() {
+            return -1;
+        }
+        let left = index.bounds.partition_point(|bounds| bounds[0] <= frame);
+        let candidate = match direction {
+            -1 => left.checked_sub(1),
+            1 => Some(left),
+            _ => None,
+        };
+        candidate
+            .filter(|&i| i < index.bounds.len())
+            .map_or(-1, |i| i as i32)
+    })
+}
+
 pub(crate) fn next_rally(input: &serde_json::Value) -> serde_json::Value {
     use serde_json::{json, Value};
     let mut rows: Vec<_> = input["rows"]
