@@ -69,7 +69,7 @@ const helperState={
   playerMatches:{"101":[{player_id:"old"}]}
 };
 const helper={
-  state:helperState,
+  state:helperState,window:previewWasmWindow(),
   post:async(url,body)=>{
     requests.push({url,body});
     return {schema:"volley-native-player-photo-comparison/1",source_replay_sha256:"sha",

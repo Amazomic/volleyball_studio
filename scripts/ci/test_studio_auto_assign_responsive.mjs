@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 import {runInNewContext} from "node:vm";
 
 const js=readFileSync(new URL("../../rust/volley-app/static/studio_tracks.js",import.meta.url),"utf8");
@@ -42,7 +43,7 @@ const context={
     resolveRequest=resolve;rejectRequest=reject;
   })},
   CustomEvent:class{constructor(type,options){this.type=type;this.detail=options.detail}},
-  window:{VolleyballTasks:{set:(id,task)=>tasks.push({id,task}),
+  window:{...previewWasmWindow(),VolleyballTasks:{set:(id,task)=>tasks.push({id,task}),
     clear:id=>tasks.push({id,clear:true})},
     dispatchEvent:event=>events.push(event)}
 };

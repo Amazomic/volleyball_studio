@@ -1,4 +1,5 @@
 import {readFileSync} from "node:fs";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 import {runInNewContext} from "node:vm";
 import assert from "node:assert/strict";
 
@@ -33,7 +34,7 @@ const context={
     feedback.textContent=message;feedback.dataset.kind=kind;feedback.hidden=!message;
   },
   galleryStatus:{textContent:""},unlock(){},reviewNote(){},loadPage:async()=>{},
-  window:{dispatchEvent(){}},CustomEvent:class {constructor(name){this.type=name}},
+  window:{...previewWasmWindow(),dispatchEvent(){}},CustomEvent:class {constructor(name){this.type=name}},
   post:async(_,payload)=>{
     posted.push(payload);
     return {automatic_count:1,automatic_assignments:{"101":"playerA"},

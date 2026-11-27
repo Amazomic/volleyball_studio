@@ -289,6 +289,104 @@ fn edit(input: &Value) -> Value {
     result
 }
 
+fn auto_result(input: &Value) -> Value {
+    let result = &input["result"];
+    let Some(threshold) = input["threshold"].as_u64().filter(|n| (1..=99).contains(n)) else {
+        return Value::Null;
+    };
+    let Some(count) = result["automatic_count"]
+        .as_u64()
+        .filter(|n| *n <= 9_007_199_254_740_991)
+    else {
+        return Value::Null;
+    };
+    if result["threshold_percent"].as_u64() != Some(threshold)
+        || !result["automatic_assignments"].is_object()
+    {
+        return Value::Null;
+    }
+    let mut reasons = serde_json::Map::new();
+    for key in [
+        "no_photo_match",
+        "insufficient_observations",
+        "below_similarity_threshold",
+        "identity_conflict_or_ambiguity",
+        "manually_suppressed",
+    ] {
+        reasons.insert(
+            key.into(),
+            json!(result["unassigned_reasons"][key]
+                .as_array()
+                .map_or(0, Vec::len)),
+        );
+    }
+    let mut projection = json!({"count":count,"remaining":result["unassigned_track_ids"].as_array().map_or(0, Vec::len),"reasons":reasons});
+    if let Some(revision) = result["identity_revision"].as_str() {
+        projection["revision"] = json!(revision);
+    }
+    if result["unassigned_track_ids"].is_array() {
+        let unassigned = ids(&result["unassigned_track_ids"]);
+        if input["viewPlayer"].as_str().unwrap_or_default().is_empty()
+            && input["viewExcluded"] != true
+            && input["viewConflicts"] != true
+        {
+            let allowed: BTreeSet<_> = unassigned.iter().copied().collect();
+            let indices: Vec<_> = input["rows"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .filter_map(|(i, row)| {
+                    track_id(&row["track_id"])
+                        .filter(|id| allowed.contains(id))
+                        .map(|_| i)
+                })
+                .collect();
+            let total = unassigned.len() as u64;
+            let limit = input["limit"].as_u64().filter(|n| *n > 0).unwrap_or(24);
+            let offset = input["offset"].as_u64().unwrap_or_default();
+            projection["indices"] = json!(indices);
+            projection["filteredTotal"] = json!(total);
+            projection["offset"] = json!(if total == 0 {
+                0
+            } else if offset >= total {
+                (total - 1) / limit * limit
+            } else {
+                offset
+            });
+        }
+        projection["unassigned"] = json!(unassigned);
+    }
+    projection
+}
+
+fn photo_result(input: &Value) -> Value {
+    let result = &input["result"];
+    let writable = input["writable"] == true;
+    if result["schema"] != "volley-native-player-photo-comparison/1"
+        || input["sourceSha"].as_str().is_none()
+        || result["source_replay_sha256"] != input["sourceSha"]
+        || result["auto_assign_enabled"] != false
+        || result["confirmed"] != false
+        || (writable && result["saved"] != true)
+        || result["matchesIsObject"] != true
+    {
+        return json!({"error":"invalid"});
+    }
+    let zero = result["photo_count"].as_f64() == Some(0.0);
+    let mut output = json!({"status":if zero {"no_reference_photos"} else {"calculated"}});
+    if writable {
+        let Some(revision) = result["identity_revision"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        else {
+            return json!({"error":"revision"});
+        };
+        output["revision"] = json!(revision);
+    }
+    output
+}
+
 pub(crate) fn call(input: &Value) -> Value {
     match input["kind"].as_str() {
         Some("candidates") => candidates(input),
@@ -296,6 +394,8 @@ pub(crate) fn call(input: &Value) -> Value {
         Some("visible") => visible(input),
         Some("groups") => groups(input),
         Some("edit") => edit(input),
+        Some("auto_result") => auto_result(input),
+        Some("photo_result") => photo_result(input),
         _ => Value::Null,
     }
 }

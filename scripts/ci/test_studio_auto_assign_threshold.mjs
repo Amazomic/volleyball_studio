@@ -1,4 +1,5 @@
 import {readFileSync} from "node:fs";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 import {runInNewContext} from "node:vm";
 import assert from "node:assert/strict";
 
@@ -34,7 +35,7 @@ const context={
   autoAssignMessage:()=>{},
   reviewReady:()=>true,reviewScope:()=>({project_id:"p",video:"video.mp4",replay_id:"r",
     expected_source_sha256:state.sourceSha,threshold_percent:30}),
-  window:{dispatchEvent(event){events.push(event)},CustomEvent:function(name,options){
+  window:{...previewWasmWindow(),dispatchEvent(event){events.push(event)},CustomEvent:function(name,options){
     this.type=name;this.detail=options.detail;}},
   CustomEvent:function(name,options){this.type=name;this.detail=options.detail;},
   unlock(){},reidUnlock(){},reviewNote(){},loadPage:async()=>{},

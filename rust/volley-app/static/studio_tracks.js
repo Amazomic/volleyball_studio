@@ -1521,23 +1521,22 @@
         ...scope,action:"auto_assign",auto_threshold_percent:threshold
       });
       if(epoch!==state.bindingEpoch||scopeKey!==autoAssignScope())return;
-      if(!Number.isSafeInteger(result.automatic_count)||result.automatic_count<0 ||
-         result.threshold_percent!==threshold ||
-         !result.automatic_assignments||typeof result.automatic_assignments!=="object")
-        throw Error("Сервер вернул некорректные автоматические привязки");
+      const projection=window.VolleyStudioChain.call(7,{kind:"auto_result",threshold,
+        result,rows:state.rows?.map(row=>({track_id:row.track_id})),viewPlayer:state.viewPlayer,
+        viewExcluded:state.viewExcluded,viewConflicts:state.viewConflicts,offset:state.offset,limit:state.limit});
+      if(!projection)throw Error("Сервер вернул некорректные автоматические привязки");
       window.VolleyballTasks?.set("auto-reid",{
         label:"Автопривязка ID",stage:"Сохранено · обновляем список игроков",progress:null
       });
       state.token++;
-      if(typeof result.identity_revision==="string")state.revision=result.identity_revision;
-      if(Array.isArray(result.unassigned_track_ids)){
-        state.unassignedIds=new Set(result.unassigned_track_ids.map(Number));
-        if(!state.viewPlayer&&!state.viewExcluded&&!state.viewConflicts){
-          state.rows=state.rows.filter(row=>state.unassignedIds.has(Number(row.track_id)));
-          state.filteredTotal=state.unassignedIds.size;
-          if(state.filteredTotal&&state.offset>=state.filteredTotal)
-            state.offset=Math.floor((state.filteredTotal-1)/state.limit)*state.limit;
-          if(!state.filteredTotal)state.offset=0;
+      if(projection.revision!==undefined)state.revision=projection.revision;
+      if(projection.unassigned){
+        state.unassignedIds=new Set(projection.unassigned);
+        if(projection.indices){
+          const visible=new Set(projection.indices);
+          state.rows=state.rows.filter((_,index)=>visible.has(index));
+          state.filteredTotal=projection.filteredTotal;
+          state.offset=projection.offset;
           animateTrackCards(()=>{renderRows();renderGroupCards();updateUnassignedLabel();unlock();});
         }
       }
@@ -1546,19 +1545,18 @@
       }}));
       await loadPage({preserveCards:true});
       if(epoch!==state.bindingEpoch||scopeKey!==autoAssignScope())return;
-      const reasons=result.unassigned_reasons||{};
-      const count=key=>Array.isArray(reasons[key])?reasons[key].length:0;
-      const remaining=Array.isArray(result.unassigned_track_ids)?result.unassigned_track_ids.length:0;
-      galleryStatus.textContent="Автопривязано ID: "+result.automatic_count+
+      const count=key=>projection.reasons[key];
+      const remaining=projection.remaining;
+      galleryStatus.textContent="Автопривязано ID: "+projection.count+
         " · без привязки: "+remaining+" · порог: "+threshold+"%"+
         (remaining?" · нет совпадений: "+count("no_photo_match")+
           " · мало наблюдений: "+count("insufficient_observations")+
           " · ниже порога: "+count("below_similarity_threshold")+
           " · конфликт: "+count("identity_conflict_or_ambiguity")+
           " · вручную отключено: "+count("manually_suppressed"):"");
-      reviewNote("Автопривязка выполнена: "+result.automatic_count+
+      reviewNote("Автопривязка выполнена: "+projection.count+
         ". Ручные назначения сохранены; одновременные ID одного игрока не объединяются.");
-      autoAssignMessage("Привязано ID: "+result.automatic_count+" · порог "+threshold+"%");
+      autoAssignMessage("Привязано ID: "+projection.count+" · порог "+threshold+"%");
     }catch(error){
       if(epoch===state.bindingEpoch&&scopeKey===autoAssignScope()){
         galleryStatus.textContent="Ошибка автопривязки: "+String(error.message||error);
@@ -1580,18 +1578,16 @@
       ...scope,action:state.writable?"refresh_matches":"compare_photos"
     },progressId);
     if(token!==state.token||scope.replay_id!==state.replay)return null;
-    if(result.schema!=="volley-native-player-photo-comparison/1"||
-      result.source_replay_sha256!==state.sourceSha||result.auto_assign_enabled!==false||
-      result.confirmed!==false||(state.writable&&result.saved!==true)||!result.player_matches||
-      typeof result.player_matches!=="object"||Array.isArray(result.player_matches))
-      throw Error("Некорректный результат сравнения фотографий");
-    if(state.writable){
-      if(typeof result.identity_revision!=="string"||!result.identity_revision)
-        throw Error("Сервер не вернул ревизию сохранённых совпадений");
-      state.revision=result.identity_revision;
-    }
+    const validation=window.VolleyStudioChain.call(7,{kind:"photo_result",sourceSha:state.sourceSha,
+      writable:!!state.writable,result:{schema:result.schema,source_replay_sha256:result.source_replay_sha256,
+        auto_assign_enabled:result.auto_assign_enabled,confirmed:result.confirmed,saved:result.saved,
+        identity_revision:result.identity_revision,photo_count:Number(result.photo_count),
+        matchesIsObject:!!result.player_matches&&typeof result.player_matches==="object"&&!Array.isArray(result.player_matches)}});
+    if(validation.error==="invalid")throw Error("Некорректный результат сравнения фотографий");
+    if(validation.error==="revision")throw Error("Сервер не вернул ревизию сохранённых совпадений");
+    if(validation.revision!==undefined)state.revision=validation.revision;
     state.playerMatches=result.player_matches;
-    state.similarityStatus=Number(result.photo_count)===0?"no_reference_photos":"calculated";
+    state.similarityStatus=validation.status;
     renderRows();renderGroupCards();
     return {trackCount:ids.length,photoCount:result.photo_count};
   };

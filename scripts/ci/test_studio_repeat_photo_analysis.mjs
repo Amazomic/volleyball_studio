@@ -1,4 +1,5 @@
 import {readFileSync} from "node:fs";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 import {runInNewContext} from "node:vm";
 import assert from "node:assert/strict";
 
@@ -9,7 +10,7 @@ assert.ok(start>=0&&end>start,"photo analysis action is defined");
 const calls=[];
 const state={project:"p",video:"v",replay:"r",rallyRun:"run",sourceSha:"a".repeat(64),
   token:1,busy:false,writable:true,photoScoreLoading:false,comparisonIds:new Set(Array.from({length:10},(_,i)=>i+1)),playerMatches:{}};
-const context={state,reviewReady:()=>true,reviewScope:()=>({project_id:"p",video:"v",replay_id:"r",rally_run_id:state.rallyRun,expected_source_sha256:state.sourceSha}),
+const context={state,window:previewWasmWindow(),reviewReady:()=>true,reviewScope:()=>({project_id:"p",video:"v",replay_id:"r",rally_run_id:state.rallyRun,expected_source_sha256:state.sourceSha}),
   unlock(){},reidUnlock(){},reviewNote(){},renderRows(){},renderGroupCards(){},
   galleryStatus:{textContent:""},
   post:async(url,body)=>{calls.push({url,body});return body.action==="refresh_matches"?
