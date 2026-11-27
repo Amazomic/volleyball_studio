@@ -6,7 +6,7 @@ Agent discovery: GET /api/agent/v1/capabilities. See [HTTP API](agent-api.md) an
 
 ## Запуск и обнаружение
 
-Из корня репозитория в Windows:
+Из выделенного чистого Windows deployment-клона на develop, HEAD == origin/develop (для обновления после публикации используй scripts/deploy-volley-queue.ps1):
 
 ~~~bat
 start-volley-ui.cmd /status
@@ -59,3 +59,5 @@ Quick Reel не переиспользует инференс проекта. Д
 Текущий детектор игроков — RF-DETR Medium; позы — RTMPose, мяч — VBallNet V4c. Точные веса, шаг наблюдений, входные размеры, FPS и способ декодирования проверяй в профиле и сохранённых манифестах: они зависят от версии и настроек.
 
 В текущем монтажном API нет огненного мяча, шлейфа, библиотеки VFX, произвольного ретайминга или пользовательских подписей. /api/montage/native/library хранит готовые монтажи, а не эффекты. [Требования к событиям и будущим VFX](events-editing-vfx.md) не являются подтверждением реализации.
+
+Действующая последовательность анализа и выборочное семплирование поз: [архитектура](../../../../docs/RUST_ARCHITECTURE.md), [RTMPose](../../../../docs/RTMPOSE_PIPELINE.md), [Ball Stabilizer](../../../../docs/BALL_STABILIZER.md), [Touch Detector](../../../../docs/TRAJECTORY_TOUCH_DETECTOR.md). ReID имеет Auto/GPU/CPU; CUDA используется для подходящих пакетов, CPU — для малых пакетов в Auto или при недоступности CUDA.

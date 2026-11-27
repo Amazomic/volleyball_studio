@@ -5039,3 +5039,7 @@ Studio показывает кнопку перехода между debug и re
 
 - Base 844c65d6ab242aed280bcb389f3cd6d624dba603. Removed the root examples folder, its LFS rules and hard-coded test/benchmark dependencies. RF-DETR parity tests use VOLLEY_AB_SOURCE, pose benchmark requires --source. Historical reports retained. No production code changes.
 - PASS: cargo fmt --all -- --check, Python AST, ownership and roadmap self-tests, git diff --check and no tracked root examples or stale GIF references. GPU parity and full Rust gate NOT TESTED; changes are limited to optional test/benchmark inputs and repository media. Deployment via standard queue.
+
+## 2026-11-27 — Актуализация действующей документации
+
+База `70159494`: владельцы `studio_pipeline.rs`, `inference_full/joint.rs`, `cpu_retrack/pose_refinement.rs`, `touch_pipeline.rs`, `reid_openvino.rs`, `studio.html`. Обновлены архитектура, RTMPose (1/1/10), Touch Detector v12 / Ball Stabilizer v15, ReID CUDA/CPU, UI, индекс, развёртывание и справочник агента; старые инструкции сохранены в истории Git, датированные исследования отделены. Проверки: 131 относительная ссылка в 11 документах разрешается в tracked tree; `git diff --check`, ownership (20 owners, 62 routes, 15 sidecars), roadmap (85/85, negative checks) PASS. Только документация: код, модели и данные не изменены; реальный GPU/матч и экспорт не тестировались. Применение: после публикации штатная очередь, live SHA проверяется отдельно.

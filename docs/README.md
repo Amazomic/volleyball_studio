@@ -8,9 +8,9 @@
 
 - [О проекте и запуск на русском](../README.ru.md)
 - [О проекте и запуск на английском](../README.md)
-- [Скачать бету v0.1.0-beta.1 (Windows/Linux), ограничения и результаты проверок](releases/v0.1.0-beta.1.md)
+- [Историческая бета v0.1.0-beta.1: архивы и ограничения](releases/v0.1.0-beta.1.md)
 - [Запуск, зависимости и диагностика](RUST_DEPLOYMENT.md)
-- [Обзор UI: смешанная версионная заметка](VOLLEY_STUDIO_UI.md)
+- [Действующее руководство по интерфейсу](VOLLEY_STUDIO_UI.md)
 - [Skill монтажа через действующую Studio](../.agents/skills/volleyball-reels-studio/SKILL.md)
 - [Текущий интерфейс проекта, монтажа и Quick Reel](../.agents/skills/volleyball-reels-studio/references/current-runtime.md)
 - [Процесс разработки](DEVELOPMENT_WORKFLOW.md)
@@ -38,7 +38,7 @@
 
 ## Предметные заметки Rust
 
-Это объяснения отдельных версий, а не обещание совпадения всех чисел и настроек с текущим кодом.
+Действующие контракты обозначены в начале соответствующих документов; остальные материалы объясняют отдельные версии. Сохранённый профиль и исходный код определяют реальные параметры конкретного анализа.
 
 - [Геометрия площадки](RUST_COURT_GEOMETRY.md)
 - [Проект контракта метаданных розыгрыша](RALLY_METADATA.md)
@@ -46,10 +46,10 @@
 - [Диагностика касаний Quick Reel](RUST_QUICK_REEL_TOUCH_DIAGNOSTICS.md)
 - [Пилотная разметка](RUST_PILOT_ANNOTATION.md)
 - [Трекинг: версионная заметка](native-player-tracking.md)
-- [Позы: версионная заметка](RTMPOSE_PIPELINE.md)
+- [RTMPose: действующий контракт и частота наблюдений](RTMPOSE_PIPELINE.md)
 - [Постобработка касаний](TOUCH_PROCESSING.md)
 - [Контракт Ball Stabilizer](BALL_STABILIZER.md)
-- [Траекторный детектор](TRAJECTORY_TOUCH_DETECTOR.md)
+- [Траекторный детектор: актуальный контракт и история](TRAJECTORY_TOUCH_DETECTOR.md)
 - [Архивный алгоритм ведущего мяча](LEADING_BALL_TRACKING.md)
 - [Совместимость геометрической интерпретации касаний](TOUCH_DETECTION_RUST_PARITY.md)
 - [Регрессия смены личности](IDENTITY_CUT_REGRESSION.md)

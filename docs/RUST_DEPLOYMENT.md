@@ -1,6 +1,10 @@
-# Volleyball Studio — deployment (Rust beta and source builds)
+# Volleyball Studio — действующее развёртывание из исходников
 
-**Current release:** [v0.1.0-beta.1](releases/v0.1.0-beta.1.md) on `master`, built from Rust source commit `437b446` (release-doc commit `ddb2a82`). **Pre-release, not production-ready**: `GET /internal/rewrite-status` reports `production_ready=false`. Ongoing development stays in `develop`; the published release tag is immutable.
+**Актуальная ветка — `develop`.** Для HOME-PC используется нативный Windows Rust, отдельный чистый deployment-клон и единая очередь `scripts/deploy-volley-queue.ps1`. Начинайте с разделов Windows ниже. Linux/Docker — отдельные способы развёртывания, а не запасной путь запуска HOME-PC. Модели и GPU-зависимости предоставляются отдельно. Историческая бета не отражает текущий код и не является критериями готовности.
+
+## Исторический релиз (не текущая инструкция)
+
+Бета [v0.1.0-beta.1](releases/v0.1.0-beta.1.md) опубликована на `master` из Rust-коммита `437b446`. Её архивы неизменяемы; сведения ниже относятся только к этой версии. Текущая готовность проверяется отдельно.
 
 ## Installed beta archives (no compiler required)
 

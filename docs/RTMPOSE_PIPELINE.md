@@ -1,51 +1,27 @@
-# RTMPose in Volley Studio
+# RTMPose в Volleyball Studio
 
-> **Версионная техническая заметка Rust.** Описанные частоты наблюдений, настройки и детали этапов могут относиться к прежней версии. Для конкретного анализа проверяй сохранённый профиль и манифесты; текущего владельца ищи в [карте](RUST_CANONICAL_OWNERS.json). Навигация: [индекс](README.md).
+Актуальный контракт Rust, проверен по `70159494` (27.11.2026). [Архитектура](RUST_ARCHITECTURE.md) · [Индекс](README.md).
 
+RTMPose-M Body7 (ONNX, 256 × 192, 17 суставов COCO) определяет позы игроков на GPU CUDA. VBallNet, Ball Stabilizer, Rally Detector и Touch Detector предварительно определяют игровые интервалы и кандидатов касаний. RF-DETR Medium измеряет рамки игроков в выбранных интервалах; трекинг и стабилизация рамок дают области для RTMPose. Кроп берётся из исходного разрешения видео, а не уменьшенного входа RF-DETR. Обработка по розыгрышам может перекрываться; сохранённые результаты проверяются по источнику и версии.
 
-RTMPose-M Body7 (official ONNX, 256 x 192, 17 COCO joints) runs as an independent CUDA stage
-AFTER VballNet/RF-DETR GPU fusion. It operates on saved player proposals and prepared RGB frames.
-It stores immutable JSONL evidence under native_gpu_pose_runs/<id>/ with a content digest and
-parent fusion/source identity. No track or verified event is created by pose inference.
+## Частота наблюдений
 
-CPU touch postprocessing first detects motion-supported ball contacts and links a same-frame
-Track ID. It optionally joins a saved RTMPose sample by nearest-frame and player-box IoU,
-then uses wrists/elbows/shoulders to refine attack, overhead pass, dig or low touch.
-Missing/weak pose evidence falls back to the Python-parity geometric predictor.
-Block and serve require verified court and rally context and are not inferred from pose alone.
-These are hypotheses, NOT human-confirmed match actions.
+| Настройка | По умолчанию | При 30 FPS |
+|---|---:|---:|
+| RF-DETR: шаг кадров | 1 | 30 измерений/с |
+| RTMPose рядом с кандидатом касания | 1 | 30 измерений/с |
+| RTMPose для остальных игроков и вне окна касания | 10 | 3 измерения/с |
 
-Primary GPU flags: pose_enabled=true and pose_stride=6 by default.
-The RF-DETR Medium player-detector pass samples the prepared 30 FPS
-video every configured N frames (10 frames by default, 3 Hz), aligned to global
-frame indices across 9-frame fusion windows. RTMPose runs in a separate stage
-on saved detector boxes and does not repeat person detection. Empty intervening observations are never called model output.
-When verified pose evidence exists, CPU tracking uses only valid measured RTMPose
-skeletons as observations. RF-DETR boxes provide crop proposals but cannot create
-Track IDs without a measured skeleton; unsampled frames do not create observations.
-Legacy RF-DETR-only projects retain a fallback when no pose run exists.
-Associations prioritize torso and joint movement (80%) over predicted box IoU (20%),
-with one-to-one assignment and a bounded movement gate. Provisional IDs are not
-verified athlete identities. CPU association versions preserve previous snapshots.
-Confirmed CPU Track IDs fill bounded gaps between real anchors for smooth
-playback; preview skeletons interpolate only between unambiguous real poses.
-The separate pose-evidence pass keeps its own stride (6 by default, 5 Hz):
-when a pose frame falls between sparse detector anchors, it can use a recent
-real detector box for its crop but infers new joints from that exact RGB frame.
-Default CPU confirmation requires six real anchors for a 3 Hz source, while
-custom confirmation thresholds and legacy dense sources remain unchanged.
-This fast mode must be validated on distant/occluded players and rapid contacts;
-interpolated evidence must never be counted as a verified ball touch.
-Postprocessing: pose_classification=true by default; CPU-only runs do not start GPU.
-Preview: the Skelеtons button reads the saved evidence, restricted to rally scopes.
+Позы включены по умолчанию. Настройки конкретного запуска могут отличаться. Интерполяция скелетов не является новым измерением модели. Отсутствие наблюдения не означает отсутствие игрока; Track ID — не подтверждённая личность спортсмена.
 
-Portable one-time model setup (Python is optional and only used to fetch weights):
-python scripts/setup_rtmpose_model.py
+## Потребители и хранение
 
-Installer downloads the official model zip, verifies its SHA256, then verifies and publishes
-the ONNX model. Model binaries are not committed to Git. ONNX Runtime CUDA must be installed
-for Rust GPU inference. A failed model load never silently falls back to CPU.
+Сохраняются версионированные pose evidence (`native_gpu_pose_runs/<id>/`) с контрольными суммами и происхождением. Touch Attribution связывает кандидаты стабилизированной траектории с треками, геометрией и позами и уточняет тип касания. Неуверенный тип остаётся неизвестным; автоматические результаты не являются ручным подтверждением. Предпросмотр показывает сохранённые и допустимые интерполированные скелеты. CPU-пересчёт не запускает GPU при наличии совместимых свидетельств.
 
-Measured accuracy on real volleyball footage is not yet established. Validate with a labeled
-sample of distant/occluded athletes and attack, set, dig, block, serve contacts; quantify
-per-class precision/recall, pose coverage, VRAM and end-to-end latency.
+Владельцы: [профиль и оркестрация](../rust/volley-app/src/studio_pipeline.rs), [семплирование поз](../rust/volley-app/src/cpu_retrack/pose_refinement.rs), [ранний проход](../rust/volley-app/src/cpu_retrack/pose_refinement/early.rs).
+
+## Установка и проверка
+
+Установщик весов: `python scripts/setup_rtmpose_model.py` из корня проекта. Python нужен только для вспомогательной установки; Studio исполняется на Rust. Для GPU требуется совместимая ONNX Runtime CUDA. См. [развёртывание](RUST_DEPLOYMENT.md).
+
+Качество на дальних и перекрытых игроках, precision/recall типов касаний, покрытие поз и VRAM требуют независимой проверки на размеченных матчах. Исторические результаты доступны в Git и журнале миграции, но не заменяют текущую оценку.
