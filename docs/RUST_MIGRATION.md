@@ -5028,3 +5028,9 @@ Studio показывает кнопку перехода между debug и re
 - База cb9e5d4b92e3683713a678d1d24a38add9e0d9f9. Владелец studio_tabs.js: открытый диалог библиотеки допускается общим lifecycle-guard; скрытые вкладки, закрытый диалог, background и pagehide по-прежнему останавливают медиа. API, видеофайлы и анализ не изменены.
 - Регрессия test_studio_media_lifecycle.mjs RED/GREEN; DOM IDs, node --check, git diff --check PASS. Edge headless: до исправления play() завершался без продвижения времени (paused=true); с подменой только исправленного JS воспроизведение продвинулось на 0.956 с и остановилось при закрытии. HTTP Range 206, H.264/AAC подтверждены для обоих сохранённых видео.
 - scripts/check-all.ps1 PASS: WASM, fmt, clippy, Rust tests, 118 Node gates. Отдельные GPU/media quality suites NOT TESTED (не затронуты). Deployment через штатную очередь; live SHA и повторная проверка сценария фиксируются в итоговом ответе.
+
+## 2026-11-27 — Запуск видео одним нажатием и управление пробелом
+
+- База b44c8254e1f5a9f09c6ecf8599f0557c8d702815. Владелец studio_video_library.js: явное нажатие Play в библиотеке открывает диалог и сразу вызывает play(); Space в открытом диалоге переключает паузу и воспроизведение, удержание клавиши не переключает повторно. Автоматическое открытие после фонового монтажа сохраняет паузу.
+- Регрессия test_studio_video_library_playback.mjs RED/GREEN; DOM IDs, media lifecycle, viewport layout, montage builder и git diff --check PASS. Edge headless с подменой только изменённого JS: оба готовых видео запускаются одним физическим кликом, Space с фокусом на кнопке закрытия ставит паузу и возобновляет проигрывание. Закрытие диалога PASS.
+- scripts/check-all.ps1 PASS: WASM, fmt, clippy, 1121 Rust tests, 28 ignored, 119 Node gates. Отдельные GPU/media quality suites NOT TESTED (не затронуты). Deployment через штатную очередь; live SHA и повторная проверка сценария фиксируются в итоговом ответе.

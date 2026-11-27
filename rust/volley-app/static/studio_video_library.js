@@ -39,14 +39,23 @@
     const n=Math.max(0,Math.round(Number(value)||0));
     return String(Math.floor(n/60)).padStart(2,"0")+":"+String(n%60).padStart(2,"0");
   };
-  const openPlayer=(url,title)=>{
+  const playMedia=()=>{void ui.media.play().catch(()=>{});};
+  const openPlayer=(url,title,autoplay=false)=>{
     ui.title.textContent=title;
     ui.media.src=url;
     if(!ui.player.open)ui.player.showModal();
+    if(autoplay)playMedia();
   };
   const closePlayer=()=>{ui.media.pause();ui.media.removeAttribute("src");
     ui.media.load();ui.player.close();};
   ui.playerClose.addEventListener("click",closePlayer);
+  ui.player.addEventListener("keydown",event=>{
+    if(!ui.player.open||(event.code!=="Space"&&event.key!==" ")||
+       event.altKey||event.ctrlKey||event.metaKey||event.isComposing)return;
+    event.preventDefault();event.stopPropagation();
+    if(event.repeat)return;
+    if(ui.media.paused)playMedia();else ui.media.pause();
+  },true);
   ui.player.addEventListener("close",()=>{ui.media.pause();ui.media.removeAttribute("src");
     ui.media.load();});
   const hide=()=>{opened=false;loadEpoch++;ui.panel.classList.add("hidden");
@@ -136,7 +145,7 @@
         details.append(apply);
         const actions=document.createElement("div");actions.className="studio-video-entry-actions";
         actions.append(button("play","Открыть видео",()=>{
-          openPlayer(item.url,(item.project_name||project)+" · "+(item.label||"Видео"));
+          openPlayer(item.url,(item.project_name||project)+" · "+(item.label||"Видео"),true);
         }));
         const download=document.createElement("a");
         download.href=item.download_url||item.url;
