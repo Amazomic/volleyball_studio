@@ -163,7 +163,7 @@ pub async fn video_media(
     let id = required_query(&query, "project_id")?.to_owned();
     let name = required_query(&query, "video")?.to_owned();
     if !query.contains_key("playback") {
-        if let Some((path, _)) =
+        if let Some((path, _, _)) =
             preparation::primary_preview::ready(state.clone(), &id, &name).await?
         {
             return serve_mp4(path, &headers).await;

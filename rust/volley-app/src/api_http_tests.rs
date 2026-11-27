@@ -724,6 +724,10 @@ async fn primary_preview_http_keeps_two_videos_separate_and_checks_version() {
         assert_eq!(value["video"], name);
         assert_eq!(value["state"], "ready");
         let url = value["media_url"].as_str().unwrap().to_owned();
+        let (_, hash) = plan.ready_media().unwrap();
+        assert!(url.ends_with(&format!("&media_sha={hash}")));
+        let forged_hash = url.replace(&format!("media_sha={hash}"), "media_sha=wrong");
+        assert_eq!(server.request("GET", &forged_hash, None).await.0, 409);
         let (code, body) = server.request("GET", &url, None).await;
         assert_eq!(code, 200);
         assert_eq!(

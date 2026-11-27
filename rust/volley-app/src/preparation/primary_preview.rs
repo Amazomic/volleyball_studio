@@ -6,7 +6,7 @@ use crate::{
 use axum::{
     body::Body,
     extract::{Query, State},
-    http::{HeaderMap, Response},
+    http::{header, HeaderMap, HeaderValue, Response},
     response::IntoResponse,
     Json,
 };
@@ -91,7 +91,7 @@ pub(crate) async fn ready(
     state: Arc<AppState>,
     project: &str,
     video: &str,
-) -> Result<Option<(PathBuf, String)>, ApiError> {
+) -> Result<Option<(PathBuf, String, String)>, ApiError> {
     let project = project.to_owned();
     let video = video.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -109,8 +109,8 @@ pub(crate) async fn ready(
         let plan = PrimaryPreviewPlan::new(&source, &state.data_root, &project, &video)
             .map_err(storage::conflict)?;
         Ok(plan
-            .ready_path()
-            .map(|path| (path.to_path_buf(), plan.id.clone())))
+            .ready_media()
+            .map(|(path, hash)| (path.to_path_buf(), plan.id.clone(), hash)))
     })
     .await
     .map_err(|e| storage::internal(format!("Primary preview lookup: {e}")))?
@@ -129,15 +129,30 @@ pub async fn get(
         .ok_or_else(|| storage::bad_request("Missing video"))?;
     let found = ready(state, project, video).await?;
     if query.get("media").is_some_and(|value| value == "1") {
-        let (path, id) = found.ok_or_else(|| storage::conflict("Primary preview is not ready"))?;
-        if query.get("preview_id") != Some(&id) {
+        let (path, id, hash) =
+            found.ok_or_else(|| storage::conflict("Primary preview is not ready"))?;
+        if query.get("preview_id") != Some(&id)
+            || query.get("media_sha").is_some_and(|sha| sha != &hash)
+        {
             return Err(storage::conflict("Primary preview version changed"));
         }
-        return playback::serve_mp4(path, &headers).await;
+        let mut response = playback::serve_mp4(path, &headers).await?;
+        if query.get("media_sha") == Some(&hash) && response.status().is_success() {
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("private, max-age=60"),
+            );
+            response.headers_mut().insert(
+                header::ETAG,
+                HeaderValue::from_str(&format!("\"{hash}\""))
+                    .map_err(|error| storage::internal(error.to_string()))?,
+            );
+        }
+        return Ok(response);
     }
-    let media_url = found.map(|(_, id)| {
+    let media_url = found.map(|(_, id, hash)| {
         format!(
-            "/api/video-primary-preview?project_id={}&video={}&media=1&preview_id={id}",
+            "/api/video-primary-preview?project_id={}&video={}&media=1&preview_id={id}&media_sha={hash}",
             percent_encoding::utf8_percent_encode(project, percent_encoding::NON_ALPHANUMERIC),
             percent_encoding::utf8_percent_encode(video, percent_encoding::NON_ALPHANUMERIC)
         )

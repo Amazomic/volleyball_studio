@@ -4371,15 +4371,35 @@
   const view=(item,requestedTime=null)=>{
     if(!s.project||!s.video)return;
     s.sequenceFollow=null;s.keyboardRallyAnchor=null;
-    if(s.current!==item.candidate_id){
-      s.current=item.candidate_id;cards();
-    }
+    const previous=s.current;
+    s.current=item.candidate_id;
     // Full timeline entries may not belong to the currently loaded (or sorted) card page.
     const {start,end}=rallyClipFrames(item);
     const key=s.project+":"+s.video;
     s.clipStart=(Number(s.analysisOffset)||0)+start/fps();
     s.clipEnd=(Number(s.analysisOffset)||0)+(end+1)/fps();
     s.stopAt=s.playbackMode==="free"?null:s.clipEnd;
+    s.seekAt=Number.isFinite(requestedTime)?
+      Math.max(s.clipStart,Math.min(s.clipEnd-1/fps(),requestedTime)):s.clipStart;
+    let deferredPlay=false;
+    if(s.videoKey!==key){
+      s.videoKey=key;
+      loadPreviewVideo(previewIsVisible());
+      deferredPlay=true;
+    }else if(ui.video.readyState>=1){
+      try{ui.video.currentTime=s.seekAt;}catch{}
+    }
+    if(previous!==s.current){
+      const old=rallyCardProgresses.get(previous),next=rallyCardProgresses.get(s.current);
+      if(old?.card&&next?.card&&(!old.source||old.source.run===s.run)&&
+         (!next.source||next.source.run===s.run)){
+        old.card.classList.remove("active");
+        old.progress.style.setProperty("--rally-progress","0%");
+        old.progress.setAttribute("aria-valuenow","0");
+        old.progress.setAttribute("aria-valuetext",second(old.start+(Number(s.analysisOffset)||0)*fps())+" с на видео");
+        next.card.classList.add("active");
+      }else cards();
+    }
     ui.viewTitle.textContent="Розыгрыш · "+clock(s.clipStart*fps())+" – "+clock(s.clipEnd*fps());
     ui.videoTime.textContent=clock(s.clipStart*fps())+" – "+clock(s.clipEnd*fps());
     if(item.ballRally===true||item.trainingMerged===true){
@@ -4389,21 +4409,10 @@
         "Тестовое объединение CPU-интервалов. Касания и игроки не пересчитывались.";
     }else renderRallyTouches(item,start,end);
     ui.emptyVideo.classList.add("hidden");
-    // Direct seeking on the card must not jump back to the rally start.
-    s.seekAt=Number.isFinite(requestedTime)?
-      Math.max(s.clipStart,Math.min(s.clipEnd-1/fps(),requestedTime)):s.clipStart;
     rallyCardProgresses.get(s.current)?.progress.style.setProperty("--rally-progress",
       (100*(s.seekAt-s.clipStart)/(s.clipEnd-s.clipStart))+"%");
     setOverlaySource(item);
     prefetchOverlayAtFrame(Math.max(0,Math.floor((s.seekAt-(Number(s.analysisOffset)||0))*fps())));
-    let deferredPlay=false;
-    if(s.videoKey!==key){
-      s.videoKey=key;
-      loadPreviewVideo(previewIsVisible());
-      deferredPlay=true;
-    }else if(ui.video.readyState>=1){
-      try{ui.video.currentTime=s.seekAt;}catch{}
-    }
     // Draw only after seeking; otherwise the playhead temporarily shows the
     // previously played position instead of the selected rally start.
     drawTimeline();
@@ -4858,7 +4867,7 @@
       const head=make("span","rally-card-progress-head");
       for(const part of [filled,markers,head])part.setAttribute("aria-hidden","true");
       progress.append(filled,markers,head);
-      rallyCardProgresses.set(id,{progress,markers,start,end,source});
+      rallyCardProgresses.set(id,{card,progress,markers,start,end,source});
       const result=make("div","rally-card-teams");
       const metadata=item.metadata;
       const winner=metadata?.winning_team;
@@ -5436,9 +5445,34 @@
     ui.video.pause();
   };
   ui.video.addEventListener("timeupdate",()=>{
-    updateTimelineProgress();updateRallyCardProgress();
     if(!ui.video.paused&&s.stopAt!==null&&ui.video.currentTime>=s.stopAt)
       onRallyBoundary();
+    else prepareNextRally();
+    updateTimelineProgress();updateRallyCardProgress();
+  });
+  let warmRallyKey=null;
+  const releaseRallyWarm=()=>{
+    warmRallyKey=null;
+    window.VolleyballPlayback?.releaseWarm?.(ui.video);
+  };
+  const prepareNextRally=()=>{
+    if(s.playbackMode!=="sequence"||training.active||!previewIsVisible()||
+       ui.video.paused||ui.video.seeking||s.stopAt===null||
+       s.stopAt-ui.video.currentTime>5||s.stopAt<=ui.video.currentTime)return;
+    const key=JSON.stringify([s.project,s.run,s.videoKey,s.current,s.stopAt]);
+    if(warmRallyKey===key)return;
+    const next=nextRally();
+    if(!next)return;
+    warmRallyKey=key;
+    const {start}=rallyClipFrames(next);
+    window.VolleyballPlayback?.warm?.(ui.video,(Number(s.analysisOffset)||0)+start/fps());
+    if(!overlay.raw&&s.run&&Number.isSafeInteger(start)&&start>=0)
+      requestOverlayWindow(s.project,s.run,s.video,overlayWindowStart(start));
+  };
+  for(const name of ["pause","emptied","seeked"])
+    ui.video.addEventListener(name,releaseRallyWarm);
+  window.addEventListener("volley:tab-change",event=>{
+    if(event.detail?.tab!=="preview")releaseRallyWarm();
   });
   // Media can end before the rounded final-frame boundary; loop must still repeat.
   ui.video.addEventListener("ended",()=>{
@@ -5500,6 +5534,7 @@
     }else ui.video.pause();
   };
   playback.mode.addEventListener("change",()=>{
+    releaseRallyWarm();
     s.playbackMode=playback.mode.value;
     s.stopAt=s.playbackMode==="free"?null:s.clipEnd;
     try{localStorage.setItem("volley:studio-playback-mode:v1",s.playbackMode);}catch{}

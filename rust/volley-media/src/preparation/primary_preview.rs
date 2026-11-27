@@ -49,6 +49,10 @@ impl PrimaryPreviewPlan {
     }
 
     pub fn ready_path(&self) -> Option<&Path> {
+        self.ready_media().map(|(path, _)| path)
+    }
+
+    pub fn ready_media(&self) -> Option<(&Path, String)> {
         if source_provenance(&self.source).ok()? != self.proof {
             return None;
         }
@@ -72,7 +76,8 @@ impl PrimaryPreviewPlan {
         if size == 0 || hash.len() != 64 || !hash.bytes().all(|c| c.is_ascii_hexdigit()) {
             return None;
         }
-        prepared_receipt_matches(&self.output, size, hash).then_some(self.output.as_path())
+        prepared_receipt_matches(&self.output, size, hash)
+            .then(|| (self.output.as_path(), hash.to_owned()))
     }
 
     pub fn begin(&self) -> Result<PrimaryPreviewWrite, String> {
