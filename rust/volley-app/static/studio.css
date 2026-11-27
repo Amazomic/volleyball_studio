@@ -2035,6 +2035,7 @@ body[data-ui-theme="light"] .analysis-flow{--flow-shell:#f7f9fc;--flow-phase:#ed
 @media(prefers-reduced-motion:reduce){.analysis-flow-node[data-status="running"] .analysis-flow-node-status{animation:none}}
 .analysis-flow-node-heading-row{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;width:100%;max-width:100%}
 .analysis-flow-node-icon{width:16px;height:16px;flex:0 0 16px;color:var(--flow-muted)}
+.analysis-flow-node[data-stage-id="ball"] .analysis-flow-node-icon{width:32px}
 .analysis-flow-node-title{font:inherit;max-width:100%;white-space:normal;overflow-wrap:anywhere}
 .analysis-flow-node[data-kind="input"] .analysis-flow-node-icon{color:var(--flow-input)}
 .analysis-flow-node[data-kind="gpu"] .analysis-flow-node-icon{color:var(--flow-gpu)}

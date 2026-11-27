@@ -489,7 +489,7 @@
   const pipelineGlyphs={
     video:[["rect",{x:2,y:5,width:14,height:14,rx:3}],["path",{d:"m16 10 6-4v12l-6-4"}]],
     ball_stabilizer:[["path",{d:"M2 18l5-5 4 2 5-9 6 4"}],["circle",{cx:7,cy:13,r:2}]],
-    ball:[["circle",{cx:12,cy:12,r:10}],["path",{d:"M2.8 7.4c5.2-1 10.7 2.8 11 7.5m5.4-11.1C14 8 12 15 14.6 21.6M4.1 18.2c4.1-4.4 9.2-5.5 17.4-4.5"}]],
+    ball:[["path",{d:"M4 20C10 12 18 9 25 9",opacity:.9,"stroke-width":1.8}],["path",{d:"M2 23C9 15 17 12 25 12",opacity:.6,"stroke-width":1.4}],["path",{d:"M10 23C15 18 20 15 26 15",opacity:.35,"stroke-width":1.1}],["circle",{cx:36,cy:12,r:10}],["path",{d:"M2.8 7.4c5.2-1 10.7 2.8 11 7.5m5.4-11.1C14 8 12 15 14.6 21.6M4.1 18.2c4.1-4.4 9.2-5.5 17.4-4.5",transform:"translate(24 0)"}]],
     rallies:[["path",{d:"m12 2 10 6-10 6L2 8l10-6Zm-10 11 10 6 10-6M2 18l10 6 10-6"}]],
     players:[["circle",{cx:9,cy:7,r:3}],["path",{d:"M2 21v-2a7 7 0 0 1 14 0v2M17 4a4 4 0 0 1 0 7m4 10v-2a6 6 0 0 0-4-5.7"}]],
     pose:[["circle",{cx:12,cy:3,r:2}],["path",{d:"M12 5v7m0 0-7 9m7-9 7 9M5 8l7 4 7-4M5 8l-2 6m16-6 2 6"}]],
@@ -503,7 +503,7 @@
   const pipelineIcon=id=>{
     const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
     svg.setAttribute("class","analysis-flow-node-icon");
-    svg.setAttribute("viewBox","0 0 24 24");
+    svg.setAttribute("viewBox",id==="ball"?"0 0 48 24":"0 0 24 24");
     svg.setAttribute("fill","none");
     svg.setAttribute("stroke","currentColor");
     svg.setAttribute("stroke-width","1.7");
