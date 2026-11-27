@@ -89,14 +89,14 @@ function Assert-FreePort {
         throw "Port $port is already occupied by an unidentified listener"
     }
 }
-function Configure-Environment {
+function Configure-Environment([bool]$embedded=$false) {
     if(-not $openvino){
         throw "Native OpenVINO C runtime missing. Run scripts/setup-openvino-windows.ps1 before starting Studio"
     }
     $settings=@{
         VOLLEY_RUST_BIND=$Bind
         VOLLEY_REPOSITORY_ROOT=$repo
-        VOLLEY_DEV_UI_ROOT=(Join-Path $repo "rust\volley-app\static")
+        VOLLEY_DEV_UI_ROOT=if($embedded){$null}else{Join-Path $repo "rust\volley-app\static"}
         VOLLEY_PERSON_DETECTOR="rfdetr-medium"
         VOLLEY_RUST_DATA_ROOT=if($ReadOnly){$null}else{$data}
         ORT_DYLIB_PATH=if($ort){$ort}else{$null}
@@ -209,8 +209,17 @@ function Test-NativeDependencies {
 }
 function Start-Windows([bool]$detached){
     Confirm-Source
+    $sha=Get-Sha
     $candidate=Get-Candidate
-    if(-not (Test-Path -LiteralPath $candidate)){throw "No built Windows executable for $(Get-Sha); use /build"}
+    $rollback=$env:VOLLEY_STUDIO_ROLLBACK_BINARY
+    if($rollback){
+        if(-not $detached -or $rollback -notmatch '^volley-app-([a-f0-9]{40})(?:-restart-[a-f0-9]{32})?\.exe$'){
+            throw "Invalid Studio rollback binary"
+        }
+        $sha=$Matches[1]
+        $candidate=Join-Path $runtime "bin\$rollback"
+    }
+    if(-not (Test-Path -LiteralPath $candidate -PathType Leaf)){throw "No built Windows executable for $sha; use /build"}
     $live=Read-Status
     if($null -ne $live){
         Assert-Owner (Read-Owner) $live
@@ -218,7 +227,16 @@ function Start-Windows([bool]$detached){
         return
     }
     Assert-FreePort
-    Configure-Environment
+    if($rollback){
+        $pending=Read-Owner
+        if($null -ne $pending){
+            $proc=Get-CimInstance Win32_Process -Filter "ProcessId = $($pending.pid)"
+            if($proc -and $proc.ExecutablePath -eq $pending.binary){
+                throw "The candidate process is still running without HTTP; rollback refused"
+            }
+        }
+    }
+    Configure-Environment -embedded ([bool]$rollback)
     if(-not $detached){
         & $candidate
         if($LASTEXITCODE -ne 0){throw "Studio exited with error $LASTEXITCODE"}
@@ -238,7 +256,8 @@ function Start-Windows([bool]$detached){
         binary=$candidate
         bind=$Bind
         token=$token
-        sha=Get-Sha
+        sha=$sha
+        data_root=if($ReadOnly){$null}else{$data}
     }
     $temporary="$ownerPath.$PID.tmp"
     try{
@@ -250,7 +269,7 @@ function Start-Windows([bool]$detached){
         $live=Read-Status
         if($null -ne $live){
             Assert-Owner (Read-Owner) $live
-            Write-Output "WINDOWS_STARTED: $(Get-Sha) $bindUrl/studio PID $($live.pid)"
+            Write-Output "WINDOWS_STARTED: $sha $bindUrl/studio PID $($live.pid)"
             return
         }
         if($process.HasExited){break}

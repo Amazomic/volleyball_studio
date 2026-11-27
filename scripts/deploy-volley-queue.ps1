@@ -30,10 +30,12 @@ $root=[System.IO.Path]::GetFullPath($DeploymentRoot).TrimEnd([char[]]@('\','/'))
 $bindUrl="http://$Bind"
 $env:VOLLEY_STUDIO_BIND=$Bind
 if($RestartFromPid -lt 0){throw "Invalid restart PID"}
-if($RestartFromPid -gt 0){
-    if($RuntimeReadOnly -and $RuntimeDataRoot){throw "Conflicting runtime data modes"}
+if($RuntimeReadOnly -and $RuntimeDataRoot){throw "Conflicting runtime data modes"}
+if($RuntimeDataRoot){$env:VOLLEY_STUDIO_DATA_ROOT=$RuntimeDataRoot}
+if($RestartFromPid -gt 0 -or $RuntimeReadOnly -or $RuntimeDataRoot){
     $env:VOLLEY_STUDIO_RESTART_READONLY=if($RuntimeReadOnly){"1"}else{"0"}
-    if($RuntimeDataRoot){$env:VOLLEY_STUDIO_DATA_ROOT=$RuntimeDataRoot}
+}
+if($RestartFromPid -gt 0){
     $env:VOLLEY_STUDIO_RESTART_GENERATION=[guid]::NewGuid().ToString("N")
 }
 $shaHasher=[System.Security.Cryptography.SHA256]::Create()
@@ -171,6 +173,55 @@ function Restart-Satisfied {
     return ($livePid -gt 0 -and $livePid -ne $RestartFromPid)
 }
 
+function Get-Rollback([int]$pidBefore) {
+    if($pidBefore -eq 0){return $null}
+    Invoke-Launcher "/status" | Out-Host
+    $live=Invoke-RestMethod -Uri "$bindUrl/internal/rewrite-status" -TimeoutSec 5
+    $shaBefore=Get-LiveSha
+    $ownerPath=Join-Path $root ".studio-runtime\windows-owner.json"
+    $owner=Get-Content -LiteralPath $ownerPath -Raw | ConvertFrom-Json
+    $binary=[System.IO.Path]::GetFileName([string]$owner.binary)
+    if($live.pid -ne $pidBefore -or $owner.pid -ne $pidBefore -or
+       $shaBefore -notmatch '^[a-f0-9]{40}$' -or $owner.sha -ne $shaBefore -or
+       $binary -notmatch "^volley-app-$shaBefore(?:-restart-[a-f0-9]{32})?\.exe$" -or
+       -not (Test-Path -LiteralPath (Join-Path $root ".studio-runtime\bin\$binary") -PathType Leaf)){
+        throw "Cannot verify the running Studio executable for rollback"
+    }
+    $readOnly=$live.isolated_writes_enabled -ne $true
+    $dataRoot=if($owner.PSObject.Properties["data_root"]){$owner.data_root}else{$RuntimeDataRoot}
+    if(-not $readOnly -and ($dataRoot -notmatch '^[a-zA-Z]:\\' -or
+       $dataRoot -match '(^|\\)\.\.(\\|$)' -or
+       -not (Test-Path -LiteralPath $dataRoot -PathType Container))){
+        throw "The running legacy Studio has no recorded data root; supply its verified -RuntimeDataRoot before deployment"
+    }
+    return @{
+        binary=$binary
+        sha=$shaBefore
+        readOnly=$readOnly
+        dataRoot=$dataRoot
+    }
+}
+
+function Restore-Previous($rollback) {
+    if((Get-LivePid) -gt 0){Stop-When-Idle}
+    $readOnly=$env:VOLLEY_STUDIO_RESTART_READONLY
+    $dataRoot=$env:VOLLEY_STUDIO_DATA_ROOT
+    try{
+        $env:VOLLEY_STUDIO_ROLLBACK_BINARY=$rollback.binary
+        $env:VOLLEY_STUDIO_RESTART_READONLY=if($rollback.readOnly){"1"}else{"0"}
+        $env:VOLLEY_STUDIO_DATA_ROOT=$rollback.dataRoot
+        Invoke-Launcher "/daemon"
+        if((Get-LiveSha) -ne $rollback.sha -or (Get-LivePid) -le 0){
+            throw "Restored Studio did not serve the previous SHA $($rollback.sha)"
+        }
+        Write-Output "RESTORED: $($rollback.sha) $bindUrl/studio"
+    }finally{
+        $env:VOLLEY_STUDIO_ROLLBACK_BINARY=$null
+        $env:VOLLEY_STUDIO_RESTART_READONLY=$readOnly
+        $env:VOLLEY_STUDIO_DATA_ROOT=$dataRoot
+    }
+}
+
 function Invoke-Deployment {
     for($attempt=1;$attempt -le $MaxBuildAttempts;$attempt++){
         Confirm-Checkout
@@ -208,15 +259,31 @@ function Invoke-Deployment {
         }
 
         $previousPid=Get-LivePid
-        Stop-When-Idle
-        Invoke-Launcher "/daemon"
-        $deployed=Get-LiveSha
-        if($deployed -ne $target){
-            throw "Live Studio SHA $deployed does not match built SHA $target"
+        $rollback=Get-Rollback $previousPid
+        if($null -ne $rollback){
+            Stop-When-Idle
+            if(-not $RuntimeReadOnly -and -not $RuntimeDataRoot){
+                $env:VOLLEY_STUDIO_RESTART_READONLY=if($rollback.readOnly){"1"}else{"0"}
+                $env:VOLLEY_STUDIO_DATA_ROOT=$rollback.dataRoot
+            }
         }
-        $deployedPid=Get-LivePid
-        if($deployedPid -le 0 -or $deployedPid -eq $previousPid -or ($RestartFromPid -gt 0 -and $deployedPid -eq $RestartFromPid)){
-            throw "Studio did not start a new verified process"
+        try{
+            Invoke-Launcher "/daemon"
+            $deployed=Get-LiveSha
+            if($deployed -ne $target){
+                throw "Live Studio SHA $deployed does not match built SHA $target"
+            }
+            $deployedPid=Get-LivePid
+            if($deployedPid -le 0 -or $deployedPid -eq $previousPid -or ($RestartFromPid -gt 0 -and $deployedPid -eq $RestartFromPid)){
+                throw "Studio did not start a new verified process"
+            }
+        }catch{
+            $startupError=$_
+            if($null -ne $rollback){
+                try{Restore-Previous $rollback}
+                catch{throw "Studio startup failed: $startupError. Rollback also failed: $_"}
+            }
+            throw $startupError
         }
         if((Published-Sha) -eq $target){
             Write-Output "DEPLOYED: $target $bindUrl/studio PID $deployedPid"

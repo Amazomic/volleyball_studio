@@ -70,6 +70,15 @@ HTTP identity, Win32 executable and the absence of active jobs/streams,
 then sends an authenticated local request; no forced process termination.
 An unknown port owner, including the previous WSL instance, blocks the switch.
 
+The Windows deployment queue verifies the previous executable and its data
+directory before stopping a running Studio. If the candidate fails to start
+or fails its live SHA check, the queue attempts to restart the verified
+previous executable with its embedded UI and prior data directory. The
+deployment request still reports failure. For a running writable Studio
+whose legacy owner record lacks the data directory, pass the verified
+existing directory as the queue's `-RuntimeDataRoot`. The queue leaves the
+running process untouched if it cannot verify a rollback target.
+
 Writable data defaults to `%LOCALAPPDATA%/VolleyballStudio/data` or
 `VOLLEY_STUDIO_DATA_ROOT`. `-DataRoot C:/absolute/path` selects a
 separate Windows data directory. Use `-ReadOnly` for disposable

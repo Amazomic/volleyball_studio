@@ -46,7 +46,7 @@ fn stored_for_hash(root: &Path, hash: &str, size: u64) -> Result<Option<Value>, 
         {
             continue;
         }
-        let Some(receipt) = storage::read_json(&path)? else {
+        let Ok(Some(receipt)) = storage::read_json(&path) else {
             continue;
         };
         if receipt["schema"] != "volley-project-upload/1" || receipt["size"].as_u64() != Some(size)
@@ -362,6 +362,16 @@ mod tests {
             .is_none());
         fs::remove_dir_all(&root).unwrap();
     }
+    #[test]
+    fn corrupt_receipt_does_not_block_other_uploads() {
+        let root = std::env::temp_dir().join(format!("volley-upload-corrupt-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("unrelated.mp4.json"), b"{").unwrap();
+        let result = stored_for_hash(&root, &"0".repeat(64), 2048);
+        fs::remove_dir_all(root).unwrap();
+        assert!(result.unwrap().is_none());
+    }
+
     #[test]
     fn legacy_receipt_is_deduplicated_by_streamed_hash() {
         let root = std::env::temp_dir().join(format!("volley-upload-legacy-{}", Uuid::new_v4()));

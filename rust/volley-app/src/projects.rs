@@ -539,7 +539,11 @@ pub(crate) fn with_registry_lock<T>(
     outcome
 }
 
-fn create_record(state: &AppState, request: Value) -> Result<Value, ApiError> {
+fn create_record(
+    state: &AppState,
+    request: Value,
+    #[cfg(test)] before_registry_lock: impl FnOnce(),
+) -> Result<Value, ApiError> {
     let raw_name = request["name"]
         .as_str()
         .ok_or_else(|| storage::bad_request("Укажите название проекта"))?;
@@ -547,16 +551,18 @@ fn create_record(state: &AppState, request: Value) -> Result<Value, ApiError> {
     let videos = list_video_names(state, &request["videos"])?;
     let ranges = validate_ranges(state, &videos, request.get("ranges"))?;
     let ids = player_ids(state, request.get("player_ids"))?;
-    let mut sources = Map::new();
-    for video in &videos {
-        sources.insert(
-            video.to_owned(),
-            json!(canonical_source(state, video)?
-                .to_string_lossy()
-                .to_string()),
-        );
-    }
+    #[cfg(test)]
+    before_registry_lock();
     with_registry_lock(state, || {
+        let mut sources = Map::new();
+        for video in &videos {
+            sources.insert(
+                video.to_owned(),
+                json!(canonical_source(state, video)?
+                    .to_string_lossy()
+                    .to_string()),
+            );
+        }
         let mut projects = load_projects(state)?;
         if projects.iter().any(|p| {
             p["name"]
@@ -900,9 +906,16 @@ pub async fn create_project(
 ) -> ApiResult<Value> {
     storage::validate_origin(&headers)?;
     let writing = state.clone();
-    let project = tokio::task::spawn_blocking(move || create_record(&writing, request))
-        .await
-        .map_err(|err| storage::internal(format!("Create task failed: {err}")))??;
+    let project = tokio::task::spawn_blocking(move || {
+        create_record(
+            &writing,
+            request,
+            #[cfg(test)]
+            || {},
+        )
+    })
+    .await
+    .map_err(|err| storage::internal(format!("Create task failed: {err}")))??;
     // The project record is already durably committed: a preparation queue
     // failure must not trigger an HTTP retry that creates another project.
     if let Some(id) = project["id"].as_str() {
@@ -996,7 +1009,79 @@ pub(crate) fn scan_videos(state: &AppState) -> Result<Vec<Value>, ApiError> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalized_name;
+    use super::*;
+
+    #[test]
+    fn create_rejects_video_removed_after_validation() {
+        use std::process::Command;
+
+        if Command::new("ffmpeg").arg("-version").output().is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("volley-create-race-{}", Uuid::new_v4()));
+        let state = AppState {
+            repository_root: root.join("original"),
+            data_root: root.join("sandbox"),
+            writes_enabled: true,
+            montage: crate::montage::MontageManager::new(),
+            preparation: crate::preparation::PreparationManager::new(),
+            preview_limit: tokio::sync::Semaphore::new(1),
+            touch_limit: tokio::sync::Semaphore::new(1),
+            continuity_limit: tokio::sync::Semaphore::new(1),
+            reid_limit: tokio::sync::Semaphore::new(1),
+            identity_limit: tokio::sync::Semaphore::new(1),
+            statistics_limit: tokio::sync::Semaphore::new(1),
+            marks_limit: tokio::sync::Semaphore::new(1),
+            quick_reel: crate::quick_reel::QuickReelManager::new(),
+            inference_limit: tokio::sync::Semaphore::new(1),
+            full_inference: crate::inference_full::FullInferenceManager::new(),
+        };
+        let id = "123456abcdef";
+        let video = "shared.mp4";
+        let projects = project_root(&state);
+        fs::create_dir_all(projects.join(id)).unwrap();
+        fs::create_dir_all(uploaded_video_root(&state)).unwrap();
+        let path = uploaded_video_root(&state).join(video);
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x64:rate=30:duration=0.5",
+                "-c:v",
+                "libx264",
+                "-threads",
+                "1"
+            ])
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        storage::write_json_atomic(
+            &registry_path(&state),
+            &json!({"schema":1,"projects":[{"id":id,"name":"Old project","videos":[video]}]}),
+        )
+        .unwrap();
+
+        let result = create_record(
+            &state,
+            json!({"name":"New project","videos":[video]}),
+            || {
+                let (staged, exclusive) =
+                    with_registry_lock(&state, || delete_from_root(&projects, id)).unwrap();
+                cleanup_staged_project(&state, staged, exclusive);
+                assert!(!path.exists());
+            },
+        );
+        let remaining = load_projects(&state).unwrap();
+        fs::remove_dir_all(root).unwrap();
+
+        assert!(result.is_err());
+        assert!(remaining.is_empty());
+    }
+
     #[test]
     fn delete_project_preserves_other_data() {
         let root = std::env::temp_dir().join(format!("volley-delete-{}", uuid::Uuid::new_v4()));

@@ -393,13 +393,16 @@ pub(crate) fn run_joint_pair(
     let court = crate::video_edits::court_snapshot(state, project_id, video)
         .map_err(|e| format!("{e:?}"))?;
     let preference = backend_preference()?;
-    let checkpoint_root = early_pose
+    let build_sha = option_env!("VOLLEY_BUILD_GIT_SHA")
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let checkpoint_target = early_pose
         .as_ref()
         .and_then(|options| options.checkpoint_root.as_ref())
-        .filter(|_| !pose_enabled);
+        .filter(|_| !pose_enabled)
+        .zip(build_sha);
     let (preference, backend_tag) = if zero_copy {
         (preference, "nvdec_zero_copy")
-    } else if checkpoint_root.is_some() {
+    } else if checkpoint_target.is_some() {
         let selection =
             volley_media::raw_decoder::select_decode_backend(original, preference, cancelled)?;
         match selection.backend {
@@ -409,13 +412,13 @@ pub(crate) fn run_joint_pair(
     } else {
         (preference, "no_checkpoint")
     };
-    let checkpoint_dir = checkpoint_root.map(|root| {
+    let checkpoint_dir = checkpoint_target.map(|(root, build_sha)| {
         let options = early_pose.as_ref().ok_or("Missing rally checkpoint settings")?;
         let ball_model = "VballNetV4c_seq9_grayscale_20260908_213829.onnx";
         let detector_model = PersonEngine::primary_model_file(person_detector, session_memory);
         let identity = json!({
             "schema":"volley-phase1-checkpoint/1",
-            "build":env!("VOLLEY_BUILD_GIT_SHA"),
+            "build":build_sha,
             "project":project_id,"video":video,
             "source":original_provenance,"stamp":[before.0,before.1],
             "range":range,"duration":duration,"backend":backend_tag,

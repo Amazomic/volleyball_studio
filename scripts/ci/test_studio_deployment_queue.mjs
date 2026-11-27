@@ -101,4 +101,28 @@ if(process.platform==="win32"){
     assert.match(failed.output,/exit 17/);
   }finally{rmSync(temp,{recursive:true,force:true});}
 }
+if(process.platform==="win32"){
+  const start=text.indexOf("function Restore-Previous(");
+  const end=text.indexOf("\ntry{",start);
+  const probe=text.slice(start,end)+[
+    '$ErrorActionPreference="Stop"',
+    '$MaxBuildAttempts=1; $RestartFromPid=0; $RuntimeReadOnly=$false; $RuntimeDataRoot=""; $bindUrl="http://127.0.0.1:8875"; $script:running="previous"; $script:stops=0; $script:rollbackAvailable=$true',
+    'function Confirm-Checkout {}',
+    'function Published-Sha {return "candidate"}',
+    'function Git-Text {return "previous"}',
+    'function Get-LiveSha {return $script:running}',
+    'function Get-LivePid {if($script:running){return 41}; return 0}',
+    'function Wait-For-Idle {}',
+    'function Update-Checkout {return "candidate"}',
+    'function Get-Rollback($pidBefore) {if($pidBefore -ne 41){throw "wrong rollback PID"}; if(-not $script:rollbackAvailable){throw "rollback unavailable"}; return @{binary="previous.exe";sha="previous";readOnly=$true;dataRoot=$null}}',
+    'function Stop-When-Idle {$script:stops++; $script:running=""}',
+    'function Invoke-Launcher($command) {if($command -eq "/daemon"){if($env:VOLLEY_STUDIO_ROLLBACK_BINARY -eq "previous.exe" -and $env:VOLLEY_STUDIO_RESTART_READONLY -eq "1"){$script:running="previous"}else{throw "candidate startup failure"}}}',
+    '$failed=$false; try{Invoke-Deployment}catch{if($_ -notmatch "candidate startup failure"){throw}; $failed=$true}',
+    'if(-not $failed -or $script:running -ne "previous" -or $script:stops -ne 1 -or $env:VOLLEY_STUDIO_ROLLBACK_BINARY){throw "Failed deployment did not restore previous Studio"}',
+    '$script:rollbackAvailable=$false; $rejected=$false; try{Invoke-Deployment}catch{if($_ -notmatch "rollback unavailable"){throw}; $rejected=$true}',
+    'if(-not $rejected -or $script:running -ne "previous" -or $script:stops -ne 1){throw "Unverified rollback allowed shutdown"}'
+  ].join("\n");
+  const result=spawnSync("powershell.exe",["-NoProfile","-NonInteractive","-EncodedCommand",Buffer.from(probe,"utf16le").toString("base64")],{encoding:"utf8",windowsHide:true});
+  assert.equal(result.status,0,result.stdout+result.stderr);
+}
 console.log("PASS: deployment queue serializes builds and coalesces duplicate requests");
