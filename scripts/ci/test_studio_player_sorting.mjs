@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 import {runInNewContext} from "node:vm";
 
 const source=readFileSync(new URL("../../rust/volley-app/static/studio_tracks.js",import.meta.url),"utf8");
@@ -11,7 +12,7 @@ const state={roster:[{id:"a",name:"Аня"},{id:"b",name:"Борис"}],
     "4":[{player_id:"b",cosine_similarity:.92}],
     "5":[{player_id:"b",cosine_similarity:.89}],
     "7":[{player_id:"a",cosine_similarity:.70}]}};
-const context={state};
+const context={state,window:previewWasmWindow()};
 runInNewContext(source.slice(start,end)+
   "\nthis.sortBySimilarity=sortBySimilarity;this.visibleUnassigned=visibleUnassigned;this.visibleUnassignedCount=visibleUnassignedCount;",context);
 const single=[{track_id:7},{track_id:9},{track_id:2},{track_id:4}];

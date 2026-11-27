@@ -1,4 +1,5 @@
 import {readFileSync} from "node:fs";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 import {runInNewContext} from "node:vm";
 import assert from "node:assert/strict";
 
@@ -10,7 +11,7 @@ const node=(tag,klass,text)=>({tag,klass,text,children:[],dataset:{},events:{},v
 const state={roster:[{id:"a",name:"Анна"},{id:"b",name:"Борис"},{id:"c",name:"Вера"}],
   playerMatches:{"7":[{player_id:"a",cosine_similarity:.37},{player_id:"b",cosine_similarity:.79}]}};
 const binds=[];
-const context={state,node,updateCardLink:()=>{},bindSelected:(ids,player)=>binds.push({ids,player})};
+const context={state,window:previewWasmWindow(),node,updateCardLink:()=>{},bindSelected:(ids,player)=>binds.push({ids,player})};
 runInNewContext(source.slice(start,end)+"\nthis.attachSuggestions=attachSuggestions;",context);
 const card=node("article");
 context.attachSuggestions(card,[7]);

@@ -556,43 +556,34 @@
     return button;
   };
   const playerCandidates=ids=>{
-    const members=new Set(ids);
-    const roster=new Map(state.roster.map(p=>[p.id,p.name]));
-    const byPlayer=new Map();
-    for(const id of members){
-      const options=state.playerMatches[String(id)];
-      for(const candidate of Array.isArray(options)?options:[]){
-        const score=Number(candidate.cosine_similarity);
-        if(!roster.has(candidate.player_id)||!Number.isFinite(score)||
-          score<=0||score>1)continue;
-        const current=byPlayer.get(candidate.player_id)||{
-          playerId:candidate.player_id,name:roster.get(candidate.player_id),
-          total:0,supported:0,score:0,trackId:id,reference: candidate.reference_track_id,
-          referenceKind:candidate.reference_kind
-        };
-        current.total+=score;
-        current.supported++;
-        if(score>current.score){
-          current.score=score;current.trackId=id;
-          current.reference=candidate.reference_track_id;
-          current.referenceKind=candidate.reference_kind;
-        }
-        byPlayer.set(candidate.player_id,current);
-      }
-    }
-    return [...byPlayer.values()].map(match=>({
-      ...match,score:match.total/match.supported,groupSize:members.size
-    })).sort((a,b)=>b.supported-a.supported||
-      b.score-a.score||a.name.localeCompare(b.name,"ru"));
+    const roster=[...state.roster].sort((a,b)=>a.name.localeCompare(b.name,"ru"));
+    let rank=0;
+    const named=roster.map((person,index)=>{
+      if(index&&person.name.localeCompare(roster[index-1].name,"ru")!==0)rank++;
+      return {id:person.id,name:person.name,rank};
+    });
+    const tracks=ids.map(id=>({id:Number(id),matches:(Array.isArray(state.playerMatches[String(id)])?
+      state.playerMatches[String(id)]:[]).filter(Boolean).map(match=>({
+      player_id:match.player_id,cosine_similarity:Number(match.cosine_similarity),
+      reference_track_id:match.reference_track_id,reference_kind:match.reference_kind
+    }))}));
+    return window.VolleyStudioChain.call(7,{kind:"candidates",roster:named,tracks});
   };
+
   const visibleUnassigned=id=>state.unassignedIds.has(id)&&!state.assignmentPending.has(id);
   const visibleUnassignedCount=()=>[...state.unassignedIds].filter(visibleUnassigned).length;
-  const sortBySimilarity=(items,idsOf)=>items.sort((a,b)=>{
-    const aIds=idsOf(a),bIds=idsOf(b);
-    const aScore=playerCandidates(aIds)[0]?.score??-1;
-    const bScore=playerCandidates(bIds)[0]?.score??-1;
-    return bScore-aScore||Number(aIds[0])-Number(bIds[0]);
-  });
+  const sortBySimilarity=(items,idsOf)=>{
+    if(!items.length)return items;
+    const cards=items.map(item=>{
+      const ids=idsOf(item);
+      return {id:Number(ids[0]),score:playerCandidates(ids)[0]?.score??-1};
+    });
+    const order=window.VolleyStudioChain.call(7,{kind:"order",cards});
+    const sorted=order.map(index=>items[index]);
+    for(let i=0;i<sorted.length;i++)items[i]=sorted[i];
+    return items;
+  };
+
   const attachSuggestions=(card,ids)=>{
     const panel=node("div","track-link-suggestions");
     const candidates=playerCandidates(ids);
@@ -1880,10 +1871,10 @@
     if(event.detail?.tab==="players")loadVideos();
   });
   window.addEventListener("volley:project-ready",()=>{
-    if(active())loadVideos();
+    if(active()&&window.VolleyballUi.isReady())loadVideos();
   });
   window.addEventListener("volley:postprocessing-change",()=>{
-    if(active())loadVideos();
+    if(active()&&window.VolleyballUi.isReady())loadVideos();
   });
   window.addEventListener("volley:player-library-updated",()=>{
     if(active())void loadLibraryRoster();
@@ -1892,5 +1883,5 @@
     if(active()&&state.tracksLoaded&&!state.bindingHold&&!state.assignmentPending.size)
       void loadPage({preserveCards:true});
   });
-  if(active())loadVideos();
+  window.VolleyballUi.ready.then(()=>{if(active())loadVideos();}).catch(error=>note(error.message,true));
 })();

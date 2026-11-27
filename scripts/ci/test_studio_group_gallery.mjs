@@ -1,4 +1,5 @@
 import {readFileSync} from "node:fs";
+import {previewWasmWindow} from "./helpers/preview_wasm.mjs";
 import {runInNewContext} from "node:vm";
 import assert from "node:assert/strict";
 
@@ -116,7 +117,7 @@ const candidateState={
   }
 };
 const cardWithReasons=makeNode("article");
-const candidateContext={state:candidateState,node:makeNode,updateCardLink(){},bindSelected(){}};
+const candidateContext={state:candidateState,window:previewWasmWindow(),node:makeNode,updateCardLink(){},bindSelected(){}};
 runInNewContext(source.slice(candidateStart,candidateEnd)+
   "\nthis.attachSuggestions=attachSuggestions;",candidateContext);
 candidateContext.attachSuggestions(cardWithReasons,[101,102,103]);
