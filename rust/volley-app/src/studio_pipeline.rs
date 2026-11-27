@@ -1291,7 +1291,12 @@ fn parse_primary_rally_scope(
     .map_err(|_| "Некорректные границы первичных розыгрышей")?;
     let short_minimum = if matches!(
         mask["ground_boundary_version"].as_str(),
-        Some("ground_ends_rally_v6" | "ground_ends_rally_v7" | "ground_ends_rally_v8")
+        Some(
+            "ground_ends_rally_v6"
+                | "ground_ends_rally_v7"
+                | "ground_ends_rally_v8"
+                | "ground_ends_rally_v9"
+        )
     ) && mask["serve_flight_geometry_available"] == true
     {
         crate::cpu_retrack::ball_track::MIN_CONFIRMED_GROUNDED_RALLY_FRAMES
@@ -1440,7 +1445,7 @@ fn gpu_lineage_valid(
                 != json!(request.post.ball_stabilizer)
             || saved["gpu_rally_mask"]["serve_flight_version"]
                 != volley_core::rally_reconstruction::serve_flight::SERVE_FLIGHT_VERSION
-            || saved["gpu_rally_mask"]["ground_boundary_version"] != "ground_ends_rally_v8"
+            || saved["gpu_rally_mask"]["ground_boundary_version"] != "ground_ends_rally_v9"
             || saved["gpu_rally_mask"]["ground_detector"]["version"]
                 != volley_core::motion::GROUND_DETECTOR_VERSION
             || !valid_sha(&saved["gpu_rally_mask"]["ground_detector"]["sha256"])
@@ -1684,7 +1689,7 @@ fn cpu_lineage_valid(
             TouchAlgorithm::TrajectoryTcn => tcn_sha.is_some()
                 && touches["method"] == "vballnet_volley3d_tcn_v1"
                 && touches["tcn_model_sha256"] == serde_json::json!(tcn_sha),
-            TouchAlgorithm::BallTrajectory => touches["method"] == "vballnet_touch_detector_v6",
+            TouchAlgorithm::BallTrajectory => touches["method"] == "vballnet_touch_detector_v7",
         })
         && rallies["schema"] == "volley-native-cpu-rally-proposals/1"
         && rallies["state"] == "provisional_rally_segments"
@@ -6279,7 +6284,7 @@ mod branching_tests {
                 "movement_filter_version":crate::cpu_retrack::ball_track::MOVEMENT_FILTER_VERSION,
                 "min_rally_seconds":5.0,
                 "serve_flight_version":volley_core::rally_reconstruction::serve_flight::SERVE_FLIGHT_VERSION,
-                "ground_boundary_version":"ground_ends_rally_v8",
+                "ground_boundary_version":"ground_ends_rally_v9",
                 "ground_detector":{"version":volley_core::motion::GROUND_DETECTOR_VERSION,"sha256":sha},
                 "ball_stabilizer":{
                     "algorithm":volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION,

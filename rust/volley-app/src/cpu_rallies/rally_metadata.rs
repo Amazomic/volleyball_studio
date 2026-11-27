@@ -2,30 +2,65 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use volley_core::{
     court_geometry::{CourtSide, CourtTransform},
-    rally_score::{scoring_landing, winning_side},
+    rally_score::{scoring_landing, scoring_landing_with_observed_center, winning_side},
 };
 
-pub(crate) fn refresh_line_winner(
-    metadata: &mut Value,
-    outcome: &str,
+pub(crate) fn score_landing<'a>(
+    outcome: &'a str,
     position: Option<[f64; 2]>,
-    court: &CourtTransform,
-) {
-    if outcome != "line_uncertain" {
-        return;
+    court: Option<&CourtTransform>,
+    frame: u64,
+    source: Option<(&std::path::Path, &str, u64)>,
+) -> Result<&'a str, String> {
+    let landing = scoring_landing(outcome, position, court);
+    if landing != "line_uncertain" || position.is_none() || court.is_none() {
+        return Ok(landing);
     }
-    let winner = if ["team_1", "team_2"].iter().all(|team| {
-        metadata[*team]
-            .as_array()
-            .is_some_and(|ids| !ids.is_empty())
-    }) {
-        winning_side(Some(scoring_landing(outcome, position, Some(court))), None)
-    } else {
-        None
+    let Some((path, sha, total)) = source else {
+        return Ok(landing);
     };
-    metadata["winning_team"] = json!(winner.map(team_label));
+    let mut observed = None;
+    crate::native_preview_overlay::for_each_verified_scoped_frame(
+        path,
+        sha,
+        total,
+        &[(frame, frame)],
+        |item| {
+            if let Some((index, bytes)) = item {
+                let row: Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+                if row["frame_index"].as_u64() != Some(index) {
+                    return Err("Invalid rally score source frame".into());
+                }
+                let ball = &row["selected_ball"]["detection"];
+                if ball["frame_index"].as_u64() == Some(index)
+                    && ball["class_name"] == "ball"
+                    && ball["score"].as_f64().is_some_and(|score| score >= 0.35)
+                {
+                    if let Ok([x1, y1, x2, y2]) =
+                        serde_json::from_value::<[f64; 4]>(ball["bbox_xyxy_norm"].clone())
+                    {
+                        if [x1, y1, x2, y2].iter().all(|v| (0.0..=1.0).contains(v))
+                            && x1 < x2
+                            && y1 < y2
+                        {
+                            observed = Some([(x1 + x2) / 2.0, (y1 + y2) / 2.0]);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        },
+    )?;
+    Ok(scoring_landing_with_observed_center(
+        outcome, position, court, observed,
+    ))
 }
 
+pub(crate) fn refresh_floor_winner(metadata: &mut Value, landing: &str) {
+    if matches!(landing, "near_half" | "far_half" | "line_uncertain") {
+        metadata["winning_team"] = json!(winning_side(Some(landing), None).map(team_label));
+    }
+}
 fn team_label(side: CourtSide) -> &'static str {
     match side {
         CourtSide::Near => "team_1",
@@ -148,11 +183,7 @@ pub(crate) fn build(
                     .copied()
             })
     });
-    let winner = if !team_1.is_empty() && !team_2.is_empty() {
-        winning_side(floor.map(|(_, outcome)| outcome), last_touch)
-    } else {
-        None
-    };
+    let winner = winning_side(floor.map(|(_, outcome)| outcome), last_touch);
     let touches = observed.iter().filter(|(frame, _, _)| floor.is_none_or(|(at, _)| *frame < at))
         .filter_map(|(frame, id, kind)| {
             id.filter(|id| roster.contains(id)).map(|id| json!({"track_id":id,"kind":kind,"time_sec":offset_sec + *frame as f64 / 30.0}))
@@ -170,6 +201,74 @@ pub(crate) fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn score_rechecks_near_net_only_with_verified_ball_center() {
+        use sha2::{Digest, Sha256};
+        let court = CourtTransform::new([[0.1, 1.05], [0.38, 0.34], [0.62, 0.34], [0.9, 1.05]])
+            .unwrap()
+            .with_net(Some([[0.28, 0.325], [0.72, 0.325]]))
+            .unwrap();
+        let [x, y] = court.floor_to_image([0.04, -4.3]).unwrap();
+        let root = std::env::temp_dir().join(format!("volley-score-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("tracked_frames.jsonl");
+        let row = |index, ball| json!({"frame_index":index,"selected_ball":ball});
+        let ball = |index, cx: f64, cy: f64| {
+            json!({"source_model":"vballnet","detection":{
+            "frame_index":index,"class_name":"ball","score":0.8,
+            "bbox_xyxy_norm":[cx-0.007,cy-0.01,cx+0.007,cy+0.01]}})
+        };
+        let data = format!(
+            "{}\n{}\n{}\n",
+            row(0, ball(0, x, y)),
+            row(1, Value::Null),
+            row(2, ball(2, 0.8, 0.8))
+        );
+        std::fs::write(&path, &data).unwrap();
+        let sha = format!("{:x}", Sha256::digest(data.as_bytes()));
+        let source = Some((path.as_path(), sha.as_str(), 3));
+        for (frame, expected) in [
+            (0, "near_half"),
+            (1, "line_uncertain"),
+            (2, "line_uncertain"),
+        ] {
+            assert_eq!(
+                score_landing("line_uncertain", Some([x, y]), Some(&court), frame, source).unwrap(),
+                expected
+            );
+        }
+        let mut saved = json!({"winning_team":null,"touches":[],"team_1":[],"team_2":[]});
+        refresh_floor_winner(
+            &mut saved,
+            score_landing("line_uncertain", Some([x, y]), Some(&court), 0, source).unwrap(),
+        );
+        assert_eq!(saved["winning_team"], "team_2");
+        assert_eq!(saved["touches"], json!([]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn in_court_point_does_not_depend_on_identified_players() {
+        let sides = BTreeMap::from([(1, CourtSide::Near)]);
+        let mut saved = build(0, 40, &sides, &[1], &[], Some((25, "near_half")), 0.0);
+        assert_eq!(saved["winning_team"], "team_2");
+        assert_eq!(saved["team_2"], json!([]));
+        saved["winning_team"] = Value::Null;
+        let court = CourtTransform::new([[0.1, 0.2], [0.9, 0.2], [0.9, 0.8], [0.1, 0.8]]).unwrap();
+        refresh_floor_winner(&mut saved, scoring_landing("near_half", None, Some(&court)));
+        assert_eq!(saved["winning_team"], "team_2");
+        let out = build(
+            0,
+            40,
+            &sides,
+            &[1],
+            &[(20, Some(1), "serve")],
+            Some((25, "out")),
+            0.0,
+        );
+        assert_eq!(out["winning_team"], "team_2");
+    }
 
     #[test]
     fn initial_serve_source_is_scoped_and_unassigned_is_not_guessed() {
@@ -232,16 +331,21 @@ mod tests {
         );
         let touches = saved["touches"].clone();
         for (x, expected) in [(-3.0, "team_2"), (3.0, "team_1")] {
-            refresh_line_winner(
+            refresh_floor_winner(
                 &mut saved,
-                "line_uncertain",
-                court.floor_to_image([x, -4.5]),
-                &court,
+                scoring_landing(
+                    "line_uncertain",
+                    court.floor_to_image([x, -4.5]),
+                    Some(&court),
+                ),
             );
             assert_eq!(saved["winning_team"], expected);
             assert_eq!(saved["touches"], touches);
         }
-        refresh_line_winner(&mut saved, "line_uncertain", None, &court);
+        refresh_floor_winner(
+            &mut saved,
+            scoring_landing("line_uncertain", None, Some(&court)),
+        );
         assert!(saved["winning_team"].is_null());
     }
 

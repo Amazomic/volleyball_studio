@@ -4118,7 +4118,7 @@ fn process_with_ball_scope_and_rally_settings_report(
                 TouchAlgorithm::PoseMotion => "vballnet_trajectory_body_contact_v12",
                 TouchAlgorithm::Legacy => "vballnet_gravity_player_geometry_pose_contact_v11",
                 TouchAlgorithm::TrajectoryTcn => "vballnet_volley3d_tcn_v1",
-                TouchAlgorithm::BallTrajectory => "vballnet_touch_detector_v6",
+                TouchAlgorithm::BallTrajectory => "vballnet_touch_detector_v7",
             },
             "tcn_model_sha256":tcn_sha,
             "trajectory_detector_version":volley_core::touch_pipeline::TRAJECTORY_DETECTOR_VERSION,

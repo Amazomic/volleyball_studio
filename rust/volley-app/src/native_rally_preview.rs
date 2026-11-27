@@ -155,10 +155,17 @@ fn fill_legacy_metadata(
             .and_then(|events| events.iter().find(|event| event["surface"] == "floor"))
             .cloned()
     };
-    if cards.iter().all(|card| {
-        card["metadata"].is_object()
-            && first_floor(card).is_none_or(|event| event["outcome"] != "line_uncertain")
-    }) {
+    let needs_score_refresh = |card: &Value| {
+        first_floor(card).is_some_and(|event| {
+            event["outcome"] == "line_uncertain"
+                || (card["metadata"]["winning_team"].is_null()
+                    && matches!(event["outcome"].as_str(), Some("near_half" | "far_half")))
+        })
+    };
+    if cards
+        .iter()
+        .all(|card| card["metadata"].is_object() && !needs_score_refresh(card))
+    {
         return Ok(());
     }
     let Some(snapshot) = crate::video_edits::court_snapshot(state, &run.project_id, &run.video)?
@@ -181,22 +188,6 @@ fn fill_legacy_metadata(
     if manifest["court_revision"].as_str() != Some(snapshot.revision.as_str()) {
         return Ok(());
     }
-    for card in cards.iter_mut().filter(|card| card["metadata"].is_object()) {
-        if let Some(event) = first_floor(card) {
-            let position = serde_json::from_value(event["position"].clone()).ok();
-            if let Some(outcome) = event["outcome"].as_str() {
-                crate::cpu_rallies::rally_metadata::refresh_line_winner(
-                    &mut card["metadata"],
-                    outcome,
-                    position,
-                    court,
-                );
-            }
-        }
-    }
-    if cards.iter().all(|card| card["metadata"].is_object()) {
-        return Ok(());
-    }
     let folder = crate::projects::project_root(state)
         .join(&run.project_id)
         .join("native_cpu_replays")
@@ -204,6 +195,31 @@ fn fill_legacy_metadata(
     storage::safe_folder(&folder).map_err(storage::bad_request)?;
     let replay = storage::safe_file(&folder, "tracked_frames.jsonl", 64 * 1024 * 1024 * 1024)
         .map_err(storage::bad_request)?;
+    let source = Some((replay.as_path(), run.replay_sha.as_str(), run.frames));
+    for card in cards
+        .iter_mut()
+        .filter(|card| card["metadata"].is_object() && needs_score_refresh(card))
+    {
+        if let Some(event) = first_floor(card) {
+            let position = serde_json::from_value(event["position"].clone()).ok();
+            if let (Some(outcome), Some(frame)) =
+                (event["outcome"].as_str(), event["frame_index"].as_u64())
+            {
+                let landing = crate::cpu_rallies::rally_metadata::score_landing(
+                    outcome,
+                    position,
+                    Some(court),
+                    frame,
+                    source,
+                )
+                .map_err(storage::bad_request)?;
+                crate::cpu_rallies::rally_metadata::refresh_floor_winner(
+                    &mut card["metadata"],
+                    landing,
+                );
+            }
+        }
+    }
     for card in cards
         .iter_mut()
         .filter(|card| !card["metadata"].is_object())
@@ -231,19 +247,26 @@ fn fill_legacy_metadata(
         } else {
             sides.keys().copied().collect()
         };
-        let floor = card["surface_event_candidates"]
+        let floor = match card["surface_event_candidates"]
             .as_array()
             .and_then(|events| events.iter().find(|event| event["surface"] == "floor"))
-            .and_then(|event| {
-                Some((
-                    event["frame_index"].as_u64()?,
-                    volley_core::rally_score::scoring_landing(
-                        event["outcome"].as_str()?,
+        {
+            Some(event) => match (event["frame_index"].as_u64(), event["outcome"].as_str()) {
+                (Some(frame), Some(outcome)) => Some((
+                    frame,
+                    crate::cpu_rallies::rally_metadata::score_landing(
+                        outcome,
                         serde_json::from_value(event["position"].clone()).ok(),
                         Some(court),
-                    ),
-                ))
-            });
+                        frame,
+                        source,
+                    )
+                    .map_err(storage::bad_request)?,
+                )),
+                _ => None,
+            },
+            None => None,
+        };
         let mut observed = card["motion_events"]
             .as_array()
             .into_iter()

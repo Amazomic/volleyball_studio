@@ -404,6 +404,83 @@ fn sustained_down_to_up_rebounds(
     candidates
 }
 
+fn short_occluded_observed_rebounds(
+    points: &[BallObservation],
+    config: DirectionBreakConfig,
+) -> Vec<TrajectoryBreak> {
+    let mut found = Vec::new();
+    for index in 6..points.len().saturating_sub(5) {
+        let contact = points[index - 1];
+        let bridge = points[index];
+        let left = &points[index - 6..index - 1];
+        let right = &points[index + 1..=index + 5];
+        let first = right[0];
+        if first.frame - bridge.frame != 3
+            || bridge.frame - contact.frame != 1
+            || contact.frame - left[4].frame != 1
+            || left
+                .windows(2)
+                .chain(right.windows(2))
+                .any(|p| p[1].frame - p[0].frame != 1)
+            || bridge.y > contact.y - config.max_fit_error_px
+            || (bridge.x - contact.x).abs() > 3.0 * config.max_join_error_px
+            || left
+                .windows(2)
+                .any(|p| p[1].y + config.max_fit_error_px < p[0].y)
+            || right
+                .windows(2)
+                .any(|p| p[1].y > p[0].y + config.max_fit_error_px)
+        {
+            continue;
+        }
+        let span = (contact.frame - left[0].frame) as f64;
+        let incoming = [
+            (contact.x - left[0].x) / span,
+            (contact.y - left[0].y) / span,
+        ];
+        let Some(after) = fit(right, contact.frame) else {
+            continue;
+        };
+        let outgoing = [(right[4].x - first.x) / 4.0, (right[4].y - first.y) / 4.0];
+        let join = (after.x[0] - contact.x).hypot(after.y[0] - contact.y);
+        if incoming[1] < 6.0 * config.max_fit_error_px
+            || outgoing[1] > -4.0 * config.max_fit_error_px
+            || after.y[1] >= 0.0
+            || after.error > config.max_fit_error_px
+            || join > 3.0 * config.max_join_error_px
+            || contact.y - first.y < 8.0 * config.max_fit_error_px
+        {
+            continue;
+        }
+        let speed_before = incoming[0].hypot(incoming[1]);
+        let speed_after = outgoing[0].hypot(outgoing[1]);
+        let angle = ((incoming[0] * outgoing[0] + incoming[1] * outgoing[1])
+            / (speed_before * speed_after))
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
+        if angle < config.min_turn_angle_deg.max(130.0) {
+            continue;
+        }
+        found.push(TrajectoryBreak {
+            frame: contact.frame,
+            position: [contact.x, contact.y],
+            motion: MotionEvidence {
+                motion_frame: contact.frame,
+                speed_before,
+                speed_after,
+                angle,
+                residual: (incoming[0] - outgoing[0]).hypot(incoming[1] - outgoing[1]),
+            },
+            fit_error: after.error + join * 0.25,
+            before_frames: left.iter().map(|p| p.frame).collect(),
+            after_frames: right.iter().map(|p| p.frame).collect(),
+            contact_observed: true,
+        });
+    }
+    found
+}
+
 fn occluded_vertical_rebounds(
     points: &[BallObservation],
     config: DirectionBreakConfig,
@@ -1134,6 +1211,14 @@ pub fn trajectory_direction_breaks(
             found.push(rebound);
         }
     }
+    for rebound in short_occluded_observed_rebounds(points, config) {
+        if !found
+            .iter()
+            .any(|event| event.frame.abs_diff(rebound.frame) <= config.min_separation_frames as u64)
+        {
+            found.push(rebound);
+        }
+    }
     for rebound in occluded_vertical_rebounds(points, config) {
         if let Some(existing) = found.iter_mut().find(|event| {
             event.frame.abs_diff(rebound.frame) <= config.min_separation_frames as u64
@@ -1225,6 +1310,47 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn steep_forearm_rebound_survives_two_missing_departure_samples() {
+        let points = (0..=10)
+            .map(|frame| {
+                let t = frame as f64 - 10.0;
+                BallObservation {
+                    frame,
+                    x: 900.0 - 20.0 * t,
+                    y: 1450.0 + 100.0 * t + 1.5 * t * t,
+                }
+            })
+            .chain([BallObservation {
+                frame: 11,
+                x: 945.0,
+                y: 1425.0,
+            }])
+            .chain((14..=24).map(|frame| {
+                let t = frame as f64 - 10.0;
+                BallObservation {
+                    frame,
+                    x: 850.0 - 28.0 * t,
+                    y: 1405.0 - 70.0 * t + 1.5 * t * t,
+                }
+            }))
+            .collect::<Vec<_>>();
+        let hits = trajectory_direction_breaks(&points, DirectionBreakConfig::default());
+        assert!(
+            hits.iter().any(|b| b.frame == 10 && b.contact_observed),
+            "{hits:?}"
+        );
+        let mut unrelated = points.clone();
+        for p in unrelated.iter_mut().filter(|p| p.frame >= 14) {
+            p.x -= 250.0;
+        }
+        assert!(
+            !trajectory_direction_breaks(&unrelated, DirectionBreakConfig::default())
+                .iter()
+                .any(|b| b.frame.abs_diff(10) <= 1)
+        );
     }
 
     #[test]

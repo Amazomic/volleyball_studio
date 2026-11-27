@@ -947,22 +947,25 @@ fn publish_primary_from_touches(
         let first_floor = surface_events
             .iter()
             .find(|event| event.surface == "floor" && (start..=end).contains(&event.frame_index));
+        let scored_floor = first_floor
+            .map(|event| {
+                rally_metadata::score_landing(
+                    event.outcome,
+                    event.position,
+                    side_source.and_then(|(_, _, snapshot)| snapshot.transform.as_ref()),
+                    event.frame_index,
+                    side_source.map(|(path, sha, _)| (path, sha, frames)),
+                )
+                .map(|landing| (event.frame_index, landing))
+            })
+            .transpose()?;
         let mut metadata = rally_metadata::build(
             start,
             end,
             &sides,
             roster,
             &observed,
-            first_floor.map(|event| {
-                (
-                    event.frame_index,
-                    volley_core::rally_score::scoring_landing(
-                        event.outcome,
-                        event.position,
-                        side_source.and_then(|(_, _, snapshot)| snapshot.transform.as_ref()),
-                    ),
-                )
-            }),
+            scored_floor,
             offset_sec,
         );
         rally_metadata::include_initial_serve(
