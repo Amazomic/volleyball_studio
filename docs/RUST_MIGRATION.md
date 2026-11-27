@@ -4917,3 +4917,9 @@ Studio показывает кнопку перехода между debug и re
 - Base 53c8a082a426306623bb2905f416f1cc86d50188; task 62064eb496e9c68c3b3548da655601e7ffc6d237. Extend the analysis graph SVG glyph in rust/volley-app/static/studio_tabs.js with three curved mint trajectory strokes; rust/volley-app/static/studio.css gives only the ball glyph a wider SVG while preserving height and card geometry. No inference, state, data or ABI changes.
 - RED: test_studio_vball_icon.mjs failed on the old viewBox. GREEN: new regression, DOM, viewport, analysis stage graph, flow geometry and WASM gates; Edge headless isolated card visual check. Full scripts/check-all.ps1 PASS: fmt, clippy, 1113 Rust tests passed (28 existing ignored), 117 Node gates. Integrated targeted tests, ownership and diff check PASS.
 - Actual match/GPU and full interactive browser scenario NOT TESTED (presentation-only change). Deploy via queue.
+
+### 2026-11-27 - Touch Detector open palm and trajectory icon
+
+- Base 15bf70c01055c32774374221f7619f31c38b2086; task 5146a9457bf591c185ac5d6b68cf3d3e46ac6a25. Presentation-only SVG in rust/volley-app/static/studio_tabs.js and local 32x16 icon styling in rust/volley-app/static/studio.css. The detector now has an independent open-palm, volleyball and curved trajectory glyph; Touch Attribution, inference, state, data and ABI remain unchanged.
+- RED: test_studio_touch_icon.mjs failed on old viewBox. GREEN: new regression, VBallNet icon, DOM, viewport, graph and flow geometry; Edge headless isolated card confirmed 32x16 layout and SVG bounds. Full scripts/check-all.ps1 PASS with isolated TEMP/TMP and RUST_TEST_THREADS=1 (1113 Rust tests passed, 28 existing ignored; fmt, clippy, WASM and 118 Node gates). Integrated targeted tests (copied verified WASM from task at identical base), ownership and diff check PASS.
+- Actual match/GPU and full interactive browser scenario NOT TESTED (presentation only). Deploy via queue.
