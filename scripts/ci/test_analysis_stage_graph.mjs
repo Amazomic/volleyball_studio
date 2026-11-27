@@ -298,10 +298,10 @@ assert.match(pipelineBody,/request\.mode\.allows_gpu_execution\(\) && request\.g
 assert.match(js,/payload\.post=postProfile\(\);/);
 assert.doesNotMatch(js,/if\(mode!=="gpu"\)payload\.post/);
 assert.equal(stages.find(item=>item[0]==="touch_detector")[3],1);
-assert.deepEqual(actualInputs("touch_detector"),["rallies"]);
+assert.deepEqual(actualInputs("touch_detector"),["ball_stabilizer","rallies"]);
 assert.ok(stages.findIndex(([id])=>id==="rallies")+1===stages.findIndex(([id])=>id==="touch_detector"));
 assert.ok(actualInputs("players").includes("touch_detector"));
-assert.deepEqual(actualInputs("touches"),["ball_stabilizer","pose","rallies","tracking"]);
+assert.deepEqual(actualInputs("touches"),["ball_stabilizer","pose","rallies","touch_detector","tracking"]);
 assert.deepEqual(actualInputs("publish"),["rallies","touches","tracking"]);
 assert.deepEqual(actualInputs("identity"),["publish","tracking","video"]);
 assert.equal(dataLinks.state("pose",null),"optional");

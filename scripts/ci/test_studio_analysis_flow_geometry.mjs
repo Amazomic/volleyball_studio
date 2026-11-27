@@ -30,6 +30,8 @@ const route=vm.runInNewContext(flow.slice(start,end)+"graphRoutes;");
 const definition=(begin,end)=>flow.slice(flow.indexOf(begin),flow.indexOf(end,flow.indexOf(begin)));
 const stages=vm.runInNewContext(definition("const pipelineStages=","const pipelineNames=")+"pipelineStages;");
 const links=vm.runInNewContext(definition("const pipelineEdges=","const graphLinkState=")+"pipelineEdges;");
+assert.ok(links.some(([from,to,condition])=>from==="touch_detector"&&to==="touches"&&!condition),"Touch Attribution must directly consume Touch Detector candidates");
+assert.ok(links.some(([from,to,condition])=>from==="ball_stabilizer"&&to==="touch_detector"&&!condition),"Touch Detector must consume stabilized trajectory");
 const uneven=new Map([
   ["a",{l:20,r:120,t:30,b:106}],
   ["b",{l:140,r:240,t:30,b:130}],
@@ -116,3 +118,12 @@ mockEdges.find(edge=>edge.dataset.edgeSource==="pose"&&edge.dataset.edgeTarget==
 draw(mockTarget);
 assert.equal(handoffs().length,1);
 assert.equal(handoffs()[0].dataset.edgeSource,"boxes");
+for(const edge of mockEdges)edge.classList={contains:()=>false,toggle(name,value){this[name]=value;}};
+for(const [from,to] of [["ball_stabilizer","touch_detector"],["touch_detector","touches"]]){
+  mockTarget.dataset.focusStage=to;
+  draw(mockTarget);
+  const edge=mockEdges.find(edge=>edge.dataset.edgeSource===from&&edge.dataset.edgeTarget===to);
+  assert.ok(edge.d,from+" -> "+to+" must be visible on focus");
+  assert.equal(edge.classList["is-highlighted"],true);
+  assert.equal(edge.classList["is-outgoing"],false);
+}
