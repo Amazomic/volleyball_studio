@@ -4191,12 +4191,13 @@
       item.manual_clip?.end_frame??0)
   });
   const refreshRallyCardTouchTicks=()=>{
+    const format=new Intl.NumberFormat("ru-RU",{minimumFractionDigits:1,maximumFractionDigits:1});
     for(const {progress,markers,start,end,source} of rallyCardProgresses.values()){
       const run=source?.run||s.run,video=source?.video||s.video;
       const data=run===s.run&&timeline.data?.rally_run_id===run&&timeline.data?.video===video?
         timeline.data:source?.timeline;
       const rate=source?.fps||fps();
-      const formatTime=frame=>source?(frame/rate+(source.offset||0)).toLocaleString("ru-RU",{minimumFractionDigits:1,maximumFractionDigits:1}):second(frame);
+      const formatTime=frame=>source?format.format(frame/rate+(source.offset||0)):second(frame);
       const validTimeline=Boolean(data)&&data.project_id===s.project&&
         data.rally_run_id===run&&data.video===video&&Array.isArray(data.touch_annotations);
       const serves=validTimeline&&!overlay.raw&&overlay.flags.touches&&

@@ -42,7 +42,13 @@ const rallyCardProgresses=new Map();
 const video={currentTime:12.5,paused:false};
 const overlay={presentedTime:null,raw:false,flags:{touches:true},
   actionFlags:{serve:true,attack:true,dig:true,block:true,unknown_touch:true}};
+let formatterCreations=0,formattedTimes=0;
 const context={
+  Intl:{NumberFormat:function(locale,options){
+    formatterCreations++;
+    const formatter=new Intl.NumberFormat(locale,options);
+    return {format(value){formattedTimes++;return formatter.format(value);}};
+  }},
   make,wipe,s:current,timeline,rallyCardProgresses,overlay,
   ui:{video},fps:()=>10,second:frame=>(frame/10).toFixed(1),
 };
@@ -240,4 +246,16 @@ assert.equal(rail.scrollTop,230,"Loading another page must not move the selected
   assert.equal(remoteMarkers.children[0].style.left,"50%");
   assert.equal(remoteMarkers.children[0].style.backgroundColor,cpuTouchStyle.attack[0]);
   assert.match(remoteMarkers.children[0].title,/86,3/,"Inactive timeline uses source FPS and offset");
+  remoteSource.timeline.touch_annotations=[
+    {frame_index:100,kind:"attack"},{frame_index:125,kind:"attack"},{frame_index:149,kind:"attack"}
+  ];
+  remoteSource.offset=1234.5;
+  const before=formatterCreations, formattedBefore=formattedTimes;
+  refreshRallyCardTouchTicks();
+  assert.equal(formatterCreations-before,1,"Create one Intl formatter per marker refresh, not per event");
+  assert.equal(formattedTimes-formattedBefore,3,"All source-specific marker times use the reused formatter");
+  assert.deepEqual(remoteMarkers.children.map(tick=>tick.title),
+    remoteSource.timeline.touch_annotations.map(event=>
+      (event.frame_index/remoteSource.fps+remoteSource.offset)
+        .toLocaleString("ru-RU",{minimumFractionDigits:1,maximumFractionDigits:1})+" с · Атака"));
 }
