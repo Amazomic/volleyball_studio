@@ -10,6 +10,8 @@ Documentation: [Index](docs/README.md).
 
 План разработки: 84/85; следующий 85/85
 
+**Rust application migration:** the native runtime is established; product acceptance remains open (stage 84/85, NO-GO; stage 85 pending). See [current status](docs/RUST_REWRITE_SCOPE.md).
+
 ---
 
 ## About
@@ -38,7 +40,7 @@ Automated player identification and touch classification are **not guaranteed to
 | `rust/volley-media` | Video preparation and FFmpeg-based editing |
 | `rust/volley-web` | WebAssembly UI components |
 
-The active application is developed in **Rust**. The original Python implementation remains available in Git history as the migration baseline. ONNX Runtime, OpenVINO, CUDA, and FFmpeg are external dependencies.
+The active Studio runs as a **Rust application**, with Rust/WASM for client-side domain state and selected compute-heavy operations. JavaScript remains for browser integration (DOM, media, storage and HTTP) and existing client code; further ports require profiling evidence. No Python application server or inference orchestration is required. Python remains in Git history and optional development, model preparation, training and benchmark tools. Historical data is read through Rust adapters. ONNX Runtime, OpenVINO, CUDA, and FFmpeg are external dependencies.
 
 ## Download beta v0.1.0-beta.1 (pre-release)
 

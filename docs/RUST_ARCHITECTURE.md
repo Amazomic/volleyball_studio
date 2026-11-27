@@ -30,7 +30,7 @@
 
 # Rust migration — canonical architecture and anti-duplication contract
 
-**Status:** binding architecture for branch migration/rust-2026-11-07. Full rewrite is NOT COMPLETE. Preserve master, the pre-Rust checkpoint and all user media.
+**Status (2026-11-27):** binding architecture for develop. The Rust application runtime is established; complete product parity and release acceptance remain open. The old migration branch is historical. Keep Rust/Rust-WASM as the domain owners, preserve necessary browser adapters, and port remaining compute only after profiling demonstrates a worthwhile gain. Preserve master, the pre-Rust checkpoint and all user media.
 
 ## Root cause / what went wrong
 
@@ -52,7 +52,7 @@ Stages 14–21 ported algorithms and readers of legacy Python-compatible evidenc
 
 Every input must declare source_kind (legacy_cpu_cache OR native_gpu_cpu_replay), schema_version, project/video/run, source SHA/fingerprint and frame-rate/coordinate convention. Legacy run_id and native replay_id are not exchangeable; numeric Track IDs are not global. Every result is either immutable evidence or a revisioned human decision, never both.
 
-## Feature ownership and what is genuinely duplicated
+## Historical ownership inventory and current canonical ledger
 
 Machine-readable ledger: docs/RUST_CANONICAL_OWNERS.json; mandatory audit: scripts/ci/check_rust_ownership.mjs. The **complete numbered roadmap**, including the last recorded stage X / planned total Y, next stage and explicit future acceptance criteria, is docs/RUST_ROADMAP.md (generated from docs/RUST_ROADMAP.json). Its consistency gate is scripts/ci/check_rust_roadmap.mjs --check --self-test. The current 85-stage denominator is a planning estimate, not an indication of finished-feature percentage.
 
@@ -60,7 +60,7 @@ Machine-readable ledger: docs/RUST_CANONICAL_OWNERS.json; mandatory audit: scrip
 |---|---|---|---|
 | Source provenance/Track ID scoping | rust/volley-core/src/evidence_source.rs | player_identity.rs legacy and native_player_tracks.rs native | Source-kind discriminator, legacy unknown FPS/SHA, native full SHA/30 FPS and scope-qualified Track IDs; not a binding algorithm |
 | ReID similarity/grouping | rust/volley-core/src/reid.rs | reid_native.rs, reid_npz.rs, reid_group_edits.rs | REUSE existing cosine and clustering; add native embeddings + photo enrollment, never another similarity algorithm |
-| Player identity | one source-aware identity decision service (PENDING) | player_identity.rs legacy; native_player_tracks.rs native | Consolidate assign/unassign/exclude/revise policy; do not mix Track IDs across source versions |
+| Player identity | rust/volley-core/src/identity_review.rs | player_identity.rs legacy; native_player_tracks.rs native | Consolidate assign/unassign/exclude/revise policy; do not mix Track IDs across source versions |
 | Touch evidence | rust/volley-core/src/touch.rs, motion.rs | touch_preview.rs legacy; cpu_touches.rs native | Unify policy, retain source parsing |
 | Rally policy | rust/volley-core/src/rally_reconstruction.rs native; legacy compatibility via rallies.rs | cpu_rallies.rs, native_rally_preview.rs | Align output contracts, retain provisional/confirmed distinctions |
 | Gold bookmarks | common revisioned decision/storage policy | rally_marks.rs legacy; native_rally_marks.rs native | Keep historical identifiers and JSON formats, share storage/CAS |
@@ -71,7 +71,7 @@ Machine-readable ledger: docs/RUST_CANONICAL_OWNERS.json; mandatory audit: scrip
 | Quick Reel | rust/volley-app/src/quick_reel.rs | preparation, inference, montage services | Fresh independent inference, no project analysis reuse |
 | Rust process / deployment | rust/volley-app/src/runtime.rs | scripts/volley-rust.sh, scripts/start-volley-rust-dev.ps1, start-volley-ui.cmd, Dockerfile | Canonical-checkout single-instance lock, report busy work, refuse stop during native jobs, strict loopback 8875, nonroot Docker runtime and external ORT provider |
 
-**Reality:** Legacy gold/rally/identity adapters are distinct file schemas and currently have consumers. Removing their routes today would lose legacy project features. Shared sidecar primitives are to be extracted now; full domain unification remains PENDING. Renaming modules is NOT deduplication.
+**Reality:** Legacy gold/rally/identity adapters are distinct file schemas and currently have consumers. Removing their routes today would lose legacy project features. Shared sidecar primitives live in versioned_store.rs; the table and consolidation sequence below describe the historical migration inventory, not a fresh audit of remaining work. Verify current ownership in the machine-readable ledger and code. Renaming modules is NOT deduplication.
 
 ## Mandatory workflow for EVERY new stage / every AI handoff
 
@@ -95,7 +95,7 @@ Machine-readable ledger: docs/RUST_CANONICAL_OWNERS.json; mandatory audit: scrip
 - Do not create another ReID grouping engine while the missing work is native vector extraction; do not invent another montage exporter or parallel gold-state manager.
 - In review, test both legacy adapter and new native route before deleting a duplicate implementation.
 
-## Ordered remaining consolidation
+## Historical consolidation sequence (not a current backlog)
 
 1. Factor out duplicated SHA-256 revision + bounded no-symlink reads/atomic writes into versioned_store.rs, shared by legacy and native adapters; preserve JSON content exactly.
 2. Introduce EvidenceSource = LegacyCpuRun | NativeCpuReplay. Extract the common identity decision semantics from player_identity.rs and native_player_tracks.rs, leaving thin readers/writers.
@@ -103,7 +103,7 @@ Machine-readable ledger: docs/RUST_CANONICAL_OWNERS.json; mandatory audit: scrip
 4. Give provisional native and legacy annotated rally candidates a common typed selection and bookmark interface without converting IDs or marking provisional contacts authoritative.
 5. Integrate athlete stats, Quick Reel, end-to-end UI and real-match validation. Switch production only after full parity comparison with immutable Python checkpoint.
 
-**Progress must be measured against missing behaviors and number of duplicate authorities, never number of commits or stages.**
+**Progress must be measured against missing behaviors and number of duplicate authorities, never number of commits or stages.** For performance work, measure a representative workload before porting and compare equivalent outputs and latency afterwards. The 2026-11-27 preview profiling in RUST_MIGRATION.md did not justify another Rust port for that workload; reuse and browser-native optimizations remain valid.
 
 ### Stage 81: compiled Rust/WASM UI, not a JavaScript business-policy fork
 

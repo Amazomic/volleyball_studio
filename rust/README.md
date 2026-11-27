@@ -1,6 +1,6 @@
 # Volleyball Studio — developer workspace
 
-This is the **only active application** on the migration branch.
+This is the **only active application** on develop. The Rust application runtime is established; the formal product acceptance gate remains open.
 `volley-app` is the Axum server, `volley-core` contains CPU identity,
 motion and rally logic, `volley-inference` loads native ONNX Runtime,
 `volley-media` invokes FFmpeg, and `volley-web` provides actual WASM state.
@@ -42,10 +42,11 @@ POST /api/players/native/references (read/enroll/undo) and GET
 /api/players/native/reference-photo; enrollment requires an already confirmed
 Track ID assignment in that exact SHA-verified CPU replay. References are
 photos, not auto-confirmed identities and not yet computed embedding caches.
-This is a **partial rewrite**, not a claim of complete product parity.
-Existing Python source is retained only in Git history/checkpoint; legacy
-media and snapshots remain readable through Rust data adapters but are
-never silently modified. See `../docs/RUST_MIGRATION.md` for missing
+This is the Rust application, not a Python-backed interim runtime. It does not claim complete product parity or production readiness. Rust/WASM owns migrated client operations; retain browser integration and require measured benefit before porting further computations.
+The former Python application is retained in Git history/checkpoint; optional
+Python development, training and benchmark tools remain. Legacy media and
+snapshots remain readable through Rust data adapters but are
+never silently modified. See `../docs/RUST_MIGRATION.md` for historical
 features, decisions and test evidence.
 ## Development UI assets
 
