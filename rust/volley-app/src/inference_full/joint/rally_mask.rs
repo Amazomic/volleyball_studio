@@ -1459,7 +1459,11 @@ mod tests {
         }
         let stabilizer = BallStabilizerSettings::default();
         let trajectory = RallyMask::stabilize(&samples, frames, stabilizer).unwrap();
-        let RallyDetection { mask, contacts, .. } = RallyMask::detect(
+        let RallyDetection {
+            mask,
+            contacts,
+            impacts,
+        } = RallyMask::detect(
             &trajectory,
             PrimaryRallySettings::default(),
             stabilizer,
@@ -1468,6 +1472,22 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap();
+        if let Ok(frame) = std::env::var("VOLLEY_RALLY_TOUCH_FRAME") {
+            let frame: u64 = frame.parse().unwrap();
+            let impacts = impacts.as_ref().unwrap();
+            let impact = impacts
+                .iter()
+                .find(|impact| impact.frame.abs_diff(frame as i64) <= 2)
+                .expect("Expected trajectory impact near requested frame");
+            assert!(mask
+                .merged
+                .iter()
+                .any(|&(start, end)| start <= impact.frame as u64 && impact.frame as u64 <= end));
+            assert!(!contacts
+                .iter()
+                .any(|contact| contact.frame.abs_diff(impact.frame as u64) <= 2));
+            println!("REPLAY_TOUCH {}", serde_json::to_string(impact).unwrap());
+        }
         println!(
             "REPLAY_RESULT {}",
             serde_json::json!({

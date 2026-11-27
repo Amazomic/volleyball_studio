@@ -2916,18 +2916,26 @@ fn refine_pose_events_policy(
         event.body_contact_supported = true;
         event.contact_landmark = Some(point);
         event.contact_pose_sample_frame = sample_frame;
-        event.action_prediction = (Some(selected_track) == original_track_id)
-            .then_some(event.action_prediction.as_ref())
-            .flatten()
-            .and_then(|geometry| {
-                refine_observed_pose_motion(
-                    &poses,
-                    event.frame_index,
-                    selected_track,
-                    &evidence,
-                    geometry,
-                )
-            });
+        if Some(selected_track) != original_track_id || event.action_prediction.is_none() {
+            event.action_prediction = None;
+            attach_touch_source_evidence(
+                std::slice::from_mut(event),
+                frames,
+                video_width,
+                video_height,
+                settings.max_reach_ratio,
+                |_, id| id == selected_track,
+            );
+        }
+        event.action_prediction = event.action_prediction.as_ref().and_then(|geometry| {
+            refine_observed_pose_motion(
+                &poses,
+                event.frame_index,
+                selected_track,
+                &evidence,
+                geometry,
+            )
+        });
     }
     if let Some(court) = court {
         for (index, event) in events.iter_mut().enumerate() {
@@ -4110,7 +4118,7 @@ fn process_with_ball_scope_and_rally_settings_report(
                 TouchAlgorithm::PoseMotion => "vballnet_trajectory_body_contact_v12",
                 TouchAlgorithm::Legacy => "vballnet_gravity_player_geometry_pose_contact_v11",
                 TouchAlgorithm::TrajectoryTcn => "vballnet_volley3d_tcn_v1",
-                TouchAlgorithm::BallTrajectory => "vballnet_touch_detector_v5",
+                TouchAlgorithm::BallTrajectory => "vballnet_touch_detector_v6",
             },
             "tcn_model_sha256":tcn_sha,
             "trajectory_detector_version":volley_core::touch_pipeline::TRAJECTORY_DETECTOR_VERSION,
@@ -5277,6 +5285,33 @@ mod tests {
         let changed = events[0].action_prediction.as_ref().unwrap();
         assert_eq!(changed.kind, ActionKind::OverheadPass);
         assert_eq!(changed.method, PredictionMethod::PoseKeypointsMotionV1);
+        let mut reassigned = vec![unconfirmed_motion.clone()];
+        reassigned[0].provisional_track_id = Some(9);
+        let mut other_player_block = block.clone();
+        for row in &mut other_player_block {
+            row.players.push(TouchPlayer {
+                track_id: 9,
+                score: 0.9,
+                touch_probability: None,
+                bbox_xyxy_norm: [0.70, 0.17, 0.90, 0.90],
+            });
+        }
+        refine_pose_events(
+            &mut reassigned,
+            &other_player_block,
+            640,
+            360,
+            &root,
+            &fusion,
+            TouchSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(reassigned[0].provisional_track_id, Some(8));
+        assert!(reassigned[0].body_contact_supported);
+        assert_eq!(
+            reassigned[0].action_prediction.as_ref().map(|p| p.kind),
+            Some(ActionKind::OverheadPass)
+        );
         let mut pose_optional = vec![unconfirmed_motion];
         pose_optional[0].ball_x_px = 620.0;
         refine_pose_events(

@@ -866,6 +866,108 @@ fn descending_lateral_brakes(
     found
 }
 
+fn descending_lateral_impulses(
+    points: &[BallObservation],
+    config: DirectionBreakConfig,
+) -> Vec<TrajectoryBreak> {
+    let mut found: Vec<TrajectoryBreak> = Vec::new();
+    for index in 6..points.len().saturating_sub(6) {
+        let contact = points[index];
+        let left = &points[index - 6..index];
+        let right = &points[index + 1..=index + 6];
+        if points[index - 6..=index + 6]
+            .windows(2)
+            .any(|pair| pair[1].frame - pair[0].frame != 1)
+        {
+            continue;
+        }
+        let incoming_dx = (left[5].x - left[0].x) / 5.0;
+        let outgoing_dx = (right[5].x - right[0].x) / 5.0;
+        if incoming_dx.abs() > config.max_fit_error_px
+            || outgoing_dx.abs() < 3.0 * config.max_fit_error_px
+            || right
+                .windows(2)
+                .any(|p| (p[1].x - p[0].x) * outgoing_dx.signum() < -config.max_fit_error_px)
+            || left
+                .windows(2)
+                .chain(right.windows(2))
+                .any(|p| p[1].y < p[0].y - config.max_fit_error_px)
+        {
+            continue;
+        }
+        let at = contact.frame;
+        let (Some(before), Some(after)) = (fit(left, at), fit(right, at)) else {
+            continue;
+        };
+        let error = before.error.max(after.error);
+        let join = (before.x[0] - after.x[0]).hypot(before.y[0] - after.y[0]);
+        let (bx, by) = (before.x[1], before.y[1]);
+        let (ax, ay) = (after.x[1], after.y[1]);
+        let speed_before = bx.hypot(by);
+        let speed_after = ax.hypot(ay);
+        let residual = (ax - bx).hypot(ay - by);
+        if error > config.max_fit_error_px
+            || join > config.max_join_error_px
+            || by < 12.0
+            || ay < 10.0
+            || bx.abs() > 5.0
+            || ax.abs() < 10.0
+            || ax * outgoing_dx <= 0.0
+            || residual < 18.0
+        {
+            continue;
+        }
+        let angle = ((bx * ax + by * ay) / (speed_before * speed_after))
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
+        if angle < 22.0 {
+            continue;
+        }
+        let joined = left.iter().chain(right).copied().collect::<Vec<_>>();
+        let Some(smooth) = fit(&joined, at) else {
+            continue;
+        };
+        if smooth.error <= config.max_fit_error_px || error > smooth.error * 0.65 {
+            continue;
+        }
+        let position = [
+            (before.x[0] + after.x[0]) * 0.5,
+            (before.y[0] + after.y[0]) * 0.5,
+        ];
+        if (position[0] - contact.x).hypot(position[1] - contact.y) > config.max_join_error_px {
+            continue;
+        }
+        let candidate = TrajectoryBreak {
+            frame: at,
+            position,
+            motion: MotionEvidence {
+                motion_frame: at,
+                speed_before,
+                speed_after,
+                angle,
+                residual,
+            },
+            fit_error: error + join * 0.25,
+            before_frames: left.iter().map(|p| p.frame).collect(),
+            after_frames: right.iter().map(|p| p.frame).collect(),
+            contact_observed: true,
+        };
+        if let Some(previous) = found
+            .last_mut()
+            .filter(|p| at - p.frame <= config.min_separation_frames)
+        {
+            if candidate.motion.residual / (1.0 + candidate.fit_error)
+                > previous.motion.residual / (1.0 + previous.fit_error)
+            {
+                *previous = candidate;
+            }
+        } else {
+            found.push(candidate);
+        }
+    }
+    found
+}
 pub fn trajectory_direction_breaks(
     points: &[BallObservation],
     config: DirectionBreakConfig,
@@ -1079,6 +1181,14 @@ pub fn trajectory_direction_breaks(
             found.push(brake);
         }
     }
+    for impulse in descending_lateral_impulses(points, config) {
+        if !found
+            .iter()
+            .any(|e| e.frame.abs_diff(impulse.frame) <= config.min_separation_frames as u64)
+        {
+            found.push(impulse);
+        }
+    }
     found.sort_by_key(|event| event.frame);
     found
 }
@@ -1115,6 +1225,41 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn descending_ball_struck_sideways_is_a_touch_without_large_turn() {
+        let points = (0..=30)
+            .map(|frame| {
+                let t = (frame - 15) as f64;
+                let (x, y) = if t <= 0.0 {
+                    (400.0 - t * 0.8, 500.0 + 34.0 * t + 1.0 * t * t)
+                } else {
+                    (400.0 + 17.0 * t, 500.0 + 25.0 * t + 1.0 * t * t)
+                };
+                BallObservation {
+                    frame,
+                    x: (x / 7.5).round() * 7.5,
+                    y: (y / 7.5).round() * 7.5,
+                }
+            })
+            .collect::<Vec<_>>();
+        let breaks = trajectory_direction_breaks(&points, DirectionBreakConfig::default());
+        assert!(
+            breaks.iter().any(|b| b.frame.abs_diff(15) <= 2),
+            "{breaks:?}"
+        );
+        let smooth = (0..=30)
+            .map(|frame| {
+                let t = (frame - 15) as f64;
+                BallObservation {
+                    frame,
+                    x: ((400.0 + 0.6 * t * t) / 7.5).round() * 7.5,
+                    y: ((500.0 + 25.0 * t + 0.6 * t * t) / 7.5).round() * 7.5,
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(trajectory_direction_breaks(&smooth, DirectionBreakConfig::default()).is_empty());
     }
 
     #[test]
