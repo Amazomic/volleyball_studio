@@ -176,7 +176,7 @@ pub struct StabilizedBallMotion {
     pub observed_frames: usize,
 }
 
-pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v13";
+pub const BALL_STABILIZER_ALGORITHM_VERSION: &str = "ball_stabilizer_v14";
 
 fn reject_preexisting_remote_ball(
     points: &[Option<[f64; 2]>],
@@ -602,6 +602,98 @@ fn reject_recurring_static_hotspots(
     rejected
 }
 
+fn restore_supported_vertical_rebounds(
+    raw: &[Option<[f64; 2]>],
+    points: &mut [Option<[f64; 2]>],
+    max_step: f64,
+) {
+    let distance = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+    for contact in 4..points.len().saturating_sub(8) {
+        if points[contact].is_some() {
+            continue;
+        }
+        let (Some(impact), Some(before), Some(earlier)) =
+            (raw[contact], points[contact - 1], points[contact - 4])
+        else {
+            continue;
+        };
+        if points[contact - 4..contact].iter().any(Option::is_none)
+            || before[1] - earlier[1] < 0.065
+            || impact[1] - before[1] < 0.015
+            || distance(impact, before) > max_step
+        {
+            continue;
+        }
+        for start in contact + 1..=contact + 3 {
+            let (Some(first), Some(second), Some(third)) =
+                (raw[start], raw[start + 1], raw[start + 2])
+            else {
+                continue;
+            };
+            let velocity = [(third[0] - first[0]) * 0.5, (third[1] - first[1]) * 0.5];
+            let elapsed = (start - contact) as f64;
+            let origin = [
+                first[0] - velocity[0] * elapsed,
+                first[1] - velocity[1] * elapsed,
+            ];
+            if velocity[1] > -0.025
+                || first[1] >= impact[1] - 0.05
+                || second[1] >= first[1] - 0.015
+                || third[1] >= second[1] - 0.015
+                || distance(first, second).max(distance(second, third)) > max_step
+                || distance(
+                    second,
+                    [(first[0] + third[0]) * 0.5, (first[1] + third[1]) * 0.5],
+                ) > 0.018
+                || distance(impact, first) > max_step * elapsed
+                || distance(impact, origin) > 0.065
+            {
+                continue;
+            }
+            let mut branch = vec![(start, first), (start + 1, second), (start + 2, third)];
+            let mut anchor = None;
+            for (frame, candidate) in raw
+                .iter()
+                .enumerate()
+                .take((contact + 25).min(raw.len()))
+                .skip(start + 3)
+            {
+                let (last_frame, last) = branch[branch.len() - 1];
+                let (previous_frame, previous) = branch[branch.len() - 2];
+                let gap = frame - last_frame;
+                if gap > 4 {
+                    break;
+                }
+                let Some(point) = *candidate else { continue };
+                let dt = gap as f64;
+                let prior_dt = (last_frame - previous_frame) as f64;
+                let predicted = [
+                    last[0] + (last[0] - previous[0]) / prior_dt * dt,
+                    last[1] + (last[1] - previous[1]) / prior_dt * dt,
+                ];
+                if point[1] > last[1] + 0.004
+                    || distance(last, point) > max_step * dt
+                    || distance(predicted, point) > 0.018 + 0.004 * dt * dt
+                {
+                    continue;
+                }
+                branch.push((frame, point));
+                if branch.len() >= 5 && points[frame] == Some(point) {
+                    anchor = Some(frame);
+                    break;
+                }
+            }
+            let Some(end) = anchor else { continue };
+            points[contact..=end].fill(None);
+            points[contact] = Some(impact);
+            for (frame, point) in branch {
+                points[frame] = Some(point);
+            }
+            break;
+        }
+    }
+}
+
 pub fn stabilize_ball_motion(
     samples: &[ScoredBallSample],
     frames: usize,
@@ -738,9 +830,14 @@ pub fn stabilize_ball_motion(
             }
         }
     }
-    rejected_frames.extend(reject_unlinked_motion(&raw_points, &mut points, settings));
-    rejected_frames.sort_unstable();
-    rejected_frames.dedup();
+    reject_unlinked_motion(&raw_points, &mut points, settings);
+    restore_supported_vertical_rebounds(&raw_points, &mut points, settings.max_step_fraction);
+    let rejected_frames: Vec<_> = raw_points
+        .iter()
+        .zip(&points)
+        .enumerate()
+        .filter_map(|(frame, (raw, point))| (raw.is_some() && point.is_none()).then_some(frame))
+        .collect();
     let observed_frames = confidence_frames - rejected_frames.len();
     let mut interpolated = interpolate_short_gaps_bounded(&mut points, settings.max_gap_frames);
     interpolate_stabilizer_rebounds(&mut points, &mut interpolated, settings.max_gap_frames);
@@ -1172,6 +1269,58 @@ fn valid_point(point: [f64; 2]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_rebound_survives_short_interleaved_false_ball_island() {
+        let samples = (0..53)
+            .map(|frame| {
+                let t = frame as f64;
+                let y = match frame {
+                    0..=18 => 0.025 + 0.019 * t + 0.00115 * t * t,
+                    19 => 0.75,
+                    20 => 0.825,
+                    21 => 0.82,
+                    22..=24 => 0.675 - 0.055 * (t - 22.0),
+                    25..=27 => 0.76,
+                    28..=42 => 0.355 - 0.047 * (t - 28.0) + 0.0017 * (t - 28.0).powi(2),
+                    _ => 0.03 + 0.0015 * (t - 42.0).powi(2),
+                };
+                ScoredBallSample {
+                    frame,
+                    point: [0.42 + 0.0065 * t.min(20.0) + 0.001 * (t - 20.0).max(0.0), y],
+                    confidence: 0.6,
+                }
+            })
+            .collect::<Vec<_>>();
+        let result =
+            stabilize_ball_motion(&samples, 53, BallStabilizerSettings::default()).unwrap();
+        assert!(
+            result.points[20].is_some_and(|p| p[1] > 0.8),
+            "{:?}",
+            &result.points[17..43]
+        );
+        assert!(result.points[24].is_some_and(|p| p[1] < 0.60));
+        assert!(result.points[30].is_some_and(|p| p[1] < 0.35));
+        assert!(result.rejected_frames.contains(&26));
+        let points = result
+            .points
+            .iter()
+            .enumerate()
+            .filter_map(|(frame, point)| {
+                let [x, y] = (*point)?;
+                Some(crate::motion::BallObservation {
+                    frame: frame as i64,
+                    x: x * 1920.0,
+                    y: y * 1080.0,
+                })
+            })
+            .collect::<Vec<_>>();
+        let breaks = crate::motion::trajectory_direction_breaks(&points, Default::default());
+        assert!(
+            breaks.iter().any(|e| (18..=22).contains(&e.frame)),
+            "{breaks:?}"
+        );
+    }
 
     #[test]
     fn ball_stabilizer_does_not_panic_when_adjacent_segment_windows_share_a_rejected_island() {

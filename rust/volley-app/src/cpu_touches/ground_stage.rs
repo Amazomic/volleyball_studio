@@ -256,7 +256,9 @@ pub(crate) fn prepare_touch_detection(
     });
     let primary = &mask["mask"]["ground_detector"];
     let revision = json!(court.as_ref().map(|c| c.revision.as_str()));
-    let reusable = primary["version"] == volley_core::motion::GROUND_DETECTOR_VERSION
+    let reusable = mask["mask"]["ball_stabilizer"]["algorithm"]
+        == volley_core::ball_interpolation::BALL_STABILIZER_ALGORITHM_VERSION
+        && primary["version"] == volley_core::motion::GROUND_DETECTOR_VERSION
         && primary["court_revision"] == revision
         && primary["source_trajectory_sha256"]
             == mask["mask"]["ball_stabilizer"]["trajectory_sha256"]
