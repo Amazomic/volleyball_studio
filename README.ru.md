@@ -8,7 +8,9 @@
 
 [![Реальный предпросмотр Volleyball Studio: траектория мяча, скелеты игроков и разметка площадки](docs/images/studio-preview.png)](docs/images/studio-preview.png)
 
-**[Посмотреть 15 секунд реального розыгрыша с разметкой (MP4)](docs/images/studio-demo.mp4)**
+![15 секунд реального розыгрыша с разметкой](docs/images/studio-demo.gif)
+
+[MP4 в исходном качестве](docs/images/studio-demo.mp4?raw=true)
 
 ## От записи матча до видеонарезки
 

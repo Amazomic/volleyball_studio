@@ -4989,3 +4989,8 @@ Studio показывает кнопку перехода между debug и re
 - Removed seven unreferenced outdated media/prediction files. Retained examples/output.gif for two opt-in RF-DETR CUDA parity tests; no application or fixture behavior changed.
 - Captured the actual Preview and Analysis tabs in isolated Edge browser against the running Windows Studio, all seven preview overlays enabled; recorded 120 distinct playback samples (source 6.0009–20.8805 s) into a 15.000 s MP4. Provenance: docs/images/README.md.
 - Checks: all README links tracked and present, no references to removed assets outside historical journal, retained fixture present, PNG/MP4 decoded, screenshots and video frames visually inspected, git diff --check PASS. No new GPU inference, no claim of recognition accuracy. Deployment via standard queue after publication; live result reported separately.
+
+## 2026-11-27 — Inline README rally animation
+
+- Base: 04800df7660311f0fa6b4e537ce8611af10b0163. The GitHub MP4 blob viewer refused to display the demonstration. Added an inline looping GIF derived from the verified live recording and retained a direct raw MP4 link in both READMEs.
+- Checks: FFprobe GIF 540x340, 90 frames, 15.000 seconds, 3,646,841 bytes; FFmpeg full decode PASS, link targets present and tracked, git diff --check PASS. No runtime changes; deployment via standard queue.
